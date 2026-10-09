@@ -23,6 +23,7 @@ from vllm.utils.flashinfer import (
 from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import (
     check_moonep_system_support,
+    deep_ep_v2_unavailable_reason,
     has_deep_ep,
     has_deep_ep_v2,
     has_mori,
@@ -1008,6 +1009,11 @@ class MoriAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+        if get_current_vllm_config().kernel_config.moe_backend == "aiter_mega_moe":
+            # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
+            # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
+            heap_size = os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "8G")
+            logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
         mori.shmem.shmem_torch_process_group_init("mori")
 
     def _make_all2all_kwargs(
@@ -1099,10 +1105,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
-        assert has_deep_ep_v2(), (
-            "DeepEP v2 (ElasticBuffer) not available. Requires DeepEP >= 2.0 "
-            "(https://github.com/deepseek-ai/DeepEP) and NCCL >= 2.30.4."
-        )
+        assert has_deep_ep_v2(), deep_ep_v2_unavailable_reason()
         super().__init__(cpu_group, tcp_store_group)
         self._device_group = device_group
         self.handle_cache = Cache()

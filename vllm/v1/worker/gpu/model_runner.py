@@ -688,7 +688,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
-            kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
             dcp_sharded=dcp_sharded,
             cp_size=self.dcp_size,
@@ -730,7 +729,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
             use_v2_model_runner=True,
-            tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
             is_profiling=is_profiling,
@@ -774,6 +772,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
+                # Draft groups build their own metadata, so they map the views too.
+                attn_groups=(
+                    g
+                    for groups in self.attn_groups
+                    + getattr(self.speculator, "attn_groups", [])
+                    for g in groups
+                ),
             )
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
@@ -820,7 +825,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "skip_attn must only be True for initial memory profiling."
             )
 
-        # Create a dummy scheduler output. Plain draft-model speculation adds
+        # Create a dummy scheduler output. Standalone AR speculation adds
         # one correction slot per request during prefill. The scheduler
         # accounts for these slots, while dummy runs bypass the scheduler.
         # Adjust the dummy token count only when the expanded draft batch
@@ -1356,7 +1361,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
         idx_mapping = async_tensor_h2d(
-            idx_mapping_np, device=self.device, dtype=torch.int32
+            idx_mapping_np, device=self.device, dtype=torch.int64
         )
         num_reqs = len(req_ids)
 
