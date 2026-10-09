@@ -12,6 +12,7 @@ mid-decode (silent corruption of an unrelated request).
 """
 
 from collections import defaultdict
+from dataclasses import replace
 from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -24,6 +25,9 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+    NixlPullConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
@@ -126,11 +130,17 @@ def _make_packed_mla_view_worker(
     num_blocks=4,
     pp_size=1,
     backend_names=("FLASHMLA",),
+    worker_cls=NixlPushConnectorWorker,
+    shared_transfer_group=False,
+    transfer_group_ids=None,
+    force_cuda_span_eligibility=False,
 ):
     """Register real strided views; only NIXL and distributed runtime are fake."""
     block_size = 16
     raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
     tensors, groups, caches = [], [], {}
+    group_layers: defaultdict[int, list[str]] = defaultdict(list)
+    group_specs: dict[int, MLAAttentionSpec] = {}
     for name, (offset, page_size) in layouts.items():
         spec = MLAAttentionSpec(
             block_size=block_size,
@@ -146,14 +156,28 @@ def _make_packed_mla_view_worker(
             offset=offset,
         )
         tensors.append(tensor)
-        groups.append(KVCacheGroupSpec([name], spec))
+        if transfer_group_ids is not None:
+            group_id = transfer_group_ids[name]
+            group_layers[group_id].append(name)
+            group_specs.setdefault(group_id, spec)
+        elif not shared_transfer_group:
+            groups.append(KVCacheGroupSpec([name], spec))
         (caches[name],) = create_kv_cache_views(
             raw, spec, num_blocks, KVCacheLayout.BLHNC, tensor
+        )
+    if shared_transfer_group:
+        groups.append(KVCacheGroupSpec(list(layouts), spec))
+    elif transfer_group_ids is not None:
+        groups.extend(
+            KVCacheGroupSpec(group_layers[group_id], group_specs[group_id])
+            for group_id in sorted(group_layers)
         )
 
     config = create_vllm_config(block_size=block_size)
     config.parallel_config.pipeline_parallel_size = pp_size
-    config.kv_transfer_config.kv_role = "kv_producer"
+    config.kv_transfer_config.kv_role = (
+        "kv_producer" if worker_cls is NixlPushConnectorWorker else "kv_consumer"
+    )
     config.cache_config.kv_cache_layout = "BLHNC"
     backends = []
     for name in backend_names:
@@ -169,14 +193,127 @@ def _make_packed_mla_view_worker(
         patch.object(bw, "get_current_attn_backends", return_value=backends),
         patch("threading.Thread"),
     ):
-        worker = NixlPushConnectorWorker(
+        worker = worker_cls(
             config,
             "producer" if pp_size > 1 else "consumer",
             KVCacheConfig(num_blocks, tensors, groups),
         )
         worker.use_mla = True
-        worker.register_kv_caches(caches)
+        if force_cuda_span_eligibility:
+            worker.device_type = "cuda"
+            worker.kv_buffer_device = "cuda"
+            worker.nixl_memory_type = "VRAM"
+            build_spans = bw._build_nixl_packed_cache_spans
+            with patch.object(
+                bw,
+                "_build_nixl_packed_cache_spans",
+                side_effect=lambda views: build_spans(
+                    [replace(view, eligible=True) for view in views]
+                ),
+            ):
+                worker.register_kv_caches(caches)
+        else:
+            worker.register_kv_caches(caches)
     return worker, raw
+
+
+def _packed_span_view(
+    layer_name,
+    data_offset,
+    *,
+    group_id=0,
+    page_size=64,
+    block_stride=256,
+    num_blocks=4,
+    storage_ptr=0x1000,
+    storage_nbytes=1024,
+    spec_type="MLAAttentionSpec",
+    eligible=True,
+):
+    return bw._NixlPackedCacheView(
+        layer_name=layer_name,
+        storage_ptr=storage_ptr,
+        storage_nbytes=storage_nbytes,
+        data_offset=data_offset,
+        page_size=page_size,
+        block_stride=block_stride,
+        num_blocks=num_blocks,
+        group_id=group_id,
+        memory_type="VRAM",
+        device_id=0,
+        spec_type=spec_type,
+        eligible=eligible,
+    )
+
+
+@pytest.mark.cpu_test
+def test_packed_span_builder_coalesces_only_adjacent_same_group_views():
+    spans = bw._build_nixl_packed_cache_spans(
+        [
+            _packed_span_view("layer.0", 0),
+            _packed_span_view("layer.1", 64),
+            _packed_span_view("layer.2", 128, group_id=1),
+            _packed_span_view("other-storage.0", 0, storage_ptr=0x2000),
+            _packed_span_view("other-storage.1", 64, storage_ptr=0x2000),
+        ]
+    )
+
+    span = spans["layer.0"]
+    assert spans["layer.1"] is span
+    assert set(spans) == {"layer.0", "layer.1", "other-storage.0", "other-storage.1"}
+    assert span.layers == ("layer.0", "layer.1")
+    assert span.offset == 0
+    assert span.length == 128
+    assert span.group_id == 0
+    assert span.member_layouts == (("layer.0", 0, 64), ("layer.1", 64, 64))
+
+
+@pytest.mark.cpu_test
+def test_packed_span_builds_one_local_descriptor_per_block():
+    span = bw._build_nixl_packed_cache_spans(
+        [_packed_span_view("layer.0", 0), _packed_span_view("layer.1", 64)]
+    )["layer.0"]
+    worker = object.__new__(NixlPushConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.device_id = 7
+    worker._transfer_layer_region_indices = ()
+    worker.region_num_blocks = [span.num_blocks]
+    worker.block_len_per_layer = [span.length]
+    worker.block_stride_per_layer = [span.stride]
+
+    descriptors = worker._build_fa_local(
+        [span.storage_ptr + span.offset], block_size_ratio=1
+    )
+
+    assert descriptors.tolist() == [
+        [span.storage_ptr + block * span.stride, span.length, 7]
+        for block in range(span.num_blocks)
+    ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "views",
+    [
+        [_packed_span_view("a", 0), _packed_span_view("b", 128)],
+        [
+            _packed_span_view("a", 0),
+            _packed_span_view("b", 64, block_stride=512, storage_nbytes=2048),
+        ],
+        [
+            _packed_span_view("a", 0),
+            _packed_span_view("b", 64, spec_type="SlidingWindowMLASpec"),
+        ],
+        [_packed_span_view("a", 0), _packed_span_view("b", 32)],
+        [
+            _packed_span_view("a", 0, storage_nbytes=850),
+            _packed_span_view("b", 64, storage_nbytes=850),
+        ],
+    ],
+    ids=["gap", "stride-mismatch", "spec-mismatch", "overlap", "allocation-bound"],
+)
+def test_packed_span_builder_rejects_incompatible_geometry(views):
+    assert bw._build_nixl_packed_cache_spans(views) == {}
 
 
 @pytest.mark.cpu_test
@@ -194,6 +331,65 @@ def test_packed_mla_pp1_push_peer_transfers_whole_rows(num_layers):
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
     assert metadata.packed_member_layouts == layouts
+
+
+@pytest.mark.cpu_test
+def test_packed_span_preserves_single_allocation_fast_path():
+    worker, raw = _make_packed_mla_view_worker({"L0": (0, 128), "L1": (128, 128)}, 256)
+
+    assert not worker._nixl_packed_cache_span_active
+    assert worker.num_descs == 4
+    assert worker.src_blocks_data.tolist() == [
+        [raw.data_ptr() + block * 256, 256, 0] for block in range(4)
+    ]
+
+
+@pytest.mark.cpu_test
+def test_pull_worker_coalesces_shared_storage_pages_into_one_region():
+    worker, raw = _make_packed_mla_view_worker(
+        {"L0": (0, 128), "L1": (128, 128)},
+        256,
+        worker_cls=NixlPullConnectorWorker,
+        shared_transfer_group=True,
+        force_cuda_span_eligibility=True,
+    )
+
+    assert worker._nixl_packed_cache_span_active
+    assert worker.num_regions == 1
+    assert worker.block_len_per_layer == [256]
+    assert worker.region_members == [["L0", "L1"]]
+    assert worker.src_blocks_data.tolist() == [
+        [raw.data_ptr() + block * 256, 256, 0] for block in range(4)
+    ]
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    assert metadata.packed_member_layouts == {"L0": (0, 128), "L1": (128, 128)}
+
+
+@pytest.mark.cpu_test
+def test_pull_span_coalescing_is_group_scoped_and_keeps_alias_regions_distinct():
+    worker, raw = _make_packed_mla_view_worker(
+        {"L0": (0, 128), "L1": (128, 128), "L2": (0, 128)},
+        256,
+        worker_cls=NixlPullConnectorWorker,
+        transfer_group_ids={"L0": 0, "L1": 0, "L2": 1},
+        force_cuda_span_eligibility=True,
+    )
+
+    assert worker._nixl_packed_cache_span_active
+    assert worker.num_regions == 2
+    assert worker.region_group_ids == [0, 1]
+    assert worker.region_members == [["L0", "L1"], ["L2"]]
+    assert worker.kv_caches_base_addr[worker.engine_id][worker.tp_rank] == [
+        raw.data_ptr(),
+        raw.data_ptr(),
+    ]
+    assert worker.block_len_per_layer == [256, 128]
+    assert worker.src_blocks_data.tolist() == [
+        [raw.data_ptr() + block * 256, 256, 0] for block in range(4)
+    ] + [[raw.data_ptr() + block * 256, 128, 0] for block in range(4)]
 
 
 @pytest.mark.cpu_test
@@ -300,6 +496,23 @@ def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
     assert "remote" not in producer.dst_num_blocks
     with pytest.raises(KeyError):
         producer.transfer_topo.get_engine_info("remote")
+
+
+@pytest.mark.cpu_test
+def test_packed_spans_reject_heterogeneous_block_sizes_before_agent_registration():
+    producer, _ = _make_packed_mla_view_worker({"L0": (0, 128)}, 128)
+    producer._nixl_packed_cache_span_active = True
+    metadata = msgspec.msgpack.decode(
+        producer.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    metadata.engine_id = "remote"
+    metadata.block_size = 8
+
+    with pytest.raises(NotImplementedError, match="packed-cache spans"):
+        producer.add_remote_agent(metadata)
+
+    assert len(producer.nixl_wrapper.dlists) == 1
 
 
 @pytest.mark.cpu_test
@@ -415,6 +628,7 @@ def _register_overlaid_mla_worker(
     worker._region_is_mla = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
+    worker.device_type = "cuda"
     worker.device_id = 0
     worker.use_host_buffer = False
     worker.host_xfer_buffers = {}
