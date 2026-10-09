@@ -30,7 +30,7 @@ When open a Github issue about the CPU backend, please add `[CPU Backend]` in th
 
 ## Requirements
 
-- Python: 3.10 -- 3.13
+- Python: 3.11 -- 3.14
 
 === "Intel/AMD x86"
 
@@ -293,7 +293,7 @@ See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, support
 
 ### How to decide `VLLM_CPU_KVCACHE_SPACE`?
 
-This value is 4GB by default. Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory.
+This value is 0 by default, which means vLLM doesn't override the KV cache size through this variable. When set, the value is in GiB (e.g, `VLLM_CPU_KVCACHE_SPACE`=40 means 40 GiB). Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory. This is a legacy setting; use `--kv-cache-memory-bytes` instead.
 
 ### How to do performance tuning for vLLM CPU?
 
