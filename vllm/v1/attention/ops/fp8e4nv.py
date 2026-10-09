@@ -5,7 +5,7 @@
 The public Triton helpers dispatch on dtype at compile time. Conversion code
 lives in an always-inline CUDA C++ helper linked from portable SM75 LLVM
 bitcode. Scalar adapters support Triton layouts with partial packs. Inference assumes
-finite activations; pass HANDLE_NAN=True to preserve signed NaNs.
+finite activations; pass HANDLE_NAN=True to produce NaNs for NaN inputs.
 SM89+ compilation requires FORCE_SOFTWARE_CONVERSION=True; prefer native conversion.
 """
 
@@ -292,6 +292,8 @@ def convert_to_fp8e4m3(
         (x.dtype == tl.float16) or (x.dtype == tl.bfloat16) or (x.dtype == tl.float32),
         "convert_to_fp8e4m3 expects fp16, bf16, or fp32 input",
     )
+    # NaN sign/payload are unspecified; opt-in handling requires NaN output only.
+    # https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt
     _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
     if x.numel >= 4 * tl.extra.cuda.num_threads():
         if HANDLE_NAN:
@@ -321,6 +323,8 @@ def convert_from_fp8e4m3(
         (dtype == tl.float16) or (dtype == tl.bfloat16) or (dtype == tl.float32),
         "convert_from_fp8e4m3 expects fp16 or bf16, or fp32 output",
     )
+    # NaN sign/payload are unspecified; opt-in handling requires NaN output only.
+    # https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-cvt
     _check_software_conversion(FORCE_SOFTWARE_CONVERSION)
     # Keep packed decoding when each thread has at least one complete pack.
     if dtype != tl.float32 and x.numel >= 4 * tl.extra.cuda.num_threads():
