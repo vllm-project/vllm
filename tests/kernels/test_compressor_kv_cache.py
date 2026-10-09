@@ -2476,3 +2476,15 @@ def test_v41_indexer_forward_q(quant_tuple):
         "use_fp4": False,
         "weights_out_dtype": torch.float32,
     }
+
+
+def test_cutedsl_gather_warmup_skips_triton_dispatch(monkeypatch):
+    """Do not compile an unused CuTeDSL gather on the Triton fallback path."""
+    pytest.importorskip("cutlass")
+    from vllm.models.deepseek_v4.common.ops import cache_utils
+    from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
+        DequantGatherKCacheKernel,
+    )
+
+    monkeypatch.setattr(cache_utils, "_can_use_cutedsl", lambda: False)
+    assert DequantGatherKCacheKernel().get_warmup_keys(None) == []
