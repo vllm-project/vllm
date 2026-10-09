@@ -120,10 +120,10 @@ def _index_block_score_kernel(
     m_q = o_q < q_len
     q_ptrs = (
         q_ptr
-        + seq_start * stride_q_n
-        + pid_h * stride_q_h
-        + o_q[:, None] * stride_q_n
-        + o_d[None, :] * stride_q_d
+        + seq_start.to(tl.int64) * stride_q_n
+        + pid_h.to(tl.int64) * stride_q_h
+        + o_q[:, None].to(tl.int64) * stride_q_n
+        + o_d[None, :].to(tl.int64) * stride_q_d
     )
     q = tl.load(q_ptrs, mask=m_q[:, None], other=0.0)
     # A matched fp8 pair (e.g. e4m3 x e4m3) lowers to a native FP8 MMA, so

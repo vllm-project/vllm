@@ -139,7 +139,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     # main recurrence
     for i_t in range(NT):
-        o_t = i_t * BT + tl.arange(0, BT)
+        o_t = (i_t * BT + tl.arange(0, BT)).to(tl.int64)
         m_t = o_t < T
         p_h1 = h + i_t.to(tl.int64) * stride_h + o_v[:, None] * K + o_k1[None, :]
         m_h1 = m_v[:, None] & m_k1[None, :]
