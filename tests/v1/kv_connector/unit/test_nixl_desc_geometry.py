@@ -801,6 +801,110 @@ def test_register_compressed_indexer_uses_virtual_transfer_pages(
     )
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("kernel_block_size", [128, 256])
+def test_register_mla_kernel_rows_larger_than_transfer_block(kernel_block_size):
+    """MLA kernel rows larger than the NIXL block must split into dense pages.
+
+    The runner selects a kernel block size per KV cache group, while NIXL selects
+    one across every attention backend in the process. When another backend (e.g.
+    a drafter's) only supports smaller blocks, each MLA kernel row holds several
+    NIXL pages.
+    """
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.attention.backend import MultipleOf
+
+    num_logical_blocks = 3
+    transfer_block_size = 64
+    layer_names = ["layer.0", "layer.1"]
+    spec = MLAAttentionSpec(
+        block_size=kernel_block_size,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    page_size = spec.page_size_bytes
+    layer_stride = num_logical_blocks * page_size
+    kv_cache_tensor = KVCacheTensor(
+        size=len(layer_names) * layer_stride,
+        layers=layer_names,
+        layer_stride=layer_stride,
+        block_stride=page_size,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_logical_blocks,
+        kv_cache_tensors=[kv_cache_tensor],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names, spec)],
+    )
+    raw = torch.zeros(kv_cache_tensor.size, dtype=torch.int8)
+    caches = create_kv_cache_views(
+        raw,
+        spec,
+        num_logical_blocks,
+        KVCacheLayout.LBHNC,
+        kv_cache_tensor,
+        kernel_block_size=kernel_block_size,
+    )
+    assert caches[0].shape[2] == kernel_block_size
+
+    vllm_config = create_vllm_config(block_size=kernel_block_size)
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    mla_backend = MagicMock()
+    mla_backend.get_supported_kernel_block_sizes.return_value = [MultipleOf(16)]
+    mla_backend.get_name.return_value = "MLA"
+    mla_backend.full_cls_name.return_value = "fake.MLA"
+    drafter_backend = MagicMock()
+    drafter_backend.get_supported_kernel_block_sizes.return_value = [
+        transfer_block_size
+    ]
+    drafter_backend.get_name.return_value = "DRAFTER"
+    drafter_backend.full_cls_name.return_value = "fake.DRAFTER"
+
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(
+            bw,
+            "get_current_attn_backends",
+            return_value=[mla_backend, drafter_backend],
+        ),
+        patch.object(bw, "current_platform", fake_platform),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        worker.use_mla = True
+        worker.register_kv_caches(dict(zip(layer_names, caches)))
+
+    ratio = kernel_block_size // transfer_block_size
+    transfer_page_size = page_size // ratio
+    num_transfer_blocks = num_logical_blocks * ratio
+    assert worker.block_size == transfer_block_size
+    assert worker.num_blocks == num_transfer_blocks
+    assert worker.num_regions == len(layer_names)
+    assert worker.block_len_per_layer == [transfer_page_size] * len(layer_names)
+    assert worker.block_stride_per_layer == [transfer_page_size] * len(layer_names)
+    assert worker.kv_caches_base_addr[worker.engine_id][0] == [
+        cache.data_ptr() for cache in caches
+    ]
+    expected_descs = np.asarray(
+        [
+            [cache.data_ptr() + block_idx * transfer_page_size, transfer_page_size, 0]
+            for cache in caches
+            for block_idx in range(num_transfer_blocks)
+        ],
+        dtype=np.uint64,
+    )
+    np.testing.assert_array_equal(worker.src_blocks_data, expected_descs)
+
+
 def _make_remote_meta(
     worker,
     remote_block_size,
