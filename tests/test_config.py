@@ -3486,6 +3486,16 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_max_num_scheduled_tokens_zero_is_rejected():
+    """Zero scheduled tokens would hang generation; it must fail validation."""
+    with pytest.raises(ValidationError, match="max_num_scheduled_tokens"):
+        SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            max_num_scheduled_tokens=0,
+        )
+
+
 @pytest.mark.parametrize(
     (
         "model_id",
