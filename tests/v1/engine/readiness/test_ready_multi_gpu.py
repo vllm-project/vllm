@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`/ready` against injected failures across two GPUs (DP=2).
+"""`/ready` against injected failures across two GPUs (DP=2 and PP=2).
 
 MoE DP ranks step in lockstep waves where idle ranks run dummy batches, and
 must not be probed with an ad-hoc dummy batch; dense DP ranks are independent
@@ -86,3 +86,13 @@ def test_dense_latent_cuda_error_while_idle(tmp_path):
         assert srv.status() == 200
         srv.rpc("fault_ima_now", "1")
         assert srv.wait_until_unready() is not None
+
+
+def test_cuda_error_on_non_output_pp_stage(tmp_path):
+    """The probe checks every worker, not only the last PP stage that returns
+    model outputs; PP dummy runs do not communicate across stages."""
+    args = ["--pipeline-parallel-size", "2"]
+    with ready_probe_server(DENSE_MODEL, args, tmp_path) as srv:
+        assert srv.status() == 200
+        srv.rpc("fault_ima_now_on_worker", "0")
+        assert srv.status() == 503

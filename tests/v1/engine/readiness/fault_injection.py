@@ -58,6 +58,7 @@ class FaultInjectionScheduler(AsyncScheduler):
 class FaultInjectionWorkerExtension:
     vllm_config: VllmConfig
     model_runner: Any
+    rank: int
 
     def _fault_targets_me(self, dp_ranks: str) -> bool:
         # Dense DP engines keep data_parallel_rank=0; the index is the DP rank.
@@ -73,6 +74,11 @@ class FaultInjectionWorkerExtension:
         if not self._fault_targets_me(dp_ranks):
             return
         _launch_illegal_memory_access()
+
+    def fault_ima_now_on_worker(self, worker_rank: str) -> None:
+        """Like ``fault_ima_now``, on one TP/PP worker of the engine."""
+        if self.rank == int(worker_rank):
+            _launch_illegal_memory_access()
 
     def fault_ima_on_next_forward(self, dp_ranks: str) -> None:
         """Launch an illegal memory access at the end of the next forward
