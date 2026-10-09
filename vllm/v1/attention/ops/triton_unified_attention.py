@@ -41,9 +41,17 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 
 @triton.jit
 def _cast_kv_tile(
-    data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr, FP8_SOFTWARE_CONV: tl.constexpr
+    data,
+    Q,
+    tensor_scale,
+    KV_QUANT_MODE: tl.constexpr,
+    FP8_SOFTWARE_CONV: tl.constexpr,
+    FORCE_SOFTWARE_CONVERSION: tl.constexpr = False,
 ):
     """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
+
+    FORCE_SOFTWARE_CONVERSION is opt-in for testing the software path on
+    targets with native FP8 conversion; production callers leave it disabled.
 
     Modes handled inside the core kernel:
 
@@ -59,7 +67,11 @@ def _cast_kv_tile(
             # Match the native path's fp32 scale multiplication before the final
             # cast to the activation dtype.
             return (
-                convert_from_fp8e4m3(data, Q.dtype).to(tl.float32)
+                convert_from_fp8e4m3(
+                    data,
+                    Q.dtype,
+                    FORCE_SOFTWARE_CONVERSION=FORCE_SOFTWARE_CONVERSION,
+                ).to(tl.float32)
                 * tl.load(tensor_scale)
             ).to(Q.dtype)
         if Q.dtype.is_fp8():

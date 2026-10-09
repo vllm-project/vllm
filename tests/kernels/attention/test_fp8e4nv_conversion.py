@@ -107,7 +107,7 @@ def _software_kv_cast_kernel(
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0)
     q = tl.load(q_ptr + offs, mask=mask, other=0.0)
-    out = _cast_kv_tile(x, q, scale_ptr, 1, True)
+    out = _cast_kv_tile(x, q, scale_ptr, 1, True, FORCE_SOFTWARE_CONVERSION=True)
     tl.store(out_ptr + offs, out, mask=mask)
 
 
