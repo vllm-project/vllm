@@ -174,6 +174,8 @@ class RocmAttentionBackend(AttentionBackend):
         "fp8_e4m3",
         "fp8_e5m2",
     ]
+    # Prefix prefill dots Q against KV and only casts FP8 tiles.
+    require_matching_float_kv: ClassVar[bool] = True
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:

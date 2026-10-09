@@ -98,6 +98,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def supports_kv_connector(cls) -> bool:
         return True
 
+    # Overrides RocmAttentionBackend. The aiter unified kernel casts an
+    # unquantized KV tile onto the query, so this pair stays eligible.
+    require_matching_float_kv: ClassVar[bool] = False
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod

@@ -98,6 +98,8 @@ class FlexAttentionBackend(AttentionBackend):
         "float16",
         "bfloat16",
     ]
+    # flex_attention takes query and KV in one dtype.
+    require_matching_float_kv: ClassVar[bool] = True
 
     forward_includes_kv_cache_update: bool = False
 

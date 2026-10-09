@@ -766,6 +766,8 @@ class AiterFlashAttentionMetadataBuilder(
 
 class AiterFlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    # extend_forward gathers the cache into flash_attn_varlen_func.
+    require_matching_float_kv: ClassVar[bool] = True
 
     @classmethod
     def supports_sink(cls) -> bool:

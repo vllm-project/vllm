@@ -522,6 +522,25 @@ def resolve_kv_cache_dtype_string(
     return "auto"
 
 
+def float_kv_cache_dtype_mismatch_reason(
+    kv_cache_dtype: str | None, query_dtype: torch.dtype
+) -> str | None:
+    """Reason when an unquantized float KV dtype differs from the query.
+
+    Call from ``supports_combination`` on kernels that cannot cast.
+    Triton casts the KV tile onto the query and does not call this.
+    ``auto`` and quantized cache dtypes are ignored.
+    """
+    if kv_cache_dtype not in ("float16", "bfloat16"):
+        return None
+    if query_dtype == STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]:
+        return None
+    return (
+        "float16/bfloat16 KV cache must match the query dtype "
+        f"(got kv_cache_dtype={kv_cache_dtype!r}, dtype={query_dtype})"
+    )
+
+
 def kv_cache_dtype_str_to_dtype(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> torch.dtype:
