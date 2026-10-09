@@ -69,6 +69,57 @@ MNK_FACTORS = [
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "m,topk,width", [(1, 1, 2560), (1, 3, 259), (1, 10, 2560), (4, 10, 2560)]
+)
+@pytest.mark.parametrize("weight_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("apply_on_input", [False, True])
+@torch.inference_mode()
+def test_bf16_decode_moe_reduce_preserves_cutlass_rounding(
+    m, topk, width, weight_dtype, apply_on_input
+):
+    from vllm.model_executor.layers.fused_moe.bf16_moe_reduce import (
+        bf16_moe_weighted_sum,
+    )
+
+    torch.manual_seed(0)
+    experts = torch.randn(m, topk, width, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(m, topk, device="cuda").softmax(-1).to(weight_dtype)
+    output = torch.empty(m, width, device="cuda", dtype=torch.bfloat16)
+    products = experts if apply_on_input else experts * weights.bfloat16()[..., None]
+    expected = products.sum(dim=1)
+    for block_h in (128, 256, 512):
+        bf16_moe_weighted_sum(experts, weights, output, apply_on_input, block_h)
+        torch.testing.assert_close(output, expected, rtol=0.008, atol=1e-5)
+
+    if m == 4 and weight_dtype == torch.float32 and not apply_on_input:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            bf16_moe_weighted_sum(experts, weights, output)
+        experts.neg_()
+        graph.replay()
+        expected = (experts * weights.bfloat16()[..., None]).sum(dim=1)
+        torch.testing.assert_close(output, expected, rtol=0.008, atol=1e-5)
+    if topk == 1:
+        return
+    # Cancellation exposes rounding that an all-FP32 fused reduction would lose.
+    experts.zero_()
+    experts[:, 0, :] = 1
+    experts[:, 1, :] = -1
+    weights.zero_()
+    weights[:, 0] = 1.001
+    weights[:, 1] = 1.0
+    bf16_moe_weighted_sum(experts, weights, output, apply_on_input)
+    torch.testing.assert_close(output, torch.zeros_like(output), rtol=0, atol=0)
+    if not apply_on_input:
+        experts[:, 0, :] = 1.0078125
+        weights[:, 0] = 1.0078125
+        weights[:, 1] = 1.015625
+        bf16_moe_weighted_sum(experts, weights, output)
+        torch.testing.assert_close(output, torch.zeros_like(output), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "experts_cls",
     [

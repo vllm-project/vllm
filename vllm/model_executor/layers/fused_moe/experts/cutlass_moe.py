@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -12,6 +13,10 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
     apply_moe_activation_supported,
+)
+from vllm.model_executor.layers.fused_moe.bf16_moe_reduce import (
+    bf16_moe_weighted_sum,
+    supports_bf16_decode_fusion,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -671,6 +676,26 @@ def run_cutlass_moe_fp4(
     c3 = ops.shuffle_rows(c3, c_map)
 
     assert output.dtype == out_dtype
+    if (
+        envs.VLLM_FUSE_BF16_MOE_REDUCE
+        and not envs.VLLM_BATCH_INVARIANT
+        and (
+            supports_bf16_decode_fusion(output)
+            and c3.dtype == output.dtype
+            and c3.device == topk_weights.device == output.device
+            and c3.is_contiguous()
+            and topk_weights.is_contiguous()
+            and topk_weights.dtype in (torch.float32, torch.bfloat16)
+            and 0 < num_topk <= 32
+        )
+    ):
+        bf16_moe_weighted_sum(
+            c3.view(m, num_topk, k),
+            topk_weights.view(m, num_topk),
+            output,
+            apply_router_weight_on_input,
+        )
+        return
     if not apply_router_weight_on_input:
         output.copy_(
             (
@@ -943,6 +968,26 @@ def run_cutlass_moe_mxfp4(
     c3 = ops.shuffle_rows(c3, c_map)
 
     assert output.dtype == out_dtype
+    if (
+        envs.VLLM_FUSE_BF16_MOE_REDUCE
+        and not envs.VLLM_BATCH_INVARIANT
+        and (
+            supports_bf16_decode_fusion(output)
+            and c3.dtype == output.dtype
+            and c3.device == topk_weights.device == output.device
+            and c3.is_contiguous()
+            and topk_weights.is_contiguous()
+            and topk_weights.dtype in (torch.float32, torch.bfloat16)
+            and 0 < num_topk <= 32
+        )
+    ):
+        bf16_moe_weighted_sum(
+            c3.view(m, num_topk, k),
+            topk_weights.view(m, num_topk),
+            output,
+            apply_router_weight_on_input,
+        )
+        return
     if not apply_router_weight_on_input:
         output.copy_(
             (
