@@ -183,3 +183,18 @@ def test_deep_gemm_fp8_o_proj_uses_bf16_fallback(monkeypatch, with_weight_scale)
     expected_out = expected + 1
     torch.testing.assert_close(wo_b.input, expected)
     torch.testing.assert_close(out, expected_out)
+
+
+def test_output_projection_fallback_does_not_warm_fp8_quantization(monkeypatch):
+    """Avoid warming an unused FP8 kernel when projection uses its BF16 fallback."""
+    import importlib
+
+    module = importlib.import_module(
+        "vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant"
+    )
+    monkeypatch.setattr(
+        module,
+        "current_platform",
+        types.SimpleNamespace(support_deep_gemm=lambda: False),
+    )
+    assert module.FusedInvRopeFP8QuantKernel().get_warmup_keys(None) == []
