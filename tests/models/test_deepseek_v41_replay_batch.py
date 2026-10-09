@@ -11,6 +11,11 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import (
+    BatchDescriptor,
+    ForwardContext,
+    override_forward_context,
+)
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -60,7 +65,7 @@ def state(monkeypatch):
     cfg.parallel_config.data_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = DecoderReplayLayers(WINDOW, MagicMock(), set(), "swa_first")
+    layers = DecoderReplayLayers(WINDOW, MagicMock(), MagicMock(), set(), "swa_first")
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     builds: list = []
 
@@ -200,7 +205,8 @@ def test_replay_batch_keeps_adaptive_verification_query_bound(state):
 
 def test_graph_steps_trim_only_piecewise_at_threshold(state):
     """A CUDA graph keeps the layers on its whole batch, unless it is a PIECEWISE
-    one at the trim threshold or above; an eager step trims a batch to its rows."""
+    one at the trim threshold or above, as its capture decided; an eager step
+    trims a batch to its rows."""
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING, num_tokens_after_padding=512)
     for cg_mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
         assert _prepare(state, batch, cg_mode) == (None, None)
@@ -209,8 +215,21 @@ def test_graph_steps_trim_only_piecewise_at_threshold(state):
     assert replay.rows.tolist() == REPLAY_ROWS
     assert build.cg_mode == CUDAGraphMode.NONE
     assert build.batch.num_tokens_after_padding == len(REPLAY_ROWS)
-    state.decoder_replay_layers.trim_threshold = 256
-    replay, _ = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
+    layers = state.decoder_replay_layers
+    graph = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        batch_descriptor=BatchDescriptor(num_tokens=512),
+    )
+    for threshold in (513, 512):
+        layers.trim_threshold = threshold
+        replay, _ = _prepare(state, batch, CUDAGraphMode.PIECEWISE)
+        with override_forward_context(graph):  # the capture's decision
+            assert (
+                layers.uses_replay_batch() == (replay is not None) == (threshold == 512)
+            )
     assert replay is not None and replay.rows.tolist() == REPLAY_ROWS
     assert _prepare(state, batch, CUDAGraphMode.FULL) == (None, None)
 

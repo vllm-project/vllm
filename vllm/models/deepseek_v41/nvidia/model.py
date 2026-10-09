@@ -627,16 +627,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         self,
         x: torch.Tensor | MoEOutput,
         positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor,
         post_mix: torch.Tensor,
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> None:
-        """Write the KV ``forward`` would write for these inputs, without the
-        rest of the layer. The decoder replay batch then runs ``forward`` on its
-        rows only, which writes theirs again."""
-        # Not the first layer, an Engram layer or sequence parallel: the
-        # replay batch rules those out (_decoder_replay_supported).
+        """Write the KV ``forward`` would for the replay layers' inputs, skipping
+        the rest of the layer; the replay batch then reruns its rows."""
+        # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
         *_, x, _, _ = mhc_shifted_post_pre(
             x,
@@ -800,8 +799,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
-            # The last KV source writes its KV for every row; the rest of it
-            # feeds only the layers after it, so it replays with them.
+            assert self.layers[cut].attn.compress_ratio <= 1
+            # The last KV source writes every row's KV, then replays.
             self.decoder_replay_start = cut
             # The attention metadata keys the replay layers read.
             metadata_prefixes = set()
@@ -815,6 +814,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.decoder_replay_layers = DecoderReplayLayers(
                 config.sliding_window,
                 self._run_replay_layers,
+                self.layers[cut].write_kv,
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
             )
@@ -1012,18 +1012,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         )
         late_aux: list[torch.Tensor] = []
         if self.decoder_replay_layers is not None:
-            if self.decoder_replay_layers.replays():
-                # Every row's KV of the first replay layer, before it runs on
-                # the replay rows: the layers after it and later steps read it.
-                # Decided as the replay layers' graph break is, so a PIECEWISE
-                # graph captures it wherever it breaks out to the replay batch.
-                assert pre_mix is not None and post_mix is not None
-                assert res_mix is not None and residual is not None
-                typing.cast(
-                    DeepseekV4DecoderLayer, self.layers[self.decoder_replay_start]
-                ).write_kv(
-                    hidden_states, positions, pre_mix, post_mix, res_mix, residual
-                )
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
@@ -1167,9 +1155,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         res_mix: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        """The last KV source and the layers past it, on whatever rows they are
-        given; returns their output, the last FFN's pre-mix and the aux hidden
-        states they capture."""
+        """Layers ``decoder_replay_start``.. on the given rows; returns their output,
+        the last FFN's pre-mix and the aux hidden states they capture."""
         aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
             range(self.decoder_replay_start, self.end_layer),

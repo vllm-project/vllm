@@ -238,8 +238,10 @@ class DeepseekV41ModelState(DefaultModelState):
             self._kept_kv_start = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=device
             )
-            self._replay_attn_groups: list[list[AttentionGroup]] | None = None
-            self._first_swa_attn_groups: list[list[AttentionGroup]] | None = None
+            # The replay layers' and the first one's SWA attention groups.
+            self._replay_attn_groups: (
+                tuple[list[list[AttentionGroup]], list[list[AttentionGroup]]] | None
+            ) = None
         layers = self.decoder_replay_layers
         compilation_config = vllm_config.compilation_config
         self.replay_cudagraphs: DecoderReplayCudaGraphManager | None = None
@@ -453,7 +455,7 @@ class DeepseekV41ModelState(DefaultModelState):
         layers.replay_batch = None
         force_replay_batch = capture_desc is not None or (
             cudagraph_mode == CUDAGraphMode.PIECEWISE
-            and layers.graph_replays(input_batch.num_tokens_after_padding)
+            and layers.graph_uses_replay_batch(input_batch.num_tokens_after_padding)
         )
         if cudagraph_mode != CUDAGraphMode.NONE and not force_replay_batch:
             return
@@ -507,26 +509,32 @@ class DeepseekV41ModelState(DefaultModelState):
         kept_batch, kept_slot_mappings = self._kept_input_batch(
             input_batch, slot_mappings, replay_start, kept_lens, num_padded
         )
+        if self._replay_attn_groups is None:
+            self._replay_attn_groups = (
+                self._copy_attn_groups(attn_groups, layers.metadata_prefixes),
+                self._copy_attn_groups(attn_groups, {layers.first_swa_prefix}),
+            )
+        replay_groups, first_swa_groups = self._replay_attn_groups
         attn_metadata = super().prepare_attn(
             kept_batch,
             CUDAGraphMode.NONE,
             block_tables,
             kept_slot_mappings,
-            self._replay_groups(attn_groups),
+            replay_groups,
             kv_cache_config,
             model_specific_attn_metadata=ReplayAttnMetadata(
                 self._kept_kv_start[:num_reqs]
             ),
         )
-        # The first replay layer wrote every row's window KV, so its window
-        # starts are the batch's.
+        # The first replay layer wrote every row's window KV: its window starts
+        # are the batch's.
         first_swa = layers.first_swa_prefix
         attn_metadata[first_swa] = super().prepare_attn(
             kept_batch,
             CUDAGraphMode.NONE,
             block_tables,
             kept_slot_mappings,
-            self._first_swa_groups(attn_groups),
+            first_swa_groups,
             kv_cache_config,
             model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
         )[first_swa]
@@ -569,7 +577,7 @@ class DeepseekV41ModelState(DefaultModelState):
 
         if self.replay_cudagraphs is not None:
             # profile_only captures use pre-KV-cache groups: drop the cache.
-            self._replay_attn_groups = self._first_swa_attn_groups = None
+            self._replay_attn_groups = None
             self.replay_cudagraphs.capture_replay_graphs(prepare)
 
     def _kept_input_batch(
@@ -646,35 +654,11 @@ class DeepseekV41ModelState(DefaultModelState):
             return False, None
         return True, agreed[1]
 
-    def _replay_groups(
-        self, attn_groups: list[list[AttentionGroup]]
-    ) -> list[list[AttentionGroup]]:
-        """The attention groups with metadata builders of their own, like each
-        microbatch's: a builder keeps the metadata it built, and the runner's
-        hold the batch's. Only the groups the replay layers read are built."""
-        if self._replay_attn_groups is None:
-            assert self.decoder_replay_layers is not None
-            self._replay_attn_groups = self._own_groups(
-                attn_groups, self.decoder_replay_layers.metadata_prefixes
-            )
-        return self._replay_attn_groups
-
-    def _first_swa_groups(
-        self, attn_groups: list[list[AttentionGroup]]
-    ) -> list[list[AttentionGroup]]:
-        """The first replay layer's sliding-window group, with builders of its
-        own as well: its metadata lives alongside the replay layers'."""
-        if self._first_swa_attn_groups is None:
-            assert self.decoder_replay_layers is not None
-            self._first_swa_attn_groups = self._own_groups(
-                attn_groups, {self.decoder_replay_layers.first_swa_prefix}
-            )
-        return self._first_swa_attn_groups
-
-    def _own_groups(
+    def _copy_attn_groups(
         self, attn_groups: list[list[AttentionGroup]], prefixes: set[str]
     ) -> list[list[AttentionGroup]]:
-        """New-builder copies of the groups holding any of ``prefixes``."""
+        """Copies of the groups holding any of ``prefixes``, with builders of their
+        own like a microbatch's: a builder keeps the metadata it built."""
         own_groups = []
         for groups in attn_groups:
             copies = []

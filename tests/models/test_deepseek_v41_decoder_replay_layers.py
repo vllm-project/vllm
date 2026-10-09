@@ -68,6 +68,7 @@ def _states(num_tokens: int):
 
 
 def test_run_gathers_states():
+    """Every row's KV is written first; the layers then run on the replay rows."""
     seen = {}
 
     def run_layers(hidden_states, positions, input_ids, pre_mix, post, res, residual):
@@ -77,7 +78,8 @@ def test_run_gathers_states():
         seen["is_padding"] = replay_context.is_padding
         return residual, pre_mix
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, set(), "swa")
+    write_batch_kv = MagicMock()
+    layers = DecoderReplayLayers(WINDOW, run_layers, write_batch_kv, set(), "swa")
     states = _states(NUM_TOKENS)
     hidden, residual = states[0], states[-1]
     full, sub = object(), object()
@@ -87,6 +89,7 @@ def test_run_gathers_states():
         outputs = layers(*states)
         assert get_forward_context() is context
 
+    write_batch_kv.assert_called_once_with(*states)
     rows = torch.tensor(REPLAY_ROWS, device=DEVICE)
     assert torch.equal(seen["hidden_states"], hidden[rows])
     assert seen["attn_metadata"] is sub and seen["is_padding"] is None
@@ -102,12 +105,14 @@ def test_no_replay_batch_runs_the_whole_batch():
         seen["attn_metadata"] = get_forward_context().attn_metadata
         return (hidden_states,)
 
-    layers = DecoderReplayLayers(WINDOW, run_layers, set(), "swa")
+    write_batch_kv = MagicMock()
+    layers = DecoderReplayLayers(WINDOW, run_layers, write_batch_kv, set(), "swa")
     states = _states(NUM_TOKENS)
     full = object()
     with override_forward_context(_context(full)):
         (output,) = layers(*states)
     assert output is states[0] and seen["attn_metadata"] is full
+    write_batch_kv.assert_not_called()
 
 
 def _graph_context(num_tokens):
@@ -121,31 +126,22 @@ def _graph_context(num_tokens):
 
 
 def test_piecewise_graphs_break_out_by_size():
-    """In a PIECEWISE graph the break, fixed at capture, follows the graph's size,
-    whether or not a replay batch is set (none is at capture); elsewhere it
-    follows the replay batch."""
-    seen = []
-
-    def run_in_graph_break(*states):
-        seen.append("break")
-        return ("break",)
-
-    layers = DecoderReplayLayers(WINDOW, lambda *states: ("whole",), set(), "swa")
-    layers._run_in_graph_break = run_in_graph_break  # type: ignore[method-assign]
+    """A PIECEWISE graph's KV write and break are fixed at capture, when no replay
+    batch is set, so both follow the graph's size rather than the replay batch."""
+    write_batch_kv = MagicMock()
+    layers = DecoderReplayLayers(
+        WINDOW, lambda *states: ("whole",), write_batch_kv, set(), "swa"
+    )
+    layers._run_in_graph_break = lambda *states: ("break",)  # type: ignore[method-assign]
     states = _states(NUM_TOKENS)
     with override_forward_context(_graph_context(1024)):
-        assert not layers.replays()  # no threshold: the graphs keep the batch
+        assert layers(*states) == ("whole",)  # no threshold: no break
         layers.trim_threshold = 768
-        assert layers.replays()
         assert layers(*states) == ("break",)
+    _set_replay_batch(layers, REPLAY_ROWS, object())
     with override_forward_context(_graph_context(576)):
-        assert not layers.replays()
-        assert layers(*states) == ("whole",)
-    with override_forward_context(_context(object())):
-        assert not layers.replays()
-        _set_replay_batch(layers, REPLAY_ROWS, object())
-        assert layers.replays()
-    assert seen == ["break"]
+        assert not layers.uses_replay_batch()  # a replay batch alone does not break out
+    write_batch_kv.assert_called_once_with(*states)
 
 
 def test_replay_graph_matches_eager(monkeypatch):
@@ -165,7 +161,7 @@ def test_replay_graph_matches_eager(monkeypatch):
     def run_layers(hidden, positions, ids, pre, post, mix, residual):
         return residual + hidden[:, None] + positions[:, None, None], pre + ids[:, None]
 
-    layers = DecoderReplayLayers(4, run_layers, set(), "swa")
+    layers = DecoderReplayLayers(4, run_layers, MagicMock(), set(), "swa")
     manager = DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
 
     def prepare(desc):

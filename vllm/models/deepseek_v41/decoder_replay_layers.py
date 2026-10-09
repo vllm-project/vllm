@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Decoder-side SWA bounded replay: running the replay layers on their batch.
 
-The layers past the last KV-source layer own nothing but sliding-window KV, and
-the rest of the last KV source feeds only them; so once that layer has written
-its KV for every row, it and the layers past it run on each request's last
-``window`` rows only.
+Once the last KV-source layer has written every row's KV, it and the layers past
+it (which own only SWA KV) run on each request's last ``window`` rows only.
 ``DeepseekV41ModelState`` prepares those rows as a sub-batch with attention
 metadata and a forward context of its own, like a microbatch;
 ``DecoderReplayLayers`` gathers the layer inputs by its rows, runs the layers
@@ -42,53 +40,55 @@ class ReplayBatch:
 class DecoderReplayLayers:
     """Runs the replay layers on the step's replay batch.
 
-    ``run_layers`` takes a batch's layer inputs and returns its per-row
-    outputs. ``metadata_prefixes`` are the attention metadata keys the layers
-    read, so the replay batch builds only those. ``first_swa_prefix`` is the
-    first replay layer's sliding-window key: that layer wrote every row's window
-    KV, so its metadata keeps the batch's window starts.
+    ``run_layers`` takes a batch's layer inputs and returns its per-row outputs;
+    ``write_batch_kv`` takes them too and writes the first replay layer's KV for
+    every row. ``metadata_prefixes`` are the attention metadata keys the layers
+    read, so the replay batch builds only those. ``first_swa_prefix`` keys the
+    first replay layer's SWA metadata, built with the batch's window starts.
     """
 
     def __init__(
         self,
         window: int,
         run_layers: Callable[..., tuple[torch.Tensor, ...]],
+        write_batch_kv: Callable[..., None],
         metadata_prefixes: set[str],
         first_swa_prefix: str,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
+        self.write_batch_kv = write_batch_kv
         self.metadata_prefixes = metadata_prefixes
         self.first_swa_prefix = first_swa_prefix
         # Set by the model state every step; None runs the layers on the batch.
         self.replay_batch: ReplayBatch | None = None
-        # Set by the model state when the replay layers run in graphs: PIECEWISE
-        # model graphs of this many tokens or more break out to the replay batch.
+        # Set by the model state with replay graphs: PIECEWISE model graphs of
+        # this many tokens or more break out to the replay batch.
         self.trim_threshold: int | None = None
         self._break_outputs: list[torch.Tensor] | None = None
 
     def __call__(
         self, hidden_states: torch.Tensor | MoEOutput, *states: torch.Tensor | None
     ) -> tuple[torch.Tensor, ...]:
-        if in_piecewise_cudagraph() and self.replays():
-            return self._run_in_graph_break(hidden_states, *states)
+        if self.uses_replay_batch():
+            # Outside the break, so a PIECEWISE graph captures it.
+            self.write_batch_kv(hidden_states, *states)
+            if in_piecewise_cudagraph():
+                return self._run_in_graph_break(hidden_states, *states)
         return self._run(hidden_states, *states)
 
-    def replays(self) -> bool:
-        """Whether this forward runs the replay layers on a replay batch. In a
-        PIECEWISE graph that is fixed when the graph is captured, so it follows
-        the graph's size (``graph_replays``); the batch itself is set only at
-        runtime. Otherwise a replay batch is set or not."""
+    def uses_replay_batch(self) -> bool:
+        """Whether this forward uses the replay batch: in a PIECEWISE graph by its
+        size, fixed at capture (no replay batch is set then); else if one is set."""
         if in_piecewise_cudagraph():
             batch_descriptor = get_forward_context().batch_descriptor
             assert batch_descriptor is not None
-            return self.graph_replays(batch_descriptor.num_tokens)
+            return self.graph_uses_replay_batch(batch_descriptor.num_tokens)
         return self.replay_batch is not None
 
-    def graph_replays(self, num_tokens: int) -> bool:
-        """Whether a PIECEWISE model graph of ``num_tokens`` padded tokens breaks
-        out to the replay batch: the one policy its capture and the model state's
-        runtime replay batch follow."""
+    def graph_uses_replay_batch(self, num_tokens: int) -> bool:
+        """Whether a PIECEWISE graph of ``num_tokens`` breaks out to the replay
+        batch; capture and the model state's runtime replay batch share it."""
         return self.trim_threshold is not None and num_tokens >= self.trim_threshold
 
     @eager_break_during_capture
