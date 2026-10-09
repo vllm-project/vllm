@@ -3,10 +3,9 @@
 
 from collections.abc import Callable
 from dataclasses import InitVar
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from pydantic import Field, field_validator
-from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger

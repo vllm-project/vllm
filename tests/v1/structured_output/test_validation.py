@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Request-time validation of structured output requests."""
 
+import json
+
 import pytest
 
 from vllm.config import StructuredOutputsConfig
 from vllm.exceptions import VLLMClientError, VLLMValidationError
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    MAX_STRUCTURED_OUTPUT_JSON_NESTING,
+    STRUCTURAL_TAG_WRAPPER_NESTING,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -110,6 +117,98 @@ def test_regex_with_nul_byte_rejected(regex):
         validate_xgrammar_grammar(params)
 
 
+def _nested_array_schema(levels: int) -> str:
+    # Built as text: json.dumps on a deeply nested dict would itself recurse.
+    wrappers = levels - 1
+    return (
+        '{"type": "array", "items": ' * wrappers + '{"type": "string"}' + "}" * wrappers
+    )
+
+
+def _structural_tag(schema: str) -> str:
+    return (
+        '{"type": "structural_tag", "format": {"type": "json_schema", '
+        f'"json_schema": {schema}}}}}'
+    )
+
+
+@pytest.mark.parametrize(
+    "structured_outputs",
+    [
+        pytest.param(
+            {"json": _nested_array_schema(MAX_STRUCTURED_OUTPUT_JSON_NESTING + 1)},
+            id="json-str-over-limit",
+        ),
+        pytest.param(
+            {"json": json.loads(_nested_array_schema(2_000))},
+            id="json-dict-past-recursion-limit",
+        ),
+        pytest.param(
+            {"json": _nested_array_schema(200_000)},
+            id="json-str-past-json-loads-recursion-limit",
+        ),
+        pytest.param(
+            {
+                "structural_tag": _structural_tag(
+                    _nested_array_schema(
+                        MAX_STRUCTURED_OUTPUT_JSON_NESTING
+                        + STRUCTURAL_TAG_WRAPPER_NESTING
+                    )
+                )
+            },
+            id="structural-tag-over-limit",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "backend", ["auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"]
+)
+def test_deeply_nested_schema_rejected(structured_outputs, backend):
+    """Converting a schema to a grammar gets steeply more expensive with nesting
+    and runs on the API server; past the recursion limit it used to escape as a
+    RecursionError (HTTP 500 with an empty message). Deep nesting must be a
+    validation error before any backend touches the schema."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(**structured_outputs)
+    )
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend=backend),
+            tokenizer=object(),
+        )
+
+
+@pytest.mark.parametrize("field", ["json", "structural_tag"])
+def test_xgrammar_validation_rejects_deeply_nested_schema(field):
+    """Request parsing and tool parsers call validate_xgrammar_grammar directly,
+    before _validate_structured_outputs, so it must check nesting itself."""
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    schema = _nested_array_schema(2_000)
+    value = _structural_tag(schema) if field == "structural_tag" else schema
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(**{field: value})
+    )
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        validate_xgrammar_grammar(params)
+
+
+@pytest.mark.parametrize("field", ["json", "structural_tag"])
+def test_schema_at_nesting_limit_accepted(field):
+    """A structural tag wraps its schema in a few more levels (more for the
+    tags tool parsers generate), which must not count against the schema."""
+    schema = _nested_array_schema(MAX_STRUCTURED_OUTPUT_JSON_NESTING)
+    value = _structural_tag(schema) if field == "structural_tag" else schema
+    structured_outputs = StructuredOutputsParams(**{field: value})
+    SamplingParams(structured_outputs=structured_outputs)._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(),
+        tokenizer=object(),
+    )
+    assert structured_outputs._backend == "xgrammar"
+
+
 INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}
 
 
@@ -184,4 +283,5 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
         StructuredOutputsConfig(backend="auto"),
         tokenizer=object(),
     )
+    assert params.structured_outputs is not None
     assert params.structured_outputs._backend == expected_backend

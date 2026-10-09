@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import regex as re
 
@@ -43,6 +43,13 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 logger = init_logger(__name__)
+
+
+class ReasoningEnd(NamedTuple):
+    """Where reasoning ends in a token sequence."""
+
+    offset: int  # index of the first end token, or the sequence length
+    implicit: bool  # the end token is also content, e.g. a tool-call start
 
 
 class ToolCallSlot:
@@ -638,14 +645,15 @@ class ParserEngine(Parser):
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._reasoning_end_token_ids
 
-    def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
+        """First reasoning end in `token_ids`, and if its token is content."""
         end_ids = self._reasoning_end_token_ids
         if not end_ids:
             return None
         for offset, token_id in enumerate(token_ids):
             if token_id in end_ids:
-                return offset
-        return len(token_ids)
+                return ReasoningEnd(offset, token_id != self._reasoning_end_token_id)
+        return ReasoningEnd(len(token_ids), False)
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         config = self.parser_engine_config

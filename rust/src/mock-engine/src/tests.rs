@@ -29,6 +29,7 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         coordinator_mode: None,
         model_name: "mock-model".to_string(),
         client_index: 0,
+        engine_stats_enabled: true,
     }
 }
 

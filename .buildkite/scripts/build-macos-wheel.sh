@@ -25,6 +25,7 @@ export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
 
 uv venv --python 3.12
 uv pip install -r requirements/build/cpu.txt --index-strategy unsafe-best-match
-uv build --wheel --no-build-isolation -o artifacts/dist
+uv build --wheel --no-build-isolation -o artifacts/dist \
+  --config-setting=--build-option=--py-limited-api=cp38
 
 ls -l artifacts/dist/*.whl
