@@ -98,6 +98,13 @@ class MooncakeStoreScheduler:
             spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
+        if (
+            self.save_decode_cache
+            and mamba_groups
+            and kv_cache_config.prefix_cache_retention_interval == 0
+        ):
+            # Decode checkpoints become reusable Store boundaries.
+            kv_cache_config.prefix_cache_retention_interval = self._block_size
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -406,7 +413,7 @@ class MooncakeStoreScheduler:
         if (
             block_state is not None
             and block_state.boundary_state_offloads
-            and not is_consumer
+            and can_process_cached
         ):
             self._handle_boundary_state_offloads(
                 block_state.boundary_state_offloads, meta
@@ -474,10 +481,8 @@ class MooncakeStoreScheduler:
             assert NULL_BLOCK_ID not in block_ids, (
                 "A null block cannot back a boundary-state offload"
             )
-            # Every allocated block is referenced, not just the ones covering
-            # this job's token range: a rank resumes from its own last
-            # successful offset, which lags the scheduler's whenever a save was
-            # skipped or failed, so it may read anywhere below the range.
+            # Each rank may retry from an earlier offset after a skipped or
+            # failed save, so retain all available attention source blocks.
             block_ids.extend(
                 block_id
                 for group_id, group in enumerate(req_meta.block_ids)
@@ -525,6 +530,14 @@ class MooncakeStoreScheduler:
                 return False
             pinned_block_ids.append(block_id)
             remapped_offloads.append((store_group_id, block_id, boundary))
+        # Partial-tail PUTs also read attention chunks, including retry ranges.
+        pinned_block_ids.extend(
+            block_id
+            for store_group_id, group_id in enumerate(self._store_group_ids)
+            if store_group_id not in self._boundary_state_group_ids
+            for block_id in block_ids[group_id]
+            if block_id != NULL_BLOCK_ID
+        )
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
 
         pool = self._gpu_block_pool
@@ -577,12 +590,10 @@ class MooncakeStoreScheduler:
                 continue
             accepted: list[tuple[int, int, int]] = []
             for group_id, block_id, boundary_tokens in entries:
-                # Every other group stops saving at the end of this prefill, so
-                # a mamba-only key past it can never complete a joint hybrid
-                # hit. `prefill_end_tokens` — not the original prompt length —
-                # is the boundary: a resumed request re-prefills and re-saves
-                # its previously generated tokens for every group.
-                if boundary_tokens > tracker.prefill_end_tokens:
+                is_decode_boundary = boundary_tokens > tracker.prefill_end_tokens
+                if is_decode_boundary and not self.save_decode_cache:
+                    continue
+                if not is_decode_boundary and self.kv_role == "kv_consumer":
                     continue
                 if block_id == NULL_BLOCK_ID:
                     continue

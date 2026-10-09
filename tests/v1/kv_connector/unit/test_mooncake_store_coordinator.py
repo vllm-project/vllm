@@ -686,7 +686,9 @@ def test_dsv4_five_group_eagle_store_lookup_round_trip():
     exists: set[tuple[int, bytes]] = set()
     store_masks = coord.store_mask(token_len)
     for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
-        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        group_hashes = chunk_hashes_for_block_size(
+            hashes, coord.hash_block_size, group.kv_cache_spec.block_size
+        )
         for chunk_id, block_hash in enumerate(group_hashes):
             if mask is None or mask[chunk_id]:
                 exists.add((gid, bytes(block_hash)))

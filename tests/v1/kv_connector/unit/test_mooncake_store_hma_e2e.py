@@ -17,11 +17,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     ChunkedTokenDatabase,
-    KeyMetadata,
     LoadSpec,
     ReqMeta,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+    KeyMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     KVCacheStoreRecvingThread,
@@ -298,8 +300,8 @@ def test_recv_skips_swa_blocks_before_window():
     ]
     md0 = KeyMetadata("m", 0, 0, 0, 0, group_id=0)
     md1 = KeyMetadata("m", 0, 0, 0, 0, group_id=1)
-    db_full = ChunkedTokenDatabase(md0, block_size=16, hash_block_size=16)
-    db_swa = ChunkedTokenDatabase(md1, block_size=16, hash_block_size=16)
+    db_full = ChunkedTokenDatabase(md0, chunk_size=16, hash_block_size=16)
+    db_swa = ChunkedTokenDatabase(md1, chunk_size=16, hash_block_size=16)
     db_full.set_kv_caches_base_addr([0])
     db_full.set_block_len([1024])
     db_swa.set_kv_caches_base_addr([1 << 20])
@@ -352,7 +354,7 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens
     keys each chunk by its ending fine hash, including a partial tail."""
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
-    db = ChunkedTokenDatabase(md, block_size=16, hash_block_size=4)
+    db = ChunkedTokenDatabase(md, chunk_size=16, hash_block_size=4)
     db.set_kv_caches_base_addr([0])
     db.set_block_len([512])
     fine_hashes = [BlockHash(bytes([i + 1]) * 4) for i in range(8)]
@@ -413,7 +415,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     for g_idx in range(2):
         db = ChunkedTokenDatabase(
             KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=4,
         )
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -487,7 +489,7 @@ def test_offload_syncs_event_before_put():
     for g_idx in range(2):
         db = ChunkedTokenDatabase(
             KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=4,
         )
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -563,7 +565,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     for g_idx, block_size in enumerate([4, 16]):
         db = ChunkedTokenDatabase(
             KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
-            block_size=block_size,
+            chunk_size=block_size,
             hash_block_size=4,
         )
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -779,7 +781,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         group_participates=[True, True],
     )
 
-    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
+    # Persist a hash-aligned tail within the 16-token physical block.
     hs = [BlockHash(bytes([i + 1]) * 8) for i in range(3)]
     req = ReqMeta(
         req_id="r0",
@@ -788,7 +790,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=20,
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_state_offloads=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(req)
 
