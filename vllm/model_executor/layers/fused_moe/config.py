@@ -1090,6 +1090,10 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_v2"
 
     @property
+    def use_nixl_ep_v2_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "nixl_ep_v2"
+
+    @property
     def use_moonep_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "moonep"
 
@@ -1563,6 +1567,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_v2_kernels(self):
         return self.moe_parallel_config.use_deepep_v2_kernels
+
+    @property
+    def use_nixl_ep_v2_kernels(self):
+        return self.moe_parallel_config.use_nixl_ep_v2_kernels
 
     @property
     def use_moonep_kernels(self):
