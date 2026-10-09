@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GLM-5 decode with each decoder layer fused into one AITER kernel.
+"""GLM-5 decode with each decoder layer fused into one FlyDSL kernel.
 
 The kernel all-reduces inside the launch, so whether a step takes this path must
 be decided identically on every TP rank. It depends only on the step's token
@@ -29,12 +29,11 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from aiter.ops.flydsl.glm5_mono import Glm5MonoKernel, LayerWeights
-
     from vllm.models.deepseek_v32.amd.model import (
         DeepseekV32DecoderLayer,
         DeepseekV32Model,
     )
+    from vllm.models.deepseek_v32.amd.mono import Glm5MonoKernel, LayerWeights
 
 logger = init_logger(__name__)
 
@@ -210,7 +209,7 @@ class GlmMonoDecode:
         return model.norm(state[:n])
 
     def _bind(self) -> None:
-        from aiter.ops.flydsl.glm5_mono import (
+        from vllm.models.deepseek_v32.amd.mono import (
             AttentionWeight,
             Glm5MonoKernel,
             KvCacheLayout,
@@ -363,7 +362,7 @@ def _weight_preshuffled(linear: torch.nn.Module) -> bool:
 
 
 def _block_fp8(linear: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.flydsl.glm5_mono import unshuffle_linear_weight
+    from vllm.models.deepseek_v32.amd.mono import unshuffle_linear_weight
 
     params = FP8BlockParams.from_layer(linear)
     scale = (
@@ -456,7 +455,7 @@ def _mxfp4_rows(linear: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
 def _dense_mlp_weights(
     mlp: torch.nn.Module, cfg
 ) -> tuple[dict[str, torch.Tensor], int]:
-    from aiter.ops.flydsl.glm5_mono import pack_dense_mlp
+    from vllm.models.deepseek_v32.amd.mono import pack_dense_mlp
 
     gate_up = _mxfp4_rows(mlp.gate_up_proj)
     slices = gate_up[0].shape[0] // (2 * cfg.inter)
@@ -481,7 +480,7 @@ def _layer_weights(
     with_indexer: bool = False,
     dense: bool = False,
 ) -> LayerWeights:
-    from aiter.ops.flydsl.glm5_mono import (
+    from vllm.models.deepseek_v32.amd.mono import (
         LayerWeights,
         Mxfp4ScaleLayout,
         Mxfp4WeightLayout,
