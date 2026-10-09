@@ -8,7 +8,10 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+import vllm.forward_context as forward_context_module
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -58,6 +61,57 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
         global_batch.idx_mapping, 0
     )
     runner.pcp_manager.restore_for_sampling.assert_not_called()
+
+
+@pytest.mark.parametrize("data_parallel_size", [1, 2])
+def test_full_graph_sync_load_observes_replay_mode(monkeypatch, data_parallel_size):
+    """Connectors must wait for READs before replay bypasses layer hooks."""
+    runner = Mock()
+    runner.vllm_config = VllmConfig()
+    runner.vllm_config.parallel_config.data_parallel_size = data_parallel_size
+    runner.vllm_config.parallel_config.is_moe_model = True
+    monkeypatch.setattr(
+        forward_context_module,
+        "coordinate_batch_across_dp",
+        Mock(side_effect=AssertionError("connector context must not synchronize DP")),
+    )
+    runner.lora_config = None
+    runner.is_encoder_decoder = False
+    runner.uses_inputs_embeds = False
+    runner.is_first_pp_rank = True
+    runner.dcp_size = 1
+    runner.pcp_manager = None
+    runner.aux_output_connector = None
+    runner.observability_config.cudagraph_metrics = False
+    runner.gather_batch_req_state.return_value = (Mock(has_prefill=False), 1)
+    runner.prepare_attn.return_value = ({}, {})
+    runner.model_state.prepare_inputs.return_value = {}
+    batch_desc = SimpleNamespace(
+        num_tokens=1, cg_mode=CUDAGraphMode.FULL, num_ubatches=1
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "dispatch_cg_and_sync_dp",
+        lambda *a, **kw: (batch_desc, None),
+    )
+    monkeypatch.setattr(
+        model_runner_module, "build_slot_mappings_by_layer", lambda *a: {}
+    )
+
+    class BeforeReplay(Exception):
+        pass
+
+    def load(**kwargs):
+        assert get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
+
+    runner.kv_connector.pre_forward.side_effect = load
+    runner.cudagraph_manager.run_fullgraph.side_effect = BeforeReplay
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"request": 1}, total_num_scheduled_tokens=1
+    )
+    with pytest.raises(BeforeReplay):
+        GPUModelRunner.execute_model(runner, scheduler_output)
+    runner.kv_connector.pre_forward.assert_called_once()
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
