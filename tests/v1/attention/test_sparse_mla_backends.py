@@ -625,7 +625,7 @@ def _quantize_dequantize_nvfp4_ds_mla(
 )
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     backend_cls,
     batch_name,
     kv_cache_dtype,
@@ -978,6 +978,8 @@ def test_sparse_backend_decode_correctness(
         input_size=kv_lora_rank,
         output_size=num_heads * (qk_nope_head_dim + v_head_dim),
         bias=False,
+        tp_rank=0,
+        tp_size=1,
     ).to(device=device, dtype=dtype)
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
 
@@ -1779,7 +1781,7 @@ PREFILL_BATCH_SPECS = {
 )
 def test_sparse_backend_prefill_correctness(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     batch_name,
     kv_cache_dtype,
     num_heads,
@@ -2005,6 +2007,8 @@ def test_sparse_backend_prefill_correctness(
         input_size=kv_lora_rank,
         output_size=num_heads * (qk_nope_head_dim + v_head_dim),
         bias=False,
+        tp_rank=0,
+        tp_size=1,
     ).to(device=device, dtype=dtype)
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
 
@@ -3733,7 +3737,7 @@ def test_hisparse_invalidation_covers_every_index_group():
 
 @requires_hisparse_ops
 def test_hisparse_mixed_batch_bf16_row_split(
-    default_vllm_config, dist_init, workspace_init, monkeypatch
+    default_vllm_config, single_rank_tp, workspace_init, monkeypatch
 ):
     """Host-resident mixed batch on the bf16 path is row-split.
 
