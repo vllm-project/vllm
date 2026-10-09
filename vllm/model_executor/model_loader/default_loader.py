@@ -16,6 +16,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
@@ -47,15 +48,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Parameters a serialized checkpoint may omit: the KV-cache scales registered by
-# BaseKVCacheMethod, and fbgemm_fp8's input_scale_ub, built from its config.
-_CHECKPOINT_OPTIONAL_PARAMS = (
-    "q_scale",
-    "k_scale",
-    "v_scale",
-    "prob_scale",
-    "input_scale_ub",
-)
+# fbgemm_fp8 builds input_scale_ub from its config; checkpoints do not carry it.
+_CONFIG_BUILT_PARAMS = ("input_scale_ub",)
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -538,14 +532,17 @@ class DefaultModelLoader(BaseModelLoader):
                 # ignore kv_cache scale and online quant scale,
                 # which can be missing in checkpoints
                 if has_online_quant or has_postprocess_quant:
-                    for param_name, _ in module.named_parameters():
+                    for param_name, param in module.named_parameters():
                         # A serialized quantized checkpoint must still carry
-                        # everything except _CHECKPOINT_OPTIONAL_PARAMS.
+                        # everything but KV-cache quantization parameters,
+                        # empty placeholders and config-built parameters.
                         if (
                             quantized
                             and not has_online_quant
+                            and not isinstance(quant_method, BaseKVCacheMethod)
+                            and param.numel() > 0
                             and param_name.rsplit(".", 1)[-1]
-                            not in _CHECKPOINT_OPTIONAL_PARAMS
+                            not in _CONFIG_BUILT_PARAMS
                         ):
                             continue
                         full_name = f"{name}.{param_name}" if name else param_name
