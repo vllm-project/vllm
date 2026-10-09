@@ -310,6 +310,78 @@ def test_supported_backend_preserves_dcp_eligibility(backend_name, default_vllm_
     assert backend_cls.validate_configuration(**kwargs) == invalid_without_dcp
 
 
+def test_fp8_kv_auto_selection_falls_back_when_attention_jit_is_unavailable():
+    """FlashInfer attention JIT failure must fall through to Triton on SM120.
+
+    The lightweight backend stub models the proposed attention-specific
+    predicate. This keeps the test independent of FlashInfer's optional
+    runtime package and does not change the broader ``has_flashinfer()`` check.
+    """
+    import sys
+    from types import ModuleType
+
+    try:
+        import vllm._C_stable_libtorch  # noqa: F401
+    except ModuleNotFoundError as error:
+        if error.name != "vllm._C_stable_libtorch":
+            raise
+        # CUDA platform import normally imports this extension to register ops.
+        # Selector-only coverage does not call those ops, so stand in for the
+        # extension when testing from an unbuilt source checkout.
+        sys.modules["vllm._C_stable_libtorch"] = ModuleType("vllm._C_stable_libtorch")
+
+    from vllm.platforms.cuda import CudaPlatform
+    from vllm.utils import flashinfer as flashinfer_utils
+
+    class FlashInferBackendStub:
+        @classmethod
+        def is_attention_jit_usable(cls):
+            return flashinfer_utils.is_flashinfer_jit_usable()
+
+        @classmethod
+        def validate_configuration(cls, **kwargs):
+            assert kwargs["device_capability"] == DeviceCapability(12, 0)
+            assert kwargs["kv_cache_dtype"] == "fp8"
+            return (
+                []
+                if cls.is_attention_jit_usable()
+                else ["FlashInfer attention JIT is unavailable"]
+            )
+
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=16))
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch.object(
+            CudaPlatform,
+            "get_device_capability",
+            return_value=DeviceCapability(12, 0),
+        ),
+        patch(
+            "vllm.platforms.cuda._get_attn_backend_class",
+            side_effect=lambda backend: (
+                FlashInferBackendStub
+                if backend == AttentionBackendEnum.FLASHINFER
+                else backend.get_class()
+            ),
+        ),
+        patch.object(
+            flashinfer_utils,
+            "is_flashinfer_jit_usable",
+            return_value=False,
+        ) as attention_jit_usable,
+    ):
+        backend = get_attn_backend(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype="fp8",
+        )
+
+    attention_jit_usable.assert_called_once_with()
+    assert backend.get_name() == "TRITON_ATTN"
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda", "hip"])
 def test_fp32_fallback(device: str):
     """Test attention backend selection with fp32."""

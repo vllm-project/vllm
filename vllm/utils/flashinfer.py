@@ -71,6 +71,20 @@ def _flashinfer_nvcc_path() -> str | None:
     return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
+def is_flashinfer_jit_usable() -> bool:
+    """Return whether FlashInfer attention JIT modules can be loaded or built.
+
+    FlashInfer's JIT-cache wheel supplies precompiled modules. Otherwise,
+    its runtime JIT needs both nvcc and ninja. The separate cubin package only
+    supplies TRTLLM-gen cubins and is not sufficient for attention JIT modules.
+    """
+    if importlib.util.find_spec("flashinfer") is None:
+        return False
+    if importlib.util.find_spec("flashinfer_jit_cache") is not None:
+        return True
+    return _flashinfer_nvcc_path() is not None and shutil.which("ninja") is not None
+
+
 @functools.cache
 def has_flashinfer_cubin() -> bool:
     """Return `True` if flashinfer-cubin package is available."""

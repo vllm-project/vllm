@@ -58,3 +58,51 @@ def test_has_flashinfer_requires_ninja(
     _make_exe(tmp_path / "cuda" / "bin" / "nvcc")
     monkeypatch.setenv("PATH", str(tmp_path / "cuda" / "bin"))
     assert not fi.has_flashinfer()
+
+
+@pytest.mark.parametrize(
+    ("flashinfer", "jit_cache", "cubin", "nvcc", "ninja", "expected"),
+    [
+        (True, True, False, False, False, True),
+        (True, False, False, True, True, True),
+        (True, False, False, True, False, False),
+        (True, False, False, False, True, False),
+        (True, False, True, False, False, False),
+        (False, True, False, False, False, False),
+    ],
+)
+def test_is_flashinfer_jit_usable(
+    monkeypatch: pytest.MonkeyPatch,
+    flashinfer: bool,
+    jit_cache: bool,
+    cubin: bool,
+    nvcc: bool,
+    ninja: bool,
+    expected: bool,
+):
+    monkeypatch.setattr(
+        fi.importlib.util,
+        "find_spec",
+        lambda name: (
+            object()
+            if name in ("flashinfer", "flashinfer_jit_cache", "flashinfer_cubin")
+            and (
+                (name == "flashinfer" and flashinfer)
+                or (name == "flashinfer_jit_cache" and jit_cache)
+                or (name == "flashinfer_cubin" and cubin)
+            )
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        fi,
+        "_flashinfer_nvcc_path",
+        lambda: "/usr/local/cuda/bin/nvcc" if nvcc else None,
+    )
+    monkeypatch.setattr(
+        fi.shutil,
+        "which",
+        lambda name: "/usr/bin/ninja" if name == "ninja" and ninja else None,
+    )
+
+    assert fi.is_flashinfer_jit_usable() is expected
