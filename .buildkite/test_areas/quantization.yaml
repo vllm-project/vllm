@@ -12,6 +12,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/models/deepseek_v41/quant_config.py
   - tests/quantization
   commands:
   # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.
@@ -38,6 +39,7 @@ steps:
       - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
       - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
       - tests/rocm/test_moe_weight_replay.py
+      - tests/rocm/test_moe_padding.py
       commands:
       # Use the ROCm default instead of the NVIDIA runner override.
       - unset VLLM_USE_V2_MODEL_RUNNER
@@ -45,6 +47,7 @@ steps:
       - uv pip install --system conch-triton-kernels
       - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
       - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 pytest -v -s rocm/test_moe_padding.py; fi
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
@@ -58,9 +61,26 @@ steps:
   - vllm/model_executor/layers/quantization/modelopt.py
   commands:
     - pytest -v -s fusion/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Quantized Fusions"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/fusion
+      - vllm/model_executor/layers/fusion
+      - vllm/model_executor/kernels/linear
+      - vllm/model_executor/layers/quantization/compressed_tensors
+      - vllm/model_executor/layers/quantization/modelopt.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) Quantized MoE"
   key: quantized-moe-test-b200
+  automatic_shard: true
   timeout_in_minutes: 120
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -86,6 +106,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - tests/quantization/test_gfx950_moe.py
       - tests/quantization/test_rocm_moe.py
       - tests/utils.py
       - vllm/model_executor/models/deepseek_v2.py
@@ -102,10 +123,12 @@ steps:
       - vllm/envs.py
       commands:
       - pytest -v -s tests/quantization/test_rocm_moe.py
+      - pytest -v -s tests/quantization/test_gfx950_moe.py
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb
   key: quantized-models-test
+  automatic_shard: true
   timeout_in_minutes: 65
   env:
     VLLM_USE_V2_MODEL_RUNNER: "0"

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     MoEPermuteScratch,
+    get_moe_permute_scratch,
     moe_permute,
     moe_permute_unpermute_supported,
     moe_unpermute,
@@ -305,7 +306,6 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         self.ab_strides2 = ab_strides2
         self.c_strides1 = c_strides1
         self.c_strides2 = ab_strides1_c_strides2
-        self._permute_scratch: MoEPermuteScratch | None = None
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -336,15 +336,13 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         return TopKWeightAndReduceDelegate()
 
     def _get_permute_scratch(self) -> MoEPermuteScratch | None:
-        if self._permute_scratch is None and moe_permute_unpermute_supported():
-            self._permute_scratch = MoEPermuteScratch(
-                max_num_tokens=self.moe_config.max_num_tokens,
-                topk=self.moe_config.experts_per_token,
-                num_experts=self.moe_config.num_experts,
-                num_local_experts=self.moe_config.num_local_experts,
-                device=torch.device(self.moe_config.device),
-            )
-        return self._permute_scratch
+        if not moe_permute_unpermute_supported():
+            return None
+        return get_moe_permute_scratch(
+            num_experts=self.moe_config.num_experts,
+            num_local_experts=self.moe_config.num_local_experts,
+            device=torch.device(self.moe_config.device),
+        )
 
     def apply(
         self,
@@ -1325,7 +1323,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         self.s_strides2[:, 0] = k
 
         self.group_size = group_size
-        self._permute_scratch: MoEPermuteScratch | None = None
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1386,15 +1383,13 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         return self.out_dtype if self.out_dtype is not None else act_dtype
 
     def _get_permute_scratch(self) -> MoEPermuteScratch | None:
-        if self._permute_scratch is None and moe_permute_unpermute_supported():
-            self._permute_scratch = MoEPermuteScratch(
-                max_num_tokens=self.moe_config.max_num_tokens,
-                topk=self.moe_config.experts_per_token,
-                num_experts=self.moe_config.num_experts,
-                num_local_experts=self.moe_config.num_local_experts,
-                device=torch.device(self.moe_config.device),
-            )
-        return self._permute_scratch
+        if not moe_permute_unpermute_supported():
+            return None
+        return get_moe_permute_scratch(
+            num_experts=self.moe_config.num_experts,
+            num_local_experts=self.moe_config.num_local_experts,
+            device=torch.device(self.moe_config.device),
+        )
 
     def workspace_shapes(
         self,

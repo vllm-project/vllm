@@ -47,7 +47,7 @@ steps:
       label: ":amd: (MI300) Core Operation Kernels Shard %N"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 40
+      timeout_in_minutes: 45
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
@@ -143,6 +143,35 @@ steps:
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepSeek V4 MoE Integration"
+      dind: false
+      device: mi355_1
+      num_devices: 1
+      timeout_in_minutes: 20
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/models/test_deepseek_v4_vl_rocm.py
+      - tests/models/test_deepseek_v4_aiter_mega_moe.py
+      - vllm/models/deepseek_v4/amd/
+      - vllm/models/deepseek_v4/common/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/activation.py
+      - vllm/model_executor/layers/linear.py
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      commands:
+      # Common qnorm/RoPE/cache kernels already run in the H100 AMD mirror.
+      # Pin the tested BF16 Triton routing and shared-expert path before imports.
+      - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+      - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
 
 # Own job so mHC never shares a process with FlashInfer's import-time
 # ptxas override.
@@ -157,6 +186,20 @@ steps:
   - tests/kernels/
   commands:
     - pytest -v -s kernels/mhc
+  mirror:
+    amd:
+      label: ":amd: (MI355) mHC Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/
+      - tests/kernels/
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) FLA Ops Kernels"
   key: kernels-fla-ops-test-b200
@@ -169,12 +212,26 @@ steps:
   - tests/kernels/
   commands:
     - pytest -v -s kernels/fla
+  mirror:
+    amd:
+      label: ":amd: (MI355) FLA Ops Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/
+      - tests/kernels/
+      - vllm/platforms/rocm.py
 
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore
-# (test_kda, test_bf16x3_router_gemm_cutedsl and test_ll_bf16_gemm run in
-# their own jobs / Kernels (B200)).
+# (test_bf16x3_router_gemm_cutedsl and test_ll_bf16_gemm run in their own jobs /
+# Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
   timeout_in_minutes: 30
@@ -199,12 +256,58 @@ steps:
         --ignore=kernels/test_fused_qk_norm_rope_gate.py
         --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
         --ignore=kernels/test_top_k_per_row.py
-        --ignore=kernels/test_kda.py
+        --ignore=kernels/test_cpu_fused_sampling.py
         --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
+        --ignore=kernels/test_bf16x3_router_gemm_rocm.py
         --ignore=kernels/test_ll_bf16_gemm.py
         --ignore=kernels/test_shuffle_rows.py
     # BROKEN on main, pending kernel fixes (B200):
     #   test_shuffle_rows.py (1: test_shuffle_rows_edge_cases)
+  mirror:
+    amd:
+      label: ":amd: (MI355) Miscellaneous Kernels"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 55
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/
+      - tests/kernels/
+      - vllm/platforms/rocm.py
+      # Keep the ROCm exclusions from #50519: incompatible FlyDSL TurboQuant
+      # and a CUDA source check whose files are absent from the AMD test image.
+      commands:
+      - pytest -v -s
+          kernels/test_apply_repetition_penalties.py
+          kernels/test_awq_int4_to_int8.py
+          kernels/test_bf16_skinny_gemm.py
+          kernels/test_bf16x3_router_gemm_rocm.py
+          kernels/test_cache_kernels.py
+          kernels/test_compressor_kv_cache.py
+          kernels/test_cp_gather_fp8.py
+          kernels/test_deepseek_v4_cpu_kernels.py
+          kernels/test_dsv41_mega_attn_layouts.py
+          kernels/test_engram.py
+          kernels/test_flashinfer_bf16_gemm.py
+          kernels/test_flex_attention.py
+          kernels/test_fp32_router_gemm.py
+          kernels/test_fused_deepseek_v32_norm_rope.py
+          kernels/test_fused_indexer_q_rope_quant.py
+          kernels/test_fused_inv_rope_fp8_quant.py
+          kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+          kernels/test_fused_quant_activation.py
+          kernels/test_gate_linear_rocm_dispatch.py
+          kernels/test_gemm_rs_ar.py
+          kernels/test_kpool_decode_update_batched.py
+          kernels/test_minimax_m3_amd_ops.py
+          kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+          kernels/test_onednn.py
+          kernels/test_relu2_fp8_quant.py
+          kernels/test_rocm_fp32_router_gemm.py
+          --deselect=tests/kernels/test_bf16_skinny_gemm.py::test_every_dsv3_routed_shape_is_instantiated
 
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
@@ -401,6 +504,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
+  automatic_shard: true
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/mamba/
@@ -447,6 +551,21 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
+
+- label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
+  key: kernels-minimax-m3-attention-b200
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/config/cache.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/attention/utils.py
+  - tests/kernels/attention/test_minimax_m3.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py
 
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
@@ -497,7 +616,6 @@ steps:
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-  - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
@@ -543,7 +661,6 @@ steps:
           pytest -v -s tests/kernels/moe/test_flashinfer.py
           pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
           pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-          pytest -v -s tests/kernels/attention/test_minimax_m3.py
           ;;
         *)
           echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2
@@ -699,6 +816,35 @@ steps:
     - pytest -v -s kernels/moe/test_flashinfer_moe.py
     - pytest -v -s kernels/moe/test_nvfp4_moe.py
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) FP4 and INT4 MoE Kernels"
+      dind: false
+      device: mi355_dpx
+      num_devices: 1
+      timeout_in_minutes: 40
+      optional: false
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/rocm/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      - vllm/config/
+      - tests/kernels/moe/test_rocm_aiter_moe.py
+      - tests/kernels/moe/test_ocp_mx_moe.py
+      - tests/kernels/moe/test_flydsl_moe.py
+      - tests/kernels/moe/utils.py
+      - tests/kernels/utils.py
+      commands:
+      - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k 'mi350_mxfp4 or quant_scheme_support_matches_gfx950'
+      - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_rocm_mxfp4_moe_oracle -k AITER_MXFP4
+      - pytest -v -s kernels/moe/test_flydsl_moe.py
 
 
 - label: ":nvidia: (H100) FusedMoE Layer Kernels"
@@ -820,34 +966,6 @@ steps:
   - pytest -v -s kernels/quantization/test_rocm_mxfp4.py
   - pytest -v -s kernels/quantization/test_rocm_mxfp8_linear.py
   - pytest -v -s kernels/quantization/test_rocm_skinny_gemms.py -k wvsplitkrc
-
-- label: ":amd: (MI355 DPX) FP4 and INT4 MoE Kernels"
-  key: amd-fp4-moe-kernels-mi355
-  dind: false
-  device: mi355_dpx
-  num_devices: 1
-  timeout_in_minutes: 40
-  working_dir: /vllm-workspace/tests
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - csrc/moe/
-  - csrc/rocm/
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/quantization/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - vllm/envs.py
-  - vllm/config/
-  - tests/kernels/moe/test_rocm_aiter_moe.py
-  - tests/kernels/moe/test_ocp_mx_moe.py
-  - tests/kernels/moe/test_flydsl_moe.py
-  - tests/kernels/moe/utils.py
-  - tests/kernels/utils.py
-  commands:
-  - pytest -v -s kernels/moe/test_rocm_aiter_moe.py -k 'mi350_mxfp4 or quant_scheme_support_matches_gfx950'
-  - pytest -v -s kernels/moe/test_ocp_mx_moe.py::test_rocm_mxfp4_moe_oracle -k AITER_MXFP4
-  - pytest -v -s kernels/moe/test_flydsl_moe.py
 
 - label: ":amd: (MI355 DPX) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355
