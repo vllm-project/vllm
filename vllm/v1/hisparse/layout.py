@@ -329,6 +329,9 @@ def get_hisparse_kv_cache_config(
         validate_kv_cache_layout,
     )
 
+    enable_nan_fault_tolerance = (
+        vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance
+    )
     hisparse_layout = create_hisparse_layout(vllm_config, kv_cache_groups, host_budget)
     device_groups = hisparse_layout.device_groups
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
@@ -373,6 +376,7 @@ def get_hisparse_kv_cache_config(
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
+        _force_zeroing=enable_nan_fault_tolerance,
     )
 
 

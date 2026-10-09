@@ -6,7 +6,6 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.logger import init_logger
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -517,11 +516,7 @@ class IterationStats:
 
         # Track if this request is corrupted (only check once per request)
         # Early exit if already marked as corrupted to avoid redundant checks
-        if (
-            envs.VLLM_COMPUTE_NANS_IN_LOGITS
-            and not req_stats.is_corrupted
-            and output.num_nans_in_logits > 0
-        ):
+        if not req_stats.is_corrupted and output.num_nans_in_logits > 0:
             req_stats.is_corrupted = True
 
         # Process request-level engine core events

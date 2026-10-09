@@ -40,3 +40,58 @@ def get_num_nans(logits: torch.Tensor) -> torch.Tensor:
         BLOCK_SIZE=BLOCK_SIZE,
     )
     return num_nans
+
+
+@triton.jit
+def _aggregate_num_nans_per_request_kernel(
+    num_nans_ptr,
+    num_nans_stride,
+    cumulative_row_ends_ptr,
+    cumulative_row_ends_stride,
+    result_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Sum NaN counts from each request's logits rows.
+
+    `num_nans` counts NaNs in each row; `cumulative_row_ends` gives each
+    request's exclusive row end. Counts [1, 2, 3, 4, 5] and ends [2, 3, 5]
+    give [3, 3, 9]. Repeated ends mean no rows: [1, 2, 3] and [2, 2, 3]
+    give [3, 0, 3].
+    """
+    req_idx = tl.program_id(0)
+    start = tl.load(
+        cumulative_row_ends_ptr + (req_idx - 1) * cumulative_row_ends_stride,
+        mask=req_idx > 0,
+        other=0,
+    )
+    end = tl.load(cumulative_row_ends_ptr + req_idx * cumulative_row_ends_stride)
+    total = 0
+    for offset in range(start, end, BLOCK_SIZE):
+        rows = offset + tl.arange(0, BLOCK_SIZE)
+        counts = tl.load(
+            num_nans_ptr + rows * num_nans_stride, mask=rows < end, other=0
+        )
+        total += tl.sum(counts)
+    tl.store(result_ptr + req_idx, total)
+
+
+def aggregate_num_nans_per_request(
+    num_nans: torch.Tensor,
+    cumulative_row_ends: torch.Tensor,
+) -> torch.Tensor:
+    """Aggregate per-logit-row counts for speculative requests on device."""
+    result = torch.empty(
+        cumulative_row_ends.numel(), dtype=num_nans.dtype, device=num_nans.device
+    )
+    if result.numel() == 0:
+        return result
+    _aggregate_num_nans_per_request_kernel[(cumulative_row_ends.numel(),)](
+        num_nans,
+        num_nans.stride(0),
+        cumulative_row_ends,
+        cumulative_row_ends.stride(0),
+        result,
+        BLOCK_SIZE=32,
+        num_warps=1,
+    )
+    return result

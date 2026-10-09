@@ -40,6 +40,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.mamba import MambaBackendEnum
@@ -56,6 +57,35 @@ from vllm.transformers_utils.config import (
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.skip_global_cleanup
+def test_nan_fault_tolerance_enables_detection_in_direct_config(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            fault_tolerance_config=FaultToleranceConfig(enable_nan_fault_tolerance=True)
+        ),
+        observability_config=ObservabilityConfig(enable_detect_nans_in_logits=False),
+    )
+
+    assert config.observability_config.enable_detect_nans_in_logits
+
+
+@pytest.mark.skip_global_cleanup
+def test_nan_fault_tolerance_rejects_mrv1(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    with pytest.raises(ValueError, match="set VLLM_USE_V2_MODEL_RUNNER=1"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                fault_tolerance_config=FaultToleranceConfig(
+                    enable_nan_fault_tolerance=True
+                )
+            ),
+        )
 
 
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
