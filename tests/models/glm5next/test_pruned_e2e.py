@@ -43,7 +43,7 @@ def _prompt_ids(n: int, seed: int = 0) -> TokensPrompt:
 
 
 def _make_llm(**kwargs) -> LLM:
-    return LLM(
+    args = dict(
         model=PRUNED_MODEL,
         max_model_len=MAX_MODEL_LEN,
         enforce_eager=True,
@@ -51,8 +51,10 @@ def _make_llm(**kwargs) -> LLM:
         limit_mm_per_prompt={"image": 0, "video": 0},
         gpu_memory_utilization=0.6,
         max_num_batched_tokens=MAX_MODEL_LEN,
-        **{"max_num_seqs": 8, **kwargs},
+        max_num_seqs=8,
     )
+    args.update(kwargs)
+    return LLM(**args)
 
 
 def _kv_layout(worker):
@@ -92,9 +94,10 @@ def test_kv_cache_layout(monkeypatch: pytest.MonkeyPatch):
     assert tail_group[2] == 4  # index_kpool
     block_size = llm.llm_engine.vllm_config.cache_config.block_size
     assert block_size % (4 * 32) == 0  # paged-MQA pool-page alignment
-    for _, layers, bs in groups:
-        if "KpoolTailSpec" not in layers:
-            assert bs in (block_size, 4)
+    for kinds, _, bs in groups:
+        # The kpool tail scratch group pages index_kpool tokens; every other
+        # group uses the auto block size.
+        assert bs == (4 if kinds == ["KpoolTailSpec"] else block_size), kinds
 
     attn = next(k for k in tensors if k[0].endswith("self_attn.attn"))
     mamba = [k for k in tensors if k[0].endswith("self_attn")]
@@ -219,6 +222,69 @@ def test_mtp_speculative_decoding_runs():
     out = spec.generate([prompt], sp)[0].outputs[0].token_ids
     assert len(out) == 8
     assert list(out[:4]) == list(base[:4])
+
+
+DFLASH2_DRAFT = os.getenv("GLM5_DFLASH2_DRAFT", "incoai/GLM-5.3-Flash-DFlash2")
+
+
+def _remap_dflash2_to_pruned_target(hf_config):
+    """Point the drafter's five aux-state taps at the boundaries the 4-layer
+    target has: the embeddings and the outputs of layers 0-3 (ids are
+    "after layer i", so -1 is the embedding stream). Applied to the target
+    config too, where it is a no-op."""
+    dflash_config = getattr(hf_config, "dflash_config", None)
+    if isinstance(dflash_config, dict):
+        dflash_config["target_layer_ids"] = [-1, 0, 1, 2, 3]
+    return hf_config
+
+
+def _layer_names(llm: LLM) -> set[str]:
+    groups, _ = llm.collective_rpc(_kv_layout)[0]
+    return {name for _, layers, _ in groups for name in layers}
+
+
+def _spec_decode_drafts(llm: LLM) -> float:
+    return sum(
+        m.value
+        for m in llm.get_metrics()
+        if m.name.startswith("vllm:spec_decode_num_drafts")
+    )
+
+
+def test_dflash2_drafter_runs_losslessly(monkeypatch: pytest.MonkeyPatch):
+    """The published DFlash2 drafter loads against the hybrid target (#56983:
+    aux hidden-state capture through mHC, the drafter's GQA layers in the KV
+    cache groups, no expert parallelism copied onto the dense drafter), its
+    five attention layers get KV cache pages, drafts are verified, and greedy
+    output agrees with the target-only run on the leading tokens. The drafter
+    was trained for the 45-layer model, so acceptance on the pruned target is
+    not asserted."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    sp = SamplingParams(temperature=0, max_tokens=8)
+    prompts = [_prompt_ids(LONG_PROMPT_LEN), _prompt_ids(64, seed=2)]
+
+    target = _make_llm()
+    target_layers = _layer_names(target)
+    base = [o.outputs[0].token_ids for o in target.generate(prompts, sp)]
+    del target
+
+    spec = _make_llm(
+        speculative_config={
+            "method": "dflash",
+            "model": DFLASH2_DRAFT,
+            "num_speculative_tokens": 6,
+        },
+        hf_overrides=_remap_dflash2_to_pruned_target,
+        gpu_memory_utilization=0.9,
+        disable_log_stats=False,
+    )
+    draft_layers = _layer_names(spec) - target_layers
+    assert len(draft_layers) == 5, sorted(draft_layers)
+    out = [o.outputs[0].token_ids for o in spec.generate(prompts, sp)]
+    assert all(len(t) == 8 for t in out)
+    assert [list(t[:4]) for t in out] == [list(t[:4]) for t in base]
+    assert _spec_decode_drafts(spec) > 0
 
 
 def test_default_max_num_seqs_tp1():

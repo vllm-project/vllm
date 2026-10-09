@@ -102,6 +102,8 @@ steps:
   - vllm/models/glm5next/
   - vllm/transformers_utils/configs/glm5_next.py
   - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/models/qwen3_dflash2.py
   - vllm/v1/core/
   - vllm/v1/attention/backends/gdn_attn.py
   - vllm/v1/attention/backends/mla/
