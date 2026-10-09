@@ -370,7 +370,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             output1_scale_gate_scalar=output1_scale_gate_scalar,
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
-            top_k=self.topk,
+            top_k=topk_ids.size(1),
             n_group=0,
             topk_group=0,
             intermediate_size=self.intermediate_size_per_partition,
@@ -392,7 +392,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             flashinfer_output,
             do_finalize=False,
             num_tokens=hidden_states.shape[0],
-            top_k=self.topk,
+            top_k=topk_ids.size(1),
         )
         assert isinstance(routed_output, UnfinalizedMoEOutput)
         return routed_output
