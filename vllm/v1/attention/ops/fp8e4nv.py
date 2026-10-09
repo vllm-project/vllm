@@ -4,8 +4,7 @@
 
 The public Triton helpers dispatch on dtype at compile time. Conversion code
 lives in an always-inline CUDA C++ helper linked from portable SM75 LLVM
-bitcode. Scalar encode adapters preserve Triton's partial pack-4 lowering;
-decode maps complete packs directly.
+bitcode. Scalar adapters support Triton layouts with partial packs.
 """
 
 from pathlib import Path
@@ -152,15 +151,11 @@ def convert_to_fp8e4m3(x):
 def convert_from_fp8e4m3(x, dtype: tl.constexpr):
     """Decode uint8 fp8e4m3 bytes to fp16, bf16, or fp32.
 
-    The fp16/bf16 paths require a multiple of four elements per thread.
+    Scalar adapters accept partial per-thread packs.
     """
     tl.static_assert(
         (dtype == tl.float16) or (dtype == tl.bfloat16) or (dtype == tl.float32),
         "convert_from_fp8e4m3 expects fp16 or bf16, or fp32 output",
     )
-    if dtype == tl.float32:
-        return _fp8e4m3x1_to_fp32x1(x).to(tl.float32, bitcast=True)
-    elif dtype == tl.float16:
-        return tl.map_elementwise(_decode_fp16_pack4, x, pack=4)[0]
-    else:
-        return tl.map_elementwise(_decode_bf16_pack4, x, pack=4)[0]
+    # Scalar decoding also supports layouts with fewer than four elements per thread.
+    return _fp8e4m3x1_to_fp32x1(x).to(tl.float32, bitcast=True).to(dtype)
