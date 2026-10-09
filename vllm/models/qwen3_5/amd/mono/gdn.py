@@ -215,8 +215,9 @@ def pack_bf(v0, v1):
 # ---------------------------------------------------------------- front
 @traced
 def stage_front(c, j):
-    """Columns 128 j ..: hidden + residual (bf16) -> ``res_out``; every task's sum
-    of squares -> rstd -> bf16(v rstd (1 + w)) -> the x rows, XRDY j."""
+    """Columns 128 j ..: hidden + residual (fp32; bf16 -> ``res_out``); every
+    task's sum of squares -> rstd -> bf16(v rstd (1 + w)) -> the x rows, XRDY j.
+    The norm reads the unrounded sum, as ``fused_add_rms_norm`` does."""
     s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
     a = c["args"]
     mine = tid < s * 64
@@ -228,8 +229,8 @@ def stage_front(c, j):
         z0, z1 = bf_lo(hw), bf_hi(hw)
     else:
         rw = ld_i32w(a["residual"], at)
-        z0 = bf16_round(bf_lo(hw) + bf_lo(rw))
-        z1 = bf16_round(bf_hi(hw) + bf_hi(rw))
+        z0 = bf_lo(hw) + bf_lo(rw)
+        z1 = bf_hi(hw) + bf_hi(rw)
     if mine:
         bo.buffer_store(pack_bf(z0, z1), rsrc(a["res_out"]), at)
     sq = wave_sum(z0 * z0 + z1 * z1)

@@ -8,9 +8,11 @@ TP8 shapes.
   AITER's conv update and fused gated delta rule -> RMSNormGated, the conv / SSM
   state each step leaves behind, pad rows.
 - K2 (eight GPUs): o_proj + all-reduce + residual add + post_attention_layernorm
-  + the sparse MoE block (softmax top-10 router, MXFP4 experts through aiter's
-  ``fused_moe``, the sigmoid-gated shared expert) + the final all-reduce. The
-  MoE is compared on the kernel's own norm output, where routing cannot differ.
+  + the sparse MoE block (softmax top-10 router, MXFP4 experts, the
+  sigmoid-gated shared expert) + the final all-reduce. The MoE is compared on
+  the kernel's own norm output, where routing cannot differ: against a torch
+  emulation of the stock decode kernel's numerics, and loosely against aiter's
+  ``fused_moe`` itself.
 """
 
 import pytest
@@ -28,6 +30,7 @@ from vllm.platforms import current_platform
 
 bf = torch.bfloat16
 COS_MIN = 0.9999
+STOCK_COS_MIN = 0.9995
 
 
 def _on_gfx950() -> bool:
@@ -78,7 +81,7 @@ def _pairs(scratch, region, n):
     )
 
 
-def _gdn_inputs(s: int, n_real: int, dim_first: bool, first: bool, slots: int = 16):
+def _gdn_inputs(s: int, n_real: int, first: bool, slots: int = 16):
     from vllm.models.qwen3_5.amd.mono.layout import BA, CONV, HD, HIDDEN, NV, QKVZ
 
     g = torch.Generator(device="cuda").manual_seed(0)
@@ -97,10 +100,7 @@ def _gdn_inputs(s: int, n_real: int, dim_first: bool, first: bool, slots: int = 
     pad = _randn(g, slots, NV * HD * HD + 8192, scale=0.05, dtype=torch.float32)
     w["rstate"] = pad[:, : NV * HD * HD].view(slots, NV, HD, HD)
     conv = _randn(g, slots, CONV * 3 + 1024)[:, : CONV * 3]
-    if dim_first:
-        w["conv_state"] = conv.view(slots, CONV, 3)
-    else:
-        w["conv_state"] = conv.view(slots, 3, CONV).transpose(-1, -2)
+    w["conv_state"] = conv.view(slots, 3, CONV).transpose(-1, -2)
     # live rows on slots 3 ..; pad rows on the null block 0
     idx = torch.zeros(s, dtype=torch.int32, device="cuda")
     idx[:n_real] = torch.arange(3, 3 + n_real, dtype=torch.int32, device="cuda")
@@ -108,10 +108,11 @@ def _gdn_inputs(s: int, n_real: int, dim_first: bool, first: bool, slots: int = 
     return w
 
 
-def _gdn_reference(w, n: int):
+def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
     """Qwen3_5DecoderLayer's input norm and the GDN decode path on ROCm
     (``forward_hip`` -> ``_forward_core_decode_aiter`` -> ``_output_projection``
-    without out_proj) on the first ``n`` rows; the rest are the cudagraph pad."""
+    without out_proj) on the first ``n`` rows; the rest are the cudagraph pad.
+    ``proj``: in_proj's output to start from instead of computing it."""
     from aiter.ops.triton.causal_conv1d_update_single_token import (
         fused_reshape_causal_conv1d_update_single_token,
     )
@@ -144,8 +145,12 @@ def _gdn_reference(w, n: int):
         x, res = ln.forward_native(w["hidden"]), w["hidden"].clone()
     else:
         x, res = ln.forward_native(w["hidden"], w["residual"].clone())
-    qkvz = F.linear(x, w["w_qkvz"])
-    ba = F.linear(x, w["w_ba"])
+    if proj is None:
+        qkvz = F.linear(x, w["w_qkvz"])
+        ba = F.linear(x, w["w_ba"])
+    else:
+        qkvz, ba = proj.split([w["w_qkvz"].size(0), w["w_ba"].size(0)], dim=-1)
+        qkvz, ba = qkvz.contiguous(), ba.contiguous()
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
     z = torch.empty(s, NV, HD, dtype=bf, device="cuda")
     core = torch.empty(s, NV, HD, dtype=bf, device="cuda")
@@ -194,18 +199,18 @@ def _gdn_reference(w, n: int):
     }
 
 
-@pytest.mark.parametrize("dim_first", [True, False])
 @pytest.mark.parametrize(
     "s,n_real,first", [(1, 1, False), (5, 4, False), (8, 8, False), (8, 7, True)]
 )
-def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool, dim_first: bool) -> None:
+def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
     """K1 against GemmaRMSNorm -> in_proj -> AITER's conv update + fused gated
     delta rule -> RMSNormGated on one decode step, the states it leaves behind,
-    and the pad rows (null block: no state written, zero core)."""
+    and the pad rows (null block: no state written, zero core). The conv state
+    is in the (slots, 3, dim) layout AITER's conv update takes."""
     from vllm.models.qwen3_5.amd.mono import gdn
     from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN
 
-    w = _gdn_inputs(s, n_real, dim_first, first)
+    w = _gdn_inputs(s, n_real, first)
     ref = _gdn_reference(w, n_real)
     key = gdn.K1Build(tokens=s, first=first)
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
@@ -240,13 +245,23 @@ def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool, dim_first: bool) 
     assert _cos(x, ref["x"]) > COS_MIN
     proj = _pairs(scratch, lay["proj"], s * gdn.NPROJ).view(s, gdn.NPROJ)
     assert _cos(proj, ref["proj"]) > COS_MIN
-    # the GEMV's summation order flips a few bf16 roundings of the conv input
-    errs = {
-        "conv_state": _rel_l2(conv_state, ref["conv_state"]),
-        "rstate": _rel_l2(rstate, ref["rstate"]),
-        "core": _rel_l2(core[:n_real], ref["core"][:n_real]),
-    }
-    assert errs["conv_state"] < 5e-3 and errs["rstate"] < 2e-3, errs
+    live = w["st_idx"][:n_real].long()
+
+    def errs_vs(r):
+        return {
+            "conv_state": _rel_l2(conv_state[live], r["conv_state"][live]),
+            "rstate": _rel_l2(rstate[live], r["rstate"][live]),
+            "core": _rel_l2(core[:n_real], r["core"][:n_real]),
+        }
+
+    # from K1's own in_proj output: the conv, gates, recurrence and norm alone
+    own = errs_vs(_gdn_reference(w, n_real, proj=proj.clone()))
+    assert own["conv_state"] == 0 and own["rstate"] < 1e-6, own
+    assert own["core"] < 1e-4, own
+    # end to end: the GEMV's summation order flips a few bf16 roundings of
+    # in_proj's output, which the recurrence carries into the state
+    errs = errs_vs(ref)
+    assert errs["conv_state"] < 5e-4 and errs["rstate"] < 5e-4, errs
     assert _cos(core[:n_real], ref["core"][:n_real]) > COS_MIN, errs
     assert torch.equal(core[n_real:], torch.zeros_like(core[n_real:]))
     # the null block is left alone
@@ -273,12 +288,21 @@ def _moe_weights(rank: int, device):
         return torch.randint(lo, hi, shape, generator=g, device=device).to(torch.uint8)
 
     fp4, e8 = torch.float4_e2m1fn_x2, torch.float8_e8m0fnu
+    w13q, w2q = u8(gr, E, 2 * RI, HIDDEN // 2), u8(gr, E, HIDDEN, RI // 2)
     w13, w2 = rocm_aiter_ops.shuffle_weights(
-        u8(gr, E, 2 * RI, HIDDEN // 2).view(fp4), u8(gr, E, HIDDEN, RI // 2).view(fp4)
+        w13q.clone().view(fp4), w2q.clone().view(fp4)
     )
-    w13s = u8(gr, E * 2 * RI, HIDDEN // 32, lo=118, hi=123).view(e8)
-    w2s = u8(gr, E * HIDDEN, RI // 32, lo=118, hi=123).view(e8)
+    w13s = u8(gr, E * 2 * RI, HIDDEN // 32, lo=118, hi=123)
+    w2s = u8(gr, E * HIDDEN, RI // 32, lo=118, hi=123)
+    raw = {
+        "w13": w13q,
+        "w2": w2q,
+        "w13s": w13s.view(E, 2 * RI, -1),
+        "w2s": w2s.view(E, HIDDEN, -1),
+    }
+    w13s, w2s = w13s.clone().view(e8), w2s.clone().view(e8)
     return {
+        "raw": raw,
         "w_gate": _randn(gc, E, HIDDEN, scale=0.02),
         "w_sg": _randn(gc, 1, HIDDEN, scale=0.02),
         "w_sgu": _randn(gr, 2 * SI, HIDDEN, scale=0.02),
@@ -290,13 +314,35 @@ def _moe_weights(rank: int, device):
     }
 
 
-def _moe_reference(x, mw):
-    """Qwen3NextSparseMoeBlock's decode path on ``x``: the bf16 router's softmax
-    top-10 renormalized, aiter's MXFP4 experts on bf16 activations, the shared
-    expert (SiluAndMul) times sigmoid(shared_expert_gate), the all-reduce."""
-    from aiter import ActivationType, QuantType
-    from aiter.fused_moe import fused_moe
+_FP4 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
+
+def _mxfp4_dequant(q, scales):
+    """Packed e2m1 bytes (low nibble first) times their e8m0 scales -> fp32."""
+    lut = torch.tensor(_FP4 + tuple(-v for v in _FP4), device=q.device)
+    v = lut[torch.stack([q & 0xF, q >> 4], -1).flatten(-2).long()]
+    return v * torch.exp2(scales.float() - 127).repeat_interleave(32, -1)
+
+
+def _mxfp4_qdq(v):
+    """Dynamic MXFP4 of the last dim as AITER's activation quant: 1 x 32 blocks,
+    e8m0 scale ceil_pow2(amax / 6), e2m1 nearest even saturating at 6."""
+    b = v.float().unflatten(-1, (-1, 32))
+    bits = (b.abs().amax(-1, keepdim=True) / 6.0).view(torch.int32)
+    e = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).int()
+    sc = torch.exp2(e.clamp(1, 253).float() - 127)
+    a = (b / sc).abs().clamp(max=6.0)
+    q = torch.where(
+        a < 2,
+        torch.round(a * 2) / 2,
+        torch.where(a < 4, torch.round(a), torch.round(a / 2) * 2),
+    )
+    return (torch.sign(b) * q * sc).flatten(-2)
+
+
+def _route_and_shared(x, mw):
+    """The bf16 router's softmax top-10 renormalized; the shared expert
+    (SiluAndMul) times sigmoid(shared_expert_gate)."""
     from vllm.models.qwen3_5.amd.mono.layout import SI, TOPK
 
     logits = F.linear(x, mw["w_gate"])
@@ -306,6 +352,37 @@ def _moe_reference(x, mw):
     gu = F.linear(x, mw["w_sgu"])
     h = (F.silu(gu[:, :SI].float()) * gu[:, SI:].float()).to(bf)
     shared = torch.sigmoid(F.linear(x, mw["w_sg"])) * F.linear(h, mw["w_sd"])
+    return wts, ids, shared
+
+
+def _moe_emulation(x, mw):
+    """The MoE block with the routed experts as the stock decode kernel computes
+    them (``fmoe_bf16_pertokenMXfp4_g1u1_flat``: x and silu(g) u through dynamic
+    MXFP4, fp32 accumulation, the route weight after w2), in plain torch; then
+    the all-reduce. Deterministic, unlike the kernel."""
+    from vllm.models.qwen3_5.amd.mono.layout import RI
+
+    raw = mw["raw"]
+    wts, ids, shared = _route_and_shared(x, mw)
+    xq = _mxfp4_qdq(x)
+    routed = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
+    for t in range(x.shape[0]):
+        for k in range(ids.shape[1]):
+            e = ids[t, k].item()
+            gu = _mxfp4_dequant(raw["w13"][e], raw["w13s"][e]) @ xq[t]
+            h = _mxfp4_qdq(F.silu(gu[:RI]) * gu[RI:])
+            routed[t] += wts[t, k] * (_mxfp4_dequant(raw["w2"][e], raw["w2s"][e]) @ h)
+    return _all_reduce_fp32((routed + shared.float()).to(bf))
+
+
+def _moe_reference(x, mw):
+    """Qwen3NextSparseMoeBlock's decode path on ``x`` through vLLM's ops: the
+    router and shared expert of ``_route_and_shared``, aiter's ``fused_moe`` for
+    the MXFP4 experts, the all-reduce."""
+    from aiter import ActivationType, QuantType
+    from aiter.fused_moe import fused_moe
+
+    wts, ids, shared = _route_and_shared(x, mw)
     routed = fused_moe(
         x,
         mw["w13"],
@@ -375,7 +452,7 @@ def _k2_worker(
             rank=rank,
             epoch=epoch,
             layer=step,
-            **mw,
+            **{k: v for k, v in mw.items() if k != "raw"},
         )
         torch.accelerator.synchronize()
 
@@ -388,7 +465,9 @@ def _k2_worker(
         lay = k2.scratch_layout(key)["xrow"][0]
         x = scratch[lay : lay + s * HIDDEN * 2].view(bf).view(s, HIDDEN)
         assert _cos(x, x_ref) > COS_MIN, s
-        assert _cos(out, _moe_reference(x.clone(), mw)) > COS_MIN, s
+        assert _cos(out, _moe_emulation(x.clone(), mw)) > COS_MIN, s
+        # fused_moe's flat kernel varies run to run
+        assert _cos(out, _moe_reference(x.clone(), mw)) > STOCK_COS_MIN, s
         outs = [torch.empty_like(out) for _ in range(tp_size)]
         dist.all_gather(outs, out)
         assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
