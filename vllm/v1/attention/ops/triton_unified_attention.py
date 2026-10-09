@@ -303,6 +303,7 @@ def kernel_unified_attention(
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
+    """Compute paged attention with the selected cache decoding and split layout."""
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
         KV_QUANT_MODE <= 3
     )
@@ -875,6 +876,7 @@ def unified_attention(
     mm_prefix_clamp_sliding_window: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
+    """Select the launch layout and run the unified paged attention kernel."""
     use_per_seq_causal = isinstance(causal, torch.Tensor)
     use_causal = bool(causal) if not use_per_seq_causal else True
     per_seq_causal_ptr = causal if use_per_seq_causal else None

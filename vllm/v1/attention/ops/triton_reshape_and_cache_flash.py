@@ -30,6 +30,7 @@ _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "fl
 
 
 def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
+    """Check whether the device can encode the requested KV cache dtype."""
     if not (
         kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES
         or is_quantized_kv_cache(kv_cache_dtype)
@@ -72,6 +73,7 @@ def reshape_and_cache_kernel_flash(
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
+    """Encode and insert key/value rows into their paged cache slots."""
     token_idx = tl.program_id(axis=0)
     slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
     if slot_idx < 0:
@@ -404,6 +406,7 @@ def triton_reshape_and_cache_flash(
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
+    """Launch paged cache insertion with native or software dtype conversion."""
     num_heads = key.shape[1]
     head_size = key.shape[2]
 
@@ -428,8 +431,8 @@ def triton_reshape_and_cache_flash(
 
     assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"Triton reshape-and-cache cannot store kv_cache_dtype={kv_cache_dtype} "
-        f"on this device: an FP8 KV cache needs native fp8e4nv (SM89+). Use "
-        f"--kv-cache-dtype bfloat16 (or float16 on SM75)."
+        f"on this device: fp8/fp8_e4m3 use software conversion on SM75-88 or "
+        f"native conversion on SM89+; other FP8 formats need native support."
     )
     kv_cache_torch_dtype = (
         current_platform.fp8_dtype()

@@ -34,6 +34,7 @@ FP8_MAX = 448.0  # largest finite fp8 e4m3fn magnitude
 
 @triton.jit
 def _decode_kernel(x_ptr, out_ptr, n, IS_FP16: tl.constexpr, BLOCK: tl.constexpr):
+    """Decode FP8 test inputs into the selected floating-point dtype."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0)
@@ -43,6 +44,7 @@ def _decode_kernel(x_ptr, out_ptr, n, IS_FP16: tl.constexpr, BLOCK: tl.constexpr
 
 @triton.jit
 def _encode_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    """Encode floating-point test inputs into FP8 bytes."""
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
@@ -56,6 +58,7 @@ def _finite_fp8_bytes() -> torch.Tensor:
 
 
 def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Launch software decoding and return its output tensor."""
     out = torch.empty(x_u8.numel(), dtype=dtype, device="cuda")
     n = x_u8.numel()
     _decode_kernel[(triton.cdiv(n, 256),)](
@@ -65,6 +68,7 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 
 def _run_encode(x: torch.Tensor) -> torch.Tensor:
+    """Launch software encoding and return the resulting FP8 bytes."""
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
     _encode_kernel[(triton.cdiv(n, 256),)](x, out, n, BLOCK=256)
@@ -149,7 +153,7 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int):
     x_u8 = _finite_fp8_bytes()
     actual = _run_decode(x_u8, dtype)
     expected = x_u8.view(FP8_DTYPE).to(dtype)
-    torch.testing.assert_close(actual.float(), expected.float(), atol=0.0, rtol=0.0)
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
 
 
 # --------------------------- encode (write path) ---------------------------
@@ -166,12 +170,7 @@ def test_encode_sampled_edge_cases(dtype: torch.dtype, min_cap: int):
     x = _edge_case_inputs(dtype)
     actual = _run_encode(x)
     ref = _saturating_fp8_ref(x)
-    torch.testing.assert_close(
-        actual.view(FP8_DTYPE).float(),
-        ref.view(FP8_DTYPE).float(),
-        atol=0.0,
-        rtol=0.0,
-    )
+    assert torch.equal(actual, ref)
 
 
 # ----------------- SM89+ exhaustive cross-check vs native ------------------
@@ -201,9 +200,4 @@ def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
     x = _all_uint16_as(dtype)
     actual = _run_encode(x)
     native = _saturating_fp8_ref(x)  # native hardware cvt on SM89+ (clamped input)
-    torch.testing.assert_close(
-        actual.view(FP8_DTYPE).float(),
-        native.view(FP8_DTYPE).float(),
-        atol=0.0,
-        rtol=0.0,
-    )
+    assert torch.equal(actual, native)
