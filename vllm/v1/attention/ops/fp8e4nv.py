@@ -157,5 +157,11 @@ def convert_from_fp8e4m3(x, dtype: tl.constexpr):
         (dtype == tl.float16) or (dtype == tl.bfloat16) or (dtype == tl.float32),
         "convert_from_fp8e4m3 expects fp16 or bf16, or fp32 output",
     )
-    # Scalar decoding also supports layouts with fewer than four elements per thread.
-    return _fp8e4m3x1_to_fp32x1(x).to(tl.float32, bitcast=True).to(dtype)
+    # Keep packed decoding when each thread has at least one complete pack.
+    if dtype != tl.float32 and x.numel >= 4 * tl.extra.cuda.num_threads():
+        if dtype == tl.float16:
+            return tl.map_elementwise(_decode_fp16_pack4, x, pack=4)[0]
+        else:
+            return tl.map_elementwise(_decode_bf16_pack4, x, pack=4)[0]
+    else:
+        return _fp8e4m3x1_to_fp32x1(x).to(tl.float32, bitcast=True).to(dtype)
