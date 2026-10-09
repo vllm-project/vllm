@@ -48,16 +48,29 @@ class PlotFilterBase(ABC):
         raise NotImplementedError
 
 
+def _parse_filter_target(series, target: str) -> float | bool | str:
+    """Parse a filter target using the column's value type when needed."""
+    if target.casefold() in ("true", "false"):
+        dtype_kind = getattr(series.dtype, "kind", None)
+        non_null_values = series.dropna()
+        is_boolean = dtype_kind == "b" or (
+            len(non_null_values) > 0
+            and all(isinstance(value, bool) for value in non_null_values)
+        )
+        if is_boolean:
+            return target.casefold() == "true"
+
+    try:
+        return float(target)
+    except ValueError:
+        return target
+
+
 @dataclass
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
-        target: float | str
-        try:
-            target = float(self.target)
-        except ValueError:
-            target = self.target
-
+        target = _parse_filter_target(df[self.var], self.target)
         return df[df[self.var] == target]
 
 
@@ -65,12 +78,7 @@ class PlotEqualTo(PlotFilterBase):
 class PlotNotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
-        target: float | str
-        try:
-            target = float(self.target)
-        except ValueError:
-            target = self.target
-
+        target = _parse_filter_target(df[self.var], self.target)
         return df[df[self.var] != target]
 
 
