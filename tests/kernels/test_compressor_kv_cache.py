@@ -2633,6 +2633,17 @@ def test_fused_kv_insert_indexer(
         device=device,
     )
 
+    fp8_software_conv = (
+        current_platform.is_cuda() and not current_platform.has_device_capability(89)
+    )
+    kernel_kwargs = {}
+    if not use_fp4:
+        kernel_kwargs["FP8_SOFTWARE_CONV"] = fp8_software_conv
+        if fp8_software_conv:
+            from vllm.v1.attention.ops.fp8e4nv import FP8E4NV_EXTERN_LIBS
+
+            kernel_kwargs["extern_libs"] = FP8E4NV_EXTERN_LIBS
+
     kernel[(num_tokens,)](
         state_cache,
         state_cache.stride(0),
@@ -2662,6 +2673,7 @@ def test_fused_kv_insert_indexer(
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
         MX_SCALE=mx_scale,
+        **kernel_kwargs,
         num_warps=1,
     )
 
