@@ -5,7 +5,10 @@ from typing import Final
 
 import pytest
 import schemathesis
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, settings
+from jsonschema import Draft202012Validator
 from schemathesis import GenerationMode
 from schemathesis.config import (
     ChecksConfig,
@@ -27,6 +30,59 @@ MAXIMUM_IMAGES = 2
 _ROCM_TIMEOUT_MULTIPLIER = 3 if current_platform.is_rocm() else 1
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 10 * _ROCM_TIMEOUT_MULTIPLIER
 LONG_TIMEOUT_SECONDS: Final[int] = 60 * _ROCM_TIMEOUT_MULTIPLIER
+
+
+@pytest.mark.parametrize("endpoint", ["chat_completion", "completion"])
+def test_openapi_response_payloads(endpoint: str) -> None:
+    """Each completion endpoint must export distinct JSON and SSE payload schemas.
+
+    Check refs against serialized models and reject malformed choices so missing,
+    swapped, or unconstrained schemas fail without starting an inference engine.
+    """
+    if endpoint == "chat_completion":
+        from vllm.entrypoints.openai.chat_completion.api_router import router
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionResponse,
+            ChatCompletionStreamResponse,
+        )
+
+        path = "/v1/chat/completions"
+        models = (ChatCompletionResponse, ChatCompletionStreamResponse)
+        choices = (
+            {"index": 0, "message": {"role": "assistant", "content": "hello"}},
+            {"index": 0, "delta": {"content": "hello"}},
+        )
+    else:
+        from vllm.entrypoints.openai.completion.api_router import router
+        from vllm.entrypoints.openai.completion.protocol import (
+            CompletionResponse,
+            CompletionStreamResponse,
+        )
+
+        path = "/v1/completions"
+        models = (CompletionResponse, CompletionStreamResponse)
+        choices = ({"index": 0, "text": "hello"},) * 2
+
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        document = client.get("/openapi.json").json()
+    operation = document["paths"][path]["post"]
+    content = operation["responses"]["200"]["content"]
+    for media, model, choice in zip(
+        ("application/json", "text/event-stream"), models, choices
+    ):
+        schema = content[media]["schema"]
+        assert schema["$ref"] == f"#/components/schemas/{model.__name__}"
+        validator = Draft202012Validator(
+            {**schema, "components": document["components"]}
+        )
+        payload = model(model="test", choices=[choice], usage={}).model_dump(
+            mode="json"
+        )
+        validator.validate(payload)
+        payload["choices"] = "not an array"
+        assert not validator.is_valid(payload)
 
 
 @pytest.fixture(scope="module")

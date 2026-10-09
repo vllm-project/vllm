@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionStreamResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -40,13 +41,43 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 
 @router.post(
     "/v1/chat/completions",
+    response_model=ChatCompletionResponse,
     dependencies=[Depends(validate_json_request)],
     responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.OK.value: {
+            # Register the chunk model as well as response_model's unary model.
+            "model": ChatCompletionStreamResponse,
+            "description": (
+                "JSON response when stream=false. With stream=true, the schema "
+                "describes successful JSON payloads in SSE data events, not the "
+                "SSE framing, [DONE] marker, error events, or keep-alive comments."
+            ),
+            "content": {
+                "text/event-stream": {
+                    "schema": {
+                        "$ref": "#/components/schemas/ChatCompletionStreamResponse"
+                    }
+                },
+            },
+        },
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
         HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+    },
+    # FastAPI applies responses[200].model to JSON too; restore the unary ref last.
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/ChatCompletionResponse"
+                        }
+                    }
+                }
+            }
+        }
     },
 )
 @with_cancellation

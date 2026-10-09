@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
+    CompletionStreamResponse,
 )
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -34,12 +35,38 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
 
 @router.post(
     "/v1/completions",
+    response_model=CompletionResponse,
     dependencies=[Depends(validate_json_request)],
     responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.OK.value: {
+            # Register the chunk model as well as response_model's unary model.
+            "model": CompletionStreamResponse,
+            "description": (
+                "JSON response when stream=false. With stream=true, the schema "
+                "describes successful JSON payloads in SSE data events, not the "
+                "SSE framing, [DONE] marker, error events, or keep-alive comments."
+            ),
+            "content": {
+                "text/event-stream": {
+                    "schema": {"$ref": "#/components/schemas/CompletionStreamResponse"}
+                },
+            },
+        },
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+    # FastAPI applies responses[200].model to JSON too; restore the unary ref last.
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/CompletionResponse"}
+                    }
+                }
+            }
+        }
     },
 )
 @with_cancellation
