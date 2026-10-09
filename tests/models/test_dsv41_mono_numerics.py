@@ -28,6 +28,7 @@ HIDDEN, Q_RANK, HEAD_DIM, NOPE, ROPE = 5120, 1280, 512, 448, 64
 N_HEADS, O_GROUPS, O_RANK = 64, 8, 1024
 WINDOW, TOPK, SWA_BLOCK, CACHE_BLOCK = 128, 512, 32, 128
 RECORD, DATA, ALIGN = 584, 576, 576
+REPLAYS = 300
 HC = 4
 
 
@@ -42,6 +43,13 @@ def _on_cdna4() -> bool:
 def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
     a, b = a.float().reshape(-1), b.float().reshape(-1)
     return torch.nn.functional.cosine_similarity(a, b, dim=0).item()
+
+
+def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
+    """Relative L2 error of ``a`` against ``b``: unlike the cosine, it sees a
+    wrong scale."""
+    a, b = a.float().reshape(-1), b.float().reshape(-1)
+    return ((a - b).norm() / b.norm()).item()
 
 
 # ---------------------------------------------------------------- caches
@@ -192,12 +200,12 @@ def _mxfp8(n: int, k: int, g, device):
     return w.to(device), s.to(device)
 
 
-def _random_moe(moe, gd, gr) -> None:
+def _random_moe(moe, gd, gr, inter: int) -> None:
     """Random parameters in the loaded layout, before post-load processing: this
     rank's shards (``gd``, a device generator) of the MXFP4 routed experts
-    (random nibbles, E8M0 scales) and the MXFP8 shared expert (one E8M0 a
-    32 x 32 block); the replicated router from ``gr``, seeded alike on every
-    rank."""
+    (random nibbles, E8M0 scales; the intermediate past ``inter`` zero, as the
+    loader pads it) and the MXFP8 shared expert (one E8M0 a 32 x 32 block); the
+    replicated router from ``gr``, seeded alike on every rank."""
     u8 = torch.uint8
     for lin in (moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj):
         n = lin.weight.shape[0]
@@ -216,6 +224,12 @@ def _random_moe(moe, gd, gr) -> None:
             t.copy_(
                 torch.randint(lo, hi, t.shape, generator=gd, device=gd.device, dtype=u8)
             )
+    padded = e.w13_weight.shape[1] // 2
+    if padded > inter:
+        w13, w2 = e.w13_weight.data.view(u8), e.w2_weight.data.view(u8)
+        for half in (0, padded):
+            w13[:, half + inter : half + padded] = 0
+        w2[..., inter // 2 :] = 0
     for t in (moe.gate.weight, moe.gate.e_score_correction_bias):
         t.data.copy_(torch.randn(t.shape, generator=gr, device=gr.device) * 0.02)
 
@@ -299,6 +313,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         moe,
         torch.Generator(device=device).manual_seed(2001 + rank),
         torch.Generator(device=device).manual_seed(2000),
+        inter=2304 // tp,
     )
     process_weights_after_loading(moe, vc.model_config, device)
 
@@ -346,6 +361,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         sc = torch.nn.functional.softplus(x.float() @ gw.T).sqrt() + bias
         return sc.topk(6, dim=1).indices.sort(1).values
 
+    steps = []  # each case's launches, on fixed buffers, for the replay stress
     for ratio, R, T in ((1, 1, 6), (2, 8, 6)):
         with set_current_vllm_config(VllmConfig()):
             rope = build_deepseek_v4_rope(
@@ -448,9 +464,11 @@ def _check_layers(rank: int, tp: int, device) -> None:
             torch.testing.assert_close(
                 got[:M].view_as(want), want, rtol=1e-4, atol=1e-5
             )
-        assert _cos(o[1], res2) > 0.9999, tag
-        assert _cos(normed, xf) > 0.999, tag
-        assert _cos(o[0], moe_out(normed)) > 0.9999, tag
+        same_in = moe_out(normed)
+        # relative errors about 3x what the kernels show (0.3-0.5%)
+        assert _cos(o[1], res2) > 0.9999 and _rel(o[1], res2) < 0.01, tag
+        assert _cos(normed, xf) > 0.999 and _rel(normed, xf) < 0.012, tag
+        assert _cos(o[0], same_in) > 0.9999 and _rel(o[0], same_in) < 0.015, tag
         # per token, where both FFN inputs pick the same experts
         same = (top6(xf) == top6(normed)).all(1)
         assert same.float().mean() >= 0.5, tag
@@ -461,13 +479,51 @@ def _check_layers(rank: int, tp: int, device) -> None:
         f = runner.ffn(mw, part, res, post, comb, attn_pre)
         torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
-        assert _cos(f[0], out) > 0.9999, tag
+        assert _cos(f[0], out) > 0.9999 and _rel(f[0], out) < 0.015, tag
         torch.accelerator.synchronize()
+
+        whole, ffn = runner._outs(M, res0), runner._outs(M, res)
+        args = (s["positions"], s["slot_mapping"], s["swa_cache"], s["swa_indices"])
+        meta = dict(
+            topk_indices=s["topk"], comp_cache=s["comp_cache"],
+            comp_block_table=s["comp_block_table"],
+        )  # fmt: skip
+
+        def step(mw=mw, x0=x0, res0=res0, post0=post0, comb0=comb0, pre0=pre0,
+                 args=args, s=s, meta=meta, whole=whole, part=part, res=res,
+                 post=post, comb=comb, attn_pre=attn_pre, ffn=ffn):  # fmt: skip
+            runner.forward(
+                mw, x0, res0, post0, comb0, pre0, *args, s["swa_lens"],
+                s["token_to_req"], **meta, outs=whole,
+            )  # fmt: skip
+            runner.ffn(mw, part, res, post, comb, attn_pre, outs=ffn)
+            return [*whole, *ffn]
+
+        steps.append(step)
+
+    # ---- the hand-off protocol under back-to-back launches: both step widths
+    # alternating in one graph, every replay bit for bit the first's
+    outs = [t for step in steps for t in step()]
+    torch.accelerator.synchronize()
+    ref = [t.clone() for t in outs]
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for step in steps:
+            step()
+    for i in range(REPLAYS):
+        graph.replay()
+        if i % 50 == 49 or i == REPLAYS - 1:
+            torch.accelerator.synchronize()
+            bad = [
+                j for j, (t, r) in enumerate(zip(outs, ref)) if not torch.equal(t, r)
+            ]
+            assert not bad, f"replay {i}: outputs {bad} differ from the first run"
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
-def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch):
-    if torch.accelerator.device_count() < 2:
-        pytest.skip("needs two GPUs (TP2)")
+@pytest.mark.parametrize("tp", [2, 4])
+def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
+    if torch.accelerator.device_count() < tp:
+        pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, 2, 1, _mono_numerics)
+    multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)

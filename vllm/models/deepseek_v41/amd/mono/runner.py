@@ -21,10 +21,10 @@ from pathlib import Path
 
 import torch
 
-from .attention.device import BLOCKS
 from .attention.front import FRONT_POINTS
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Dims
 from .common.arch import GFX942
+from .common.plan import BLOCKS
 from .layer import (
     EPOCH_WORDS,
     K2_POINTS,
@@ -36,8 +36,10 @@ from .layer import (
     peer_half_bytes,
     scratch_bytes,
 )
+from .stages.dims import Dims as MoeDims
+from .stages.moe_shape import EXPERTS
 
-__all__ = ["MAX_TOKENS", "AttnWeights", "DSV41MonoLayer", "MonoLayerWeights"]
+__all__ = ["BLOCKS", "MAX_TOKENS", "AttnWeights", "DSV41MonoLayer", "MonoLayerWeights"]
 
 _LOG2E = 1.4426950408889634
 HC = 4
@@ -52,6 +54,17 @@ def _ensure_writable_flydsl_cache() -> None:
     path = Path.home() / ".flydsl" / "cache"
     path.mkdir(parents=True, exist_ok=True)
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = str(path)
+
+
+def _check_tensors(owner, tag: str, want: dict) -> None:
+    """Each named tensor of ``owner`` has the (shape, dtype) the kernels read,
+    contiguous: their buffer loads are unbounded, so a mismatch would read
+    garbage rather than fault."""
+    for name, (shape, dtype) in want.items():
+        t = getattr(owner, name)
+        assert tuple(t.shape) == shape and t.dtype == dtype and t.is_contiguous(), (
+            f"{tag} {name}: {tuple(t.shape)} {t.dtype}, want {shape} {dtype}"
+        )
 
 
 @dataclass
@@ -88,12 +101,7 @@ class AttnWeights:
             "wo_b": ((HIDDEN, g * 1024), fp8),
             "wo_b_scale": ((HIDDEN // 32, g * 32), torch.uint8),
         }
-        for name, (shape, dtype) in want.items():
-            t = getattr(self, name)
-            assert tuple(t.shape) == shape and t.dtype == dtype and t.is_contiguous(), (
-                f"layer {self.layer_id} {name}: {tuple(t.shape)} {t.dtype}, "
-                f"want {shape} {dtype}"
-            )
+        _check_tensors(self, f"layer {self.layer_id}", want)
         assert self.cos_sin.dtype == torch.float32 and self.cos_sin.shape[-1] == 64
 
 
@@ -121,6 +129,30 @@ class MonoLayerWeights:
     sgu_s: torch.Tensor  # [2 inter / 32, 160] E8M0
     sw2: torch.Tensor  # shared down [5120, inter] e4m3
     sw2_s: torch.Tensor
+
+    def check(self, tp: int) -> None:
+        """The MoE's tensors: 384 experts, TP-sharded intermediates (the routed
+        one padded as the loader pads it), AITER's A8W4 layout, 32 x 32 E8M0
+        blocks for the shared expert."""
+        d, fp4, e4m3, u8 = (
+            MoeDims(tp),
+            torch.float4_e2m1fn_x2,
+            torch.float8_e4m3fn,
+            torch.uint8,
+        )
+        want = {
+            "gate_w": ((EXPERTS, HIDDEN), torch.bfloat16),
+            "bias": ((EXPERTS,), torch.float32),
+            "w13": ((EXPERTS, 2 * d.inter, HIDDEN // 2), fp4),
+            "w13_s": ((EXPERTS * 2 * d.inter, HIDDEN // 32), u8),
+            "w2": ((EXPERTS, HIDDEN, d.inter // 2), fp4),
+            "w2_s": ((EXPERTS * HIDDEN, d.down_scale_cols), u8),
+            "sgu": ((2 * d.sh_inter, HIDDEN), e4m3),
+            "sgu_s": ((2 * d.sh_inter // 32, HIDDEN // 32), u8),
+            "sw2": ((HIDDEN, d.sh_inter), e4m3),
+            "sw2_s": ((HIDDEN // 32, d.sh_inter // 32), u8),
+        }
+        _check_tensors(self, "MoE", want)
 
 
 class DSV41MonoLayer:

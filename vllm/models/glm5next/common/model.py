@@ -66,9 +66,11 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vForConditionalGeneration,
 )
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -685,7 +687,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
 
-class Glm5NextModel(nn.Module):
+class Glm5NextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -743,6 +745,7 @@ class Glm5NextModel(nn.Module):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+        self._aux_post_op = MHCPostOp()
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
@@ -766,6 +769,26 @@ class Glm5NextModel(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def _aux_hidden_state(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        post: torch.Tensor | None,
+        comb: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Completed residual stream entering a layer, as one hidden vector.
+
+        mHC layers defer their final ``hc_post`` into the next layer's fused
+        pre-op, so ``hidden_states`` holds the raw layer output while the
+        widened stream is completed here and contracted back to
+        ``hidden_size``. Non-mHC layers already return the summed stream.
+        """
+        if post is None:
+            return hidden_states
+        assert residual is not None and comb is not None
+        completed = self._aux_post_op(hidden_states, residual, post, comb)
+        return hc_contract(completed, self.config.mhc_num_residual_streams)
 
     def forward(
         self,
@@ -796,7 +819,15 @@ class Glm5NextModel(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
-        for layer in self._active_layers:
+        aux_hidden_states: list[torch.Tensor] = []
+        for idx, layer in enumerate(self._active_layers, start=self.start_layer):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_state = self._aux_hidden_state(
+                    hidden_states, residual, post, comb
+                )
+                if self.is_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
             )
@@ -811,10 +842,18 @@ class Glm5NextModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        if self.end_layer in self.aux_hidden_state_layers:
+            final_aux = self._aux_hidden_state(hidden_states, residual, post, comb)
+            if self.is_sequence_parallel:
+                final_aux = sp_all_gather(final_aux)[:full_num_tokens]
+            aux_hidden_states.append(final_aux)
+
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1006,7 +1045,7 @@ class Glm5NextModel(nn.Module):
 
 
 class Glm5NextForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1102,7 +1141,11 @@ class Glm5NextForCausalLM(
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(
-    Glm4vForConditionalGeneration, HasInnerState, IsHybrid, MixtureOfExperts
+    Glm4vForConditionalGeneration,
+    HasInnerState,
+    IsHybrid,
+    MixtureOfExperts,
+    SupportsEagle3,
 ):
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as

@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 from vllm.models.deepseek_v41.amd import mono_decode as md
 
 M = 6
@@ -115,6 +116,15 @@ def test_decode_step_runs_mono(run, mode):
     assert kwargs["comp_cache"].shape == (4, 128, md.RECORD)
 
 
+def test_padded_decode_step_runs_mono(run):
+    """A FULL graph pads the step to its capture size: the kernels take it and
+    skip the pad rows (their slot is -1)."""
+    swa = _swa(num_decode_tokens=M - 2)
+    comp = SimpleNamespace(block_size=128, block_table=None)
+    out, calls = run(metadata={"swa": swa, "comp": comp})
+    assert out == ("mono outputs",) and len(calls) == 1
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -145,7 +155,7 @@ def test_decode_step_runs_mono(run, mode):
         "piecewise",
         "prefill",
         "noncausal-window",
-        "padding",
+        "tokens-past-rows",
         "no-metadata",
         "rows",
         "first-layer",
@@ -168,7 +178,12 @@ def _decoder_layer(engram=None, **attn):
         )
         | attn
     )
+    backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+    quant_method = SimpleNamespace(mxfp4_backend=backend)
     ffn = SimpleNamespace(
+        experts=SimpleNamespace(
+            routed_experts=SimpleNamespace(quant_method=quant_method)
+        ),
         shared_experts=object(),
         gate=SimpleNamespace(tid2eid=None),
         n_routed_experts=384,
@@ -203,17 +218,8 @@ def _decoder_layer(engram=None, **attn):
 def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
     """The whole-layer kernels serve the standard layers; every other backbone
     layer keeps vLLM's attention and runs its FFN half as one launch."""
-    import vllm.platforms.rocm as rocm
-
-    monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
-    monkeypatch.setattr(rocm, "get_cdna_version", lambda: 4)
-    monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
-    runner = "vllm.models.deepseek_v41.amd.mono.runner"
-    monkeypatch.setitem(sys.modules, runner, ModuleType(runner))
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40))
-    )
-    mono = md.MonoDecodeLayer.create(layer, config)
+    _deployment(monkeypatch)
+    mono = md.MonoDecodeLayer.create(layer, _config())
     got = None if mono is None else "ffn" if mono.ffn_only else "whole"
     assert got == path
 
@@ -239,7 +245,7 @@ def test_ffn_layer_never_runs_whole(run):
         dict(metadata={}),
         dict(**_inputs(md.MAX_ROWS + 6)),
     ],
-    ids=["piecewise", "prefill", "padding", "no-metadata", "rows"],
+    ids=["piecewise", "prefill", "tokens-past-rows", "no-metadata", "rows"],
 )
 def test_other_steps_reduce_wo_b_themselves(run, case):
     """None: the layer all-reduces wo_b's partial and runs the FFN as before."""
@@ -248,14 +254,64 @@ def test_other_steps_reduce_wo_b_themselves(run, case):
     assert out is None and not calls
 
 
-@pytest.mark.parametrize("cdna", [3, 5])
-def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
+def _config(**parallel):
+    parallel = (
+        dict(enable_expert_parallel=False, enable_eplb=False, data_parallel_size=1)
+        | parallel
+    )
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40)),
+        parallel_config=SimpleNamespace(**parallel),
+    )
+
+
+def _deployment(monkeypatch, cdna=4, cus=256):
+    """A deployment the kernels take (the runner module stubbed: no FlyDSL)."""
     import vllm.platforms.rocm as rocm
 
     monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40))
-    )
+    monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(md, "_compute_units", lambda: cus)
+    name = "vllm.models.deepseek_v41.amd.mono.runner"
+    runner = ModuleType(name)
+    runner.BLOCKS = 256  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, name, runner)
+
+
+@pytest.mark.parametrize("cdna", [3, 5])
+def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
+    _deployment(monkeypatch, cdna=cdna)
     with pytest.raises(ValueError, match="needs CDNA4"):
-        md.MonoDecodeLayer.create(_decoder_layer(), config)
+        md.MonoDecodeLayer.create(_decoder_layer(), _config())
+
+
+def _other_backend():
+    layer = _decoder_layer()
+    experts = layer.ffn.experts.routed_experts
+    experts.quant_method.mxfp4_backend = Mxfp4MoeBackend.TRITON
+    return layer
+
+
+@pytest.mark.parametrize(
+    "case, match",
+    [
+        (dict(parallel=dict(enable_expert_parallel=True)), "no expert"),
+        (dict(parallel=dict(data_parallel_size=2)), "no expert"),
+        (dict(parallel=dict(enable_eplb=True)), "no expert"),
+        (dict(a4w4=True), "A8W4"),
+        (dict(layer=_other_backend), "AITER_MXFP4_BF16"),
+        (dict(cus=128), "256 compute units"),
+    ],
+    ids=["expert-parallel", "data-parallel", "eplb", "a4w4", "moe-backend", "cus"],
+)
+def test_opt_in_outside_the_kernels_moe_raises(monkeypatch, case, match):
+    """The kernels read all 384 experts on each rank in AITER's A8W4 layout, with
+    all 256 CTAs resident: any other deployment is an error, not garbage."""
+    _deployment(monkeypatch, cus=case.get("cus", 256))
+    if case.get("a4w4"):
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
+    layer = case.get("layer", _decoder_layer)()
+    with pytest.raises(ValueError, match=match):
+        md.MonoDecodeLayer.create(layer, _config(**case.get("parallel", {})))

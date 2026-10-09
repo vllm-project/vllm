@@ -35,6 +35,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
@@ -216,6 +217,36 @@ def _vllm_indexer(attn, x: torch.Tensor, qr: torch.Tensor, positions: torch.Tens
     indexer.indexer_op(x, q_quant, None, index_weights)
 
 
+def _compute_units() -> int:
+    return current_platform.num_compute_units(torch.accelerator.current_device_index())
+
+
+def _unsupported_moe(layer: "DeepseekV4DecoderLayer", vllm_config) -> str | None:
+    """Why the kernels cannot run this deployment's MoE, or None. They read every
+    one of the 384 experts on each rank, TP-sharded, in AITER's A8W4 MXFP4
+    layout."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    pc = vllm_config.parallel_config
+    if pc.enable_expert_parallel or pc.enable_eplb or pc.data_parallel_size > 1:
+        return "needs tensor parallelism only: no expert or data parallelism"
+    if envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
+        return "needs AITER's A8W4 MoE (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 unset)"
+    experts = getattr(getattr(layer.ffn, "experts", None), "routed_experts", None)
+    if experts is None:
+        return None  # not a routed MoE: the layer checks decline it
+    if _on_gfx942():
+        # The gfx942 kernels read their own copies of the experts. They are
+        # made from the loaded tensors before vLLM's MoE backend converts
+        # them (_capture_plain_experts), and moe_copies checks those tensors.
+        # So the backend matters on gfx950 only.
+        return None
+    backend = getattr(experts.quant_method, "mxfp4_backend", None)
+    if backend != Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        return f"needs the AITER_MXFP4_BF16 MoE backend, not {backend}"
+    return None
+
+
 class MonoDecodeLayer:
     """One decoder layer's mono path (``create``: None when the layer is not
     eligible): the whole layer (``__call__``) or, with ``ffn_only``, the FFN
@@ -258,10 +289,17 @@ class MonoDecodeLayer:
         elif get_tensor_model_parallel_world_size() not in (2, 4):
             why = "needs tensor parallel size 2 or 4"
         else:
+            why = _unsupported_moe(layer, vllm_config)
+        if why is None:
             try:
-                import vllm.models.deepseek_v41.amd.mono.runner  # noqa: F401
+                from vllm.models.deepseek_v41.amd.mono.runner import BLOCKS
             except ImportError as err:
                 why = f"needs FlyDSL and AITER's FlyDSL helpers ({err})"
+            else:
+                # every CTA of a launch stays resident: a partitioned GPU deadlocks
+                cus = _compute_units()
+                if cus < BLOCKS:
+                    why = f"needs {BLOCKS} compute units, the GPU has {cus}"
         if why is not None:
             raise ValueError(f"VLLM_ROCM_MONO_DECODE {why}.")
         # the layer: the kernels serve the backbone's seams and MoE
@@ -401,6 +439,7 @@ class MonoDecodeLayer:
             sw2=sh.down_proj.weight,
             sw2_s=_scale_bytes(sh.down_proj.weight_scale),
         )
+        self._weights.check(get_tensor_model_parallel_world_size())
         return self._weights
 
     def _weights_942(self, layer: "DeepseekV4DecoderLayer"):
