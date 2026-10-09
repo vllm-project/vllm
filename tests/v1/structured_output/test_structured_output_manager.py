@@ -11,6 +11,8 @@ from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
+from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -18,6 +20,7 @@ from vllm.v1.structured_output.backend_outlines import OutlinesGrammar
 
 TOKENIZER = "gpt2"
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
+IMPLICIT_THINK_END = "z"  # accepted in strings, rejected at the object start
 EOS = "<|eos|>"  # resolved to tokenizer.eos_token_id
 JSON_SCHEMA = '{"type": "object"}'
 BACKENDS = ("xgrammar", "guidance")
@@ -43,6 +46,7 @@ class FlowCase:
     prefix: str = ""
     expected_validated: tuple[str, ...] | None = None
     reasoning_ended: bool | None = False
+    engine_reasoner: bool = False
     xfail_guidance: str | None = None
 
 
@@ -57,6 +61,23 @@ class MockReasoner:
 
     def is_reasoning_end_streaming(self, input_ids, delta_ids):
         return self.is_reasoning_end(delta_ids)
+
+
+class MockEngineReasoner(ParserEngineReasoningAdapter):
+    """Ends reasoning implicitly on ``marker``, which is also content."""
+
+    def __init__(self, tokenizer, marker: int):
+        self.marker = marker
+
+    @property
+    def reasoning_end_token_ids(self):
+        return frozenset({self.marker})
+
+    def find_reasoning_end(self, token_ids):
+        ids = list(token_ids)
+        if self.marker in ids:
+            return ReasoningEnd(ids.index(self.marker), True)
+        return ReasoningEnd(len(ids), False)
 
 
 def _single_token(tokenizer, text: str) -> int:
@@ -331,6 +352,28 @@ FLOW_CASES = [
         ),
         id="becomes_active_terminates",
     ),
+    pytest.param(
+        FlowCase(
+            prefix='{"a": "',
+            raw_drafts=(IMPLICIT_THINK_END,),
+            expected_row_pattern="UC",
+            expected_reasoning=True,
+            expect_terminated=False,
+            engine_reasoner=True,
+        ),
+        id="implicit_end_accepted",
+    ),
+    pytest.param(
+        FlowCase(
+            raw_drafts=(" ", IMPLICIT_THINK_END, "{", "}"),
+            expected_validated=(" ",),
+            expected_row_pattern="UUUUU",
+            expected_reasoning=False,
+            expect_terminated=False,
+            engine_reasoner=True,
+        ),
+        id="implicit_end_rejected",
+    ),
 ]
 
 
@@ -344,7 +387,8 @@ def test_real_flow(
     if backend == "guidance" and case.xfail_guidance:
         pytest.xfail(case.xfail_guidance)
 
-    reasoner_kwargs = {"marker": _single_token(tokenizer, THINK_END)}
+    marker = IMPLICIT_THINK_END if case.engine_reasoner else THINK_END
+    reasoner_kwargs = {"marker": _single_token(tokenizer, marker)}
     manager, request = _build_harness(
         tokenizer,
         backend,
@@ -352,6 +396,8 @@ def test_real_flow(
         reasoning_ended=case.reasoning_ended,
         reasoning_parser_kwargs=reasoner_kwargs,
     )
+    if case.engine_reasoner:
+        manager.reasoner_cls = MockEngineReasoner
 
     raw_drafts = _to_token_ids(tokenizer, case.raw_drafts)
     expected_texts = (
