@@ -23,7 +23,10 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    DirectRankRegion,
+    SharedOffloadRegion,
+)
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_CHUNKS = [256]
@@ -307,13 +310,14 @@ def test_transfer(
         kv_bytes_per_chunk = (
             cpu_page_size if replicated_layout else cpu_page_size * simulated_world_size
         )
-        mmap_region = SharedOffloadRegion(
+        mmap_region = DirectRankRegion(
             engine_id=str(uuid.uuid4()),
             num_chunks=num_cpu_chunks,
             rank=0,
             kv_bytes_per_chunk=kv_bytes_per_chunk,
             cpu_page_size=cpu_page_size,
         )
+        mmap_region.populate()
 
     worker = CPUOffloadingWorker(
         kv_caches=kv_caches,

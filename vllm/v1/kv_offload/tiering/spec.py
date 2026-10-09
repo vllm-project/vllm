@@ -68,7 +68,13 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    CanonicalRegion,
+    DirectRankRegion,
+    GlobalRegion,
+    ReplicatedRegion,
+    SharedOffloadRegion,
+)
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -348,15 +354,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             primary_tier: CPUPrimaryTierOffloadingManager | None = None
             secondary_tiers = []
             try:
-                # Create scheduler-side SharedOffloadRegion (rank=None) so the
-                # primary tier can eagerly create a memoryview over _base.
-                scheduler_mmap = SharedOffloadRegion(
+                # Create a global region so the primary tier can eagerly create
+                # a memoryview over the complete row-major buffer.
+                scheduler_mmap = GlobalRegion(
                     engine_id=self._engine_id,
                     num_chunks=self.num_chunks,
-                    rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-                    cpu_page_size=self.cpu_page_size_per_worker,
                 )
+                scheduler_mmap.populate()
                 self._scheduler_mmap = scheduler_mmap
 
                 # Create primary tier (CPU-based)
@@ -443,14 +448,32 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Fold the global physical device index into the replica-local
             # [0, world_size) slot range.
             rank = torch.accelerator.current_device_index() % world_size
-        worker_mmap = SharedOffloadRegion(
-            engine_id=self._engine_id,
-            num_chunks=self.num_chunks,
-            rank=rank,
-            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-            cpu_page_size=self.cpu_page_size_per_worker,
-        )
+        worker_mmap: SharedOffloadRegion
         try:
+            if self.config.canonical_layout:
+                worker_mmap = CanonicalRegion(
+                    engine_id=self._engine_id,
+                    num_chunks=self.num_chunks,
+                    rank=rank,
+                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                )
+            elif self.replicated_layout:
+                worker_mmap = ReplicatedRegion(
+                    engine_id=self._engine_id,
+                    num_chunks=self.num_chunks,
+                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                )
+            else:
+                worker_mmap = DirectRankRegion(
+                    engine_id=self._engine_id,
+                    num_chunks=self.num_chunks,
+                    rank=rank,
+                    kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                    cpu_page_size=self.cpu_page_size_per_worker,
+                )
+            worker_mmap.populate()
             if self.config.canonical_layout:
                 self._validate_canonical_refs(kv_caches)
             return CPUOffloadingWorker(

@@ -114,7 +114,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
 
-        self._kv_memoryview = mmap_region.create_kv_memoryview()
+        self._kv_memoryview = mmap_region.get_view()
 
     def prepare_read(
         self, keys: Collection[OffloadKey], req_context: ReqContext

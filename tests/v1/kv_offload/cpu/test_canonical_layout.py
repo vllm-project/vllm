@@ -21,7 +21,10 @@ from vllm.v1.kv_offload.cpu.gpu_worker import (
     _canonical_page_ids,
     pin_mmap_region,
 )
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    CanonicalRegion,
+    SharedOffloadRegion,
+)
 
 
 def _ref(mapping: CanonicalPageMapping, tensor_idx: int = 0) -> CanonicalKVCacheRef:
@@ -227,10 +230,10 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
     engine_id = str(uuid.uuid4())
     row_stride = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     assert row_stride >= _CANONICAL_PAGE
-    regions: list[SharedOffloadRegion] = []
+    regions: list[CanonicalRegion] = []
 
     def canonical_view(rank: int, world_size: int) -> torch.Tensor:
-        region = SharedOffloadRegion(
+        region = CanonicalRegion(
             engine_id=engine_id,
             num_chunks=num_blocks,
             rank=rank,
@@ -238,11 +241,12 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
             cpu_page_size=row_stride // world_size,
         )
         regions.append(region)
+        region.populate()
         # The Triton load path dereferences CPU pointers on the GPU, which is
         # only legal on pinned memory; production pins via CPUOffloadingWorker
         pin_mmap_region(region)
         assert region.is_pinned
-        return region.create_next_canonical_view(_CANONICAL_PAGE)
+        return region.get_view(_CANONICAL_PAGE)
 
     try:
         for rank in range(writer_tp):

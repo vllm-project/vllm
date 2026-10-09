@@ -816,7 +816,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region)
+            mmap_region.pin()
         host_memory_is_pinned = pin_memory and (
             mmap_region is None or mmap_region.is_pinned
         )
@@ -838,11 +838,11 @@ class CPUOffloadingWorker(OffloadingWorker):
 
             if canonical_bytes_per_block is not None:
                 assert mmap_region is not None
-                cpu_tensor = mmap_region.create_next_canonical_view(
+                cpu_tensor = mmap_region.get_view(
                     canonical_bytes_per_block[t_idx] * blocks_per_chunk
                 )
             elif mmap_region is not None:
-                cpu_tensor = mmap_region.create_next_worker_view(cpu_page_size_bytes)
+                cpu_tensor = mmap_region.get_view(cpu_page_size_bytes)
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(
