@@ -4,14 +4,22 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize("major,minor", [(8, 0), (8, 6), (8, 9), (9, 0), (10, 0)])
-def test_deepseek_v4_sparse_mla_supports_cuda_architectures(major: int, minor: int):
-    """Verify supported CUDA families can select DeepSeek V4 sparse MLA."""
+@pytest.mark.parametrize(
+    "major,minor,expected",
+    [(8, 0, False), (8, 6, False), (8, 9, False), (9, 0, True), (10, 0, True)],
+)
+def test_deepseek_v4_sparse_mla_supports_cuda_architectures(
+    major: int, minor: int, expected: bool
+):
+    """Verify the focused fix retains the existing SM90/SM100 routing gate."""
     from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
     from vllm.platforms.interface import DeviceCapability
 
-    assert DeepseekV4SparseMLABackend.supports_compute_capability(
-        DeviceCapability(major, minor)
+    assert (
+        DeepseekV4SparseMLABackend.supports_compute_capability(
+            DeviceCapability(major, minor)
+        )
+        is expected
     )
 
 
