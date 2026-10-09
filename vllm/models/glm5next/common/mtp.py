@@ -36,7 +36,9 @@ from .model import (
     Glm5NextMLAAttention,
     Glm5NextMoE,
     _fused_shared_expert_name,
+    _mega_moe_fused_shared_experts,
     _num_fused_shared_experts,
+    _routed_experts_prefix,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_sparse_topk_buffer_width,
@@ -313,6 +315,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
+            routed_experts_prefix=_routed_experts_prefix(self.moe_mlp_layers),
         )
 
         params_dict = dict(self.named_parameters())
@@ -336,6 +339,12 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            mega_experts = _mega_moe_fused_shared_experts(self, name)
+            if mega_experts is not None:
+                loaded_params.add(
+                    mega_experts.load_shared_expert_weight(name, loaded_weight)
+                )
+                continue
             # Only parse the layer index when FSE is enabled.
             if (
                 "mlp.shared_experts." in name

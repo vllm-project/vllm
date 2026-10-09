@@ -281,8 +281,13 @@ class Glm5NextMoE(nn.Module):
         )
 
         swiglu_limit = config.swiglu_limit
+        vllm_config = get_current_vllm_config()
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.is_fused_shared_expert_enabled = False
-        if config.n_shared_experts is not None:
+        # MegaMoE fuses the shared expert itself (see _init_mega_moe_experts).
+        if config.n_shared_experts is not None and not self.use_mega_moe:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix
             ) and _fused_shared_experts_tuned(parallel_config)
@@ -302,10 +307,6 @@ class Glm5NextMoE(nn.Module):
                 swiglu_limit=swiglu_limit,
             )
 
-        vllm_config = get_current_vllm_config()
-        self.use_mega_moe = (
-            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
-        )
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, quant_config, prefix)
             return
@@ -348,6 +349,9 @@ class Glm5NextMoE(nn.Module):
     ) -> None:
         """DeepGEMM FP8xFP8 MegaMoE: the kernel dispatches, runs the routed and
         shared experts and combines across the EP group."""
+        from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+            MegaMoEActivation,
+        )
         from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 
         parallel_config = vllm_config.parallel_config
@@ -376,9 +380,6 @@ class Glm5NextMoE(nn.Module):
         self.mega_top_k = config.num_experts_per_tok
         self.mega_renormalize = config.norm_topk_prob
         self.mega_scoring_func = config.scoring_func
-        self.mega_activation_clamp = (
-            float(config.swiglu_limit) if config.swiglu_limit is not None else None
-        )
         self.experts = Glm5NextMegaMoEExperts(
             vllm_config,
             num_experts=self.n_physical_experts,
@@ -389,15 +390,22 @@ class Glm5NextMoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             weight_block_size=tuple(weight_block_size),
-            num_shared_experts=(
-                self.n_shared_experts if self.shared_experts is not None else 0
+            activation=MegaMoEActivation(
+                "swiglu",
+                clamp=None
+                if config.swiglu_limit is None
+                else float(config.swiglu_limit),
             ),
+            shared_experts=self.shared_experts,
             prefix=f"{prefix}.experts",
         )
+        if self.experts.has_fused_shared_experts:
+            # The experts own the shared-expert weights now.
+            self.shared_experts = None
 
     def finalize_mega_moe_weights(self) -> None:
         if self.use_mega_moe:
-            self.experts.finalize_weights(self.shared_experts)
+            self.experts.requantize_block_fp8()
 
     def _forward_mega_moe(self, hidden_states: torch.Tensor) -> torch.Tensor:
         router_logits, _ = self.gate(hidden_states)
@@ -412,20 +420,7 @@ class Glm5NextMoE(nn.Module):
             indices_type=torch.int64,
             routed_scaling_factor=self.routed_scaling_factor,
         )
-        final_hidden_states = self.experts(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            activation_clamp=self.mega_activation_clamp,
-        )
-        if (
-            self.shared_experts is not None
-            and not self.experts.has_fused_shared_experts
-        ):
-            final_hidden_states = final_hidden_states + self.shared_experts(
-                hidden_states
-            )
-        return final_hidden_states
+        return self.experts(hidden_states, topk_weights, topk_ids, self.shared_experts)
 
     def forward(
         self,
@@ -1011,6 +1006,11 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
                 num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
+                routed_experts_prefix=_routed_experts_prefix(
+                    layer.mlp
+                    for layer in self.layers
+                    if isinstance(layer, Glm5NextDecoderLayer)
+                ),
             )
         else:
             expert_params_mapping = []
@@ -1037,6 +1037,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
+                continue
+            mega_experts = _mega_moe_fused_shared_experts(self, name)
+            if mega_experts is not None:
+                loaded_params.add(
+                    mega_experts.load_shared_expert_weight(name, loaded_weight)
+                )
                 continue
             # Only parse the layer index when FSE is enabled.
             if (
@@ -1466,6 +1472,26 @@ def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> in
             "experts as a separate MLP."
         )
     return n_shared_experts
+
+
+def _routed_experts_prefix(mlps: Iterable[nn.Module]) -> str:
+    """Submodule of ``mlp.experts`` holding the routed weights: MegaMoE
+    registers them on the experts module itself."""
+    use_mega_moe = any(getattr(mlp, "use_mega_moe", False) for mlp in mlps)
+    return "" if use_mega_moe else "routed_experts"
+
+
+def _mega_moe_fused_shared_experts(model: nn.Module, name: str) -> nn.Module | None:
+    """The MegaMoE experts that fused the shared expert of checkpoint tensor
+    ``name``; None when that shared expert loads as a separate MLP."""
+    if ".shared_experts." not in name:
+        return None
+    try:
+        mlp = model.get_submodule(name.partition(".shared_experts.")[0])
+    except AttributeError:
+        return None
+    experts = getattr(mlp, "experts", None)
+    return experts if getattr(experts, "has_fused_shared_experts", False) else None
 
 
 def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
