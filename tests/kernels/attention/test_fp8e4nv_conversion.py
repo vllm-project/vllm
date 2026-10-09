@@ -15,6 +15,10 @@ Oracle (per the test plan):
 Decode is exact; the RNE encode is bit-exact vs the saturating reference.
 """
 
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -248,3 +252,59 @@ def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype):
         atol=0.0,
         rtol=0.0,
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("block", [64, 128, 256])
+def test_decode_partial_per_thread_packs(dtype, block):
+    if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
+        pytest.skip("BF16 requires SM80+")
+    raw = torch.arange(block, dtype=torch.int32, device="cuda").to(torch.uint8)
+    out = torch.empty(block, dtype=dtype, device="cuda")
+    _decode_kernel[(1,)](
+        raw,
+        out,
+        block,
+        IS_FP16=(dtype == torch.float16),
+        IS_FP32=False,
+        BLOCK=block,
+        num_warps=4,
+        extern_libs=FP8E4NV_EXTERN_LIBS,
+    )
+    expected = raw.view(FP8_DTYPE).to(dtype)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0, equal_nan=True)
+    finite = ~torch.isnan(expected)
+    torch.testing.assert_close(
+        out[finite].view(torch.uint8),
+        expected[finite].view(torch.uint8),
+        atol=0,
+        rtol=0,
+    )
+
+
+def test_packaged_bitcode_matches_cuda_source(tmp_path):
+    compiler = shutil.which("clang++-18")
+    if compiler is None:
+        pytest.skip("bitcode regeneration requires the documented clang++-18 compiler")
+    assert compiler is not None
+    helper = Path(FP8E4NV_EXTERN_LIBS["fp8e4nv"])
+    rebuilt = tmp_path / helper.name
+    subprocess.run(
+        [
+            compiler,
+            "--cuda-device-only",
+            "-nocudainc",
+            "-nocudalib",
+            "--cuda-gpu-arch=sm_75",
+            "-fcuda-flush-denormals-to-zero",
+            "-O3",
+            "-emit-llvm",
+            "-c",
+            "fp8e4nv_helper.cu",
+            "-o",
+            str(rebuilt),
+        ],
+        cwd=helper.parent,
+        check=True,
+    )
+    assert rebuilt.read_bytes() == helper.read_bytes()
