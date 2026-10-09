@@ -277,9 +277,10 @@ class ECMooncakeScheduler:
             try:
                 if not isinstance(data, dict):
                     raise TypeError("EC readiness event must be an object")
-                if not data.get("ready"):
-                    continue
-                self._accept_ready_event(data)
+                if data.get("abandoned"):
+                    self._accept_abandoned_event(data, now)
+                elif data.get("ready"):
+                    self._accept_ready_event(data)
             except (KeyError, TypeError, ValueError):
                 # Readiness events cross a plain PULL socket, so a malformed
                 # one costs that event and not the engine.
@@ -300,6 +301,19 @@ class ECMooncakeScheduler:
         if not self._note_shard_ready(data):
             return
         self._store_pushed_spec(data)
+
+    def _accept_abandoned_event(self, data: dict[str, Any], now: float) -> None:
+        transfer_id = str(data["transfer_id"])
+        mm_hash = str(data["mm_hash"])
+        if not self._transfers.observe_abandoned(transfer_id, mm_hash, now):
+            return
+        self._forget_shard_readiness(transfer_id)
+        logger.warning(
+            "EC Mooncake push of mm_hash=%s (transfer_id=%s) was abandoned; "
+            "requests needing it fail with a retryable error.",
+            mm_hash,
+            transfer_id,
+        )
 
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
