@@ -24,11 +24,9 @@ _TOPK = 16
 _MAX_QUERY_HEAD_ROWS = 65536
 _MAX_DECODE_QUERY_LEN = 32
 _DEFAULT_MIN_CUTLASS_BATCH_SIZE = 16
-_B300_EAGLE3_MIN_BATCH_BY_HEADS = {
-    (64, 4): 4,
-    (32, 2): 8,
-    (16, 1): 16,
-}
+_B300_EAGLE3_QUERY_HEAD_ROWS = 1024
+_B300_EAGLE3_MAX_QUERY_LEN = 8
+_B300_EAGLE3_HEAD_GEOMETRIES = {(64, 4), (32, 2), (16, 1)}
 
 
 def is_nvfp4_kv_cache(kv_cache_dtype: str) -> bool:
@@ -243,11 +241,14 @@ def _min_cutlass_batch_size(
     num_q_heads: int,
     num_kv_heads: int,
 ) -> int:
-    if decode_query_len != 4 or not current_platform.is_device_capability((10, 3)):
+    if (
+        not current_platform.is_device_capability((10, 3))
+        or not 1 <= decode_query_len <= _B300_EAGLE3_MAX_QUERY_LEN
+        or (num_q_heads, num_kv_heads) not in _B300_EAGLE3_HEAD_GEOMETRIES
+    ):
         return _DEFAULT_MIN_CUTLASS_BATCH_SIZE
-    return _B300_EAGLE3_MIN_BATCH_BY_HEADS.get(
-        (num_q_heads, num_kv_heads), _DEFAULT_MIN_CUTLASS_BATCH_SIZE
-    )
+    query_head_rows = decode_query_len * num_q_heads
+    return (_B300_EAGLE3_QUERY_HEAD_ROWS + query_head_rows - 1) // query_head_rows
 
 
 def supports_cutlass_sparse_decode(

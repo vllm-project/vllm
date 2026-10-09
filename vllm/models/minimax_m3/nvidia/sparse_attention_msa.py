@@ -8,12 +8,12 @@ path for regular decode and speculative verification. NVFP4 KV caches read the
 vLLM packed pages directly in both prefill and CUTLASS decode.
 """
 
+import os
 from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.config.cache import CacheDType
@@ -48,6 +48,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 logger = init_logger(__name__)
+
+
+def _get_msa_cutlass_min_batch_size() -> int | None:
+    value = os.getenv("VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH")
+    return int(value) if value is not None else None
 
 
 def _dequantize_query(
@@ -134,7 +139,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.decode_backend = vllm_config.attention_config.minimax_m3_msa_decode_backend
         self.msa_cutlass_plan_cache = MSACutlassDecodePlanCache()
-        self.msa_cutlass_min_batch_size = envs.VLLM_MINIMAX_M3_MSA_CUTLASS_MIN_BATCH
+        self.msa_cutlass_min_batch_size = _get_msa_cutlass_min_batch_size()
 
     def build(
         self,
