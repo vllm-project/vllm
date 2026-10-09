@@ -35,7 +35,8 @@ updates:
 # `uv pip compile` without -c, --torch-backend, --python-platform,
 # --index-strategy, and --no-emit-package. requirements/test/{cuda,cpu,rocm,xpu}.txt
 # and requirements/docs.txt need those flags. The refresh workflow reruns the
-# pre-commit commands instead and opens one PR.
+# pre-commit commands instead and uploads a patch for a manually opened PR.
+# Its separate publish job remains disabled until explicitly enabled.
 #
 # Source pins stay human-managed. Do not point Dependabot at requirements/
 # or pyproject.toml:
