@@ -138,3 +138,19 @@ def mixer2_gated_norm_tensor_parallel(
             atol=5e-3,
             rtol=1e-3,
         )
+
+
+@pytest.mark.parametrize("tp_rank", range(8))
+@pytest.mark.parametrize("scalar_shape", [(), (1,)])
+def test_mamba_sharded_loader_replicates_per_tensor_scale(tp_rank, scalar_shape):
+    """Every TP rank receives the full scalar, including scalar-shaped checkpoints."""
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+        mamba_v2_sharded_weight_loader,
+    )
+    from vllm.model_executor.parameter import PerTensorScaleParameter
+
+    param = PerTensorScaleParameter(data=torch.empty(1), weight_loader=lambda: None)
+    loaded = torch.full(scalar_shape, 0.25)
+    loader = mamba_v2_sharded_weight_loader([(64, 0, 1), (64, 32, 4)], 8, tp_rank)
+    loader(param, loaded)
+    torch.testing.assert_close(param.data, torch.tensor([0.25]))

@@ -56,7 +56,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     sharded_weight_loader,
 )
-from vllm.model_executor.parameter import BasevLLMParameter
+from vllm.model_executor.parameter import BasevLLMParameter, PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -211,6 +211,10 @@ def mamba_v2_sharded_weight_loader(
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         # - track boundary of (sharded) param, and loaded_weight, respectively
         """Load projection slices, replicating groups across adjacent head shards."""
+        if isinstance(param, PerTensorScaleParameter):
+            # Per-tensor scales are replicated rather than sharded by output rows.
+            param.load_column_parallel_weight(loaded_weight)
+            return
         boundary, loaded_boundary = 0, 0
 
         # - iterate over the shard specs
