@@ -177,7 +177,7 @@ def _embedding_model_config(
     model_config.max_model_len = max_model_len
     model_config.encoder_config = None
     model_config.pooler_config = PoolerConfig(
-        pooling_target="embed",
+        seq_pooling_type="CLS",
         max_embed_len=max_embed_len,
         enable_chunked_processing=enable_chunked_processing,
     )
