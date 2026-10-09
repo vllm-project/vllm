@@ -737,14 +737,14 @@ class Platform:
             for candidate in candidates:
                 if all(b.supports_block_size(candidate) for b in backend_classes):
                     return candidate
-        raise ValueError(
-            "The attention backends share no supported KV cache block size ("
-            + "; ".join(
-                f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
-                for b in backend_classes
+            raise ValueError(
+                "The attention backends share no supported KV cache block size ("
+                + "; ".join(
+                    f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
+                    for b in backend_classes
+                )
+                + ")."
             )
-            + ")."
-        )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -936,17 +936,6 @@ class Platform:
             cache_config.mamba_page_size_padded = shared_page
 
     @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
-        """Extra ``block_size`` multiple a sparse indexer needs, else ``None``.
-
-        The CUDA kpool paged-MQA indexer virtually splits each storage block
-        into pool pages, so ``block_size`` must be a multiple of
-        ``index_kpool * min(PAGED_MQA_PAGE_SIZES)`` — implemented in the CUDA
-        platform override. Other platforms impose no extra constraint.
-        """
-        return None
-
-    @classmethod
     def _align_hybrid_block_size(
         cls,
         vllm_config: "VllmConfig",
@@ -1077,6 +1066,14 @@ class Platform:
                 ),
                 cache_config.block_size,
             )
+            # Also a multiple of every backend's smallest kernel block.
+            backend_block_alignment = lcm(
+                *(
+                    min(s.base if isinstance(s, MultipleOf) else s for s in sizes)
+                    for b in cls._find_non_ssm_backends(vllm_config)
+                    if (sizes := b.get_supported_kernel_block_sizes())
+                )
+            )
             if model_config.use_mla:
                 # TRTLLM/FlashInfer MLA decode kernels require the physical
                 # number of kernel blocks to be aligned to 128 / kernel_block_size.
@@ -1090,9 +1087,9 @@ class Platform:
             mamba_page_size,
             kernel_block_alignment_size * attn_page_size_1_token,
         )
-        indexer_align = cls._get_indexer_block_alignment(vllm_config)
-        if indexer_align:
-            attn_block_size = indexer_align * cdiv(attn_block_size, indexer_align)
+        attn_block_size = backend_block_alignment * cdiv(
+            attn_block_size, backend_block_alignment
+        )
 
         if cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size

@@ -119,9 +119,6 @@ def _initialize_kv_cache(runner: GPUModelRunner) -> None:
         device=runner.device,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
-        kernel_block_sizes=[
-            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
-        ],
         max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)

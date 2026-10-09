@@ -661,8 +661,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.hash_block_size = hash_block_size
         self.dcp_world_size = dcp_world_size
         # Only groups that participate in prefix caching must satisfy the
-        # divisibility constraint; groups that opt out (e.g. GLM-5.3-Flash kpool
-        # tail, block_size=kpool) are scratch buffers and excluded.
+        # divisibility constraint; groups that opt out (e.g. circular buffers
+        # such as the GLM-5.3-Flash indexer tail) are scratch and excluded.
         cacheable_block_sizes = [
             manager.block_size
             for manager, group in zip(
@@ -724,8 +724,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
-            # kpool tail): their blocks are per-request scratch, never
+            # Skip groups that opt out of prefix caching (e.g. circular
+            # buffers): their blocks are per-request scratch, never
             # shareable, so they must not participate in hit lookup (their
             # manager-level hooks already no-op). Their slot in the per-group
             # hit tuple stays empty.

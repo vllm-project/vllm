@@ -333,7 +333,7 @@ def get_hisparse_kv_cache_config(
     device_groups = hisparse_layout.device_groups
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, device_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(device_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(device_groups, layout)
     num_blocks = may_override_num_blocks(
         vllm_config, available_memory // bytes_per_block
     )
@@ -345,7 +345,7 @@ def get_hisparse_kv_cache_config(
     host_groups = [hisparse_layout.source_group]
     host_layout = KVCacheLayout.LBNHC
     validate_kv_cache_layout(host_layout, host_groups)
-    host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups)
+    host_bytes_per_block = _get_kv_cache_bytes_per_block(host_groups, host_layout)
     host_size = host_bytes_per_block * hisparse_layout.host_num_blocks
     kv_cache_tensors[:0] = _build_hisparse_kv_cache_tensors(
         host_groups,

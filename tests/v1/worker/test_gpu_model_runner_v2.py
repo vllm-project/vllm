@@ -237,7 +237,6 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
-    block_tables.blocks_per_kv_block = [1]
     block_tables.block_tables = [_BlockTable()]
     block_tables.num_blocks = SimpleNamespace(
         np=torch.tensor([[0, 3]], dtype=torch.int32)

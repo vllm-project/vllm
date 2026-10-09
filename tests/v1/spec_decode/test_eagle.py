@@ -963,6 +963,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Mock draft_attn_groups for attention metadata building.
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.build_metadata_for_drafting = (
+        attn_metadata_builder.build_for_drafting
+    )
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
     mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
     proposer.draft_attn_groups = [mock_attn_group]
@@ -1066,6 +1069,9 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
     )
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.build_metadata_for_drafting = (
+        attn_metadata_builder.build_for_drafting
+    )
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
     mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
     proposer.draft_attn_groups = [mock_attn_group]

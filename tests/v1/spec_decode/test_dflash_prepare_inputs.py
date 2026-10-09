@@ -102,7 +102,7 @@ def _run_prepare(
         block_tables=SimpleNamespace(
             slot_mappings=query_slot_mapping.unsqueeze(0),
             input_block_tables=[block_table],
-            kernel_block_sizes=[4],
+            block_sizes=[4],
             cp_rank=cp_rank,
             cp_size=cp_size,
             cp_interleave=cp_interleave,
