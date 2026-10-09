@@ -51,7 +51,10 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     const std::optional<torch::stable::Tensor>& projection_bias,
     const std::optional<torch::stable::Tensor>& norm_bias, double eps,
     int64_t norm_kind, int64_t microchunk_rows, int64_t comm_address,
-    int64_t tp_size);
+    int64_t tp_size,
+    const std::optional<torch::stable::Tensor>& local_workspace,
+    const std::vector<int64_t>& workspace_ptrs,
+    const std::optional<torch::stable::Tensor>& signal_one, int64_t rank);
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);

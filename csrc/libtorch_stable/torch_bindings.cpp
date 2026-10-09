@@ -34,7 +34,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "tpsp_fused_matmul_reduce_scatter_norm_all_gather("
       "Tensor a, Tensor b, Tensor weight, Tensor residual, "
       "Tensor? projection_bias, Tensor? norm_bias, float eps, int norm_kind, "
-      "int microchunk_rows, int comm_address, int tp_size) "
+      "int microchunk_rows, int comm_address, int tp_size, "
+      "Tensor? local_workspace, int[] workspace_ptrs, Tensor? signal_one, "
+      "int rank) "
       "-> (Tensor, Tensor, Tensor)");
 
   // Note about marlin kernel 'workspace' arguments:

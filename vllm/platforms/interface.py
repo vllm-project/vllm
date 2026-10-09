@@ -254,6 +254,11 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
+    def get_tpsp_backend_cls(cls) -> str:
+        """Return the TPSP backend class path, or empty if unsupported."""
+        return ""
+
+    @classmethod
     def import_ir_kernels(cls) -> None:
         """The default implementation imports ``vllm.kernels``, which registers
         the built-in IR op implementations. Out-of-tree (OOT) platforms should

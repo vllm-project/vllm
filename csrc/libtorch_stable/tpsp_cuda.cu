@@ -56,16 +56,42 @@ __global__ void unpack_tpsp_chunk(const bf16* packed, bf16* output, int tokens,
   }
 }
 
+__global__ void wait_and_clear_tpsp_signals(unsigned int* signals, int rank,
+                                            int tp_size) {
+  int peer = blockIdx.x * blockDim.x + threadIdx.x;
+  if (peer >= tp_size || peer == rank) {
+    return;
+  }
+  auto start = clock64();
+  while (atomicCAS(signals + peer, 1, 0) != 1) {
+    if (clock64() - start > 30000000000ULL) {
+      printf("TPSP P2P signal timed out\n");
+      asm volatile("trap;");
+    }
+  }
+}
+
 template <bool LayerNorm>
-__global__ void tpsp_add_norm(const bf16* reduced, const bf16* residual,
-                              const bf16* projection_bias, const bf16* weight,
-                              const bf16* norm_bias, bf16* new_residual,
-                              bf16* normalized, int hidden_size, float eps) {
+__global__ void tpsp_add_norm(const bf16* reduced, const bf16* remote,
+                              int64_t remote_stride, int rank, int tp_size,
+                              const bf16* residual, const bf16* projection_bias,
+                              const bf16* weight, const bf16* norm_bias,
+                              bf16* new_residual, bf16* normalized,
+                              int hidden_size, float eps) {
   int row = blockIdx.x;
   float sum = 0.0f;
   for (int col = threadIdx.x; col < hidden_size; col += blockDim.x) {
     int index = row * hidden_size + col;
     bf16 projected = reduced[index];
+    if (remote) {
+      float sum = float(projected);
+      for (int source = 0; source < tp_size; ++source) {
+        if (source != rank) {
+          sum += float(remote[int64_t(source) * remote_stride + index]);
+        }
+      }
+      projected = bf16(sum);
+    }
     if (projection_bias) {
       projected = bf16(float(projected) + float(projection_bias[col]));
     }
@@ -113,7 +139,9 @@ __global__ void tpsp_add_norm(const bf16* reduced, const bf16* residual,
 }
 
 template <bool LayerNorm>
-__global__ void tpsp_add_norm_vector(const bf16* reduced, const bf16* residual,
+__global__ void tpsp_add_norm_vector(const bf16* reduced, const bf16* remote,
+                                     int64_t remote_stride, int rank,
+                                     int tp_size, const bf16* residual,
                                      const bf16* projection_bias,
                                      const bf16* weight, const bf16* norm_bias,
                                      bf16* new_residual, bf16* normalized,
@@ -144,6 +172,21 @@ __global__ void tpsp_add_norm_vector(const bf16* reduced, const bf16* residual,
 #pragma unroll
     for (int j = 0; j < 8; j += 2) {
       __nv_bfloat162 pair{value.data[j], value.data[j + 1]};
+      if (remote) {
+        float2 sum = __bfloat1622float2(pair);
+        for (int source = 0; source < tp_size; ++source) {
+          if (source != rank) {
+            auto* incoming = reinterpret_cast<const Vec*>(
+                remote + int64_t(source) * remote_stride +
+                int64_t(row) * hidden_size);
+            float2 x = __bfloat1622float2(__nv_bfloat162{
+                incoming[idx].data[j], incoming[idx].data[j + 1]});
+            sum.x += x.x;
+            sum.y += x.y;
+          }
+        }
+        pair = __floats2bfloat162_rn(sum.x, sum.y);
+      }
       if (projection_bias) {
         pair += __nv_bfloat162{bias.data[j], bias.data[j + 1]};
       }
@@ -272,7 +315,10 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     const std::optional<torch::stable::Tensor>& projection_bias,
     const std::optional<torch::stable::Tensor>& norm_bias, double eps,
     int64_t norm_kind, int64_t microchunk_rows, int64_t comm_address,
-    int64_t tp_size) {
+    int64_t tp_size,
+    const std::optional<torch::stable::Tensor>& local_workspace,
+    const std::vector<int64_t>& workspace_ptrs,
+    const std::optional<torch::stable::Tensor>& signal_one, int64_t rank) {
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(
       a.is_cuda() && b.is_cuda() && weight.is_cuda() && residual.is_cuda(),
@@ -306,8 +352,8 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     }
   }
   STD_TORCH_CHECK(a.size(1) == b.size(0) && b.size(1) == weight.size(0) &&
-                      tp_size >= 2 && tp_size <= 8 && microchunk_rows > 0 &&
-                      comm_address != 0 && eps > 0,
+                      tp_size >= 2 && microchunk_rows > 0 &&
+                      (comm_address != 0 || local_workspace) && eps > 0,
                   "Invalid TPSP shape or configuration");
   int64_t tokens = a.size(0);
   int64_t width = a.size(1);
@@ -327,6 +373,49 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
   ncclComm_t comm = reinterpret_cast<ncclComm_t>(comm_address);
   int64_t max_chunk = std::min(rows, microchunk_rows);
   int64_t num_chunks = (rows + max_chunk - 1) / max_chunk;
+  bool p2p = local_workspace.has_value();
+  bf16* local_inbox = nullptr;
+  bf16* local_gather = nullptr;
+  unsigned int* local_flags = nullptr;
+  const unsigned int* one = nullptr;
+  int64_t slot_bytes = 0;
+  int64_t flag_offset = 0;
+  if (p2p) {
+    int64_t flag_bytes = 3 * tp_size * int64_t(sizeof(unsigned int));
+    STD_TORCH_CHECK(
+        rank >= 0 && rank < tp_size && signal_one &&
+            workspace_ptrs.size() == tp_size &&
+            local_workspace->scalar_type() == ScalarType::Byte &&
+            signal_one->scalar_type() == ScalarType::Int &&
+            local_workspace->is_contiguous() && signal_one->is_contiguous() &&
+            local_workspace->device() == a.device() &&
+            signal_one->device() == a.device() &&
+            local_workspace->numel() >=
+                4 * tp_size * max_chunk * hidden + flag_bytes &&
+            (local_workspace->numel() - flag_bytes) % (2 * tp_size) == 0,
+        "Invalid TPSP P2P workspace");
+    auto* local_base =
+        reinterpret_cast<char*>(local_workspace->mutable_data_ptr());
+    slot_bytes = (local_workspace->numel() - flag_bytes) / (2 * tp_size);
+    flag_offset = 2 * tp_size * slot_bytes;
+    local_inbox = reinterpret_cast<bf16*>(local_base);
+    local_gather = reinterpret_cast<bf16*>(local_base + tp_size * slot_bytes);
+    local_flags = reinterpret_cast<unsigned int*>(local_base + flag_offset);
+    one = reinterpret_cast<const unsigned int*>(signal_one->const_data_ptr());
+    STD_TORCH_CHECK(slot_bytes >= max_chunk * hidden * int64_t(sizeof(bf16)),
+                    "TPSP P2P workspace slot is too small");
+    for (int source = 0; source < tp_size; ++source) {
+      STD_TORCH_CHECK(
+          workspace_ptrs[source] != 0 &&
+              (source != rank ||
+               workspace_ptrs[source] == reinterpret_cast<int64_t>(local_base)),
+          "Invalid TPSP P2P peer mapping");
+    }
+  } else {
+    STD_TORCH_CHECK(workspace_ptrs.empty() && !signal_one && rank == -1 &&
+                        comm_address != 0,
+                    "Incomplete TPSP P2P configuration");
+  }
   PipelineState* pipeline = nullptr;
   if (num_chunks > 1) {
     auto& state = pipeline_states[a.get_device_index()];
@@ -413,17 +502,41 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
       STD_CUDA_CHECK(cudaStreamWaitEvent(comm_stream,
                                          pipeline->gemm_ready[slot].handle, 0));
     }
-    STD_TORCH_CHECK(
-        ncclReduceScatter(partial_ptr, local_ptr, chunk_rows * hidden,
-                          ncclBfloat16, ncclSum, comm,
-                          comm_stream) == ncclSuccess,
-        "TPSP reduce-scatter failed");
+    int64_t shard_elems = int64_t(chunk_rows) * hidden;
+    size_t shard_bytes = shard_elems * sizeof(bf16);
+    if (p2p) {
+      // The symmetric-memory peer mapping uses this device's virtual address.
+      for (int dest = 0; dest < tp_size; ++dest) {
+        if (dest == rank) {
+          continue;
+        }
+        auto* peer_base = reinterpret_cast<char*>(workspace_ptrs[dest]);
+        STD_CUDA_CHECK(cudaMemcpyAsync(
+            peer_base + rank * slot_bytes, partial_ptr + dest * shard_elems,
+            shard_bytes, cudaMemcpyDeviceToDevice, comm_stream));
+        STD_CUDA_CHECK(cudaMemcpyAsync(
+            peer_base + flag_offset + rank * sizeof(unsigned int), one,
+            sizeof(unsigned int), cudaMemcpyDeviceToDevice, comm_stream));
+      }
+      wait_and_clear_tpsp_signals<<<(tp_size + 255) / 256, 256, 0,
+                                    comm_stream>>>(local_flags, rank, tp_size);
+      STD_CUDA_CHECK(cudaGetLastError());
+    } else {
+      STD_TORCH_CHECK(
+          ncclReduceScatter(partial_ptr, local_ptr, shard_elems, ncclBfloat16,
+                            ncclSum, comm, comm_stream) == ncclSuccess,
+          "TPSP reduce-scatter failed");
+    }
 
     auto* residual_chunk = residual_ptr + offset * hidden;
     auto* new_residual_chunk = new_residual_ptr + offset * hidden;
     auto* normalized_chunk = normalized_ptr + offset * hidden;
+    auto* reduced_ptr = p2p ? partial_ptr + rank * shard_elems : local_ptr;
+    auto* remote_ptr = p2p ? local_inbox : nullptr;
+    int64_t remote_stride = slot_bytes / sizeof(bf16);
     bool aligned =
-        hidden % 8 == 0 && ((reinterpret_cast<uintptr_t>(local_ptr) |
+        hidden % 8 == 0 && ((reinterpret_cast<uintptr_t>(reduced_ptr) |
+                             reinterpret_cast<uintptr_t>(remote_ptr) |
                              reinterpret_cast<uintptr_t>(residual_chunk) |
                              reinterpret_cast<uintptr_t>(weight_ptr) |
                              reinterpret_cast<uintptr_t>(projection_bias_ptr) |
@@ -434,34 +547,85 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     if (aligned) {
       if (norm_kind == 0) {
         tpsp_add_norm_vector<false><<<chunk_rows, threads, 0, comm_stream>>>(
-            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
-            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            reduced_ptr, remote_ptr, remote_stride, rank, tp_size,
+            residual_chunk, projection_bias_ptr, weight_ptr, norm_bias_ptr,
+            new_residual_chunk, normalized_chunk, hidden,
             static_cast<float>(eps));
       } else {
         tpsp_add_norm_vector<true><<<chunk_rows, threads, 0, comm_stream>>>(
-            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
-            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            reduced_ptr, remote_ptr, remote_stride, rank, tp_size,
+            residual_chunk, projection_bias_ptr, weight_ptr, norm_bias_ptr,
+            new_residual_chunk, normalized_chunk, hidden,
             static_cast<float>(eps));
       }
     } else {
       if (norm_kind == 0) {
         tpsp_add_norm<false><<<chunk_rows, threads, 0, comm_stream>>>(
-            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
-            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            reduced_ptr, remote_ptr, remote_stride, rank, tp_size,
+            residual_chunk, projection_bias_ptr, weight_ptr, norm_bias_ptr,
+            new_residual_chunk, normalized_chunk, hidden,
             static_cast<float>(eps));
       } else {
         tpsp_add_norm<true><<<chunk_rows, threads, 0, comm_stream>>>(
-            local_ptr, residual_chunk, projection_bias_ptr, weight_ptr,
-            norm_bias_ptr, new_residual_chunk, normalized_chunk, hidden,
+            reduced_ptr, remote_ptr, remote_stride, rank, tp_size,
+            residual_chunk, projection_bias_ptr, weight_ptr, norm_bias_ptr,
+            new_residual_chunk, normalized_chunk, hidden,
             static_cast<float>(eps));
       }
     }
     STD_CUDA_CHECK(cudaGetLastError());
-    STD_TORCH_CHECK(
-        ncclAllGather(normalized_ptr + offset * hidden,
-                      whole_input ? output_ptr : chunk_ptr, chunk_rows * hidden,
-                      ncclBfloat16, comm, comm_stream) == ncclSuccess,
-        "TPSP all-gather failed");
+    if (p2p) {
+      auto* target = whole_input ? output_ptr : chunk_ptr;
+      auto* own_output = target + rank * shard_elems;
+      STD_CUDA_CHECK(cudaMemcpyAsync(own_output, normalized_chunk, shard_bytes,
+                                     cudaMemcpyDeviceToDevice, comm_stream));
+      for (int dest = 0; dest < tp_size; ++dest) {
+        if (dest == rank) {
+          continue;
+        }
+        auto* peer_base = reinterpret_cast<char*>(workspace_ptrs[dest]);
+        STD_CUDA_CHECK(cudaMemcpyAsync(
+            peer_base + tp_size * slot_bytes + rank * slot_bytes,
+            normalized_chunk, shard_bytes, cudaMemcpyDeviceToDevice,
+            comm_stream));
+        STD_CUDA_CHECK(cudaMemcpyAsync(
+            peer_base + flag_offset + (tp_size + rank) * sizeof(unsigned int),
+            one, sizeof(unsigned int), cudaMemcpyDeviceToDevice, comm_stream));
+      }
+      wait_and_clear_tpsp_signals<<<(tp_size + 255) / 256, 256, 0,
+                                    comm_stream>>>(local_flags + tp_size, rank,
+                                                   tp_size);
+      STD_CUDA_CHECK(cudaGetLastError());
+      for (int source = 0; source < tp_size; ++source) {
+        if (source == rank) {
+          continue;
+        }
+        STD_CUDA_CHECK(cudaMemcpyAsync(
+            target + source * shard_elems,
+            reinterpret_cast<char*>(local_gather) + source * slot_bytes,
+            shard_bytes, cudaMemcpyDeviceToDevice, comm_stream));
+      }
+      for (int dest = 0; dest < tp_size; ++dest) {
+        if (dest == rank) {
+          continue;
+        }
+        auto* peer_base = reinterpret_cast<char*>(workspace_ptrs[dest]);
+        STD_CUDA_CHECK(cudaMemcpyAsync(
+            peer_base + flag_offset +
+                (2 * tp_size + rank) * sizeof(unsigned int),
+            one, sizeof(unsigned int), cudaMemcpyDeviceToDevice, comm_stream));
+      }
+      wait_and_clear_tpsp_signals<<<(tp_size + 255) / 256, 256, 0,
+                                    comm_stream>>>(local_flags + 2 * tp_size,
+                                                   rank, tp_size);
+      STD_CUDA_CHECK(cudaGetLastError());
+    } else {
+      STD_TORCH_CHECK(
+          ncclAllGather(normalized_ptr + offset * hidden,
+                        whole_input ? output_ptr : chunk_ptr, shard_elems,
+                        ncclBfloat16, comm, comm_stream) == ncclSuccess,
+          "TPSP all-gather failed");
+    }
     if (!whole_input) {
       int64_t output_elems = tp_size * chunk_rows * hidden;
       unpack_tpsp_chunk<<<(output_elems + threads - 1) / threads, threads, 0,

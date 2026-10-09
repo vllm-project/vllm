@@ -234,6 +234,10 @@ class CudaPlatformBase(Platform):
     ]
 
     @classmethod
+    def get_tpsp_backend_cls(cls) -> str:
+        return "vllm.v1.worker.tpsp_cuda.CudaTPSPBackend"
+
+    @classmethod
     def import_kernels(cls) -> None:
         """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
         try:

@@ -130,6 +130,10 @@ class XPUPlatform(Platform):
     ]
 
     @classmethod
+    def get_tpsp_backend_cls(cls) -> str:
+        return "vllm.v1.worker.tpsp_profile.XPUTPSPBackend"
+
+    @classmethod
     def import_kernels(cls) -> None:
         # Do not import vllm._C
         with contextlib.suppress(ImportError):

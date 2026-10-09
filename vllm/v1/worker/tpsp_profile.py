@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Startup profiling for BF16 TP projection / residual RMSNorm chains."""
 
+from __future__ import annotations
+
 import importlib
 import logging
 import math
@@ -10,12 +12,15 @@ import statistics
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed import distributed_c10d as c10d
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.tpsp_cuda import CudaTPSPContext
 
 _LOG = logging.getLogger(__name__)
 _EPS = 1e-5
@@ -26,19 +31,41 @@ _SCREEN_TRIALS = 5
 @dataclass(frozen=True)
 class ChunkConfig:
     microchunk_tokens: int
+    comm_mode: str = "nccl"
+
+
+@dataclass(frozen=True)
+class TPSPProjectionContext:
+    transport: Any
+    config: object
 
 
 class TPSPBackend:
-    """Own the fused operator and its platform-specific profile configuration.
+    """Profile a fused projection with platform-owned resources.
 
     A native ``profile_tpsp_config`` returns an object with
     ``threshold_tokens`` and opaque ``config`` attributes. It requires a
     matching native ``fused_matmul_reduce_scatter_norm_all_gather_profiled``
     entry point. When the native profiler is absent, vLLM scans chunks
-    through the standard fused op.
+    through the standard fused op, checking both NCCL and P2P when available.
+    Set ``VLLM_TPSP_COMM_MODE`` to ``nccl`` or ``p2p`` to restrict the sweep.
     """
 
-    def __init__(self, ops: Any, group_name: str, device: torch.device):
+    requires_projection_context = False
+    profiles_transport_modes = False
+    synchronize_after_fused = True
+    supports_projection_bias = False
+
+    @classmethod
+    def create(cls, group_name: str, device: torch.device) -> TPSPBackend | None:
+        return cls(None, group_name, device)
+
+    def __init__(
+        self,
+        ops: Any,
+        group_name: str,
+        device: torch.device,
+    ):
         self.ops = ops
         self.group_name = group_name
         self.device = device
@@ -47,21 +74,35 @@ class TPSPBackend:
             raise ValueError("TPSP chunk granularity must be a positive integer")
         self._closed = False
 
-    @classmethod
     def open(
+        self,
+        *,
+        dtype: torch.dtype,
+        tp_size: int,
+        hidden_size: int,
+        max_batched_tokens: int,
+        group_name: str,
+        device: torch.device,
+    ) -> Any | None:
+        return None
+
+    @classmethod
+    def _valid_open(
         cls,
         *,
         dtype: torch.dtype,
         tp_size: int,
         hidden_size: int,
+        max_batched_tokens: int,
         group_name: str,
         device: torch.device,
-    ) -> "TPSPBackend | None":
+    ) -> bool:
         if (
             dtype != torch.bfloat16
-            or not 2 <= tp_size <= 8
+            or tp_size < 2
             or hidden_size <= 0
             or hidden_size % tp_size
+            or max_batched_tokens <= 0
         ):
             _LOG.warning(
                 "TPSP unavailable for dtype=%s tp_size=%s hidden_size=%s",
@@ -69,36 +110,20 @@ class TPSPBackend:
                 tp_size,
                 hidden_size,
             )
-            return None
-        ops: Any
-        if device.type == "cuda":
-            from vllm.v1.worker.tpsp_cuda import CudaTPSPOps
-
-            ops = CudaTPSPOps.open(group_name, device)
-        else:
-            try:
-                ops = importlib.import_module("deep_symm.async_tp")
-            except ModuleNotFoundError as exc:
-                if exc.name not in ("deep_symm", "deep_symm.async_tp"):
-                    raise
-                _LOG.warning("TPSP unavailable: %s", exc)
-                return None
-            if device.type not in getattr(ops, "tpsp_supported_devices", ("xpu",)):
-                _LOG.warning("TPSP fused projection does not support %s", device.type)
-                return None
-            if not hasattr(ops._C, "fused_matmul_reduce_scatter_norm_all_gather"):
-                _LOG.warning("TPSP native fused projection is unavailable")
-                return None
-            import vllm_xpu_kernels._C  # noqa: F401
-
+            return False
         if not torch._C._dispatch_has_kernel_for_dispatch_key(
             "_C::fused_add_rms_norm", device.type.upper()
         ):
-            raise RuntimeError(f"vLLM {device.type} fused_add_rms_norm is unavailable")
+            _LOG.warning("TPSP unavailable: %s fused_add_rms_norm is missing", device)
+            return False
         group = c10d._resolve_process_group(group_name)
         if dist.get_world_size(group) != tp_size:
-            raise ValueError("TPSP group_name and tp_size disagree")
-        return cls(ops, group_name, device)
+            _LOG.warning("TPSP unavailable: group_name and tp_size disagree")
+            return False
+        return True
+
+    def _profile_context(self, context: Any | None) -> Any | None:
+        return context
 
     def profile(
         self,
@@ -110,9 +135,11 @@ class TPSPBackend:
         norm_eps: float,
         sharded_residual: bool,
         time_budget_s: float,
-    ) -> "SPProfile":
+        context: Any | None = None,
+    ) -> SPProfile:
         if self._closed:
             raise RuntimeError("TPSP backend is closed")
+        context = self._profile_context(context)
         kwargs = dict(
             tp_size=tp_size,
             hidden_size=hidden_size,
@@ -160,7 +187,11 @@ class TPSPBackend:
                 "enabled" if threshold is not None else "disabled",
                 "",
                 threshold_tokens=threshold,
-                config=config,
+                config=(
+                    TPSPProjectionContext(context, config)
+                    if threshold is not None and context is not None
+                    else config
+                ),
                 input_width=input_width,
                 norm_eps=norm_eps,
                 gather_sharded_residual=sharded_residual,
@@ -175,6 +206,7 @@ class TPSPBackend:
             norm_eps=norm_eps,
             sharded_residual=sharded_residual,
             time_budget_s=time_budget_s,
+            context=context,
         )
 
     def fused(
@@ -190,48 +222,174 @@ class TPSPBackend:
         norm_type: str = "rms_norm",
         projection_bias: torch.Tensor | None = None,
         norm_bias: torch.Tensor | None = None,
+        context: Any | None = None,
     ):
         if self._closed:
             raise RuntimeError("TPSP backend is closed")
-        if self.device.type != "cuda" and (
-            norm_type != "rms_norm"
-            or projection_bias is not None
-            or norm_bias is not None
-        ):
-            raise ValueError("This TPSP backend does not support bias or LayerNorm")
+        if isinstance(config, TPSPProjectionContext):
+            if context is not None:
+                raise ValueError("TPSP context was supplied twice")
+            context, config = config.transport, config.config
+        context = self._profile_context(context)
         if isinstance(config, ChunkConfig):
-            result = self.ops.fused_matmul_reduce_scatter_norm_all_gather(
+            result = self.run(
                 a,
                 b,
                 weight,
-                None,
-                self.group_name,
-                eps=eps,
+                residual,
+                eps,
+                config,
                 norm_type=norm_type,
-                residual=residual,
-                microchunk_tokens=config.microchunk_tokens,
-                **(
-                    {"projection_bias": projection_bias, "norm_bias": norm_bias}
-                    if self.device.type == "cuda"
-                    else {}
-                ),
+                projection_bias=projection_bias,
+                norm_bias=norm_bias,
+                context=context,
             )
         else:
-            if norm_type != "rms_norm" or norm_bias is not None:
+            if (
+                norm_type != "rms_norm"
+                or norm_bias is not None
+                or projection_bias is not None
+            ):
                 raise ValueError(
                     "TPSP profiled configuration only supports RMSNorm without bias"
                 )
             result = self.ops._C.fused_matmul_reduce_scatter_norm_all_gather_profiled(
                 a, b, weight, residual, self.group_name, eps=eps, config=config
             )
-        if synchronize and self.device.type != "cuda":
+        if synchronize and self.synchronize_after_fused:
             self.device_synchronize()
         return result
+
+    def run(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+        eps: float,
+        config: ChunkConfig,
+        *,
+        norm_type: str = "rms_norm",
+        projection_bias: torch.Tensor | None = None,
+        norm_bias: torch.Tensor | None = None,
+        context: Any | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
 
     def device_synchronize(self) -> None:
         getattr(torch, self.device.type).synchronize(self.device)
 
-    def close(self) -> None:
+    def close(self, context: Any | None = None) -> None:
+        if not self._closed:
+            self._closed = True
+
+
+def get_tpsp_backend(group_name: str, device: torch.device) -> TPSPBackend | None:
+    from vllm.platforms import current_platform
+
+    backend_path = current_platform.get_tpsp_backend_cls()
+    if not backend_path:
+        return None
+    module, _, name = backend_path.rpartition(".")
+    backend_cls = getattr(importlib.import_module(module), name)
+    return backend_cls.create(group_name, device)
+
+
+class XPUTPSPBackend(TPSPBackend):
+    requires_projection_context = True
+
+    @classmethod
+    def create(
+        cls,
+        group_name: str,
+        device: torch.device,
+    ) -> XPUTPSPBackend | None:
+        if device.type != "xpu":
+            return None
+        try:
+            ops = importlib.import_module("deep_symm.async_tp")
+        except ModuleNotFoundError as exc:
+            if exc.name not in ("deep_symm", "deep_symm.async_tp"):
+                raise
+            _LOG.warning("TPSP unavailable: %s", exc)
+            return None
+        if device.type not in getattr(ops, "tpsp_supported_devices", ("xpu",)):
+            _LOG.warning("TPSP fused projection does not support %s", device.type)
+            return None
+        if not hasattr(ops._C, "fused_matmul_reduce_scatter_norm_all_gather"):
+            _LOG.warning("TPSP native fused projection is unavailable")
+            return None
+        import vllm_xpu_kernels._C  # noqa: F401
+
+        return cls(ops, group_name, device)
+
+    def open(
+        self,
+        *,
+        dtype: torch.dtype,
+        tp_size: int,
+        hidden_size: int,
+        max_batched_tokens: int,
+        group_name: str,
+        device: torch.device,
+    ) -> str | None:
+        if self._closed:
+            raise RuntimeError("TPSP backend is closed")
+        if device != self.device or group_name != self.group_name or tp_size > 8:
+            return None
+        if not self._valid_open(
+            dtype=dtype,
+            tp_size=tp_size,
+            hidden_size=hidden_size,
+            max_batched_tokens=max_batched_tokens,
+            group_name=group_name,
+            device=device,
+        ):
+            return None
+        return group_name
+
+    def _profile_context(self, context: Any | None) -> str:
+        if context != self.group_name:
+            raise ValueError("TPSP context belongs to another backend")
+        return context
+
+    def run(
+        self,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        weight: torch.Tensor,
+        residual: torch.Tensor,
+        eps: float,
+        config: ChunkConfig,
+        *,
+        norm_type: str = "rms_norm",
+        projection_bias: torch.Tensor | None = None,
+        norm_bias: torch.Tensor | None = None,
+        context: Any | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if context != self.group_name:
+            raise ValueError("TPSP context belongs to another backend")
+        if (
+            norm_type != "rms_norm"
+            or projection_bias is not None
+            or norm_bias is not None
+        ):
+            raise ValueError("This TPSP backend does not support bias or LayerNorm")
+        return self.ops.fused_matmul_reduce_scatter_norm_all_gather(
+            a,
+            b,
+            weight,
+            None,
+            self.group_name,
+            eps=eps,
+            norm_type=norm_type,
+            residual=residual,
+            microchunk_tokens=config.microchunk_tokens,
+        )
+
+    def close(self, context: Any | None = None) -> None:
+        if context is not None:
+            self._profile_context(context)
         if not self._closed:
             close = getattr(self.ops, "close_tpsp", None)
             if close is not None:
@@ -241,7 +399,7 @@ class TPSPBackend:
                     "TPSP backend has no close_tpsp API; native pools may remain "
                     "allocated until process exit"
                 )
-            self._closed = True
+            super().close(context)
 
 
 @dataclass(frozen=True)
@@ -263,10 +421,10 @@ class SPProfile:
     config: object | None = None
     pool_mb: int | None = None
     measurements: tuple[SPMeasurement, ...] = ()
-    candidates: tuple[tuple[int, float], ...] = ()
+    candidates: tuple[tuple[ChunkConfig, float], ...] = ()
     input_width: int | None = None
     norm_eps: float = _EPS
-    finalists: tuple[tuple[int, float], ...] = ()
+    finalists: tuple[tuple[ChunkConfig, float], ...] = ()
     gather_sharded_residual: bool = False
 
     @property
@@ -293,19 +451,14 @@ class TPSPProfileSession:
         self.group_name = group_name
         self.profiles: dict[str, SPProfile] | None = None
         self.backend: TPSPBackend | None = None
+        self.contexts: dict[str, Any] = {}
 
     def profile(self, max_batched_tokens: int, parameter: torch.nn.Parameter) -> None:
         if self.profiles is not None:
             return
         if not self.shapes:
             raise ValueError("TPSP requires at least one projection shape")
-        backend = TPSPBackend.open(
-            dtype=parameter.dtype,
-            tp_size=self.tp_size,
-            hidden_size=next(iter(self.shapes.values())).hidden_size,
-            group_name=self.group_name,
-            device=parameter.device,
-        )
+        backend = get_tpsp_backend(self.group_name, parameter.device)
         self.backend = backend
         if backend is None:
             self.profiles = {
@@ -321,10 +474,33 @@ class TPSPProfileSession:
                 )
                 for name, shape in self.shapes.items()
             }
+            self._log_fallback()
             return
         try:
-            self.profiles = {
-                name: backend.profile(
+            profiles = {}
+            for name, shape in self.shapes.items():
+                context = backend.open(
+                    dtype=parameter.dtype,
+                    tp_size=self.tp_size,
+                    hidden_size=shape.hidden_size,
+                    max_batched_tokens=max_batched_tokens,
+                    group_name=self.group_name,
+                    device=parameter.device,
+                )
+                if context is None:
+                    profiles[name] = SPProfile(
+                        self.tp_size,
+                        shape.hidden_size,
+                        max_batched_tokens,
+                        "unsupported",
+                        "neither NCCL nor P2P is usable",
+                        input_width=shape.input_width,
+                        norm_eps=shape.norm_eps,
+                        gather_sharded_residual=shape.sharded_residual,
+                    )
+                    continue
+                self.contexts[name] = context
+                profiles[name] = backend.profile(
                     tp_size=self.tp_size,
                     hidden_size=shape.hidden_size,
                     input_width=shape.input_width,
@@ -332,17 +508,35 @@ class TPSPProfileSession:
                     norm_eps=shape.norm_eps,
                     sharded_residual=shape.sharded_residual,
                     time_budget_s=240.0,
+                    context=context,
                 )
-                for name, shape in self.shapes.items()
-            }
+            self.profiles = profiles
+            if not all(profile.enabled for profile in profiles.values()):
+                self._close_backend()
+                self._log_fallback()
         except Exception:
             self.close()
             raise
 
-    def close(self) -> None:
+    def _log_fallback(self) -> None:
+        assert self.profiles is not None
+        details = ", ".join(
+            f"{name}={profile.status}"
+            + (f" ({profile.reason})" if profile.reason else "")
+            for name, profile in self.profiles.items()
+        )
+        _LOG.warning("TPSP using standard forward; projection plans: %s", details)
+
+    def _close_backend(self) -> None:
         if self.backend is not None:
+            for context in self.contexts.values():
+                self.backend.close(context)
             self.backend.close()
             self.backend = None
+            self.contexts.clear()
+
+    def close(self) -> None:
+        self._close_backend()
         if self.profiles is not None:
             self.profiles = {
                 name: SPProfile(
@@ -415,10 +609,6 @@ def _search_chunks(
     return chunks
 
 
-def _top_chunks(chunks: list[int], scores: dict[int, float]) -> list[int]:
-    return sorted(chunks, key=scores.__getitem__)[:2]
-
-
 def profile_sp_config(
     backend: TPSPBackend,
     tp_size: int,
@@ -429,6 +619,7 @@ def profile_sp_config(
     time_budget_s: float,
     norm_eps: float = _EPS,
     sharded_residual: bool = False,
+    context: CudaTPSPContext | None = None,
 ) -> SPProfile:
     """Scan chunks with the fused op's default communication configuration."""
     if time_budget_s <= 0:
@@ -440,13 +631,14 @@ def profile_sp_config(
         )
 
     if (
-        not 2 <= tp_size <= 8
+        tp_size < 2
+        or (backend.device.type != "cuda" and tp_size > 8)
         or hidden_size <= 0
         or hidden_size % tp_size
         or max_batched_tokens < 1
     ):
         return unsupported(
-            "requires TP in [2, 8], divisible hidden size and positive "
+            "requires supported TP, divisible hidden size and positive "
             "max_batched_tokens"
         )
     if input_width <= 0:
@@ -457,6 +649,8 @@ def profile_sp_config(
     if dist.get_world_size(group) != tp_size:
         raise ValueError("group_name and tp_size disagree")
     device = backend.device
+    if device.type == "cuda" and context is None:
+        raise ValueError("CUDA TPSP requires a projection context")
     rank = dist.get_rank(group)
     shard_rows = math.ceil(max_batched_tokens / tp_size)
     pool_mb = None
@@ -522,7 +716,14 @@ def profile_sp_config(
         (a, b, linear_weight), weight, residual, local_residual, _ = data
         if candidate is not None:
             return backend.fused(
-                a, b, weight, local_residual, norm_eps, candidate, synchronize=False
+                a,
+                b,
+                weight,
+                local_residual,
+                norm_eps,
+                candidate,
+                synchronize=False,
+                context=context,
             )[2]
         partial = F.linear(a, linear_weight)
         full = partial.clone()
@@ -574,58 +775,87 @@ def profile_sp_config(
         )
 
     data = inputs(max_batched_tokens)
-    samples: dict[int, list[float]] = {}
+    samples: dict[ChunkConfig, list[float]] = {}
 
-    def screen_chunk(chunk: int, results: dict[int, list[float]]) -> float | None:
-        candidate = ChunkConfig(chunk)
-        results[chunk] = []
+    def screen_chunk(
+        candidate: ChunkConfig, results: dict[ChunkConfig, list[float]]
+    ) -> float | None:
+        results[candidate] = []
         measure(data, candidate)
         if expired():
             return None
         for _ in range(_SCREEN_TRIALS):
-            results[chunk].append(measure(data, candidate))
+            results[candidate].append(measure(data, candidate))
             if expired():
                 return None
         score = torch.tensor(
-            [_screen_score(results[chunk])], dtype=torch.float64, device=device
+            [_screen_score(results[candidate])], dtype=torch.float64, device=device
         )
         dist.all_reduce(score, op=dist.ReduceOp.MAX, group=group)
         return float(score.item())
 
-    chunks = _search_chunks(
-        shard_rows,
-        lambda chunk: screen_chunk(chunk, samples),
-        backend.chunk_granularity,
+    modes = (
+        [mode for mode in ("nccl", "p2p") if mode in context.modes]
+        if context is not None and backend.profiles_transport_modes
+        else ["nccl"]
     )
-    if chunks is None:
-        return inconclusive("screening time budget exceeded")
+    forced_mode = os.environ.get("VLLM_TPSP_COMM_MODE")
+    if forced_mode is not None:
+        if forced_mode not in modes:
+            raise ValueError(
+                f"VLLM_TPSP_COMM_MODE={forced_mode!r} is not an available "
+                f"TPSP transport: {modes}"
+            )
+        modes = [forced_mode]
+    candidates: list[ChunkConfig] = []
+    for mode in modes:
+
+        def score_chunk(chunk: int, mode: str = mode) -> float | None:
+            return screen_chunk(ChunkConfig(chunk, mode), samples)
+
+        chunks = _search_chunks(
+            shard_rows,
+            score_chunk,
+            backend.chunk_granularity,
+        )
+        if chunks is None:
+            return inconclusive("screening time budget exceeded")
+        candidates.extend(ChunkConfig(chunk, mode) for chunk in chunks)
     scores = torch.tensor(
-        [_screen_score(samples[chunk]) for chunk in chunks],
+        [_screen_score(samples[candidate]) for candidate in candidates],
         dtype=torch.float64,
         device=device,
     )
     dist.all_reduce(scores, op=dist.ReduceOp.MAX, group=group)
     candidate_results = tuple(
-        (chunk, float(score)) for chunk, score in zip(chunks, scores.tolist())
+        (candidate, float(score))
+        for candidate, score in zip(candidates, scores.tolist())
     )
-    screened_scores = dict(candidate_results)
-    finalists = _top_chunks(chunks, screened_scores)
-    retested: dict[int, list[float]] = {}
-    for chunk in finalists:
-        if screen_chunk(chunk, retested) is None:
+    finalists = [
+        item
+        for mode in modes
+        for item in sorted(
+            (result for result in candidate_results if result[0].comm_mode == mode),
+            key=lambda result: result[1],
+        )[:2]
+    ]
+    retested: dict[ChunkConfig, list[float]] = {}
+    for candidate, _ in finalists:
+        if screen_chunk(candidate, retested) is None:
             return inconclusive(
                 "finalist time budget exceeded", candidate_results=candidate_results
             )
     final_scores = torch.tensor(
-        [_screen_score(retested[chunk]) for chunk in finalists],
+        [_screen_score(retested[candidate]) for candidate, _ in finalists],
         dtype=torch.float64,
         device=device,
     )
     dist.all_reduce(final_scores, op=dist.ReduceOp.MAX, group=group)
     finalist_results = tuple(
-        (chunk, float(score)) for chunk, score in zip(finalists, final_scores.tolist())
+        (candidate, float(score))
+        for (candidate, _), score in zip(finalists, final_scores.tolist())
     )
-    candidate = ChunkConfig(min(finalist_results, key=lambda item: item[1])[0])
+    candidate = min(finalist_results, key=lambda item: item[1])[0]
     data = None
 
     check_data = inputs(min(max_batched_tokens, tp_size * 5 + 1))
@@ -710,7 +940,13 @@ def profile_sp_config(
         status,
         reason,
         threshold,
-        candidate if status == "enabled" else None,
+        (
+            TPSPProjectionContext(context, candidate)
+            if context is not None and status == "enabled"
+            else candidate
+            if status == "enabled"
+            else None
+        ),
         pool_mb,
         tuple(measurements),
         candidate_results,
@@ -726,7 +962,7 @@ def profile_sp_config(
             "candidates=%s finalists=%s measurements=%s reason=%s",
             status,
             threshold,
-            candidate.microchunk_tokens,
+            candidate,
             input_width,
             norm_eps,
             sharded_residual,
