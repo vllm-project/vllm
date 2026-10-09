@@ -7,6 +7,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.utils import is_breakable_cudagraph_enabled
 from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
@@ -65,9 +66,14 @@ class XpuCommunicator(DeviceCommunicatorBase):
             # and accumulate in rank order, independent of the token batch.
             return self._fixed_rank_sum(input_)
 
-        output = input_.clone()
-        dist.all_reduce(output, group=self.device_group)
-        return output
+        # should check eager mode, but cannot access compilation_config here.
+        if is_breakable_cudagraph_enabled():
+            dist.all_reduce(input_, group=self.device_group)
+            return input_
+        else:
+            output = input_.clone()
+            dist.all_reduce(output, group=self.device_group)
+            return output
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
