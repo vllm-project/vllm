@@ -37,6 +37,12 @@ from vllm.v1.attention.ops.fp8e4nv import (
     convert_from_fp8e4m3,
     convert_to_fp8e4m3,
 )
+from vllm.v1.attention.ops.fp8e4nv_ptx import (
+    convert_from_fp8e4m3 as ptx_convert_from,
+)
+from vllm.v1.attention.ops.fp8e4nv_ptx import (
+    convert_to_fp8e4m3 as ptx_convert_to,
+)
 
 FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = 448.0  # largest finite fp8 e4m3fn magnitude
@@ -394,3 +400,90 @@ def test_software_conversion_requires_explicit_override_on_native_targets(
         assert "FORCE_SOFTWARE_CONVERSION=True" in str(cause)
     else:
         triton.compile(source, target=GPUTarget("cuda", arch, 32), options=options)
+
+
+@triton.jit
+def _policy_kernel(
+    src,
+    dst,
+    n,
+    ENCODE: tl.constexpr,
+    BF16: tl.constexpr,
+    PACK: tl.constexpr,
+    HANDLE_NAN: tl.constexpr,
+    FLUSH_UNDERFLOW: tl.constexpr,
+    FLUSH_NEGATIVE_ZERO: tl.constexpr,
+):
+    """Exercise the direct PTX interface without caller-side packing."""
+    offsets = tl.program_id(0) * 512 + tl.arange(0, 512)
+    x = tl.load(src + offsets, offsets < n, other=0)
+    if ENCODE:
+        y = ptx_convert_to(
+            x, HANDLE_NAN, True, FLUSH_UNDERFLOW, FLUSH_NEGATIVE_ZERO, PACK
+        )
+    else:
+        y = ptx_convert_from(
+            x,
+            tl.bfloat16 if BF16 else tl.float16,
+            HANDLE_NAN,
+            True,
+            FLUSH_UNDERFLOW,
+            FLUSH_NEGATIVE_ZERO,
+            PACK,
+        )
+    tl.store(dst + offsets, y, offsets < n)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("pack", [1, 2, 4, None])
+@pytest.mark.parametrize("encode", [False, True])
+@pytest.mark.parametrize("handle_nan", [False, True])
+@pytest.mark.parametrize("flush_underflow", [False, True])
+@pytest.mark.parametrize("flush_negative_zero", [False, True])
+def test_packed_conversion_policies(
+    dtype, pack, encode, handle_nan, flush_underflow, flush_negative_zero
+):
+    """Check independent policies over every input encoding, including signed zeros."""
+    if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
+        pytest.skip("bf16 needs SM80+")
+    if encode:
+        bits = torch.arange(65536, device="cuda", dtype=torch.int32).to(torch.uint16)
+        src = bits.view(dtype)
+        expected = _saturating_fp8_ref(src)
+        finite = ~src.isnan()
+        if flush_underflow:
+            signed_zero = ((bits.to(torch.int32) >> 8) & 0x80).to(torch.uint8)
+            expected = torch.where(src.abs() < 2**-6, signed_zero, expected)
+        if flush_negative_zero:
+            expected = torch.where(expected == 0x80, 0, expected)
+    else:
+        src = torch.arange(256, device="cuda", dtype=torch.int32).to(torch.uint8)
+        expected = src.view(FP8_DTYPE).to(dtype)
+        finite = (src & 0x7F) != 0x7F
+        if flush_underflow:
+            signed_zero = torch.copysign(torch.zeros_like(expected), expected)
+            expected = torch.where((src & 0x78) == 0, signed_zero, expected)
+        if flush_negative_zero:
+            expected = torch.where(expected == 0, torch.zeros_like(expected), expected)
+    actual = torch.empty_like(expected)
+    _policy_kernel[(triton.cdiv(src.numel(), 512),)](
+        src,
+        actual,
+        src.numel(),
+        encode,
+        dtype == torch.bfloat16,
+        pack,
+        handle_nan,
+        flush_underflow,
+        flush_negative_zero,
+        num_warps=4,
+    )
+    assert torch.equal(
+        actual[finite].view(torch.uint8), expected[finite].view(torch.uint8)
+    )
+    if handle_nan:
+        # PTX requires NaN output, not preservation of NaN sign or payload.
+        if encode:
+            assert torch.all((actual[~finite] & 0x7F) == 0x7F)
+        else:
+            assert torch.all(actual[~finite].isnan())
