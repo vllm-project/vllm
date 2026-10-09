@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use xgrammar_structural_tag::format::Format;
+
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
+use crate::output_grammar::{self, OutputGrammarContext};
 use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 const HERMES_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
@@ -53,6 +56,15 @@ impl ToolParser for HermesToolParser {
         Some(xgrammar_structural_tag::Model::Hermes.builder())
     }
 
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let format =
+            output_grammar::visible_format_from_builder(self.structural_tag_builder(), ctx)?;
+        Ok(format.map(with_template_call_separators))
+    }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.inner.parse_into(chunk, output)
     }
@@ -66,12 +78,32 @@ impl ToolParser for HermesToolParser {
     }
 }
 
+/// Accept repeated `required` calls separated by the newline that Hermes chat
+/// templates render between them, as well as back to back, which is all the
+/// shared builder accepts.
+fn with_template_call_separators(format: Format) -> Format {
+    match format {
+        Format::TagsWithSeparator(calls) if !calls.stop_after_first => {
+            let mut newline_separated = calls.clone();
+            newline_separated.separator = "\n".to_owned();
+            Format::or(vec![
+                Format::TagsWithSeparator(newline_separated),
+                Format::TagsWithSeparator(calls),
+            ])
+        }
+        format => format,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use thiserror_ext::AsReport;
+    use xgrammar_structural_tag::ToolChoice;
 
     use super::HermesToolParser;
+    use crate::output_grammar::OutputGrammarContext;
+    use crate::output_grammar::test_utils::outline;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
@@ -229,5 +261,46 @@ mod tests {
 
         expect!["tool parser parsing failed: incomplete Hermes tool call"]
             .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn hermes_required_grammar_accepts_template_call_separators() {
+        // Hermes templates write `</tool_call>\n<tool_call>` between parallel
+        // calls and some fine-tunes write them back to back, so a `required`
+        // grammar must admit both.
+        let tools = &test_tools()[..1];
+        let parser = HermesToolParser::new(tools);
+        let outline_for = |tool_choice: ToolChoice, parallel_tool_calls: bool| {
+            let ctx = OutputGrammarContext {
+                tools,
+                tool_choice: &tool_choice,
+                tool_strict_level: Default::default(),
+                parallel_tool_calls,
+            };
+            outline(&parser.build_visible_format(&ctx).unwrap().unwrap())
+        };
+
+        expect![[r#"
+            or
+              tags_with_separator `\n` at_least_one
+                tag `<tool_call>\n{"name": "get_weather", "arguments": ` json(any) `}\n</tool_call>`
+                tag `<tool_call>{"name": "get_weather", "arguments": ` json(any) `}</tool_call>`
+              tags_with_separator `` at_least_one
+                tag `<tool_call>\n{"name": "get_weather", "arguments": ` json(any) `}\n</tool_call>`
+                tag `<tool_call>{"name": "get_weather", "arguments": ` json(any) `}</tool_call>`
+        "#]]
+        .assert_eq(&outline_for(ToolChoice::required(), true));
+        expect![[r#"
+            tags_with_separator `` at_least_one stop_after_first
+              tag `<tool_call>\n{"name": "get_weather", "arguments": ` json(any) `}\n</tool_call>`
+              tag `<tool_call>{"name": "get_weather", "arguments": ` json(any) `}</tool_call>`
+        "#]]
+        .assert_eq(&outline_for(ToolChoice::required(), false));
+        expect![[r#"
+            tags_with_separator `` at_least_one stop_after_first
+              tag `<tool_call>\n{"name": "get_weather", "arguments": ` json(any) `}\n</tool_call>`
+              tag `<tool_call>{"name": "get_weather", "arguments": ` json(any) `}</tool_call>`
+        "#]]
+        .assert_eq(&outline_for(ToolChoice::function("get_weather"), true));
     }
 }

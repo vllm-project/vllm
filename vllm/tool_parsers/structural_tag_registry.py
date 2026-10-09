@@ -379,6 +379,7 @@ def _hermes_style_structural_tag(
     tool_choice: SimplifiedToolChoice,
     start_tag: str,
     end_tag: str,
+    parallel_call_separators: tuple[str, ...] = ("",),
 ) -> StructuralTag:
     tags = _hermes_tool_tags(tools, start_tag, end_tag)
     if tool_choice == "auto":
@@ -395,10 +396,12 @@ def _hermes_style_structural_tag(
             stop_after_first=True,
         )
     else:
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=tags,
-            separator="",
-            at_least_one=True,
+        call_lists = [
+            TagsWithSeparatorFormat(tags=tags, separator=sep, at_least_one=True)
+            for sep in parallel_call_separators
+        ]
+        suffix_tag = (
+            call_lists[0] if len(call_lists) == 1 else OrFormat(elements=call_lists)
         )
 
     return StructuralTag(format=suffix_tag)
@@ -413,8 +416,14 @@ def get_hermes_structural_tag(
     token_suffix: str = "",
 ) -> StructuralTag:
     del builtin_tools, reasoning, token_suffix
+    # Hermes chat templates render a newline between parallel tool calls;
+    # some fine-tuned templates write them back to back.
     return _hermes_style_structural_tag(
-        tools, tool_choice, "<tool_call>", "</tool_call>"
+        tools,
+        tool_choice,
+        "<tool_call>",
+        "</tool_call>",
+        parallel_call_separators=("\n", ""),
     )
 
 
