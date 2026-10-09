@@ -292,6 +292,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_V2_DOMAIN_SIZE: int = 0
     VLLM_NIXL_EP_V2_NUM_SMS: int = 0
     VLLM_NIXL_EP_V2_EXPAND: bool = False
+    VLLM_NIXL_EP_V2_NVFP4_DISPATCH: bool = False
     VLLM_NIXL_EP_V2_PREFER_OVERLAP: bool = True
     VLLM_NIXL_EP_V2_ALLOW_MULTIPLE_REDUCTION: bool = True
     VLLM_DBO_COMM_SMS: int = 20
@@ -2054,6 +2055,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the worst case instead of the padded layout
     "VLLM_NIXL_EP_V2_EXPAND": lambda: bool(
         int(os.getenv("VLLM_NIXL_EP_V2_EXPAND", "0"))
+    ),
+    # NIXL EP v2: for NVFP4 layers that quantize their input in prepare,
+    # quantize before dispatch and send NVFP4 instead of BF16
+    "VLLM_NIXL_EP_V2_NVFP4_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_NIXL_EP_V2_NVFP4_DISPATCH", "0"))
     ),
     # NIXL EP v2: active SMs per dispatch/combine, even and at most the launch
     # grid; 0 = the launch grid

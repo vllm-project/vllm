@@ -271,3 +271,129 @@ def test_nixl_ep_v2_expand_knob(
     assert meta.expert_num_tokens is None
     assert int(meta.psum_recv_per_rank[-1]) == 5
     assert weights.shape == (8, 1)
+
+
+@pytest.mark.parametrize(
+    "flag,quant,defer,swizzled,wire",
+    [
+        (False, "nvfp4", False, False, "bf16"),
+        (True, "nvfp4", False, False, "nvfp4"),
+        (True, "nvfp4", False, True, "nvfp4"),
+        (True, "nvfp4", True, False, "bf16"),
+        (True, None, False, False, "bf16"),
+    ],
+    ids=["off", "on", "on-swizzled", "on-deferred", "on-bf16-layer"],
+)
+def test_nixl_ep_v2_nvfp4_dispatch_knob(
+    flag: bool,
+    quant: str | None,
+    defer: bool,
+    swizzled: bool,
+    wire: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VLLM_NIXL_EP_V2_NVFP4_DISPATCH quantizes NVFP4 layers' input before
+    the dispatch and sends (codes, row-major scales); the receiver does not
+    requantize, and swizzles the scales only when the experts ask. Deferred
+    or non-NVFP4 layers dispatch BF16 as without it.
+
+    Args:
+        flag: Set VLLM_NIXL_EP_V2_NVFP4_DISPATCH.
+        quant: The layer's quant_dtype: "nvfp4" or None for BF16.
+        defer: The experts quantize their own input.
+        swizzled: The experts want swizzled scales.
+        wire: The expected dispatch payload.
+
+    """
+    if not has_nixl_ep_v2():
+        pytest.skip("Requires NIXL EP v2 (nixl.runtime.ep)")
+    import vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep_v2 as pf_mod
+    from tests.kernels.moe.utils import make_ep_prepare_finalize_with_fake_buffer
+
+    num_tokens, hidden = 3, 256
+    quant_calls: list[dict] = []
+    swizzle_calls: list[torch.Tensor] = []
+
+    def fake_quantize(a, a_scale, quant_dtype, per_act_token_quant, **kwargs):
+        # scaled_fp4_quant's unswizzled shapes; the real op needs SM100.
+        quant_calls.append(dict(a_scale=a_scale, quant_dtype=quant_dtype, **kwargs))
+        n = len(a)
+        return (
+            torch.zeros(n, hidden // 2, dtype=torch.uint8),
+            torch.zeros(n, hidden // 16, dtype=torch.uint8).view(torch.float8_e4m3fn),
+        )
+
+    def fake_interleave(scale):
+        swizzle_calls.append(scale)
+        return torch.ones(128, scale.size(1), dtype=torch.uint8)
+
+    class _Buffer:
+        num_launch_sms = 26
+        num_max_tokens_per_rank = 16
+
+        def dispatch(self, x, **kwargs):
+            self.x = x
+            # Exact layout: 4 rows, 1 + 3 for local experts 0 and 2.
+            handle = types.SimpleNamespace(
+                recv_count_is_exact=True, num_recv_tokens_per_expert_list=[1, 0, 3, 0]
+            )
+            if isinstance(x, tuple):
+                recv_x = (
+                    x[0].new_zeros(4, x[0].size(1)),
+                    x[1].new_zeros(4, x[1].size(1)),
+                )
+            else:
+                recv_x = x.new_zeros(4, x.size(1))
+            return recv_x, None, torch.ones(4), handle, None
+
+    monkeypatch.setattr(pf_mod, "moe_kernel_quantize_input", fake_quantize)
+    monkeypatch.setattr(pf_mod, "nvfp4_block_scale_interleave", fake_interleave)
+    monkeypatch.delenv("VLLM_NIXL_EP_V2_NVFP4_DISPATCH", raising=False)
+    if flag:
+        monkeypatch.setenv("VLLM_NIXL_EP_V2_NVFP4_DISPATCH", "1")
+    buffer = _Buffer()
+    pf = make_ep_prepare_finalize_with_fake_buffer("nixl_ep_v2", buffer, monkeypatch)
+    assert pf.nvfp4_dispatch is flag
+    gscale = torch.tensor([2.0, 2.0])  # the oracle repeats one value per expert
+    quant_config = (
+        FusedMoEQuantConfig.make("nvfp4", a1_gscale=gscale, is_scale_swizzled=swizzled)
+        if quant == "nvfp4"
+        else FusedMoEQuantConfig.make()
+    )
+    a1 = torch.randn(num_tokens, hidden, dtype=torch.bfloat16)
+    with set_forward_context(None, VllmConfig()):
+        receiver = pf.prepare_async(
+            a1,
+            torch.rand(num_tokens, 2),
+            torch.tensor([[0, 4], [1, 2], [5, 6]]),
+            8,
+            None,
+            False,
+            quant_config,
+            defer_input_quant=defer,
+        )
+    x, x_scale, meta, ids, _ = receiver()
+    assert ids.flatten().tolist() == [0, 2, 2, 2]
+
+    if wire == "bf16":
+        assert buffer.x is a1
+        # Without the flag, the NVFP4 layer still quantizes after receive.
+        assert len(quant_calls) == int(quant == "nvfp4" and not defer)
+        return
+    codes, scales = buffer.x
+    assert codes.dtype == torch.uint8 and codes.shape == (num_tokens, hidden // 2)
+    assert scales.dtype == torch.float8_e4m3fn
+    assert scales.shape == (num_tokens, hidden // 16)
+    # Quantized once, before the dispatch, row-major with the layer's scale.
+    [call] = quant_calls
+    assert call["a_scale"] is gscale
+    assert call["quant_dtype"] == "nvfp4" and call["is_scale_swizzled"] is False
+    assert x.dtype == torch.uint8 and x.shape == (4, hidden // 2)
+    if swizzled:
+        [swizzle_in] = swizzle_calls
+        assert swizzle_in.dtype == torch.uint8 and swizzle_in.shape == (4, hidden // 16)
+        assert x_scale.shape == (128, hidden // 16)
+    else:
+        assert not swizzle_calls
+        assert x_scale.dtype == torch.float8_e4m3fn
+        assert x_scale.shape == (4, hidden // 16)

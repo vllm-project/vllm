@@ -339,6 +339,7 @@ def maybe_make_prepare_finalize(
             use_cudagraph=model_config is not None and not model_config.enforce_eager,
             sp_size=moe.moe_parallel_config.sp_size,
             expand=envs.VLLM_NIXL_EP_V2_EXPAND,
+            nvfp4_dispatch=envs.VLLM_NIXL_EP_V2_NVFP4_DISPATCH,
         )
 
     elif moe.use_moonep_kernels:

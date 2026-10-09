@@ -7,6 +7,7 @@ from nixl.runtime import ep
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -17,7 +18,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 from vllm.utils.math_utils import cdiv, next_power_of_2, round_up
+
+logger = init_logger(__name__)
 
 
 class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -37,6 +41,10 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         row per received (token, local expert) pair, grouped by expert.
 
     Activations are dispatched in BF16, or in block FP8 for block-FP8 layers.
+    NVFP4 layers dispatch BF16 and quantize the received rows, or with
+    nvfp4_dispatch quantize before the dispatch and send the NVFP4 codes and
+    row-major scales, swizzled after receive if the experts want them so.
+    Either way, layers whose experts quantize their own input dispatch BF16.
     DBO is not supported: there is one handle slot.
 
     Args:
@@ -52,6 +60,8 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             shard of its DP rank's tokens.
         expand: Under use_cudagraph, take the expanded layout instead of the
             padded one.
+        nvfp4_dispatch: Quantize NVFP4 layers' input before the dispatch
+            instead of after it.
 
     """
 
@@ -78,6 +88,7 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use_cudagraph: bool,
         sp_size: int = 1,
         expand: bool = False,
+        nvfp4_dispatch: bool = False,
     ):
         super().__init__()
         self.buffer = buffer
@@ -87,6 +98,7 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
         self.expand = expand
+        self.nvfp4_dispatch = nvfp4_dispatch
         self.handle: ep.EPHandle | None = None
         # arange(num_local_experts) + rank_expert_offset, built on first use.
         self._expert_ids: torch.Tensor | None = None
@@ -138,15 +150,38 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         x: torch.Tensor | tuple[torch.Tensor, torch.Tensor | None] = a1
-        if quant_config.quant_dtype is not None:
+        quantize_after = False
+        swizzle_scales = False
+        wire = "bf16"
+        if quant_config.quant_dtype == "nvfp4":
+            if self.nvfp4_dispatch and not defer_input_quant:
+                # One global scale for every rank: the oracle repeats one amax
+                # per expert, and the experts GEMM folds the same a1_gscale in.
+                codes, scales = moe_kernel_quantize_input(
+                    a1,
+                    quant_config.a1_gscale,
+                    quant_dtype="nvfp4",
+                    per_act_token_quant=False,
+                    is_scale_swizzled=False,
+                )
+                assert scales is not None
+                # Row-major [tokens, hidden // 16] e4m3: swizzling pads rows.
+                x = (codes, scales.view(torch.float8_e4m3fn))
+                swizzle_scales = quant_config.is_scale_swizzled
+                wire = "nvfp4"
+            else:
+                # Otherwise NVFP4 is quantized after receive, as deepep_v2
+                # does, unless the experts quantize their own input.
+                quantize_after = not defer_input_quant
+        elif quant_config.quant_dtype is not None:
             # Weight-only schemes have no quant_dtype and dispatch BF16.
             if (
                 not (quant_config.use_fp8_w8a8 and quant_config.is_block_quantized)
                 or defer_input_quant
             ):
                 raise NotImplementedError(
-                    "nixl_ep_v2 dispatches BF16 or block-FP8 activations only, "
-                    f"got quant_dtype={quant_config.quant_dtype}, "
+                    "nixl_ep_v2 dispatches BF16, block-FP8 or NVFP4 activations "
+                    f"only, got quant_dtype={quant_config.quant_dtype}, "
                     f"block_shape={quant_config.block_shape}, "
                     f"defer_input_quant={defer_input_quant}"
                 )
@@ -158,6 +193,15 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 block_shape=quant_config.block_shape,
                 is_scale_swizzled=False,
             )
+            wire = "fp8"
+        if self.nvfp4_dispatch and wire != "nvfp4":
+            logger.info_once(
+                "VLLM_NIXL_EP_V2_NVFP4_DISPATCH has no effect on layers with "
+                "quant_dtype=%s, defer_input_quant=%s",
+                quant_config.quant_dtype,
+                defer_input_quant,
+            )
+        logger.info_once("nixl_ep_v2 dispatch wire: %s", wire)
 
         recv_x, recv_topk_idx, recv_topk_weights, handle, _ = self.buffer.dispatch(
             x=x,
@@ -171,7 +215,15 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             do_expand=self.expand or not self.use_cudagraph,
         )
         self.handle = handle
-        return lambda: self._receiver(recv_x, recv_topk_idx, recv_topk_weights, handle)
+        post_quant_config = quant_config if quantize_after else None
+        return lambda: self._receiver(
+            recv_x,
+            recv_topk_idx,
+            recv_topk_weights,
+            handle,
+            post_quant_config,
+            swizzle_scales,
+        )
 
     def _receiver(
         self,
@@ -179,6 +231,8 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         recv_topk_idx: torch.Tensor | None,
         recv_topk_weights: torch.Tensor,
         handle: ep.EPHandle,
+        post_quant_config: FusedMoEQuantConfig | None,
+        swizzle_scales: bool,
     ) -> mk.PrepareResultType:
         expert_x, expert_x_scale = (
             recv_x if isinstance(recv_x, tuple) else (recv_x, None)
@@ -217,6 +271,22 @@ class NixlEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 recv_topk_idx, psum[-1:], self.rank_expert_offset
             )
             topk_weights = recv_topk_weights
+
+        if post_quant_config is not None and expert_x.numel() != 0:
+            expert_x, expert_x_scale = moe_kernel_quantize_input(
+                expert_x,
+                post_quant_config.a1_gscale,
+                quant_dtype=post_quant_config.quant_dtype,
+                per_act_token_quant=False,
+                is_scale_swizzled=post_quant_config.is_scale_swizzled,
+            )
+        elif swizzle_scales and expert_x.numel() != 0:
+            # Every layout's padding rows get scales too, ignored like their
+            # codes.
+            assert expert_x_scale is not None
+            expert_x_scale = nvfp4_block_scale_interleave(
+                expert_x_scale.view(torch.uint8)
+            )
 
         return expert_x, expert_x_scale, meta, topk_ids, topk_weights
 
