@@ -14,10 +14,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import (
-    float_kv_cache_dtype_mismatch_reason,
-    is_quantized_kv_cache,
-)
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
@@ -133,6 +130,7 @@ class RocmSegmentedAttentionBackend(RocmAttentionBackend):
     ) -> str | None:
         del (
             head_size,
+            dtype,
             block_size,
             use_mla,
             has_sink,
@@ -142,9 +140,6 @@ class RocmSegmentedAttentionBackend(RocmAttentionBackend):
         )
         if not is_rdna():
             return "ROCM_SEGMENTED_ATTN requires AMD RDNA GPUs on ROCm"
-        mismatch = float_kv_cache_dtype_mismatch_reason(kv_cache_dtype, dtype)
-        if mismatch is not None:
-            return mismatch
 
         from vllm.platforms.rocm import on_gfx12x
 

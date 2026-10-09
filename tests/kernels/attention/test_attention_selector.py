@@ -636,8 +636,6 @@ def _load_same_dtype_backend(qualname: str):
 _SAME_DTYPE_BACKENDS = [
     "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",
     "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
-    "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend",
-    "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
 ]
 
 
@@ -698,40 +696,6 @@ def test_triton_combination_allows_mismatched_float_kv(dtype, kv_cache_dtype):
     from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
     assert _supports_combination(TritonAttentionBackend, dtype, kv_cache_dtype) is None
-
-
-def test_rocm_segmented_attn_rejects_mismatched_float_kv():
-    from vllm.v1.attention.backends import rocm_segmented_attn as seg
-
-    backend_cls = seg.RocmSegmentedAttentionBackend
-    with patch.object(seg, "is_rdna", return_value=True):
-        reason = _supports_combination(backend_cls, torch.bfloat16, "float16")
-    assert reason is not None
-    assert "query dtype" in reason
-
-
-def test_aiter_fa_rejects_mismatched_float_kv():
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-
-    reason = _supports_combination(
-        AiterFlashAttentionBackend, torch.bfloat16, "float16"
-    )
-    assert reason is not None
-    assert "query dtype" in reason
-
-
-def test_aiter_unified_accepts_mismatched_float_kv():
-    """Aiter Triton unified_attention casts an unquantized KV tile to Q."""
-    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
-        RocmAiterUnifiedAttentionBackend,
-    )
-
-    assert (
-        _supports_combination(
-            RocmAiterUnifiedAttentionBackend, torch.bfloat16, "float16"
-        )
-        is None
-    )
 
 
 @pytest.mark.parametrize(

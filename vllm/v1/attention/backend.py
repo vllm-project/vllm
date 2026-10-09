@@ -67,9 +67,6 @@ class AttentionBackend(ABC):
         "float16",
         "bfloat16",
     ]
-    # Set True when this kernel cannot run an unquantized float16/bfloat16
-    # KV cache whose dtype differs from the query.
-    require_matching_float_kv: ClassVar[bool] = False
 
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
@@ -275,10 +272,6 @@ class AttentionBackend(ABC):
         use_mm_prefix: bool,
         device_capability: "DeviceCapability",
     ) -> str | None:
-        if cls.require_matching_float_kv:
-            from vllm.utils.torch_utils import float_kv_cache_dtype_mismatch_reason
-
-            return float_kv_cache_dtype_mismatch_reason(kv_cache_dtype, dtype)
         return None
 
     @classmethod
