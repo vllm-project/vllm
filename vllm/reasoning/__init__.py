@@ -108,6 +108,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "kimi_k3_reasoning_parser",
         "KimiK3ReasoningParser",
     ),
+    "kolibri1": (
+        "kolibri1_engine_reasoning_parser",
+        "Kolibri1ParserReasoningAdapter",
+    ),
     "k2_horizon": (
         "k2_horizon_reasoning_parser",
         "K2HorizonReasoningParser",

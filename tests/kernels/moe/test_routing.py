@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.models.kolibri1 import sigmoid_logit_add_routing
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
@@ -490,6 +492,27 @@ def baseline_custom_llama4(
     return router_scores.to(torch.float32), router_indices.to(torch.int32)
 
 
+def baseline_custom_kolibri1(
+    router_logits: torch.Tensor,
+    top_k: int,
+    renormalize: bool,
+    e_score_correction_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Baseline for Kolibri 1 custom routing.
+
+    Algorithm:
+    1. Select top-k experts on logits + bias
+    2. Weight them by the sigmoid of the unbiased logits
+    3. Optionally renormalize the weights
+    """
+    logits = router_logits.float()
+    topk_ids = torch.topk(logits + e_score_correction_bias, top_k, dim=-1)[1]
+    topk_weights = torch.sigmoid(logits).gather(1, topk_ids)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
 @pytest.mark.parametrize("m,k", MK_S)
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("global_num_experts", NUM_EXPERTS)
@@ -712,6 +735,58 @@ def test_custom(
 
     # Compare results
     assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
+
+
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("enable_eplb", [False, True])
+def test_custom_kolibri1(renormalize: bool, enable_eplb: bool):
+    m, k, top_k, global_num_experts = 32, 256, 6, 64
+    eplb_state = setup_eplb_state(enable_eplb, global_num_experts)
+    # Random, not constant: a constant bias never changes the top-k selection.
+    e_score_correction_bias = torch.randn(
+        global_num_experts, device="cuda", dtype=torch.float32
+    )
+
+    router = create_fused_moe_router(
+        top_k=top_k,
+        global_num_experts=global_num_experts,
+        custom_routing_function=partial(
+            sigmoid_logit_add_routing,
+            e_score_correction_bias=e_score_correction_bias,
+        ),
+        renormalize=renormalize,
+        eplb_state=eplb_state,
+    )
+
+    hidden_states, router_logits = make_test_data(m, k, global_num_experts)
+    topk_weights, topk_ids = router.select_experts(hidden_states, router_logits)
+
+    baseline_weights, baseline_ids = baseline_custom_kolibri1(
+        router_logits, top_k, renormalize, e_score_correction_bias
+    )
+    assert_routing_results_close(topk_weights, topk_ids, baseline_weights, baseline_ids)
+
+
+def test_kolibri1_routing_selects_on_biased_logits():
+    """Kolibri 1 selects on logits + bias, unlike the built-in sigmoid scoring,
+    which selects on sigmoid(logits) + bias, and weights by the unbiased
+    sigmoid(logits)."""
+    logits = torch.tensor([[2.0, 0.0]])
+    bias = torch.tensor([0.5, 1.5])
+
+    topk_weights, topk_ids = sigmoid_logit_add_routing(
+        hidden_states=torch.empty(1, 1),
+        gating_output=logits,
+        topk=1,
+        renormalize=False,
+        e_score_correction_bias=bias,
+    )
+
+    # logits + bias = [2.5, 1.5] picks expert 0;
+    # sigmoid(logits) + bias = [1.38, 2.0] would pick expert 1.
+    assert topk_ids.tolist() == [[0]]
+    # sigmoid(2.0) = 0.881; the biased sigmoid(2.5) would be 0.924.
+    torch.testing.assert_close(topk_weights, torch.sigmoid(logits[:, :1]))
 
 
 # TODO: is other test sufficient?

@@ -126,6 +126,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "kimi_k3_tool_parser",
         "KimiK3ToolParser",
     ),
+    "kolibri1": (
+        "hermes_tool_parser",
+        "Hermes2ProToolParser",
+    ),
     "k2_horizon": (
         "k2_horizon_tool_parser",
         "K2HorizonToolParser",
