@@ -8,6 +8,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tests.models.test_deepseek_v41_amd_replay_forward import _RocmKvInsert
+from vllm.forward_context import override_forward_context
+
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
@@ -32,17 +35,20 @@ def test_amd_model_fills_replay_metadata_prefixes(monkeypatch):
                     if indexer is None
                     else SimpleNamespace(k_cache=SimpleNamespace(prefix=indexer))
                 ),
+                compress_ratio=1,
             ),
             engram=None,
         )
 
-    # Layer 0 is the KV source. Replay starts at layer 1. Layer 2 has no
+    # Layer 0 is the KV source, so replay starts there. Layer 2 has no
     # compressed cache and no indexer, so those keys are not added for it.
+    insert = _RocmKvInsert(19)
     layers = [
         fake_layer("layers.0", "layers.0.compressed", "layers.0.indexer"),
         fake_layer("layers.1", "layers.0.compressed", "layers.1.indexer"),
         fake_layer("layers.2", None, None),
     ]
+    layers[0].write_kv = insert.write
     monkeypatch.setattr(amd, "make_layers", lambda n, factory, prefix: (0, n, layers))
 
     config = SimpleNamespace(
@@ -73,10 +79,21 @@ def test_amd_model_fills_replay_metadata_prefixes(monkeypatch):
 
     model = amd.DeepseekV4Model(vllm_config=vllm_config)
 
-    assert model.decoder_replay_start == 1
+    assert model.decoder_replay_start == 0
+    assert model.decoder_replay_layers.first_swa_prefix == "layers.0.swa"
     assert model.decoder_replay_layers.metadata_prefixes == {
-        "layers.1.swa",
+        "layers.0.swa",
         "layers.0.compressed",
+        "layers.0.indexer",
+        "layers.1.swa",
         "layers.1.indexer",
         "layers.2.swa",
     }
+    hidden = torch.empty(19, 1, device="cuda")
+    positions = torch.arange(19, device="cuda")
+    mix = torch.empty(19, 1, device="cuda")
+    with override_forward_context(insert.context):
+        model.decoder_replay_layers.write_batch_kv(
+            hidden, positions, None, mix, mix, mix, hidden
+        )
+    insert.assert_matches_forward()
