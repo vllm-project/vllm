@@ -1949,6 +1949,22 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
+def gather_block_table_cpu(
+    block_table: torch.Tensor,
+    output: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_blocks: torch.Tensor,
+    num_reqs_padded: int,
+) -> None:
+    torch.ops._C.gather_block_table_cpu(
+        block_table,
+        output,
+        idx_mapping,
+        num_blocks,
+        num_reqs_padded,
+    )
+
+
 def prepare_prefill_inputs_cpu(
     input_ids: torch.Tensor,
     next_prefill_tokens: torch.Tensor,
