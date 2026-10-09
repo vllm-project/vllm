@@ -42,14 +42,13 @@ class DraftTokensHandler:
     ) -> None:
         self.req_ids = input_batch.req_ids
         self.num_draft_tokens = draft_tokens.shape[1]
-        if not input_batch.has_structured_output_reqs:
-            # No draft token validation needs to be performed by
-            # the scheduler for this batch.
-            self.draft_tokens_np = None
-            return
-
-        # For spec decoding + structured outputs, we must transfer the
-        # draft tokens back to the scheduler for grammar validation.
+        # Always transfer the drafts. The slot is shared across steps, so
+        # clearing it for batches without structured-output requests makes
+        # get_draft_tokens return -1 placeholders that the scheduler treats
+        # as real draft tokens: with async scheduling disabled this kills
+        # the PP worker (1 query row vs 2 logits rows -> prepare_inputs
+        # assert); with async scheduling it silently corrupts
+        # structured-output constraints (#54437).
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
@@ -65,7 +64,7 @@ class DraftTokensHandler:
             self.copy_event.synchronize()
             draft_token_ids = self.draft_tokens_np.tolist()
         else:
-            # This case only happens when async scheduling is disabled.
+            # Only reachable before the first set_draft_tokens call.
             draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
         return DraftTokenIds(self.req_ids, draft_token_ids)
 
