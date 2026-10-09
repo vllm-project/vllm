@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.models.glm5next.nvidia.mega_moe import (
-    Glm5NextMegaMoEExperts,
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    DeepGemmSm100Fp8MegaMoEBackend,
     requant_block_fp8_to_ue8m0,
 )
+from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 
 BLOCK = (128, 128)
 
@@ -33,7 +34,7 @@ def test_requant_gives_power_of_two_scale_per_32_columns():
     real = torch.randn(3, 256, 384) * 0.02
     weight, scale = _block_fp8(real)
 
-    requant, sf = requant_block_fp8_to_ue8m0(weight, scale, BLOCK, chunk=2)
+    requant, sf = requant_block_fp8_to_ue8m0(weight, scale, chunk=2)
 
     assert requant.dtype == torch.float8_e4m3fn
     assert requant.shape == weight.shape
@@ -52,7 +53,7 @@ def test_requant_is_exact_for_power_of_two_block_scales():
     real = torch.randn(256, 256) * 0.05
     weight, scale = _block_fp8(real, power_of_two=True)
 
-    requant, sf = requant_block_fp8_to_ue8m0(weight, scale, BLOCK)
+    requant, sf = requant_block_fp8_to_ue8m0(weight, scale)
 
     # A finer power-of-two scale only shifts exponents, so nothing rounds.
     assert torch.equal(
@@ -62,7 +63,8 @@ def test_requant_is_exact_for_power_of_two_block_scales():
 
 def _experts(**kwargs) -> Glm5NextMegaMoEExperts:
     vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=64)
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
     return Glm5NextMegaMoEExperts(
         vllm_config,  # type: ignore[arg-type]
@@ -123,3 +125,71 @@ def test_weight_loader_places_gate_then_up_for_local_experts_only():
     assert torch.all(w13[0] == 0.0)
     scale = loader.w13_weight_scale_inv.data
     assert torch.all(scale[1, 1] == 0.5) and torch.all(scale[1, 0] == 0.0)
+
+
+class _FakeDeepGemm:
+    """Identity layout transforms, so the test sees what the backend passes."""
+
+    sf_calls: list[tuple] = []
+
+    @classmethod
+    def transform_sf_into_required_layout(cls, sf, mn, k, gran, num_groups):
+        cls.sf_calls.append((tuple(sf.shape), mn, k, gran, num_groups))
+        return sf
+
+    @staticmethod
+    def transform_weights_for_mega_moe(l1, l2):
+        return l1, l2
+
+
+def test_fp8_backend_requantizes_routed_weights_to_1x32(monkeypatch):
+    torch.manual_seed(2)
+    monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: _FakeDeepGemm)
+    _FakeDeepGemm.sf_calls = []
+    w13, s13 = _block_fp8(torch.randn(2, 256, 256) * 0.02)
+    w2, s2 = _block_fp8(torch.randn(2, 256, 128) * 0.02)
+
+    (l1, l1_sf), (l2, l2_sf) = DeepGemmSm100Fp8MegaMoEBackend().transform_weights(
+        w13_weight=w13,
+        w13_weight_scale=s13,
+        w2_weight=w2,
+        w2_weight_scale=s2,
+        num_local_experts=2,
+        hidden_size=256,
+        intermediate_size=128,
+    )
+
+    assert _FakeDeepGemm.sf_calls == [
+        ((2, 256, 8), 256, 256, (1, 32), 2),
+        ((2, 256, 4), 256, 128, (1, 32), 2),
+    ]
+    for q, sf, w, s in ((l1, l1_sf, w13, s13), (l2, l2_sf, w2, s2)):
+        assert q.dtype == torch.float8_e4m3fn
+        restored = q.float() * sf.repeat_interleave(32, -1)
+        original = _dequant_block(w, s)
+        assert ((restored - original).norm() / original.norm()).item() < 0.05
+
+
+def test_finalize_hands_the_checkpoint_weights_to_the_backend(monkeypatch):
+    experts = _experts()
+    seen = {}
+
+    class Backend:
+        mma_type = "fp8xfp8"
+
+        def transform_weights(self, **kwargs):
+            seen.update(kwargs)
+            return ("l1", "l1_sf"), ("l2", "l2_sf")
+
+    monkeypatch.setattr(experts, "_ensure_backend", lambda: Backend())
+    monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: object())
+
+    experts.finalize_weights()
+
+    assert seen["w13_weight"].dtype == torch.float8_e4m3fn
+    assert seen["w13_weight_scale"].shape == (2, 2, 2)
+    assert seen["w2_weight_scale"].shape == (2, 2, 1)
+    assert experts._transformed_l1_weights == ("l1", "l1_sf")
+    # Only the kernel's tensors remain.
+    assert experts.routed_experts is None
+    assert dict(experts.named_parameters()) == {}

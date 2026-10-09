@@ -340,9 +340,11 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             if shard_id in ("w1", "w3"):
                 if "w13_" not in weight_name:
                     continue
-                shard_offset = 0 if shard_id == "w1" else self.intermediate_size
+                # Gate (w1) rows first, then up (w3); block scales with fewer
+                # rows than the weight shard the same way.
+                half = expert_data.shape[0] // 2
                 expert_data = expert_data.narrow(
-                    0, shard_offset, self.intermediate_size
+                    0, 0 if shard_id == "w1" else half, half
                 )
             elif shard_id == "w2":
                 if "w2_" not in weight_name:
