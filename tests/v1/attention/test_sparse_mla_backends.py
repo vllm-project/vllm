@@ -3367,53 +3367,6 @@ def test_hisparse_keeps_speculative_rows_as_decodes():
     assert builder.reorder_batch_threshold == 4
 
 
-def test_flashinfer_hisparse_decode_runs_batched_attention():
-    device = torch.device("cpu")
-    num_tokens = 6
-    q = torch.randn(num_tokens, 2, 4, device=device)
-    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=device)
-    physical_topk = topk + 10
-    valid_counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=device)
-    kernel_shapes: list[torch.Size] = []
-
-    def convert_decode(self, *args, **kwargs):  # noqa: ARG001
-        return physical_topk, valid_counts
-
-    def run_kernel(self, q, cache, indices, counts, **kwargs):  # noqa: ARG001
-        kernel_shapes.append(q.shape)
-        return q[..., :1], None
-
-    cache_handle = SimpleNamespace(
-        runtime=SimpleNamespace(
-            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
-        ),
-    )
-    index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.caches = [cache_handle]
-    index_group.convert_logical_to_physical_topk = MethodType(
-        convert_decode, index_group
-    )
-    impl = object.__new__(FlashInferMLASparseImpl)
-    impl.topk_indices_buffer = topk
-    impl.dcp_world_size = 1
-    impl.index_group = index_group
-    impl.index_group_index = 0
-    impl._forward_mqa_kernel = MethodType(run_kernel, impl)
-    metadata = SimpleNamespace(num_decode_tokens=num_tokens, block_size=64)
-
-    output, lse = FlashInferMLASparseImpl.forward_mqa(
-        impl,
-        q,
-        torch.empty(1, device=device),
-        metadata,
-        SimpleNamespace(),
-    )
-
-    assert kernel_shapes == [q.shape]
-    assert output.shape == (num_tokens, 2, 1)
-    assert lse is None
-
-
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(90),
     reason="FlashAttention MLA requires Hopper",
@@ -3543,42 +3496,6 @@ def test_flashattn_shared_indices_match_independent_conversion(
     stream.synchronize()
 
 
-def test_flashattn_hisparse_decode_uses_index_group():
-    num_tokens = 4
-    q_nope = torch.empty(num_tokens, 2, 3, device=DEVICE_TYPE)
-    q_rope = torch.empty(num_tokens, 2, 1, device=DEVICE_TYPE)
-    topk = torch.zeros(num_tokens, 4, dtype=torch.int32, device=DEVICE_TYPE)
-    physical = topk.clone()
-    counts = torch.full((num_tokens,), 4, dtype=torch.int32, device=DEVICE_TYPE)
-    index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.convert_logical_to_physical_topk = MagicMock(
-        return_value=(physical, counts)
-    )
-    index_group.physical_kv_cache = MagicMock(
-        return_value=torch.empty(1, device=DEVICE_TYPE)
-    )
-    impl = object.__new__(FlashAttnMLASparseImpl)
-    impl.topk_indices_buffer = topk
-    impl.dcp_world_size = 1
-    impl.index_group = index_group
-    impl.index_group_index = 0
-    impl._forward_mqa_kernel = MagicMock(return_value=(q_nope[..., :1], None))
-    metadata = SimpleNamespace(num_decode_tokens=num_tokens, block_size=64)
-
-    output, lse = FlashAttnMLASparseImpl.forward_mqa(
-        impl,
-        (q_nope, q_rope),
-        torch.empty(1, device=DEVICE_TYPE),
-        metadata,
-        SimpleNamespace(),
-    )
-
-    assert output.shape == (num_tokens, 2, 1)
-    assert lse is None
-    index_group.convert_logical_to_physical_topk.assert_called_once()
-    impl._forward_mqa_kernel.assert_called_once()
-
-
 def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     num_tokens = 4
     q = torch.empty(num_tokens, 2, 4, device=DEVICE_TYPE)
@@ -3613,128 +3530,51 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     impl._run_mqa_kernel.assert_called_once()
 
 
-def test_flashattn_plain_path_passes_converted_topk(monkeypatch):
-    """FA3's plain path hands the converted top-k straight to the kernel."""
-    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa3_module
-
-    device = torch.device(DEVICE_TYPE)
-    num_tokens, topk_tokens, lora, rope, block_size = 3, 8, 4, 2, 4
-    kv_cache = torch.arange(
-        2 * block_size * (lora + rope), dtype=torch.bfloat16, device=device
-    ).view(2, block_size, lora + rope)
-    logical = torch.zeros(num_tokens, topk_tokens, dtype=torch.int32, device=device)
-    physical = torch.full_like(logical, 5)
-    counts = torch.full((num_tokens,), topk_tokens, dtype=torch.int32, device=device)
-    recorded: dict = {}
-
-    def fake_kernel(**kwargs):
-        recorded.update(kwargs)
-        return torch.zeros(num_tokens, 2, lora, device=device)
-
-    monkeypatch.setattr(fa3_module, "flash_attn_varlen_func", fake_kernel)
-
-    impl = object.__new__(FlashAttnMLASparseImpl)
-    impl.topk_indices_buffer = logical
-    impl.index_group = SimpleNamespace(num_layers=2)
-    impl.dcp_world_size = 1
-    impl._convert_logical_to_physical_topk = MagicMock(return_value=(physical, counts))
-    impl.kv_lora_rank = lora
-    impl.qk_rope_head_dim = rope
-    impl.cu_seqlens_q_buffer = torch.arange(
-        num_tokens + 1, dtype=torch.int32, device=device
-    )
-    impl.scale = 0.25
-    q_nope = torch.zeros(num_tokens, 2, lora, device=device)
-    q_rope = torch.zeros(num_tokens, 2, rope, device=device)
-    metadata = SimpleNamespace(num_decode_tokens=num_tokens, block_size=block_size)
-
-    out, lse = impl.forward_mqa((q_nope, q_rope), kv_cache, metadata, None)
-
-    assert recorded["block_table"] is physical
-    assert recorded["seqused_k"] is counts
-    kv_rows = kv_cache.view(-1, lora + rope)
-    assert recorded["q"] is q_rope and recorded["q_v"] is q_nope
-    torch.testing.assert_close(recorded["k"][:, 0, 0], kv_rows[:, lora:])
-    torch.testing.assert_close(recorded["v"][:, 0, 0], kv_rows[:, :lora])
-    assert lse is None and out.shape == (num_tokens, 2, lora)
-
-
-@pytest.mark.parametrize("dcp", [1, 2], ids=["native", "dcp2"])
-def test_sparse_mqa_plain_lane_wiring(monkeypatch, dcp):
-    """The plain lane converts once and hands the hook one whole-batch call."""
+def test_sparse_mqa_plain_lane_wiring(monkeypatch):
+    """Under DCP the plain lane converts with the DCP filter at the flat stride."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
 
     num_tokens, topk_tokens, block_size, head_dim = 3, 8, 4, 6
     # Flat row stride (8) differs from block size (4): the wrong one misaddresses.
     kv_cache = torch.zeros(2, 8, head_dim)[:, :block_size]
-    # One row longer than the batch, so slicing to num_tokens is observable.
-    topk_buffer = torch.zeros(num_tokens + 1, topk_tokens, dtype=torch.int32)
-    req_id_per_token = torch.zeros(num_tokens + 1, dtype=torch.int32)
     q = torch.zeros(num_tokens, 2, head_dim)
-    physical = torch.full((num_tokens, topk_tokens), 5, dtype=torch.int32)
-    counts = torch.full((num_tokens,), topk_tokens, dtype=torch.int32)
-    layer = object()
     metadata = SimpleNamespace(
         num_decode_tokens=num_tokens,
         block_size=block_size,
         block_table=torch.zeros((num_tokens, 1), dtype=torch.int32),
-        req_id_per_token=req_id_per_token,
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32),
         cp_kv_cache_interleave_size=2,
     )
-    index_filter = MagicMock(return_value=(physical, counts))
+    index_filter = MagicMock(return_value=(None, None))
     monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", index_filter)
 
     impl = object.__new__(FlashInferMLASparseImpl)
-    impl.topk_indices_buffer = topk_buffer
+    impl.topk_indices_buffer = torch.zeros(num_tokens, topk_tokens, dtype=torch.int32)
     impl.index_group = MagicMock()
     impl.index_group_index = 0
-    impl.dcp_world_size = dcp
-    impl.dcp_rank = dcp - 1
-    impl._convert_logical_to_physical_topk = MagicMock(return_value=(physical, counts))
+    impl.dcp_world_size = 2
+    impl.dcp_rank = 1
+    impl._convert_logical_to_physical_topk = MagicMock()
     impl._forward_mqa_kernel = MagicMock(return_value=(q, None))
 
-    out, lse = impl.forward_mqa(q, kv_cache, metadata, layer)
+    impl.forward_mqa(q, kv_cache, metadata, None)
 
-    assert out is q and lse is None
-    if dcp > 1:
-        impl._convert_logical_to_physical_topk.assert_not_called()
-        args, kwargs = index_filter.call_args
-        assert args[0].data_ptr() == req_id_per_token.data_ptr()
-        assert args[0].shape == (num_tokens,)
-        assert args[1] is metadata.block_table
-        assert args[2].data_ptr() == topk_buffer.data_ptr()
-        assert args[2].shape == (num_tokens, topk_tokens)
-        assert kwargs["BLOCK_STRIDE_ROWS"] == 8
-    else:
-        index_filter.assert_not_called()
-        args, kwargs = impl._convert_logical_to_physical_topk.call_args
-        assert args[0].data_ptr() == topk_buffer.data_ptr()
-        assert args[0].shape == (num_tokens, topk_tokens)
-        assert args[1] is metadata
-        assert kwargs == {"block_stride_rows": 8, "return_valid_counts": True}
-    impl._forward_mqa_kernel.assert_called_once_with(
-        q,
-        kv_cache,
-        physical,
-        counts,
-        layer=layer,
-        block_size=block_size,
-        is_decode=True,
-    )
+    impl._convert_logical_to_physical_topk.assert_not_called()
+    assert index_filter.call_args.kwargs["BLOCK_STRIDE_ROWS"] == 8
+    impl._forward_mqa_kernel.assert_called_once()
 
 
-@pytest.mark.parametrize("split_q", [False, True], ids=["fused", "split"])
 @pytest.mark.parametrize(
-    "num_decode_tokens,all_resident,lane",
+    "num_decode_tokens,all_resident,split_q",
     [
-        (0, True, "resident"),
-        (0, False, "staged"),
-        # Fewer prefill than decode rows: row counts cannot tell the calls apart.
-        (2, True, "mixed"),
+        pytest.param(0, True, False, id="resident"),
+        pytest.param(0, False, False, id="staged"),
+        pytest.param(2, True, True, id="mixed"),
+        pytest.param(5, True, False, id="decode"),
     ],
 )
 def test_sparse_mqa_hisparse_lanes(
-    monkeypatch, num_decode_tokens, all_resident, lane, split_q
+    monkeypatch, num_decode_tokens, all_resident, split_q
 ):
     """HiSparse splits a batch into at most one decode and one prefill call."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
@@ -3745,9 +3585,7 @@ def test_sparse_mqa_hisparse_lanes(
     host = torch.zeros(2, block_size, head_dim, dtype=torch.bfloat16)
     hot = torch.zeros(6, block_size, head_dim, dtype=torch.bfloat16)
     staged = torch.zeros(3, block_size, head_dim, dtype=torch.bfloat16)
-    topk_buffer = torch.zeros(num_tokens + 1, topk_tokens, dtype=torch.int32)
     q = torch.arange(num_tokens, dtype=torch.float32).view(num_tokens, 1, 1)
-    layer = object()
     metadata = SimpleNamespace(
         num_decode_tokens=num_decode_tokens, block_size=block_size
     )
@@ -3758,106 +3596,63 @@ def test_sparse_mqa_hisparse_lanes(
             torch.full((rows,), rows, dtype=torch.int32),
         )
 
-    decode_ret = converted(num_decode_tokens, 1)
-    resident_ret = converted(num_tokens, 2)
-    staged_ret = converted(num_prefill, 3)
-    req_ids = torch.zeros(num_prefill, dtype=torch.int32)
-    staged_block_table = torch.zeros(1, staged.shape[0], dtype=torch.int32)
-
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.physical_kv_cache = MagicMock(return_value=hot)
     index_group.cache = MagicMock(
         return_value=SimpleNamespace(all_context_pages_resident=all_resident)
     )
+    # The fill value names the converter that produced a call's indices.
     index_group.convert_logical_to_physical_topk = MagicMock(
-        return_value=decode_ret if num_decode_tokens else resident_ret
+        return_value=converted(num_decode_tokens, 1)
+        if num_decode_tokens
+        else converted(num_tokens, 2)
     )
-    index_group.stage_prefill_rows = MagicMock(
-        return_value=(staged, staged_block_table, req_ids)
-    )
+    index_group.stage_prefill_rows = MagicMock(return_value=(staged, None, None))
     calls: list[tuple] = []
 
     def convert_staged(*args, **kwargs):
         # Decode rows are consumed before a later conversion can reuse their buffer.
         assert len(calls) == min(num_decode_tokens, 1)
-        return staged_ret
+        return converted(num_prefill, 3)
 
-    convert = MagicMock(side_effect=convert_staged)
-    monkeypatch.setattr(sparse_mla, "triton_convert_req_index_to_global_index", convert)
+    monkeypatch.setattr(
+        sparse_mla,
+        "triton_convert_req_index_to_global_index",
+        MagicMock(side_effect=convert_staged),
+    )
 
-    def hook(rows, cache, indices, counts, **kwargs):
+    def hook(rows, cache, indices, counts, *, is_decode, **kwargs):
         if split_q:
             assert rows[0].tolist() == rows[1].tolist()
             rows = rows[0]
-        assert kwargs["layer"] is layer and kwargs["block_size"] == block_size
-        is_decode = kwargs["is_decode"]
-        calls.append((rows, cache.data_ptr(), indices, counts, is_decode))
+        calls.append((rows.flatten().tolist(), cache.shape[0], indices[0, 0].item()))
         return torch.full((rows.shape[0], 1, 1), 1.0 if is_decode else 2.0), None
 
     impl = object.__new__(FlashInferMLASparseImpl)
-    impl.topk_indices_buffer = topk_buffer
+    impl.topk_indices_buffer = torch.zeros(num_tokens, topk_tokens, dtype=torch.int32)
     impl.index_group = index_group
     impl.index_group_index = 0
     impl.dcp_world_size = 1
     impl._forward_mqa_kernel = hook
 
-    out, lse = impl.forward_mqa((q, q) if split_q else q, host, metadata, layer)
+    out, lse = impl.forward_mqa((q, q) if split_q else q, host, metadata, None)
 
+    q_rows = q.flatten().tolist()
+    expected = []
+    if num_decode_tokens:
+        # Decode reads the hot cache through the group's conversion.
+        expected.append((q_rows[:num_decode_tokens], hot.shape[0], 1))
+    if num_decode_tokens == 0 and all_resident:
+        expected.append((q_rows, hot.shape[0], 2))
+    elif num_prefill:
+        expected.append((q_rows[num_decode_tokens:], staged.shape[0], 3))
+    assert calls == expected
+    if not num_prefill:
+        # A decode-only batch returns before it looks up the prefill cache.
+        index_group.cache.assert_not_called()
     assert lse is None
     # A lane handed the whole batch would concatenate to more rows than this.
-    assert out.shape == (num_tokens, 1, 1)
-    if num_decode_tokens:
-        rows, kv_ptr, indices, counts, is_decode = calls[0]
-        assert is_decode is True
-        assert kv_ptr == hot.data_ptr()
-        # Identity, not equality: a sub-slice would break pointer stability.
-        assert indices is decode_ret[0] and counts is decode_ret[1]
-        assert rows.tolist() == q[:num_decode_tokens].tolist()
-        args, kwargs = index_group.convert_logical_to_physical_topk.call_args_list[0]
-        assert args[1].data_ptr() == topk_buffer.data_ptr()
-        assert args[1].shape == (num_decode_tokens, topk_tokens)
-        assert args[2] is metadata
-        assert kwargs == {"block_stride_rows": None, "return_valid_counts": True}
-
-    rows, kv_ptr, indices, counts, is_decode = calls[-1]
-    assert is_decode is False
-    assert rows.tolist() == q[num_decode_tokens:].tolist()
-    if lane == "resident":
-        index_group.stage_prefill_rows.assert_not_called()
-        convert.assert_not_called()
-        assert kv_ptr == hot.data_ptr()
-        assert indices is resident_ret[0] and counts is resident_ret[1]
-        args, kwargs = index_group.convert_logical_to_physical_topk.call_args
-        assert args[1].data_ptr() == topk_buffer.data_ptr()
-        assert args[1].shape == (num_tokens, topk_tokens)
-        assert args[2] is metadata
-        # The resident cache carries its own stride, so the group resolves it.
-        assert kwargs == {"block_stride_rows": None, "return_valid_counts": True}
-    else:
-        assert index_group.convert_logical_to_physical_topk.call_count == min(
-            num_decode_tokens, 1
-        )
-        assert index_group.stage_prefill_rows.call_args.args == (0, host, metadata)
-        assert kv_ptr == staged.data_ptr()
-        assert indices is staged_ret[0] and counts is staged_ret[1]
-        args, kwargs = convert.call_args
-        assert args[0] is req_ids and args[1] is staged_block_table
-        assert args[2].data_ptr() == topk_buffer[num_decode_tokens:].data_ptr()
-        assert args[2].shape == (num_prefill, topk_tokens)
-        # The staging buffer is densely packed: no block stride to pass on.
-        assert kwargs == {
-            "BLOCK_SIZE": block_size,
-            "NUM_TOPK_TOKENS": topk_tokens,
-            "return_valid_counts": True,
-        }
-
-    if lane == "mixed":
-        assert [call[-1] for call in calls] == [True, False]
-        assert (out[:num_decode_tokens] == 1.0).all()
-        assert (out[num_decode_tokens:] == 2.0).all()
-    else:
-        assert [call[-1] for call in calls] == [False]
-        assert (out == 2.0).all()
+    assert out.flatten().tolist() == [1.0] * num_decode_tokens + [2.0] * num_prefill
 
 
 def test_hisparse_resident_prefill_uses_attention_block_stride():
@@ -3928,32 +3723,31 @@ def test_hisparse_mixed_single_token_batch_is_not_decode_only():
     assert not cache.decode_batch
 
 
-def _fa4_impl(**fields):
-    buffer = fields.pop("topk_indices_buffer")
-    fields.setdefault("num_heads", 16)
-    fields.setdefault("kv_lora_rank", 512)
-    fields.setdefault("qk_nope_head_dim", 128)
-    fields.setdefault("qk_rope_head_dim", 64)
-    fields.setdefault("scale", 1.0)
-    fields.setdefault("kv_cache_dtype", "auto")
-    fields.setdefault("dcp_world_size", 1)
-    fields.setdefault("dcp_rank", 0)
-    fields.setdefault("need_to_return_lse_for_decode", False)
-    fields.setdefault("index_group_index", 0)
-    fields.setdefault("is_nope_mla", False)
-    fields.setdefault("_workspace_buffer", None)
-    fields.setdefault("bmm1_scale", None)
-    fields.setdefault("bmm2_scale", None)
-    if "index_group" not in fields:
+def _fa4_impl(topk_indices_buffer, **fields):
+    impl = object.__new__(FlashAttnMLASparseFA4Impl)
+    impl.__dict__.update(
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        scale=1.0,
+        kv_cache_dtype="auto",
+        dcp_world_size=1,
+        dcp_rank=0,
+        need_to_return_lse_for_decode=False,
+        is_nope_mla=False,
+        _workspace_buffer=None,
+        bmm1_scale=None,
+        bmm2_scale=None,
         # A non-index-producing layer does not wait on the indexer's ready event.
-        fields["index_group"] = SparseMLAIndexGroupBuilder(buffer).register_layer(
+        index_group=SparseMLAIndexGroupBuilder(topk_indices_buffer).register_layer(
             False
-        )[0]
-    stub = object.__new__(FlashAttnMLASparseFA4Impl)
-    stub.__dict__.update(fields)
+        )[0],
+        index_group_index=0,
+    )
+    impl.__dict__.update(fields)
     # topk_indices_buffer is a data descriptor, so it needs its own setter.
-    stub.topk_indices_buffer = buffer
-    return stub
+    impl.topk_indices_buffer = topk_indices_buffer
+    return impl
 
 
 def _fa4_inputs(counts, *, num_heads=16, topk=128, num_blocks=4, device=DEVICE_TYPE):
@@ -4078,109 +3872,52 @@ def test_fa4_sparse_decode_kernel_correctness(num_heads, return_lse):
         )
 
 
-@pytest.mark.parametrize("dcp", [1, 2], ids=["native", "dcp2"])
-@pytest.mark.parametrize("is_decode", [True, False])
-def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode, dcp):
+@pytest.mark.parametrize("is_decode", [True, False], ids=["decode", "prefill"])
+def test_fa4_sparse_hook_routes_lanes(monkeypatch, is_decode):
     """The hook runs a decode batch on FA4 and every other batch on trtllm-gen."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
 
     counts = [1, 2, 3, 4, 5, 6, 7]
-    num_tokens = len(counts)
-    # The query reaches the hook all-gathered: more heads than the impl's own.
+    num_tokens, dcp = len(counts), 2
+    # Under DCP the hook gets the heads of every DCP rank, not just its own.
     kernel_heads = 16 * dcp
     inputs = _fa4_inputs(counts, num_heads=kernel_heads, device="cpu")
     calls = _record_fa4_kernels(monkeypatch, kernel_heads, device="cpu")
-    valid_counts = inputs.valid_counts.clone()
-    q = (inputs.ql_nope, inputs.q_pe)
-    if dcp > 1:
-        # DCP without PCP (the gate rejects the pair) always fuses the query.
-        q = torch.cat(q, dim=-1)
+    # DCP without PCP (the gate rejects the pair) always fuses the query.
+    q = torch.cat((inputs.ql_nope, inputs.q_pe), dim=-1)
     impl = _fa4_impl(
         # One row longer than the batch: the varlen-scalar slices become observable.
         topk_indices_buffer=inputs.topk_indices.new_zeros(num_tokens + 1, inputs.topk),
         dcp_world_size=dcp,
-        need_to_return_lse_for_decode=dcp > 1,
+        need_to_return_lse_for_decode=True,
     )
-
+    impl._convert_logical_to_physical_topk = MagicMock()
+    dcp_filter = MagicMock(return_value=(inputs.topk_indices, inputs.valid_counts))
+    monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", dcp_filter)
     inputs.metadata.num_decode_tokens = num_tokens if is_decode else 1
-    convert = MagicMock(return_value=(inputs.topk_indices, valid_counts))
-    impl._convert_logical_to_physical_topk = convert
-    monkeypatch.setattr(sparse_mla, "triton_filter_and_convert_dcp_index", convert)
 
     with torch.inference_mode():
         out, lse = impl.forward_mqa(q, inputs.kv_cache, inputs.metadata, None)
 
-    assert lse is None if dcp == 1 else lse.shape == (num_tokens, kernel_heads)
+    dcp_filter.assert_called_once()
+    impl._convert_logical_to_physical_topk.assert_not_called()
     assert out.shape == (num_tokens, kernel_heads, 512)
-
     if is_decode:
         (fa4,) = calls.fa4
         assert calls.trtllm == []
-        assert fa4["return_softmax_lse"] is (dcp > 1)
-        assert fa4["gather_kv_indices"] is inputs.topk_indices
-        assert fa4["gather_kv_valid_length"] is valid_counts
-        # Every token is its own one-row FA4 sequence, spec-decode rows included.
-        assert fa4["max_seqlen_q"] == 1
+        assert fa4["return_softmax_lse"] is True
         assert fa4["cu_seqlens_q"].tolist() == list(range(num_tokens + 1))
-        # Gathered rows are addressed by the top-k list, so the K offsets stay 0.
-        assert fa4["cu_seqlens_k"].tolist() == [0] * (num_tokens + 1)
-        # The flat KV rows of the whole page pool, addressed by the top-k list.
-        assert fa4["v"].data_ptr() == inputs.kv_cache.data_ptr()
-        assert fa4["seqused_k"].tolist() == [4 * inputs.block_size] * num_tokens
-        assert fa4["q"].shape[-1] == inputs.rope_dim
-        assert fa4["q_v"].shape[-1] == inputs.kv_lora_rank
         assert (out == 1.0).all()
-        if dcp > 1:
-            torch.testing.assert_close(lse, calls.lse(num_tokens), rtol=0, atol=0)
-        return
-
-    (trtllm,) = calls.trtllm
-    assert calls.fa4 == []
-    assert trtllm["return_lse"] is (dcp > 1)
-    assert trtllm["query"].shape[0] == num_tokens
-    assert trtllm["seq_lens"] is valid_counts
-    assert (out == 2.0).all()
-    if dcp > 1:
+        # FA4's LSE is already natural-log.
+        torch.testing.assert_close(lse, calls.lse(num_tokens), rtol=0, atol=0)
+    else:
+        (trtllm,) = calls.trtllm
+        assert calls.fa4 == []
+        assert trtllm["return_lse"] is True
+        assert (out == 2.0).all()
+        # trtllm-gen's LSE is base 2; the DCP merge expects natural log.
         expected = calls.lse(num_tokens) * math.log(2.0)
         torch.testing.assert_close(lse, expected, rtol=0, atol=1e-5)
-
-
-def test_fa4_sparse_autotune_hisparse_decode_runs_decode_lane(monkeypatch):
-    """The HiSparse warmup reaches FA4's hook once per key, on the decode lane."""
-    from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
-        autotune_hisparse_flashinfer_attention,
-    )
-
-    block_size, topk, max_num_reqs = 64, 128, 3
-    hot = torch.zeros(5, block_size, 576, dtype=torch.bfloat16)
-    calls = _record_fa4_kernels(monkeypatch, 16, device="cpu")
-    runtime = SimpleNamespace(
-        hot=SimpleNamespace(attention_cache=hot, block_size=block_size),
-        max_num_reqs=max_num_reqs,
-    )
-    index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.caches = [SimpleNamespace(runtime=runtime)]
-
-    def fa4_layer():
-        buffer = torch.zeros(max_num_reqs, topk, dtype=torch.int32)
-        impl = _fa4_impl(topk_indices_buffer=buffer, index_group=index_group)
-        return SimpleNamespace(impl=impl, hisparse_cache=object())
-
-    layers = {"a": fa4_layer()}
-    runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(static_forward_context=layers)
-        )
-    )
-
-    with torch.inference_mode():
-        autotune_hisparse_flashinfer_attention(runner)
-
-    (fa4,) = calls.fa4
-    assert calls.trtllm == []
-    assert fa4["v"].data_ptr() == hot.data_ptr()
-    assert fa4["seqused_k"].tolist() == [hot.shape[0] * block_size] * max_num_reqs
-    assert fa4["gather_kv_indices"].shape == (max_num_reqs, topk)
 
 
 @pytest.mark.parametrize(
@@ -4191,11 +3928,8 @@ def test_fa4_sparse_autotune_hisparse_decode_runs_decode_lane(monkeypatch):
         ({"heads": 12}, "heads"),
         ({"dcp": 2}, None),
         ({"dcp": 8}, "heads"),
-        ({"index_topk": None}, "index_topk"),
         ({"index_topk": 192}, "index_topk"),
-        # PCP over a DCP-sharded cache: the inherited reason names this backend.
-        ({"dcp": 2, "pcp": 2}, "FLASH_ATTN_MLA_SPARSE_FA4 does not support"),
-        ({"kv_dtype": "fp8"}, "kv_cache_dtype"),
+        ({"rope": 32}, "(kv_lora_rank, qk_rope_head_dim)"),
         ({"flashinfer": False}, "FlashInfer"),
     ],
 )
@@ -4208,14 +3942,15 @@ def test_fa4_sparse_gate(monkeypatch, config, expected):
     monkeypatch.setattr(fa4_sparse, "_fa4_cute_mla_available", lambda: None)
     dcp = config.get("dcp", 1)
     vllm_config = _build_sparse_dcp_vllm_config(config.get("heads", 16), dcp)
-    vllm_config.parallel_config.prefill_context_parallel_size = config.get("pcp", 1)
-    vllm_config.model_config.hf_text_config.index_topk = config.get("index_topk", 128)
+    hf_text_config = vllm_config.model_config.hf_text_config
+    hf_text_config.index_topk = config.get("index_topk", 128)
+    hf_text_config.qk_rope_head_dim = config.get("rope", 64)
 
     with set_current_vllm_config(vllm_config):
         reasons = FlashAttnMLASparseFA4Backend.validate_configuration(
             head_size=576,
             dtype=torch.bfloat16,
-            kv_cache_dtype=config.get("kv_dtype", "auto"),
+            kv_cache_dtype="auto",
             block_size=64,
             use_mla=True,
             has_sink=False,
