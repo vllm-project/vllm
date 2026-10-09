@@ -4,7 +4,6 @@
 """SynthID-Text watermark generation primitives."""
 
 import math
-import warnings
 
 import torch
 
@@ -15,21 +14,11 @@ from vllm.v1.watermarking.watermarker import (
     RandomSampler,
     Watermarker,
     WatermarkSample,
+    _validate_context_width,
 )
 
 # High stream word ("SYNT") keeps SynthID-Text off Gumbel-max's Philox streams.
 _STREAM_DOMAIN = 0x53594E54 << 32
-
-
-def _validate_context_width(context_width: int) -> None:
-    if context_width < 1:
-        raise ValueError("context_width must be positive")
-    if context_width > 16:
-        warnings.warn(
-            "context_width values greater than 16 reduce robustness to edits because "
-            "each changed token affects more subsequent watermark contexts",
-            stacklevel=3,
-        )
 
 
 class SynthIDWatermarker(Watermarker):
