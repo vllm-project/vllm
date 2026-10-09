@@ -14,7 +14,6 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import gpu, range_constexpr
 from flydsl.expr.typing import T
 
-from vllm.models.kimi_k3.amd.mono.common.execution import THREADS, WAVES
 from vllm.models.kimi_k3.amd.mono.common.ops import (
     CM_DEV,
     CM_NT,
@@ -22,6 +21,7 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     rsrc,
     traced,
 )
+from vllm.models.kimi_k3.amd.mono.common.plan import THREADS, WAVES
 
 ROWS = 16
 KCH = 128

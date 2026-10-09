@@ -35,7 +35,7 @@ from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
-from vllm.models.kimi_k3.amd.mono.common.execution import THREADS, WAVES
+from vllm.models.kimi_k3.amd.mono.common.plan import THREADS, WAVES
 
 # gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16. SC1 alone is device
 # scope (past the per-XCD caches); SC0 | SC1 is system scope (peers over XGMI).

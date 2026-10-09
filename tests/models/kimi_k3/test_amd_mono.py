@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Numerics of the Kimi-K3 mono decode kernels (``VLLM_ROCM_MONO_K3``) on MI355X
+"""Numerics of the Kimi-K3 mono decode kernels (``VLLM_ROCM_MONO_DECODE``) on MI355X
 against the ops vLLM runs for the same spec-verify step, random weights in the
 checkpoint's formats at TP8 shapes.
 
@@ -60,7 +60,14 @@ def _randn(g, *shape, scale=1.0, dtype=bf):
 
 
 def _kda_inputs(nb: int, nacc: int, dim_first: bool, S: int, slots: int = 16):
-    from vllm.models.kimi_k3.amd.mono.kda_pre import HD, HIDDEN, NH, NPROJ, PROJ, QKV
+    from vllm.models.kimi_k3.amd.mono.attention.kda import (
+        HD,
+        HIDDEN,
+        NH,
+        NPROJ,
+        PROJ,
+        QKV,
+    )
 
     g = torch.Generator(device="cuda").manual_seed(0)
     sl = 3 + (S - 1)
@@ -97,7 +104,7 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
         causal_conv1d_update,
     )
-    from vllm.models.kimi_k3.amd.mono.kda_pre import HD, NH, PROJ, QKV
+    from vllm.models.kimi_k3.amd.mono.attention.kda import HD, NH, PROJ, QKV
     from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
     from vllm.models.kimi_k3.amd.ops.third_party.kda import fused_recurrent_kda
     from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
@@ -173,7 +180,7 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
     """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
     fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
     request, 8 tokens), including the state each step leaves behind."""
-    from vllm.models.kimi_k3.amd.mono.kda_pre import (
+    from vllm.models.kimi_k3.amd.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
         kda_pre,
@@ -257,7 +264,7 @@ def _moe_reference(x, mw, rank: int):
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
-    from vllm.models.kimi_k3.amd.mono.moe import SI, TOPK, UP_N
+    from vllm.models.kimi_k3.amd.mono.stages.moe import SI, TOPK, UP_N
 
     sig = torch.sigmoid(torch.mm(x.float(), mw["w_gate"].float().t()))
     ids = torch.topk(sig + mw["bias"], TOPK, dim=-1, sorted=True).indices
@@ -296,7 +303,7 @@ def _moe_weights(rank: int, device):
     from aiter.utility.fp4_utils import e8m0_shuffle
 
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.models.kimi_k3.amd.mono.moe import HIDDEN, LAT, RI, SI, UP_N, E
+    from vllm.models.kimi_k3.amd.mono.stages.moe import HIDDEN, LAT, RI, SI, UP_N, E
 
     gc = torch.Generator(device=device).manual_seed(7)  # replicated weights
     gr = torch.Generator(device=device).manual_seed(100 + rank)  # TP shards
@@ -361,9 +368,10 @@ def _k2_worker(
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
     from vllm.distributed import get_tp_group
-    from vllm.models.kimi_k3.amd.mono import k2, moe
+    from vllm.models.kimi_k3.amd.mono import layer as k2
+    from vllm.models.kimi_k3.amd.mono.attention.kda import HIDDEN, PROJ
     from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
-    from vllm.models.kimi_k3.amd.mono.kda_pre import HIDDEN, PROJ
+    from vllm.models.kimi_k3.amd.mono.stages import moe
     from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 
     S, nb = 8, 4

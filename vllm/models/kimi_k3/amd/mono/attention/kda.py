@@ -39,15 +39,7 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
-from vllm.models.kimi_k3.amd.mono.common.abi import KernelAbi
-from vllm.models.kimi_k3.amd.mono.common.build_key import key_tuple, source_digest
-from vllm.models.kimi_k3.amd.mono.common.execution import (
-    BLOCKS,
-    THREADS,
-    WAVES,
-    first_task,
-)
-from vllm.models.kimi_k3.amd.mono.common.layout import pair_layout
+from vllm.models.kimi_k3.amd.mono.common.debug import stamp, stamp_begin, stamp_flush
 from vllm.models.kimi_k3.amd.mono.common.ops import (
     CM_DEV,
     CM_NT,
@@ -64,7 +56,16 @@ from vllm.models.kimi_k3.amd.mono.common.ops import (
     uniform,
     wave_max,
 )
-from vllm.models.kimi_k3.amd.mono.common.stamps import stamp, stamp_begin, stamp_flush
+from vllm.models.kimi_k3.amd.mono.common.plan import (
+    BLOCKS,
+    THREADS,
+    WAVES,
+    KernelAbi,
+    first_task,
+    key_tuple,
+    pair_layout,
+    source_digest,
+)
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, publish, sreg
 
 HIDDEN = 7168
