@@ -310,7 +310,15 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         tokio::spawn(
             async move {
                 futures::pin_mut!(stream);
-                while let Some(event) = stream.next().await {
+                loop {
+                    let event = tokio::select! {
+                        biased;
+                        _ = tx.closed() => break,
+                        event = stream.next() => event,
+                    };
+                    let Some(event) = event else {
+                        break;
+                    };
                     let response = match event {
                         Err(error) => Err(log_text_error(&task_span, started_at, "stream", error)),
                         Ok(DecodedTextEvent::Start {
