@@ -222,7 +222,6 @@ def test_rocm_aiter_grouped_topk_torch_compile_compatibility():
 
 
 def test_rocm_aiter_topk_gating_custom_op_registration():
-    assert hasattr(torch.ops.vllm, "rocm_aiter_topk_gating")
     assert callable(torch.ops.vllm.rocm_aiter_topk_gating)
 
 
