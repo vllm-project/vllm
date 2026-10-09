@@ -42,14 +42,12 @@ is_blackwell = lambda: current_platform.is_device_capability_family(100)
 
 
 def nvfp4_kernel_exposes_input_quant_key() -> bool:
-    """Check if the NVFP4 kernel selected on this platform exposes input_quant_key.
+    """Report SiLU manual-fusion eligibility despite this helper's legacy name.
 
-    FlashInferCuteDslNvFp4LinearKernel does not expose input_quant_key() due to
-    layout incompatibility between the manual fusion kernel (silu_and_mul_nvfp4_quant)
-    output format and the cutedsl backend's expected input format.
+    FlashInferCuteDslNvFp4LinearKernel exposes an input quantization key, but
+    restricts automatic activation fusion to ReLU2, preserving its SiLU Tensor path.
 
-    FlashInferCutlassNvFp4LinearKernel does expose input_quant_key() and supports
-    manual fusion.
+    FlashInferCutlassNvFp4LinearKernel retains SiLU manual-fusion support.
     """
     if not current_platform.is_cuda():
         return False
