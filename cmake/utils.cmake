@@ -39,6 +39,21 @@ function (run_python OUT EXPR ERR_MSG)
   set(${OUT} ${PYTHON_OUT} PARENT_SCOPE)
 endfunction()
 
+#
+# Read the key recorded in `STAMP_FILE` by the last successful run of a source
+# generator into `OUT` (empty if missing).  The stamp lives next to the
+# generated sources rather than in the CMake cache, so it stays accurate when
+# several build directories share the source tree and is removed together with
+# the sources (e.g. by `git clean -X`).
+#
+function (read_generator_stamp OUT STAMP_FILE)
+  set(_KEY "")
+  if (EXISTS "${STAMP_FILE}")
+    file(READ "${STAMP_FILE}" _KEY)
+  endif()
+  set(${OUT} "${_KEY}" PARENT_SCOPE)
+endfunction()
+
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
 # `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
 macro (append_cmake_prefix_path PKG EXPR)

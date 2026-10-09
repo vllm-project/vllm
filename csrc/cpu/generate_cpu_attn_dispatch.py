@@ -287,8 +287,14 @@ def main():
         os.path.dirname(__file__), "cpu_attn_dispatch_generated.h"
     )
 
+    header = generate_header_file()
+    # Keep the mtime stable when unchanged so reconfigures don't force rebuilds.
+    if os.path.exists(output_path):
+        with open(output_path) as f:
+            if f.read() == header:
+                return
     with open(output_path, "w") as f:
-        f.write(generate_header_file())
+        f.write(header)
 
 
 if __name__ == "__main__":

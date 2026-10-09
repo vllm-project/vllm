@@ -160,13 +160,13 @@ uv pip install -e . --torch-backend=auto
     For example, you can install [ccache](https://github.com/ccache/ccache) using `conda install ccache` or `apt install ccache` .
     As long as `which ccache` command can find the `ccache` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
-    When using `ccache` with `pip install -e .`, you should run `CCACHE_NOHASHDIR="true" pip install --no-build-isolation -e .`. This is because `pip` creates a new folder with a random name for each build, preventing `ccache` from recognizing that the same files are being built.
+    Editable installs reuse the CMake build directory under `build/`, so re-running `pip install --no-build-isolation -e .` only recompiles what changed. With build isolation, every build gets a fresh environment and recompiles everything. `ccache` still helps after clean builds or branch switches; if you build from several checkouts, set `CCACHE_NOHASHDIR="true"` so they can share cache entries.
 
     [sccache](https://github.com/mozilla/sccache) works similarly to `ccache`, but has the capability to utilize caching in remote storage environments.
     The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.
 
 !!! note "Faster Kernel Development"
-    For frequent C++/CUDA kernel changes, after the initial `uv pip install -e .` setup, consider using the [Incremental Compilation Workflow](../../contributing/incremental_build.md) for significantly faster rebuilds of only the modified kernel code.
+    For frequent C++/CUDA kernel changes, see the [Incremental Compilation Workflow](../../contributing/incremental_build.md) for rebuilding only the modified kernel code.
 
 ##### Use an existing PyTorch installation
 

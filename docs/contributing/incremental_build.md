@@ -1,6 +1,16 @@
 # Incremental Compilation Workflow
 
-When working on vLLM's C++/CUDA kernels located in the `csrc/` directory, recompiling the entire project with `uv pip install -e .` for every change can be time-consuming. An incremental compilation workflow using CMake allows for faster iteration by only recompiling the necessary components after an initial setup. This guide details how to set up and use such a workflow, which complements your editable Python installation.
+When working on vLLM's C++/CUDA kernels located in the `csrc/` directory, you want rebuilds to recompile only the files you changed. There are two ways to do this.
+
+## Rebuilding with `pip install -e .`
+
+After setting up a [source build](./README.md#developing), re-run `uv pip install -e . --no-build-isolation` after each change. Editable installs keep their CMake build directory under `build/` (e.g. `build/temp.linux-x86_64-cpython-312`), so only the affected files are recompiled.
+
+This relies on `--no-build-isolation`: with build isolation, every build runs in a fresh environment with a different torch path, so everything is recompiled. If the Python interpreter, the torch location or version, or the CMake generator changes, the CMake cache is discarded and everything is rebuilt.
+
+## Building directly with CMake
+
+Driving CMake yourself skips the `pip` overhead and lets you choose the build directory, build type, and targets. The rest of this guide sets up that workflow, which complements your editable Python installation.
 
 ## Prerequisites
 
@@ -145,5 +155,5 @@ The `cmake --build ... --target install` command copies the compiled shared libr
 ## Additional Tips
 
 - **Adjust Parallelism:** Fine-tune the `CMAKE_JOB_POOLS` in `configurePresets` and `jobs` in `buildPresets` in your `CMakeUserPresets.json`. Too many jobs can overload systems with limited RAM or CPU cores, leading to slower builds or system instability. Too few won't fully utilize available resources.
-- **Clean Builds When Necessary:** If you encounter persistent or strange build errors, especially after significant changes or switching branches, consider removing the CMake build directory (e.g., `rm -rf cmake-build-release`) and re-running the `cmake --preset` and `cmake --build` commands.
+- **Clean Builds When Necessary:** If you encounter persistent or strange build errors, especially after significant changes or switching branches, consider removing the CMake build directory (e.g., `rm -rf cmake-build-release`, or `rm -rf build/` for `pip install -e .` builds) and building again.
 - **Specific Target Builds:** For even faster iterations when working on a specific module, you can sometimes build a specific target instead of the full `install` target, though `install` ensures all necessary components are updated in your Python environment. Refer to CMake documentation for more advanced target management.

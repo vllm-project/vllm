@@ -209,6 +209,40 @@ class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
 
+    def finalize_options(self) -> None:
+        super().finalize_options()
+        if self.editable_mode:
+            # setuptools points editable builds at a fresh temporary directory,
+            # which forces a full CMake configure and rebuild on every install.
+            # Reuse the directory a regular (non-editable) build would use.
+            build = self.get_finalized_command("build")
+            plat_specifier = f"{self.plat_name}-{sys.implementation.cache_tag}"
+            if is_freethreaded():
+                plat_specifier += "t"
+            if hasattr(sys, "gettotalrefcount"):
+                plat_specifier += "-pydebug"
+            self.build_temp = os.path.join(build.build_base, f"temp.{plat_specifier}")
+
+    def invalidate_stale_cmake_cache(self, build_env: dict) -> None:
+        """Drop the CMake cache unless it was configured for `build_env`.
+
+        CMake caches paths it discovers (e.g. `Torch_DIR`) and refuses to
+        switch generators, so a build dir reused across venvs, isolated build
+        envs, or torch installs must be reconfigured from scratch.
+        """
+        cache = Path(self.build_temp, "CMakeCache.txt")
+        if not cache.exists():
+            return
+        try:
+            stamp = Path(self.build_temp, "vllm_build_env.json").read_text()
+            if json.loads(stamp) == build_env:
+                return
+        except (OSError, ValueError):
+            pass
+        logger.warning("Build environment changed; reconfiguring CMake.")
+        cache.unlink()
+        shutil.rmtree(Path(self.build_temp, "CMakeFiles"), ignore_errors=True)
+
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
@@ -334,10 +368,18 @@ class cmake_build_ext(build_ext):
         if other_cmake_args:
             cmake_args += other_cmake_args.split()
 
+        build_env = {
+            "python": sys.executable,
+            "torch": os.path.dirname(torch.__file__),
+            "torch_version": torch.__version__,
+            "generator": build_tool,
+        }
+        self.invalidate_stale_cmake_cache(build_env)
         subprocess.check_call(
             ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp,
         )
+        Path(self.build_temp, "vllm_build_env.json").write_text(json.dumps(build_env))
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
