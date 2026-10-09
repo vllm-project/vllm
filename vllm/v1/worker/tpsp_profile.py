@@ -87,7 +87,7 @@ class TPSPProjection(nn.Module):
         self.backend: TPSPBackend | None = None
         self.context: Any | None = None
 
-    def run(
+    def fused_gemm_norm(
         self,
         x: torch.Tensor,
         projection: nn.Module,
@@ -310,15 +310,15 @@ def profile_tpsp_pair(
     ) -> tuple[torch.Tensor, torch.Tensor]:
         attn_output, full_residual, local_residual, baseline_residual = data
         if fused:
-            hidden, residual = o_plan.run(
+            hidden, residual = o_plan.fused_gemm_norm(
                 attn_output,
                 layer.self_attn.o_proj,
                 local_residual if layer_idx else full_residual,
                 layer.post_attention_layernorm,
                 bool(layer_idx),
             )
-            mlp_input = layer.mlp(hidden, skip_down_proj=True)
-            return down_plan.run(
+            mlp_input = layer.mlp(hidden, tpsp_active=True)
+            return down_plan.fused_gemm_norm(
                 mlp_input, layer.mlp.down_proj, residual, next_norm, True
             )
         hidden, _ = layer.self_attn.o_proj(attn_output)

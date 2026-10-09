@@ -223,9 +223,9 @@ def _check_tpsp_backend(
                 super().__init__()
                 self.down_proj = Projection(4096)
 
-            def forward(self, x, skip_down_proj=False):
+            def forward(self, x, tpsp_active=False):
                 x = torch.nn.functional.silu(x)
-                return x if skip_down_proj else self.down_proj(x)[0]
+                return x if tpsp_active else self.down_proj(x)[0]
 
         layer = llama.LlamaDecoderLayer.__new__(llama.LlamaDecoderLayer)
         nn.Module.__init__(layer)
@@ -293,6 +293,32 @@ def test_tpsp_backend(tp_size: int):
             pytest.skip("TPSP backend is unavailable for this configuration")
 
 
+def test_llama_tpsp_disables_compile_on_cpu(monkeypatch):
+    model = nn.Module()
+    model.make_empty_intermediate_tensors = lambda: None
+    monkeypatch.setattr(
+        llama.LlamaForCausalLM, "_init_model", lambda *args, **kwargs: model
+    )
+    monkeypatch.setattr(
+        llama,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=False),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(vocab_size=2), enable_tpsp=True
+        ),
+        device_config=SimpleNamespace(device_type="cpu"),
+        quant_config=None,
+        lora_config=None,
+    )
+
+    llama.LlamaForCausalLM(vllm_config=config)
+
+    assert model.tpsp_requested
+    assert model.do_not_compile
+
+
 def test_llama_tpsp_forward(monkeypatch):
     group = SimpleNamespace(world_size=1, rank_in_group=0, device_group=object())
     from vllm.distributed import parallel_state
@@ -337,18 +363,18 @@ def test_llama_tpsp_forward(monkeypatch):
             super().__init__()
             self.o_proj = Projection(bias=True)
 
-        def forward(self, positions, hidden_states, skip_o_proj=False):
+        def forward(self, positions, hidden_states, tpsp_active=False):
             result = hidden_states + 1
-            return result if skip_o_proj else self.o_proj(result)[0]
+            return result if tpsp_active else self.o_proj(result)[0]
 
     class MLP(nn.Module):
         def __init__(self):
             super().__init__()
             self.down_proj = Projection()
 
-        def forward(self, hidden_states, skip_down_proj=False):
+        def forward(self, hidden_states, tpsp_active=False):
             result = hidden_states + 1
-            return result if skip_down_proj else self.down_proj(result)[0]
+            return result if tpsp_active else self.down_proj(result)[0]
 
     context = object()
 
@@ -404,16 +430,14 @@ def test_llama_tpsp_forward(monkeypatch):
         projection.context = context
 
     def set_profile(threshold: int | None) -> None:
-        model.tpsp_profile = TPSPProfile(
-            threshold is not None, threshold, 8, o_plan, down_plan
-        )
+        model.tpsp = TPSPProfile(threshold is not None, threshold, 8, o_plan, down_plan)
         if threshold is not None:
-            layer.tpsp_profile = model.tpsp_profile
+            layer.tpsp = model.tpsp
 
     set_profile(1)
-    assert model.tpsp_profile.is_active(2)
+    assert model.tpsp.is_active(2)
     with pytest.raises(ValueError, match="profiled range"):
-        model.tpsp_profile.is_active(9)
+        model.tpsp.is_active(9)
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         model.forward(
             None,
@@ -440,7 +464,7 @@ def test_llama_tpsp_forward(monkeypatch):
     assert layer.mlp.down_proj.calls == 0
 
     set_profile(3)
-    assert not model.tpsp_profile.is_active(2)
+    assert not model.tpsp.is_active(2)
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
@@ -467,8 +491,8 @@ def test_llama_tpsp_forward(monkeypatch):
     assert layer.mlp.down_proj.calls == 2
 
     set_profile(None)
-    assert not model.tpsp_profile.enabled
-    assert not model.tpsp_profile.is_active(2)
+    assert not model.tpsp.enabled
+    assert not model.tpsp.is_active(2)
     with pytest.raises(RuntimeError, match="invalid enabled profile"):
         TPSPProfile(True, None, 8, o_plan, down_plan).is_active(2)
     result = model.forward(
@@ -496,8 +520,8 @@ def test_llama_tpsp_forward(monkeypatch):
     torch.testing.assert_close(residual, hidden)
 
     set_profile(None)
-    disabled_profile = model.tpsp_profile
-    model.tpsp_profile = None
+    disabled_profile = model.tpsp
+    model.tpsp = None
     model.tpsp_requested = True
     calls = []
 
@@ -514,12 +538,12 @@ def test_llama_tpsp_forward(monkeypatch):
     assert calls == [(model, 8)]
 
     enabled_profile = TPSPProfile(True, 1, 8, o_plan, down_plan)
-    model.tpsp_profile = None
+    model.tpsp = None
     monkeypatch.setattr(llama, "profile_tpsp", lambda *args: enabled_profile)
     model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
-    assert layer.tpsp_profile is enabled_profile
+    assert layer.tpsp is enabled_profile
 
 
 def test_tpsp_pair_profile_keeps_distinct_projection_configs(monkeypatch):

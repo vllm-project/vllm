@@ -119,10 +119,11 @@ class LlamaMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
-    def forward(self, x, skip_down_proj: bool = False):
+    def forward(self, x, tpsp_active: bool = False):
         x, _ = self.gate_up_proj(x)
         x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
-        if skip_down_proj:
+        if tpsp_active:
+            # TPSP fuses down_proj with the following residual/norm step.
             return x
         x, _ = self.down_proj(x)
         return x
@@ -231,13 +232,14 @@ class LlamaAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        skip_o_proj: bool = False,
+        tpsp_active: bool = False,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        if skip_o_proj:
+        if tpsp_active:
+            # TPSP fuses o_proj with the following residual/norm step.
             return attn_output
         output, _ = self.o_proj(attn_output)
         return output
@@ -258,7 +260,7 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    tpsp_profile: TPSPProfile
+    tpsp: TPSPProfile
 
     def __init__(
         self,
@@ -329,29 +331,29 @@ class LlamaDecoderLayer(nn.Module):
         *,
         next_norm: RMSNorm | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        use_tpsp = next_norm is not None
+        tpsp_active = next_norm is not None
         residual_is_sharded = residual is not None
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-        elif not use_tpsp:
+        elif not tpsp_active:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
-            skip_o_proj=use_tpsp,
+            tpsp_active=tpsp_active,
         )
-        if use_tpsp:
-            hidden_states, residual = self.tpsp_profile.o_proj.run(
+        if tpsp_active:
+            hidden_states, residual = self.tpsp.o_proj.fused_gemm_norm(
                 hidden_states,
                 self.self_attn.o_proj,
                 residual,
                 self.post_attention_layernorm,
                 residual_is_sharded,
             )
-            hidden_states = self.mlp(hidden_states, skip_down_proj=True)
-            return self.tpsp_profile.down_proj.run(
+            hidden_states = self.mlp(hidden_states, tpsp_active=True)
+            return self.tpsp.down_proj.fused_gemm_norm(
                 hidden_states,
                 self.mlp.down_proj,
                 residual,
@@ -432,7 +434,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
         self.tpsp_requested = False
-        self.tpsp_profile: TPSPProfile | None = None
+        self.tpsp: TPSPProfile | None = None
         self.max_tpsp_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -448,12 +450,12 @@ class LlamaModel(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if self.tpsp_requested and self.tpsp_profile is None:
+        if self.tpsp_requested and self.tpsp is None:
             new_profile = profile_tpsp(self, self.max_tpsp_batched_tokens)
             if new_profile.enabled:
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
-                    layer.tpsp_profile = new_profile
-            self.tpsp_profile = new_profile
+                    layer.tpsp = new_profile
+            self.tpsp = new_profile
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -466,7 +468,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        profile = self.tpsp_profile
+        profile = self.tpsp
         tpsp_active = profile is not None and profile.is_active(hidden_states.size(0))
         if tpsp_active and intermediate_tensors is not None:
             raise RuntimeError("TP/SP Llama does not support pipeline inputs")
@@ -594,8 +596,7 @@ class LlamaForCausalLM(
             ):
                 raise ValueError("TPSP does not support quantization or LoRA")
             self.model.tpsp_requested = True
-            if vllm_config.device_config.device_type == "cuda":
-                self.model.do_not_compile = True
+            self.model.do_not_compile = True
 
     def _init_model(
         self,
