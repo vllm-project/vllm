@@ -666,7 +666,7 @@ class EngineCore:
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
+            scheduler_output, model_output, self._weight_version
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
@@ -767,7 +767,7 @@ class EngineCore:
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
+            scheduler_output, model_output, self._weight_version
         )
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
@@ -2098,7 +2098,12 @@ class EngineCoreProc(EngineCore):
         self, req_ids: list[str], client_index: int, finish_reason: FinishReason
     ) -> None:
         outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
+            EngineCoreOutput(
+                req_id,
+                [],
+                finish_reason=finish_reason,
+                weight_version=self._weight_version,
+            )
             for req_id in req_ids
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)

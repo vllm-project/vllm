@@ -469,6 +469,7 @@ class GenerateStreamResponseBase(BaseModel):
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
     metrics: PerRequestMetrics | None = None
+    weight_version: str | None = None
 
 
 class GenerateTokensStreamResponse(GenerateStreamResponseBase):
@@ -498,6 +499,7 @@ class GenerateResponseBase(BaseModel):
     prompt_token_ids: list[NonNegativeInt] | None = None
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
     metrics: PerRequestMetrics | None = None
+    weight_version: str | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,

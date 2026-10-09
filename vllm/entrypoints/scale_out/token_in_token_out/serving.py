@@ -504,6 +504,7 @@ class ServingTokens(GenerateBaseServing):
             ),
             mm_placeholders=request._response_mm_placeholders,
             metrics=per_request_metrics,
+            weight_version=final_res.weight_version,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
@@ -641,6 +642,7 @@ class ServingTokens(GenerateBaseServing):
                             request_id=request_id,
                             choices=[GenerateTokensStreamChoice(**choice_fields)],
                         )
+                    chunk.weight_version = res.weight_version
 
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
@@ -656,7 +658,12 @@ class ServingTokens(GenerateBaseServing):
                     # Omit fields that are absent from token-bearing chunks.
                     exclude = {
                         name
-                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
+                        for name in (
+                            "prompt_token_ids",
+                            "mm_placeholders",
+                            "metrics",
+                            "weight_version",
+                        )
                         if getattr(chunk, name) is None
                     }
                     yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
@@ -696,6 +703,9 @@ class ServingTokens(GenerateBaseServing):
                         usage=final_usage_info,
                         metrics=per_request_metrics,
                     )
+                final_chunk.weight_version = (
+                    last_res.weight_version if last_res else None
+                )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
             request_metadata.final_usage_info = final_usage_info

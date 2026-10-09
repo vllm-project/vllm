@@ -17,6 +17,8 @@ The request field `output_mode` selects how much of the postprocessing the serve
 
 Every response and every stream chunk echoes `output_mode`. Servers that predate the field ignore it and return token IDs only with a 200, so check that the `output_mode` in the response matches the one you sent. Older servers don't return it.
 
+`weight_version` reports the committed serving version on each output. A request resumed after `pause(mode="keep")` and a weight update can therefore emit chunks with different versions. Read the version from each chunk rather than assuming it is fixed for the request.
+
 ```python
 import httpx
 

@@ -2026,6 +2026,7 @@ class Scheduler(SchedulerInterface):
         self,
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
+        weight_version: str | None = None,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
@@ -2263,6 +2264,7 @@ class Scheduler(SchedulerInterface):
                     EngineCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
+                        weight_version=weight_version,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
                         new_sampling_mask=new_sampling_mask,
@@ -2318,6 +2320,7 @@ class Scheduler(SchedulerInterface):
                     EngineCoreOutput(
                         request_id=request.request_id,
                         new_token_ids=[],
+                        weight_version=weight_version,
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,

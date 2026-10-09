@@ -945,7 +945,9 @@ def test_update_from_output_routes_sampling_masks_by_request():
         ),
     )
 
-    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+    outputs = scheduler.update_from_output(
+        scheduler_output, model_output, weight_version="step-2"
+    )[0].outputs
 
     assert [out.request_id for out in outputs] == [req.request_id for req in requests]
     assert [out.new_sampling_mask.token_ids.tolist() for out in outputs] == [
@@ -954,6 +956,7 @@ def test_update_from_output_routes_sampling_masks_by_request():
         [4, 5, 6],
     ]
     assert all(out.new_sampling_mask.offsets is None for out in outputs)
+    assert all(out.weight_version == "step-2" for out in outputs)
 
 
 def test_update_from_output_routes_multi_position_sampling_masks():

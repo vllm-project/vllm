@@ -138,6 +138,8 @@ pub struct EngineCoreOutput {
     /// the first output of a request that asked for them.
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<WireNdArray>,
+    #[serde(default)]
+    pub weight_version: Option<String>,
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -542,6 +544,7 @@ mod tests {
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
+                            weight_version: None,
                         },
                     ],
                     scheduler_stats: None,
