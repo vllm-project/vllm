@@ -68,6 +68,11 @@ def test_deepseek_v41_all_reduce_fusion_requires_kernel_support(
     """Eligibility depends on kernel inputs, not serving or attention settings."""
     from vllm.models.deepseek_v41.nvidia.ops import mhc
 
+    monkeypatch.setattr(
+        mhc.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 100,
+    )
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp, enable_expert_parallel=ep
@@ -302,8 +307,12 @@ def test_deepseek_v41_mhc_pre_delayed(
 
 
 @pytest.mark.skipif(
-    not HAS_TILELANG_MHC or not current_platform.is_device_capability_family(100),
-    reason="SM100 TileLang mHC required",
+    not HAS_TILELANG_MHC
+    or not (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+    ),
+    reason="SM90 or SM100 TileLang mHC required",
 )
 @pytest.mark.parametrize("num_tokens", [0, 1, 8, 9, 32, 128, 256])
 @pytest.mark.parametrize("entry", ["broadcast", "identity", "carried"])

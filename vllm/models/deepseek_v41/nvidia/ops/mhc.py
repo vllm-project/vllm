@@ -43,11 +43,17 @@ _all_reduce_mhc: "AllReduceMHC | None" = None
 
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     """Check kernel requirements and safety of sharing the coefficient stream."""
+    enabled = vllm_config.kernel_config.enable_mhc_overlap
+    if enabled is False:
+        return False
+    supported_arch = current_platform.is_device_capability_family(100) or (
+        enabled is True and current_platform.is_device_capability(90)
+    )
     config = vllm_config.model_config.hf_config
     # DeepGEMM's prenorm kernel requires K % 64 == 0, N % 8 == 0, and N <= 32.
     mix_size = config.hc_mult * (config.hc_mult + 2)
     return (
-        current_platform.is_device_capability_family(100)
+        supported_arch
         and is_deep_gemm_supported()
         and config.hidden_size % 64 == 0
         and 0 < mix_size <= 32
@@ -57,6 +63,9 @@ def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
 
 
 def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
+    # SM90 overlap uses the ordinary TP collective, not the SM100 fusion.
+    if not current_platform.is_device_capability_family(100):
+        return False
     parallel = vllm_config.parallel_config
     config = vllm_config.model_config.hf_config
     if (
