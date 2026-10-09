@@ -166,10 +166,8 @@ class XPUPlatform(Platform):
                     f"with use_mla: {attn_selector_config.use_mla}"
                 )
             flash_attn_mla_cls = AttentionBackendEnum.FLASH_ATTN_MLA.get_class()
-            device_capability = cls.get_device_capability()
-            assert device_capability is not None
             invalid_reasons = flash_attn_mla_cls.validate_configuration(
-                device_capability=device_capability,
+                device_capability=cls.get_device_capability(),  # type: ignore[arg-type]
                 **attn_selector_config._asdict(),
             )
             if invalid_reasons:
