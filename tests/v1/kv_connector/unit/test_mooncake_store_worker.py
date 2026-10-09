@@ -29,10 +29,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
-    partial_tail_non_mamba_blocks,
+    partial_tail_non_mamba_puts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
+    BoundaryPut,
     ChunkedTokenDatabase,
     KeyMetadata,
     LBHNCStoreLayout,
@@ -946,8 +947,9 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
 
 
 def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
-    """Resolve the tail on ``req`` as the scheduler does before the worker."""
-    req.partial_tail_non_mamba = partial_tail_non_mamba_blocks(
+    """Add the tail's non-Mamba puts as the scheduler does before the worker."""
+    req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
+    req.boundary_puts[:0] = partial_tail_non_mamba_puts(
         thread.coord, req, [db.block_size for db in thread.token_databases]
     )
     return req
@@ -999,7 +1001,7 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
         block_ids=(block_ids, [1]),
         block_hashes=[b"a0", b"a1", b"a2"],
         can_save=True,
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_puts=[(1, 7, 12)],
         num_prompt_tokens=13,
     )
 
@@ -1011,7 +1013,7 @@ def test_partial_tail_offload_rejects_wrong_prompt_boundary(use_eagle):
     thread.coord.eagle_proof_margin_by_group = {0: 4} if use_eagle else {}
     req = _make_partial_tail_req([1, 2, 3])
     req.num_prompt_tokens = 17 if use_eagle else 13
-    req.boundary_state_offloads = [(1, 7, 8)]
+    req.boundary_puts = [(1, 7, 8)]
 
     with pytest.raises(AssertionError, match="Mamba tail.*prompt checkpoint"):
         thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
@@ -1034,7 +1036,7 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
     metadata = _make_partial_tail_req([1, 2, 3])
     metadata.num_prompt_tokens = 13
     metadata.completed_token_len = 8
-    metadata.boundary_state_offloads = [(1, 7, 8)]
+    metadata.boundary_puts = [(1, 7, 8)]
 
     assert thread._maybe_offload_boundary_states(
         _resolve_partial_tail(thread, metadata)
@@ -1045,7 +1047,7 @@ def test_eagle_attention_proof_published_after_checkpoint_handoff():
     assert attention_key not in stored
 
     metadata.completed_token_len = 13
-    metadata.boundary_state_offloads = None
+    metadata.boundary_puts = None
     metadata.publish_partial_tail = True
     assert thread._maybe_offload_boundary_states(
         _resolve_partial_tail(thread, metadata)
@@ -1198,7 +1200,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         block_hashes=[b"a0", b"a1", b"a2"],
         can_save=True,
         # The scheduler accepted group 1 and omitted group 2 at boundary 12.
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_puts=[(1, 7, 12)],
         num_prompt_tokens=13,
     )
     assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
@@ -1351,7 +1353,7 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
         block_ids=([1, 2, 3], [5]),
         block_hashes=hs,
         can_save=True,
-        boundary_state_offloads=[(1, 7, 32)],
+        boundary_puts=[(1, 7, 32)],
     )
     assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
@@ -1383,7 +1385,7 @@ def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
         block_ids=(list(range(1, 14)), [0, 0, 0]),
         block_hashes=hs,
         can_save=True,
-        boundary_state_offloads=[(1, 9, 32), (1, 7, 44)],
+        boundary_puts=[(1, 9, 32), (1, 7, 44)],
         num_prompt_tokens=49 if use_eagle else 45,
         completed_token_len=49 if use_eagle else 45,
     )
@@ -1448,13 +1450,13 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         block_ids=([1, 2, 3], list(range(20, 26))),
         block_hashes=hs,
         can_save=True,
-        boundary_state_offloads=[(1, 7, 44)],
+        boundary_puts=[(1, 7, 44)],
         num_prompt_tokens=45,
         completed_token_len=45,
         publish_partial_tail=True,
     )
     assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
-    assert req.partial_tail_non_mamba == {0: (44, range(2, 3))}
+    assert req.boundary_puts == [(0, 3, 44), (1, 7, 44)]
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     # Mamba block cdiv(44, 8) - 1 = 5 belongs to put_step_rank 5 % 2 = 1,
@@ -1480,7 +1482,7 @@ def test_snapshot_offload_skips_null_handoff_block():
                 block_ids=([1, 2, 3], [5]),
                 block_hashes=hs,
                 can_save=True,
-                boundary_state_offloads=[(1, NULL_BLOCK_ID, 32)],
+                boundary_puts=[(1, NULL_BLOCK_ID, 32)],
             ),
         )
     )

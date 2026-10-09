@@ -51,7 +51,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
-    PartialTailNonMamba,
     PoolKey,
     ReqMeta,
     StoreShardId,
@@ -570,47 +569,43 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
-    def _mamba_state_puts(
-        self, req_meta: ReqMeta, mamba_offloads: list[tuple[int, int, int]]
+    def _boundary_puts(
+        self, req_meta: ReqMeta
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
-        """Puts for handed-off mamba "align" boundary states.
+        """Puts for ``req_meta.boundary_puts``: each block under the hash of
+        the prefix ending at its ``num_tokens``.
 
-        A block-aligned boundary is a committed snapshot; a sub-block one is
-        the prompt's CoW partial tail. Either way the key is the boundary's
-        hash and the value is the handed-off block. ``store_mask`` masks mamba
-        groups out of the normal save entirely, so this is their *only*
-        writer. The exclusion is not an optimization: the normal save resolves
-        a chunk's address as
-        ``req_meta.block_ids[g][start // block_size]``, and ``block_ids`` is the
-        connector's append-only mirror of the core's per-group table. An
-        align-mode table is mutated in place (a superseded state block is freed
-        and nulled; speculative blocks relocate), and the connector is never
-        told, so a stale mirror entry is indistinguishable from a live one — a
-        retry of a failed or pressure-skipped chunk would read a block that now
-        belongs to another request.
-
-        Each entry's handed-off block *is* the boundary state and is pinned by
-        the core, so it is uploaded under its boundary-end hash key and never
-        resolved positionally.
+        The scheduler resolves and pins every block, so none is looked up
+        positionally here. That matters for mamba "align" states: ``store_mask``
+        masks mamba groups out of the normal save, which resolves a chunk's
+        address as ``req_meta.block_ids[g][start // block_size]``. An align-mode
+        table is mutated in place (a superseded state block is freed and
+        nulled; speculative blocks relocate) without telling the connector, so
+        a retried positional read could hit a block that now belongs to another
+        request. The handed-off block *is* the state.
         """
         hash_block_size = self.coord.hash_block_size
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
-        for group_id, block_id, boundary in mamba_offloads:
-            if boundary == 0 or block_id == NULL_BLOCK_ID:
+        for group_id, block_id, num_tokens in req_meta.boundary_puts or []:
+            if (
+                not self.group_participates[group_id]
+                or num_tokens == 0
+                or block_id == NULL_BLOCK_ID
+            ):
                 continue
-            # A negative index would silently key the state by the last hash.
-            assert boundary % hash_block_size == 0, (
-                f"Mamba boundary {boundary} is not a multiple of the hash block "
-                f"size {hash_block_size}"
+            # A negative index would silently key the block by the last hash.
+            assert num_tokens % hash_block_size == 0, (
+                f"Boundary put at {num_tokens} tokens is not a multiple of the "
+                f"hash block size {hash_block_size}"
             )
-            hash_idx = boundary // hash_block_size - 1
+            hash_idx = num_tokens // hash_block_size - 1
             if hash_idx >= len(req_meta.block_hashes):
                 continue
             db = self.token_databases[group_id]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[group_id]
             put_step_rank = (self.tp_rank + group_id) % put_step
-            if (cdiv(boundary, db.block_size) - 1) % put_step != put_step_rank:
+            if (cdiv(num_tokens, db.block_size) - 1) % put_step != put_step_rank:
                 continue
             addr, size = db.prepare_value_for_block(block_id)
             puts.append(
@@ -618,78 +613,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
         return puts
 
-    def _partial_tail_non_mamba_puts(
-        self, req_meta: ReqMeta, tail_blocks_by_group: PartialTailNonMamba
-    ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
-        """Puts for the non-Mamba blocks of the request's sub-block partial
-        tail, so a later request can hit the sub-block prefix.
-
-        Covers each group's blocks from the normal save's lcm floor to its
-        ``proof_end``: the normal save floors to ``lcm_block_size``, so a
-        smaller-block group's full blocks in that gap are never persisted
-        elsewhere, and the consumer's lookup needs every group at every probed
-        boundary. Full blocks are keyed by their block-end hash and the last
-        block by the ``proof_end`` sub-hash. Mamba states are written by
-        :meth:`_mamba_state_puts`.
-        """
-        hash_block_size = self.coord.hash_block_size
-        puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
-        for g_idx, db in enumerate(self.token_databases):
-            if not self.group_participates[g_idx] or g_idx not in tail_blocks_by_group:
-                continue
-            group_boundary, block_indices = tail_blocks_by_group[g_idx]
-            group_blocks = req_meta.block_ids[g_idx]
-            # Distribute across ranks by the same rule as normal chunks.
-            put_step = self.group_put_steps[g_idx]
-            put_step_rank = (self.tp_rank + g_idx) % put_step
-            for block_idx in block_indices:
-                if block_idx % put_step != put_step_rank:
-                    continue
-                valid_end = min((block_idx + 1) * db.block_size, group_boundary)
-                key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
-                if block_idx >= len(group_blocks):
-                    continue
-                block_id = group_blocks[block_idx]
-                if block_id == NULL_BLOCK_ID:
-                    logger.debug(
-                        "Skipping unavailable partial-tail source block "
-                        "(req=%s, group=%d, block=%d)",
-                        req_meta.req_id,
-                        g_idx,
-                        block_idx,
-                    )
-                    continue
-                addr, size = db.prepare_value_for_block(block_id)
-                puts.append((db.key_for(key_hash), addr, size, db.metadata))
-        return puts
-
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
-        """Persist connector-pinned mamba "align" boundary states handed off
-        for this request, deduped against the store.
+        """Persist this job's boundary puts, deduped against the store.
 
-        This is every mamba key the connector writes — ``store_mask`` excludes
-        mamba groups from the positional normal save, aligned boundaries
-        included (see :meth:`_mamba_state_puts`). The scheduler-resolved
-        partial tail (``ReqMeta.partial_tail_non_mamba``) adds the other groups' blocks
-        in the normal save's lcm gap; both go in one batch.
+        These are every mamba key the connector writes (``store_mask`` excludes
+        mamba groups from the positional normal save) plus the other groups'
+        partial-tail blocks in the normal save's lcm gap.
 
         Returns:
             True when no put is needed or every put succeeds, False otherwise.
 
         """
-        mamba_offloads = req_meta.boundary_state_offloads or []
-        if not req_meta.block_hashes:
+        if not req_meta.boundary_puts or not req_meta.block_hashes:
             return True
-        partial_tail_non_mamba = req_meta.partial_tail_non_mamba
-        if not mamba_offloads and partial_tail_non_mamba is None:
-            return True
-
-        puts = (
-            []
-            if partial_tail_non_mamba is None
-            else self._partial_tail_non_mamba_puts(req_meta, partial_tail_non_mamba)
-        )
-        puts.extend(self._mamba_state_puts(req_meta, mamba_offloads))
+        puts = self._boundary_puts(req_meta)
         puts = list({put[0]: put for put in puts}.values())
 
         if not puts:

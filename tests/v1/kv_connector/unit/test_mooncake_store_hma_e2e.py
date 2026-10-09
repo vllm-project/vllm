@@ -16,9 +16,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
-    partial_tail_non_mamba_blocks,
+    partial_tail_non_mamba_puts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    BoundaryPut,
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
@@ -381,8 +382,9 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
 
 
 def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
-    """Resolve the tail on ``req`` as the scheduler does before the worker."""
-    req.partial_tail_non_mamba = partial_tail_non_mamba_blocks(
+    """Add the tail's non-Mamba puts as the scheduler does before the worker."""
+    req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
+    req.boundary_puts[:0] = partial_tail_non_mamba_puts(
         thread.coord, req, [db.block_size for db in thread.token_databases]
     )
     return req
@@ -454,7 +456,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         num_prompt_tokens=13,
         prefill_end_tokens=20,
         completed_token_len=20,
-        boundary_state_offloads=[(1, mamba_cow_block, 12)],
+        boundary_puts=[(1, mamba_cow_block, 12)],
     )
 
     send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
@@ -526,7 +528,7 @@ def test_offload_syncs_event_before_put():
         can_save=True,
         num_prompt_tokens=12,
         store_job_id=1,
-        boundary_state_offloads=[(1, 7, 8)],
+        boundary_puts=[(1, 7, 8)],
     )
     req.current_event = event
 
@@ -603,7 +605,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        boundary_state_offloads=[(1, mamba_cow_block, 8)],
+        boundary_puts=[(1, mamba_cow_block, 8)],
     )
 
     send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
@@ -692,7 +694,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        boundary_state_offloads=[(1, 7, 8)],
+        boundary_puts=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 
@@ -798,7 +800,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=12,
-        boundary_state_offloads=[(1, 7, 8)],
+        boundary_puts=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
 

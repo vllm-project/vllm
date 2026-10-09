@@ -862,7 +862,7 @@ def test_from_request_tracker_no_load_saves_normally(token_len, save_partial_tai
     assert req_meta.load_spec is None
     assert req_meta.token_len_chunk == token_len // 16 * 16
     assert req_meta.completed_token_len == token_len
-    assert req_meta.boundary_state_offloads is None
+    assert req_meta.boundary_puts is None
     assert tracker.num_saved_tokens == token_len // 16 * 16
     assert (
         ReqMeta.from_request_tracker(
@@ -910,13 +910,13 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
     # The save that completes the prompt carries the tail for the worker.
     (req_meta,) = step(44, 1)
     assert req_meta.publish_partial_tail
-    assert req_meta.partial_tail_non_mamba == {0: (44, range(2, 3))}
+    assert req_meta.boundary_puts == [(0, 2, 44)]
 
     # A later save does not recompute or resend it.
     (req_meta,) = step(45, 3)
     assert req_meta.token_len_chunk == 48
     assert not req_meta.publish_partial_tail
-    assert req_meta.partial_tail_non_mamba is None
+    assert req_meta.boundary_puts is None
 
 
 class _StubLookupClient:
@@ -1170,7 +1170,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.req_id == "req-0"
     assert req_meta.can_save is True
     assert req_meta.token_len_chunk == 0
-    assert req_meta.boundary_state_offloads == [(1, 7, 12)]
+    assert req_meta.boundary_puts == [(1, 7, 12)]
     assert req_meta.num_prompt_tokens == 13
     assert req_meta.block_ids == ([0],)
     store_job_id = req_meta.store_job_id
@@ -1268,7 +1268,13 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     assert req_meta.token_len_chunk == 0
     assert req_meta.block_ids == block_ids
     assert req_meta.block_hashes == request.block_hashes
-    assert req_meta.boundary_state_offloads == [(1, 50, 44)]
+    assert req_meta.boundary_puts == [
+        (0, attention_ids[idx], min((idx + 1) * attention_block_size, proof_end))
+        for idx in range(
+            32 // attention_block_size,
+            (proof_end + attention_block_size - 1) // attention_block_size,
+        )
+    ] + [(1, 50, 44)]
     assert set(scheduler._pinned_saves[req_meta.store_job_id][0]) == {50, *expected}
     assert all(pool.blocks[i].ref_cnt == 1 for i in expected + [50])
     assert scheduler._finished_partial_tail_metas == {}
@@ -1376,7 +1382,7 @@ def test_boundary_state_group_ids_are_remapped_to_store_projection():
 
     scheduler._handle_boundary_state_offloads({"req-0": [(2, 7, 800)]}, meta)
 
-    assert meta.requests[0].boundary_state_offloads == [(1, 7, 800)]
+    assert meta.requests[0].boundary_puts == [(1, 7, 800)]
 
 
 def test_resumed_prefill_claims_boundaries_past_prompt_length():
@@ -1392,7 +1398,7 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     meta = scheduler.build_connector_meta(out)
 
     # Aligned states at 16 and 32 are inside the resumed prefill; 48 is past it.
-    assert meta.requests[0].boundary_state_offloads == [(1, 7, 16), (1, 9, 32)]
+    assert meta.requests[0].boundary_puts == [(1, 7, 16), (1, 9, 32)]
     store_job_id = meta.requests[0].store_job_id
     assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
 
@@ -1408,7 +1414,7 @@ def test_boundary_state_job_pins_exact_blocks_once():
     meta = scheduler.build_connector_meta(out)
 
     req_meta = meta.requests[0]
-    assert req_meta.boundary_state_offloads == [
+    assert req_meta.boundary_puts == [
         (1, 7, 16),
         (1, 8, 32),
         (1, 9, 48),
@@ -1521,7 +1527,7 @@ def test_preemption_and_request_id_reuse_do_not_release_inflight_job():
     _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
     second = scheduler.build_connector_meta(_make_offload_only_output([(1, 8, 32)]))
     second_job_id = second.requests[0].store_job_id
-    assert second.requests[0].boundary_state_offloads == [(1, 8, 32)]
+    assert second.requests[0].boundary_puts == [(1, 8, 32)]
 
     scheduler.update_connector_output(_make_worker_output({first_job_id: 1}))
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
@@ -1554,7 +1560,7 @@ def test_resumed_partial_tail_uses_exact_boundary():
     meta = scheduler.build_connector_meta(out)
 
     assert len(meta.requests) == 1
-    assert meta.requests[0].boundary_state_offloads == [(1, 7, 12)]
+    assert meta.requests[0].boundary_puts == [(1, 7, 12)]
     assert meta.requests[0].num_prompt_tokens == 13
     assert meta.requests[0].prefill_end_tokens == 20
     tracker = scheduler._request_trackers["req-0"]
@@ -1587,7 +1593,7 @@ def test_resumed_partial_tail_attached_to_save_keeps_exact_boundary():
 
     assert len(meta.requests) == 1
     assert meta.requests[0].can_save is True
-    assert meta.requests[0].boundary_state_offloads == [(0, 7, 36)]
+    assert meta.requests[0].boundary_puts == [(0, 7, 36)]
     assert meta.requests[0].num_prompt_tokens == 37
     assert meta.requests[0].prefill_end_tokens == 48
     # Ordinary saving still covers the full resumed prefill range.
