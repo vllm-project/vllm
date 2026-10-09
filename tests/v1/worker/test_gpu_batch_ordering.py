@@ -56,6 +56,7 @@ def _make_runner(
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = decode_query_len
     runner.adaptive_verification = None
+    runner.hidden_state_handoff = None
     runner.pcp_manager = None
     runner.use_pp = False
     runner.req_states = SimpleNamespace(
@@ -93,7 +94,7 @@ def test_adaptive_verification_sizes_only_batches_with_drafts():
     decodes = {"d0": (16, 16), "d1": (16, 16)}
     runner = _make_runner(decodes, decode_query_len=8)
     manager = SimpleNamespace(
-        get_num_tokens=lambda _num_tokens_per_req, _draft_tokens: 12
+        get_num_tokens=lambda _num_tokens_per_req, _draft_tokens, **_: 12
     )
     runner.adaptive_verification = manager
     scheduler_output = SimpleNamespace(
@@ -246,6 +247,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = 8
     runner.adaptive_verification = None
+    runner.hidden_state_handoff = None
     runner.pcp_manager = None
     runner.use_pp = False
     # State arrays in state-index order: a prefilling request, then two decodes.

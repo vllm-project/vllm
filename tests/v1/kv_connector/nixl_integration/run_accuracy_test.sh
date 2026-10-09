@@ -54,13 +54,17 @@ fi
 # Connector: default pull NixlConnector; NixlPushConnector enables PP prefill.
 KV_CONNECTOR=${KV_CONNECTOR:-NixlConnector}
 
+# The P/D hidden-state handoff (on by default) keeps its records on the
+# prefiller's last pipeline stage: the decoder needs the prefiller's PP size.
+KV_CONFIG_D_EXTRA=',"kv_connector_extra_config":{"hidden_state_handoff_producer_pp_size":'"${PREFILLER_PP_SIZE:-1}"'}'
+
 # Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
   KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}'}'
-  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_CONFIG_D_EXTRA}'}'
 else
   KV_CONFIG_P="{\"kv_connector\":\"${KV_CONNECTOR}\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"${KV_CONFIG_HETERO_LAYOUT}}"
-  KV_CONFIG_D="{\"kv_connector\":\"${KV_CONNECTOR}\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"${KV_CONFIG_HETERO_LAYOUT}}"
+  KV_CONFIG_D="{\"kv_connector\":\"${KV_CONNECTOR}\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"${KV_CONFIG_HETERO_LAYOUT}${KV_CONFIG_D_EXTRA}}"
 fi
 
 # Models to run
