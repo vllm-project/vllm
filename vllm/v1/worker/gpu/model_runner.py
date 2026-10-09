@@ -1984,13 +1984,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.step_timing.forward_start()
 
-        connector_kwargs = dict(
-            scheduler_output=scheduler_output,
-            request_state_indices=input_batch.idx_mapping,
-            request_ids=input_batch.req_ids,
-            num_tokens=input_batch.num_tokens,
-        )
-
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
@@ -1998,7 +1991,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(
-                **connector_kwargs, attn_metadata=attn_metadata
+                scheduler_output, input_batch, attn_metadata=attn_metadata
             )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
@@ -2022,7 +2015,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
-                self.kv_connector.pre_forward(**connector_kwargs)
+                self.kv_connector.pre_forward(scheduler_output, input_batch)
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(
