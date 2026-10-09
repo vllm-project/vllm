@@ -501,8 +501,8 @@ impl SharedRuntimeArgs {
         self,
         listen_fd: i32,
         grpc_listen_fd: Option<i32>,
-        input_address: String,
-        output_address: String,
+        input_listener_fd: i32,
+        output_listener_fd: i32,
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
@@ -518,8 +518,8 @@ impl SharedRuntimeArgs {
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 data_parallel_size,
@@ -697,14 +697,12 @@ pub struct FrontendArgs {
     /// supervisor. When not set, no gRPC server is started.
     #[arg(long)]
     pub grpc_listen_fd: Option<i32>,
-    /// Frontend input ROUTER socket address that the Python engines will
-    /// connect to.
+    /// Inherited frontend input ROUTER listener file descriptor.
     #[arg(long)]
-    pub input_address: String,
-    /// Frontend output PULL socket address that the Python engines will push
-    /// responses to.
+    pub input_listener_fd: i32,
+    /// Inherited frontend output PULL listener file descriptor.
     #[arg(long)]
-    pub output_address: String,
+    pub output_listener_fd: i32,
     /// Optional Python-owned frontend-side DP coordinator socket address for
     /// external coordinator mode in the bootstrapped frontend path, i.e.,
     /// `stats_update_address`.
@@ -733,8 +731,8 @@ impl FrontendArgs {
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
             self.grpc_listen_fd,
-            self.input_address,
-            self.output_address,
+            self.input_listener_fd,
+            self.output_listener_fd,
             self.coordinator_address,
             self.engine_start_index,
             self.engine_count,
