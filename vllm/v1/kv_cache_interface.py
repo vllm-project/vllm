@@ -1506,9 +1506,6 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
-    num_cpu_blocks: int | None = None
-    """The unified number of CPU offload blocks, if CPU offloading is enabled."""
-
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""
