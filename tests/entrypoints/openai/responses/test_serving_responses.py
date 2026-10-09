@@ -515,7 +515,11 @@ async def test_online_renderer_applies_responses_token_budget_to_harmony_prompt(
     result = await renderer.render_responses(request)
 
     assert not isinstance(result, ErrorResponse)
-    assert result.engine_input["prompt_token_ids"] == [4, 5, 6]
+    # `max_tokens` is an output upper bound rather than a reservation off the
+    # context window, so the prompt budget is the full max_model_len minus the
+    # one token held back for output: 6 tokens truncate to 4, not to
+    # max_model_len - max_output_tokens.
+    assert result.engine_input["prompt_token_ids"] == [3, 4, 5, 6]
 
 
 @pytest.mark.asyncio
