@@ -139,7 +139,7 @@ def extract_mm_features(
     engine_input: EngineInput,
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
-    include_kwargs: bool = True,
+    include_mm_kwargs: bool = True,
 ) -> MultiModalFeatures | None:
     """Extract multimodal features from a rendered engine prompt.
 
@@ -147,7 +147,7 @@ def extract_mm_features(
     intersection of processed kwargs that prefill needs after EC transfer:
     fields declared as embedding metadata, plus fields marked
     ``keep_on_cpu`` (for example M-RoPE grid dims). With
-    ``include_kwargs=False`` neither is serialized.
+    ``include_mm_kwargs=False`` neither is serialized.
     """
     if engine_input.get("type") != "multimodal":
         return None
@@ -159,11 +159,13 @@ def extract_mm_features(
 
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
-    if include_kwargs and (raw_mm_kwargs := mm_engine_input.get("mm_kwargs")):
-        kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
-            raw_mm_kwargs,
-            metadata_fields_for=metadata_fields_for,
-        )
+    if include_mm_kwargs:
+        raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
+        if raw_mm_kwargs:
+            kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
+                raw_mm_kwargs,
+                metadata_fields_for=metadata_fields_for,
+            )
 
     return MultiModalFeatures(
         mm_hashes=mm_hashes,

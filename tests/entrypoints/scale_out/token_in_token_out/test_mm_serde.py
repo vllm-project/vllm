@@ -173,7 +173,7 @@ def test_extract_without_kwargs_keeps_layout():
     engine_input, _pixel_values, _image_grid_thw = _image_engine_input()
 
     full = extract_mm_features(engine_input)
-    layout = extract_mm_features(engine_input, include_kwargs=False)
+    layout = extract_mm_features(engine_input, include_mm_kwargs=False)
 
     assert full is not None and layout is not None
     assert layout.kwargs_data is None

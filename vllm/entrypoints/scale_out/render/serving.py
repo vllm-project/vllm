@@ -145,7 +145,7 @@ class ServingRender(BaseServing):
             request_id=request_id,
             token_ids=token_ids,
             features=self._extract_mm_features(
-                engine_input, include_kwargs=request.return_mm_kwargs
+                engine_input, include_mm_kwargs=request.return_mm_kwargs
             ),
             sampling_params=params,
             model=request.model,
@@ -221,7 +221,7 @@ class ServingRender(BaseServing):
                     request_id=request_id,
                     token_ids=token_ids,
                     features=self._extract_mm_features(
-                        engine_input, include_kwargs=request.return_mm_kwargs
+                        engine_input, include_mm_kwargs=request.return_mm_kwargs
                     ),
                     sampling_params=params,
                     model=request.model,
@@ -283,7 +283,7 @@ class ServingRender(BaseServing):
             request_id=request.request_id,
             token_ids=list(token_ids),
             features=self._extract_mm_features(
-                engine_input, include_kwargs=request.return_mm_kwargs
+                engine_input, include_mm_kwargs=request.return_mm_kwargs
             ),
             sampling_params=params,
             model=request.model,
@@ -336,10 +336,10 @@ class ServingRender(BaseServing):
         self,
         engine_input: EngineInput,
         *,
-        include_kwargs: bool = True,
+        include_mm_kwargs: bool = True,
     ) -> MultiModalFeatures | None:
         return extract_mm_features(
             engine_input,
             metadata_fields_for=self._placeholder_metadata_fields,
-            include_kwargs=include_kwargs,
+            include_mm_kwargs=include_mm_kwargs,
         )
