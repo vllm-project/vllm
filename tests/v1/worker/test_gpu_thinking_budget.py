@@ -133,6 +133,27 @@ def test_v2_thinking_budget_allows_tokens_before_budget():
     assert torch.all(out == 0)
 
 
+def test_v2_thinking_budget_rewind_resets_marker_cache():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+    state.cached_last_start[3] = 1
+    state.cached_last_end[3] = 2
+    state.cached_scan_pos[3] = 4
+
+    state.rewind_requests([3])
+    torch.accelerator.synchronize()
+
+    assert state.cached_last_start[3].item() == -1
+    assert state.cached_last_end[3].item() == -1
+    assert state.cached_scan_pos[3].item() == 0
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[12], local_pos=[0])
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
 def test_v2_thinking_budget_continues_multi_token_end_marker():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     state = ThinkingBudgetState(req_states, MockMultiTokenEndReasoningConfig())

@@ -143,6 +143,14 @@ class ModelState(ABC):
         """Capture the CUDA graphs this state runs inside the model's forward."""
         return None
 
+    def rewind_requests(
+        self,
+        req_indices: list[int],
+        num_computed_tokens: list[int],
+    ) -> None:
+        """Restore per-request model state to absolute scheduler offsets."""
+        return None
+
     def get_additional_cg_support(self) -> tuple[AttentionCGSupport, str | None]:
         """Cudagraph support of attention groups this ModelState builds outside
         ``init_attn_backend`` (e.g. encoder-only layers).
