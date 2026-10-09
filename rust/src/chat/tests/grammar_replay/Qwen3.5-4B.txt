@@ -30,18 +30,7 @@ sequence
     `\n\n`
   json({ answer: string })
 
-# auto_answer (from_token_zero)
-sequence
-  sequence
-    tag `` text `</think>`
-    `\n\n`
-  or
-    triggered_tags [`<tool_call>\n<function=`] excluding [`<think>`, `</think>`] at_least_one
-      tag `<tool_call>\n<function=get_weather>\n` qwen_xml({ location: string }) `\n</function>\n</tool_call>`
-      tag `<tool_call>\n<function=add>\n` qwen_xml({ y: number, x: number, items: string[] }) `\n</function>\n</tool_call>`
-    json({ answer: string })
-
-# auto_answer_calls (from_token_zero)
+# auto_answer, auto_answer_calls (from_token_zero)
 sequence
   sequence
     tag `` text `</think>`

@@ -7,9 +7,10 @@
 //! parsed from the generated assistant completion and then rendered back to the exact same
 //! assistant completion.
 //!
-//! The tool-call fixture also snapshots the output grammar built by the initialized parser for each
-//! tool-choice variant, with the rendered completion as its generation, as one file per model under
-//! `tests/grammar_replay/`. `grammar_replay.rs` replays these cases through the real XGrammar.
+//! The tool-call fixture also snapshots the output grammars built by the initialized parser, one
+//! entry per distinct grammar with the rendered completion of every variant that builds it as a
+//! generation, as one file per model under `tests/grammar_replay/`. `grammar_replay.rs` replays
+//! these generations through the real XGrammar.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -1184,16 +1185,23 @@ struct GrammarReplayFile {
     /// Request stop set, passed to the matcher as `override_stop_tokens`.
     #[serde(serialize_with = "serialize_one_line")]
     all_stop_token_ids: BTreeSet<u32>,
-    /// Cases keyed by fixture variant.
-    cases: BTreeMap<FixtureVariant, GrammarReplayCase>,
+    /// Distinct output grammars, in the order of the first variant building each.
+    grammars: Vec<GrammarReplayCase>,
 }
 
-/// One parser-built output grammar with the generation it must accept.
+/// One parser-built output grammar with the generations it must accept.
 #[derive(Serialize)]
 struct GrammarReplayCase {
     /// Parser-built grammar; only token-zero grammars are replayed from the
     /// first generated token.
     grammar: BuiltOutputGrammar,
+    /// Generations keyed by the fixture variants whose requests build this grammar.
+    generations: BTreeMap<FixtureVariant, GrammarReplayGeneration>,
+}
+
+/// One rendered completion replayed against its output grammar.
+#[derive(Serialize)]
+struct GrammarReplayGeneration {
     /// Generated completion text, without the stop token.
     completion: String,
     /// Generated token IDs presented to the matcher, ending with a stop token.
@@ -1217,8 +1225,8 @@ fn grammar_replay_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/grammar_replay")
 }
 
-/// Snapshot the output grammars of one model's roundtrips, keyed by variant,
-/// as its grammar replay file, or check that no stale file remains when the
+/// Snapshot the output grammars of one model's roundtrips, grouping the
+/// variants that build the same grammar, as its grammar replay file, or check that no stale file remains when the
 /// parser builds none.
 fn check_grammar_replay_file(
     case: &RoundtripCase,
@@ -1264,7 +1272,7 @@ fn check_grammar_replay_file(
         case.assistant_stop_suffix
     );
 
-    let mut cases = BTreeMap::new();
+    let mut grammars = Vec::<GrammarReplayCase>::new();
     for (variant, grammar, closed_completion) in results {
         let (completion, mut generation_token_ids) = match completion_body(
             tokenizer.as_ref(),
@@ -1275,27 +1283,41 @@ fn check_grammar_replay_file(
             CompletionBody::TokenIds(body) => (tokenizer.decode(body, false)?, body.to_vec()),
         };
         generation_token_ids.push(stop_token_id);
-        cases.insert(
-            variant,
-            GrammarReplayCase {
+        let generation = GrammarReplayGeneration {
+            completion,
+            generation_token_ids,
+        };
+        match grammars.iter_mut().find(|case| case.grammar == grammar) {
+            Some(case) => {
+                case.generations.insert(variant, generation);
+            }
+            None => grammars.push(GrammarReplayCase {
                 grammar,
-                completion,
-                generation_token_ids,
-            },
-        );
+                generations: BTreeMap::from([(variant, generation)]),
+            }),
+        }
     }
 
     // A readable outline of the same grammars, for review only.
     let mut outline = String::new();
-    for (variant, case) in &cases {
+    for case in &grammars {
         if !outline.is_empty() {
             outline.push('\n');
         }
-        let variant = serde_json::to_value(variant)?;
+        let variants = case
+            .generations
+            .keys()
+            .map(|variant| {
+                serde_json::to_value(variant)?
+                    .as_str()
+                    .map(str::to_owned)
+                    .context("variant name")
+            })
+            .collect::<Result<Vec<_>>>()?;
         let coverage = serde_json::to_value(case.grammar.coverage)?;
         outline.push_str(&format!(
             "# {} ({})\n",
-            variant.as_str().context("variant name")?,
+            variants.join(", "),
             coverage.as_str().context("coverage name")?,
         ));
         outline.push_str(&vllm_parser::output_grammar::test_utils::outline(
@@ -1308,7 +1330,7 @@ fn check_grammar_replay_file(
         model_id: case.model_id,
         vocab_size: backends.text_backend.model_vocab_size(),
         all_stop_token_ids,
-        cases,
+        grammars,
     };
     let mut json = serde_json::to_string_pretty(&file)?;
     json.push('\n');

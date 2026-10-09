@@ -22,16 +22,7 @@ sequence
   optional tag `<think>` text `</think>`
   json({ answer: string })
 
-# auto_answer (from_token_zero)
-sequence
-  optional tag `<think>` text `</think>`
-  or
-    triggered_tags [`<tool_call>`] excluding [`<think>`, `</think>`, `</tool_call>`, `<function=`] at_least_one
-      tag `<tool_call><function=get_weather>` qwen_xml({ location: string }) `</function></tool_call>`
-      tag `<tool_call><function=add>` qwen_xml({ y: number, x: number, items: string[] }) `</function></tool_call>`
-    json({ answer: string })
-
-# auto_answer_calls (from_token_zero)
+# auto_answer, auto_answer_calls (from_token_zero)
 sequence
   optional tag `<think>` text `</think>`
   or
