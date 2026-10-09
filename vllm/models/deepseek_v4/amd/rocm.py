@@ -15,7 +15,8 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.amd.mxfp4_indexer import DeepseekV4RocmMxfp4Indexer
+from vllm.models.deepseek_v4.attention import DeepseekV4Attention, DeepseekV4Indexer
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -30,6 +31,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.mla.indexer import dsa_indexer_uses_fp4
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
     DeepseekSparseSWAMetadataBuilder,
@@ -666,6 +668,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
     _use_aiter_sparse_mla = False
+
+    def _indexer_cls(self, vllm_config: VllmConfig) -> type[DeepseekV4Indexer]:
+        if dsa_indexer_uses_fp4(vllm_config):
+            # aiter's paged MXFP4 kernels write and score the index K cache.
+            return DeepseekV4RocmMxfp4Indexer
+        return super()._indexer_cls(vllm_config)
 
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
