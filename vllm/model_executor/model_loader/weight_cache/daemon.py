@@ -246,9 +246,15 @@ class WeightCacheDaemon:
         """Run the FlashInfer autotune pass against the cached model."""
         vllm_config = self.vllm_config
         # Mirrors the gate in the engine's kernel warmup.
-        if vllm_config.kernel_config.enable_flashinfer_autotune is False:
-            return
-        if not (has_flashinfer() and current_platform.has_device_capability(90)):
+        if (
+            vllm_config.kernel_config.enable_flashinfer_autotune is False
+            or not has_flashinfer()
+            or not current_platform.has_device_capability(90)
+            or (
+                not self.is_draft
+                and is_draft_model_cacheable(vllm_config.speculative_config)
+            )
+        ):
             return
         try:
             runner = build_tuning_runner(
@@ -257,19 +263,6 @@ class WeightCacheDaemon:
                 is_draft=self.is_draft,
                 model_config=self.model_config,
             )
-            drafter = getattr(runner, "drafter", None)
-            if drafter is not None and hasattr(drafter, "load_model"):
-                # The draft model lives in the draft daemon group, so this
-                # process cannot run the drafter's dummy passes. Engines tune
-                # themselves instead.
-                logger.info(
-                    "Weight cache %s daemon rank %d skips in-daemon FlashInfer "
-                    "autotune: speculative decoding's draft model is held by "
-                    "the draft daemons",
-                    self.role,
-                    self.global_rank,
-                )
-                return
             assert self.model is not None, "warmup ran before load_model"
             runner.load_model(model=self.model)
             replicate_engine_cache_config(vllm_config, runner)
@@ -277,13 +270,6 @@ class WeightCacheDaemon:
             logger.info(
                 "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
                 "configs are in the on-disk autotune cache",
-                self.role,
-                self.global_rank,
-            )
-        except Exception:
-            logger.exception(
-                "FlashInfer autotune failed in the weight cache %s daemon "
-                "rank %d; engines will run it themselves",
                 self.role,
                 self.global_rank,
             )

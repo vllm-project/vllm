@@ -70,18 +70,6 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
-In-place tuning spawns no extra process and loads nothing twice: the daemon
-reuses the weights it already holds, so the pass costs only transient
-activation memory. It also runs only the autotune pass — CUDA graph capture
-does not persist to disk, and the per-machine JIT/compile caches are paid by
-the first real engine. Give `vllm preload` the same engine
-flags you give `vllm serve`, and run both with the same cache directory: the
-cache is keyed by the configuration hash, so an engine whose flags differ tunes
-again. `--load-format` and `--gpu-memory-utilization` are not part of the hash,
-which is why the daemons and `vllm serve --load-format ipc_cache` share it. A
-failed tuning pass is reported but not fatal, since the daemons keep serving
-the weights they hold.
-
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
