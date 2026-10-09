@@ -186,8 +186,6 @@ def triton_scaled_mm(
     block_size_k: int = 32,
     use_heuristic=True,
     use_td: bool | None = None,
-    num_warps: int = 4,
-    num_stages: int | None = None,
 ) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
@@ -227,7 +225,7 @@ def triton_scaled_mm(
         else:
             tile_shape = (128, 128, 128)
 
-        block_size_m, block_size_n, block_size_k = tile_shape
+    block_size_m, block_size_n, block_size_k = tile_shape
 
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
     block_size_sb = 1 if has_scalar(scale_b) else block_size_n
@@ -255,7 +253,6 @@ def triton_scaled_mm(
 
     # A = input, B = weight, C = result
     # A = M x K, B = K x N, C = M x N
-    launch_options = {} if num_stages is None else {"num_stages": num_stages}
     scaled_mm_kernel[grid](
         input,
         weight,
@@ -280,8 +277,6 @@ def triton_scaled_mm(
         BLOCK_SIZE_SCALE_B=block_size_sb,
         USE_TD=use_td,
         B_T=b_t,
-        num_warps=num_warps,
-        **launch_options,
     )
 
     return result.to(out_dtype)

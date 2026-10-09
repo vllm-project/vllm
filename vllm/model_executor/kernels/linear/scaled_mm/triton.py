@@ -9,10 +9,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm
     triton_scaled_mm,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kFp8DynamicTokenSym,
-)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -24,51 +20,8 @@ from .BlockScaledMMLinearKernel import (
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
-
-
-class TritonFp8PerTokenScaledMMKernel(FP8ScaledMMLinearKernel):
-    """Triton FP8 GEMM with per-token activations and per-channel weights."""
-
-    @classmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
-        if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
-            return False, "only CUDA-alike and XPU devices are supported."
-        return True, None
-
-    @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not (
-            c.activation_quant_key == kFp8DynamicTokenSym
-            and c.weight_quant_key.scale.group_shape.is_per_channel()
-        ):
-            return False, "requires per-token activations and per-channel weights."
-        if c.out_dtype not in (torch.bfloat16, torch.float16):
-            return False, "requires BF16 or FP16 output."
-        return True, None
-
-    def input_quant_key(self) -> QuantKey | None:
-        return kFp8DynamicTokenSym
-
-    def apply_scaled_mm(
-        self,
-        *,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        out_dtype: torch.dtype,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-        bias: torch.Tensor | None,
-        output_shape: list,
-    ) -> torch.Tensor:
-        return torch.ops.vllm.w8a8_triton_per_token_scaled_mm_func(
-            A, B, As, Bs, out_dtype, bias
-        ).view(*output_shape)
 
 
 class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
@@ -225,43 +178,6 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             list(self.weight_group_shape),
             self.config.out_dtype,
         )
-
-
-def _w8a8_triton_per_token_scaled_mm_func(
-    qx: torch.Tensor,
-    weight: torch.Tensor,
-    x_scale: torch.Tensor,
-    weight_scale: torch.Tensor,
-    output_dtype: torch.dtype,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        w8a8_triton_per_token_scaled_mm,
-    )
-
-    return w8a8_triton_per_token_scaled_mm(
-        qx, weight, x_scale, weight_scale, output_dtype, bias
-    )
-
-
-def _w8a8_triton_per_token_scaled_mm_fake(
-    qx: torch.Tensor,
-    weight: torch.Tensor,
-    x_scale: torch.Tensor,
-    weight_scale: torch.Tensor,
-    output_dtype: torch.dtype,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    return torch.empty(
-        (qx.size(0), weight.size(1)), dtype=output_dtype, device=qx.device
-    )
-
-
-direct_register_custom_op(
-    "w8a8_triton_per_token_scaled_mm_func",
-    _w8a8_triton_per_token_scaled_mm_func,
-    fake_impl=_w8a8_triton_per_token_scaled_mm_fake,
-)
 
 
 # TODO we should be able to change the type of block_size to GroupShape
