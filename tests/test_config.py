@@ -345,7 +345,7 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
 
     kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     with caplog.at_level(logging.INFO):
-        config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
+        config.finalize_kv_cache_layout(kv_cache_groups)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 16
     assert "automatically adjusted from 3 to block_size 16" in caplog.text
@@ -368,9 +368,30 @@ def test_kv_offloading_does_not_adjust_dcp_interleave_size():
     )
 
     kv_cache_groups = [SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
-    config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
+    config.finalize_kv_cache_layout(kv_cache_groups)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 1
+
+
+def test_legacy_dcp_interleave_is_normalized_without_nixl(caplog, disable_log_dedup):
+    with caplog.at_level(logging.WARNING):
+        config = VllmConfig(
+            cache_config=CacheConfig(block_size=16),
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+                dcp_kv_cache_interleave_size=8,
+                distributed_executor_backend="mp",
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="OffloadingConnector",
+                kv_role="kv_both",
+            ),
+        )
+
+    assert config.parallel_config.cp_kv_cache_interleave_size == 8
+    assert "cp_kv_cache_interleave_size is overridden" in caplog.text
 
 
 def test_kv_offloading_does_not_skip_dcp_interleave_validation():

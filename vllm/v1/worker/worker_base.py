@@ -20,6 +20,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
@@ -114,22 +115,19 @@ class WorkerBase:
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
 
         kv_transfer_config = self.vllm_config.kv_transfer_config
+        parallel_config = self.vllm_config.parallel_config
         if (
             kv_transfer_config is None
-            or not kv_transfer_config.is_kv_transfer_instance
-            or not kv_transfer_config.has_connector("NixlConnector")
-            or self.vllm_config.parallel_config.decode_context_parallel_size <= 1
+            or parallel_config.decode_context_parallel_size == 1
         ):
             return
 
-        # Group geometry can depend on the resolved layout. Finalize NIXL's
-        # interleave before profiling builds a temporary KV cache and CUDA graphs.
-        from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
-
+        # Group geometry can depend on the resolved layout. Finalize related
+        # configuration before profiling builds a temporary cache and CUDA graphs.
         kv_cache_groups = get_kv_cache_groups(
             self.vllm_config, self.get_kv_cache_spec()
         )
-        self.vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
+        self.vllm_config.finalize_kv_cache_layout(kv_cache_groups)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.

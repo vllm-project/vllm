@@ -501,6 +501,21 @@ class ParallelConfig:
         return value
 
     @model_validator(mode="after")
+    def _normalize_dcp_kv_cache_interleave_size(self) -> Self:
+        if (
+            self.decode_context_parallel_size > 1
+            and self.dcp_kv_cache_interleave_size > 1
+            and self.cp_kv_cache_interleave_size != self.dcp_kv_cache_interleave_size
+        ):
+            self.cp_kv_cache_interleave_size = self.dcp_kv_cache_interleave_size
+            logger.warning_once(
+                "cp_kv_cache_interleave_size is overridden by "
+                "dcp_kv_cache_interleave_size. The latter will be deprecated "
+                "when PCP is fully supported."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
             raise ValueError(

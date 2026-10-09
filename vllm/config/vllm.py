@@ -3257,34 +3257,18 @@ class VllmConfig:
                 f"Model Runner V1 does not support: {', '.join(unsupported)}"
             )
 
-    def adjust_dcp_kv_cache_interleave_size(
+    def finalize_kv_cache_layout(
         self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
-        """Normalize DCP interleave size against block_size for NIXL P/D.
-
-        Called by each worker once it knows its post-layout KV cache groups.
-        """
+        """Finalize configuration that depends on resolved KV cache groups."""
         dcp_size = self.parallel_config.decode_context_parallel_size
-        if dcp_size <= 1:
-            return
-        if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-            self.parallel_config.cp_kv_cache_interleave_size
-            != self.parallel_config.dcp_kv_cache_interleave_size
+        kv_transfer_config = self.kv_transfer_config
+        if (
+            dcp_size == 1
+            or kv_transfer_config is None
+            or not kv_transfer_config.has_connector("NixlConnector")
+            or not self.parallel_config._allow_auto_resolve_cp_interleave_size
         ):
-            self.parallel_config.cp_kv_cache_interleave_size = (
-                self.parallel_config.dcp_kv_cache_interleave_size
-            )
-            logger.warning_once(
-                "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                "deprecated when PCP is fully supported."
-            )
-
-        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
-            "NixlConnector"
-        ):
-            return
-        if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
