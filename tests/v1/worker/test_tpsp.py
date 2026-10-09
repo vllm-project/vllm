@@ -113,7 +113,7 @@ def _check_tpsp_backend(
                 rtol=0.02,
                 atol=0.05,
             )
-            if tokens == 129 and backend.supports_projection_bias:
+            if tokens == 129:
                 projection_bias = torch.full_like(weight, 0.125)
                 norm_bias = torch.full_like(weight, 0.25)
                 expected_with_bias = a @ b
@@ -185,7 +185,7 @@ def test_tpsp_backend(tp_size: int):
 
 
 def test_llama_tpsp_forward(monkeypatch):
-    group = SimpleNamespace(world_size=1, rank_in_group=0)
+    group = SimpleNamespace(world_size=1, rank_in_group=0, device_group=object())
     monkeypatch.setattr(llama, "get_tp_group", lambda: group)
     monkeypatch.setattr(
         llama,
@@ -195,14 +195,21 @@ def test_llama_tpsp_forward(monkeypatch):
 
     class Projection(nn.Module):
         input_size_per_partition = 2
-        bias = None
 
-        def __init__(self):
+        def __init__(self, bias=False):
             super().__init__()
             self.weight = nn.Parameter(torch.eye(2, dtype=torch.bfloat16))
+            self.bias = (
+                nn.Parameter(torch.zeros(2, dtype=torch.bfloat16)) if bias else None
+            )
+            self.calls = 0
 
         def forward(self, x):
-            return x @ self.weight, None
+            self.calls += 1
+            result = x @ self.weight
+            if self.bias is not None:
+                result += self.bias
+            return result, None
 
     class Norm(nn.Module):
         def __init__(self):
@@ -217,26 +224,27 @@ def test_llama_tpsp_forward(monkeypatch):
     class Attention(nn.Module):
         def __init__(self):
             super().__init__()
-            self.o_proj = Projection()
+            self.o_proj = Projection(bias=True)
 
-        def compute_attention(self, positions, hidden_states):
-            return hidden_states + 1
+        def forward(self, positions, hidden_states, skip_o_proj=False):
+            result = hidden_states + 1
+            return result if skip_o_proj else self.o_proj(result)[0]
 
     class MLP(nn.Module):
         def __init__(self):
             super().__init__()
             self.down_proj = Projection()
 
-        def compute_down_proj_input(self, hidden_states):
-            return hidden_states + 1
+        def forward(self, hidden_states, skip_down_proj=False):
+            result = hidden_states + 1
+            return result if skip_down_proj else self.down_proj(result)[0]
 
     context = object()
 
     class Backend:
-        supports_projection_bias = False
-
         def __init__(self):
             self.calls = 0
+            self.biases = []
 
         def fused_gemm_rs_norm_ag(
             self,
@@ -251,9 +259,11 @@ def test_llama_tpsp_forward(monkeypatch):
             context,
         ):
             self.calls += 1
-            assert projection_bias is None
+            self.biases.append(projection_bias)
             assert context is model.tpsp_projections["o"].context
             reduced = x @ weight + residual
+            if projection_bias is not None:
+                reduced += projection_bias
             return reduced, None, reduced
 
     layer = llama.LlamaDecoderLayer.__new__(llama.LlamaDecoderLayer)
@@ -278,24 +288,69 @@ def test_llama_tpsp_forward(monkeypatch):
         {name: TPSPProjection(2, 2, 1e-5, 1, "test") for name in ("o", "down")}
     )
     layer.tpsp_projections = dict(model.tpsp_projections.items())
+    owner = llama.LlamaForCausalLM.__new__(llama.LlamaForCausalLM)
+    nn.Module.__init__(owner)
+    owner.model = model
+    owner.config = model.config
     for projection in model.tpsp_projections.values():
         projection.profile = SPProfile(
             1, 2, 8, "enabled", "", threshold_tokens=1, config=64
         )
         projection.backend = backend
         projection.context = context
+    owner.finalize_tpsp()
+    assert model.tpsp_enabled and layer.tpsp_enabled
 
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
     torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
     assert backend.calls == 2
+    assert backend.biases[0] is layer.self_attn.o_proj.bias
+    assert backend.biases[1] is None
+    assert layer.self_attn.o_proj.calls == 0
+    assert layer.mlp.down_proj.calls == 0
 
     model.tpsp_projections["o"].profile = SPProfile(
         1, 2, 8, "enabled", "", threshold_tokens=3, config=64
     )
+    owner.finalize_tpsp()
     result = model.forward(
         None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
     )
     torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
     assert backend.calls == 3
+    assert layer.self_attn.o_proj.calls == 1
+    assert layer.mlp.down_proj.calls == 0
+
+    model.tpsp_projections["o"].profile = SPProfile(
+        1, 2, 8, "enabled", "", threshold_tokens=1, config=64
+    )
+    model.tpsp_projections["down"].profile = SPProfile(
+        1, 2, 8, "enabled", "", threshold_tokens=3, config=64
+    )
+    owner.finalize_tpsp()
+    monkeypatch.setattr(
+        llama.dist,
+        "all_gather_into_tensor",
+        lambda output, source, group: output.copy_(source),
+    )
+    result = model.forward(
+        None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
+    )
+    torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
+    assert backend.calls == 4
+    assert layer.self_attn.o_proj.calls == 1
+    assert layer.mlp.down_proj.calls == 1
+
+    for projection in model.tpsp_projections.values():
+        projection.profile = SPProfile(1, 2, 8, "disabled", "")
+    owner.finalize_tpsp()
+    assert not model.tpsp_enabled and not layer.tpsp_enabled
+    result = model.forward(
+        None, None, None, inputs_embeds=torch.ones(2, 2, dtype=torch.bfloat16)
+    )
+    torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
+    assert backend.calls == 4
+    assert layer.self_attn.o_proj.calls == 2
+    assert layer.mlp.down_proj.calls == 2

@@ -79,6 +79,7 @@ class TPSPProjection(nn.Module):
         self.tp_size = tp_size
         self.group_name = group_name
         self.profile: SPProfile | None = None
+        self.config: object = None
         self.backend: TPSPBackend | None = None
         self.context: Any | None = None
 
@@ -106,6 +107,7 @@ def close_tpsp_projections(model: nn.Module) -> None:
                 backend.close(projection.context)
         projection.context = None
         projection.backend = None
+        projection.config = None
         if profile := projection.profile:
             projection.profile = SPProfile(
                 profile.tp_size,
@@ -125,6 +127,8 @@ def initialize_tpsp(model: nn.Module, max_batched_tokens: int) -> bool:
     if not projections:
         return False
     if all(projection.profile is not None for projection in projections.values()):
+        if (finalize := getattr(model, "finalize_tpsp", None)) is not None:
+            finalize()
         return True
     if any(projection.profile is not None for projection in projections.values()):
         raise RuntimeError("TPSP projections were only partially profiled")
@@ -199,21 +203,12 @@ def initialize_tpsp(model: nn.Module, max_batched_tokens: int) -> bool:
                     "all plans" if len(inactive) == len(members) else "inactive plans",
                     ", ".join(inactive),
                 )
+        if (finalize := getattr(model, "finalize_tpsp", None)) is not None:
+            finalize()
     except Exception:
         close_tpsp_projections(model)
         raise
     return True
-
-
-def select_sp_config(profile: SPProfile, current_batched_tokens: int) -> bool:
-    """Use the fixed startup choice only for batches within its measured range."""
-    if not 1 <= current_batched_tokens <= profile.max_batched_tokens:
-        raise ValueError("current_batched_tokens must be within the profiled range")
-    return (
-        profile.enabled
-        and profile.threshold_tokens is not None
-        and current_batched_tokens >= profile.threshold_tokens
-    )
 
 
 def _beneficial(measurement: SPMeasurement) -> bool:

@@ -135,7 +135,6 @@ class DeviceCapability(NamedTuple):
 
 
 class TPSPBackend(ABC):
-    supports_projection_bias = False
     ops: Any
 
     def __init__(self, group_name: str, device: torch.device) -> None:

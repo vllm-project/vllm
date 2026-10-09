@@ -506,7 +506,6 @@ class CudaTPSPOps:
 
 class CudaTPSPBackend(TPSPBackend):
     ops = CudaTPSPOps
-    supports_projection_bias = True
 
     def __init__(self, group_name: str, device: torch.device):
         super().__init__(group_name, device)
