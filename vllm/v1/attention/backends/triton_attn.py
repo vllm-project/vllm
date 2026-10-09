@@ -529,7 +529,7 @@ class TritonAttentionImpl(AttentionImpl):
                     # Pre-SM89 has no native fp8e4nv cast, so fp8 KV is supported
                     # on the Triton path via software conversion: K/V are
                     # decoded/encoded to the platform's native float -- bf16 where
-                    # bf16 is supported directly (SM80/86), fp16 where only fp16 is
+                    # bf16 is supported directly (SM80-SM88), fp16 where only fp16 is
                     # (SM75). The conversion adds emulation overhead; warn about it.
                     alt = (
                         "bfloat16"
