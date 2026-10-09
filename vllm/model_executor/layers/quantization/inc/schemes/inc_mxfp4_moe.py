@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     B12X_BACKENDS,
     Mxfp4MoeBackend,
@@ -52,6 +54,11 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
 
     def __init__(self, moe) -> None:
         super().__init__(moe)
+        if moe.moe_backend in FLASHINFER_MOE_EP_BACKENDS:
+            raise ValueError(
+                f"moe_backend={moe.moe_backend!r} is not supported for AutoRound "
+                "(INC) MXFP4 MoE checkpoints"
+            )
         self.group_size = 32
         # Backend selection must stay consistent with the weight preparation in
         # process_weights_after_loading / get_fused_moe_quant_config, which use
@@ -228,7 +235,7 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

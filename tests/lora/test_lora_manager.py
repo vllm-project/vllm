@@ -16,10 +16,12 @@ from vllm.lora.layers import (
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
+from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.model_manager import (
     DEFAULT_LANGUAGE_WRAPPER_KEY,
+    AdapterLRUCache,
     LoRAMapping,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
@@ -45,6 +47,68 @@ DEVICES = (
 )
 
 DEFAULT_DTYPE = torch.get_default_dtype()
+
+
+@pytest.mark.parametrize(
+    "mixed,declared_3d", [(False, False), (False, True), (True, False)]
+)
+def test_reject_fused_moe_lora_before_registration(mixed, declared_3d):
+    """Missing format flags should produce guidance without caching the adapter."""
+    module_name = "model.layers.0.mlp.experts"
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.lora_config = LoRAConfig(max_cpu_loras=1)
+    manager._registered_adapters = AdapterLRUCache(1, manager.deactivate_adapter)
+    manager._enable_mixed_moe_lora_format = mixed
+    manager.is_pooling_model = False
+    manager.modules = {module_name: FusedMoEWithLoRA.__new__(FusedMoEWithLoRA)}
+    adapter = LoRAModel(
+        1,
+        8,
+        {
+            module_name: LoRALayerWeights(
+                module_name, 8, 16, torch.zeros(16, 4), torch.zeros(4, 16)
+            )
+        },
+    )
+    adapter.is_3d_lora_weight = declared_3d
+
+    with pytest.raises(ValueError, match="enable_mixed_moe_lora_format=True") as exc:
+        manager.add_adapter(adapter)
+    assert "is_3d_lora_weight=True" in str(exc.value)
+    assert module_name in str(exc.value)
+    assert manager.list_adapters() == {}
+
+
+@pytest.mark.parametrize(
+    "wrapper,mixed,declared_3d,weight_name",
+    [
+        (FusedMoE3DWithLoRA, False, False, "experts"),
+        (FusedMoEWithLoRA, True, True, "experts"),
+        (FusedMoEWithLoRA, False, False, "experts.0.down_proj"),
+        (FusedMoEWithLoRA, True, False, "experts.0.down_proj"),
+        (FusedMoEWithLoRA, False, False, "q_proj"),
+    ],
+)
+def test_moe_format_validation_allows_supported_layouts(
+    wrapper, mixed, declared_3d, weight_name
+):
+    """Preserve native 3D, mixed-format, per-expert and attention-only adapters."""
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager._enable_mixed_moe_lora_format = mixed
+    manager.is_pooling_model = False
+    manager.modules = {"experts": wrapper.__new__(wrapper)}
+    adapter = LoRAModel(
+        1,
+        8,
+        {
+            weight_name: LoRALayerWeights(
+                weight_name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8)
+            )
+        },
+    )
+    adapter.is_3d_lora_weight = declared_3d
+
+    manager._validate_moe_lora_format(adapter)
 
 
 @pytest.mark.parametrize("device", DEVICES)
