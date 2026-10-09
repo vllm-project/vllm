@@ -68,6 +68,7 @@ def test_hub_tokenizer_loads_from_local_snapshot():
     ) as list_repo_templates:
         tokenizer = get_tokenizer("openai-community/gpt2")
 
+    assert isinstance(tokenizer, PreTrainedTokenizerBase)
     assert Path(tokenizer.name_or_path).is_dir()
     list_repo_templates.assert_not_called()
 
