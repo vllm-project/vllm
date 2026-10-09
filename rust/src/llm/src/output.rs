@@ -228,6 +228,7 @@ impl GenerateOutput {
         self.kv_transfer_params = next.kv_transfer_params;
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
+        self.timestamps = next.timestamps;
     }
 }
 

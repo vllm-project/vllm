@@ -412,6 +412,8 @@ async fn generate_merges_outputs_by_stream_interval() {
     for output in &outputs {
         assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
     }
+    assert!(outputs[..2].iter().all(|output| output.timestamps.is_none()));
+    assert!(outputs[2].timestamps.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
