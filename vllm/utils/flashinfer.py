@@ -72,11 +72,14 @@ def _flashinfer_nvcc_path() -> str | None:
 
 
 def is_flashinfer_jit_usable() -> bool:
-    """Return whether FlashInfer attention JIT modules can be loaded or built.
+    """Check package/toolchain prerequisites for FlashInfer attention JIT.
 
     FlashInfer's JIT-cache wheel supplies precompiled modules. Otherwise,
     its runtime JIT needs both nvcc and ninja. The separate cubin package only
     supplies TRTLLM-gen cubins and is not sufficient for attention JIT modules.
+    This prerequisite check does not verify per-kernel artifacts for every
+    active GPU architecture; the selector uses it to decide whether the
+    FlashInfer path is eligible, not to guarantee a particular kernel loads.
     """
     if importlib.util.find_spec("flashinfer") is None:
         return False

@@ -310,12 +310,20 @@ def test_supported_backend_preserves_dcp_eligibility(backend_name, default_vllm_
     assert backend_cls.validate_configuration(**kwargs) == invalid_without_dcp
 
 
-def test_fp8_kv_auto_selection_falls_back_when_attention_jit_is_unavailable():
-    """FlashInfer attention JIT failure must fall through to Triton on SM120.
+@pytest.mark.parametrize(
+    ("jit_usable", "expected_backend"),
+    [(False, "TRITON_ATTN"), (True, "FLASHINFER")],
+)
+def test_fp8_kv_auto_selection_respects_attention_jit_availability(
+    jit_usable: bool, expected_backend: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Select Triton on SM120 if unavailable; preserve FlashInfer otherwise.
 
     The lightweight backend stub models the proposed attention-specific
     predicate. This keeps the test independent of FlashInfer's optional
     runtime package and does not change the broader ``has_flashinfer()`` check.
+    The ``True`` case checks selector behavior when the predicate reports
+    availability; it does not validate per-kernel artifact coverage.
     """
     import sys
     from types import ModuleType
@@ -335,6 +343,14 @@ def test_fp8_kv_auto_selection_falls_back_when_attention_jit_is_unavailable():
 
     class FlashInferBackendStub:
         @classmethod
+        def full_cls_name(cls):
+            return (__name__, "FlashInferBackendStub")
+
+        @classmethod
+        def get_name(cls):
+            return "FLASHINFER"
+
+        @classmethod
         def is_attention_jit_usable(cls):
             return flashinfer_utils.is_flashinfer_jit_usable()
 
@@ -347,6 +363,13 @@ def test_fp8_kv_auto_selection_falls_back_when_attention_jit_is_unavailable():
                 if cls.is_attention_jit_usable()
                 else ["FlashInfer attention JIT is unavailable"]
             )
+
+    # CUDA resolves the selected class by qualified name after validation.
+    # Register the local stub so this stays independent of FlashInfer.
+    monkeypatch.setattr(
+        sys.modules[__name__], "FlashInferBackendStub", FlashInferBackendStub,
+        raising=False,
+    )
 
     vllm_config = VllmConfig(cache_config=CacheConfig(block_size=16))
 
@@ -369,7 +392,7 @@ def test_fp8_kv_auto_selection_falls_back_when_attention_jit_is_unavailable():
         patch.object(
             flashinfer_utils,
             "is_flashinfer_jit_usable",
-            return_value=False,
+            return_value=jit_usable,
         ) as attention_jit_usable,
     ):
         backend = get_attn_backend(
@@ -379,7 +402,7 @@ def test_fp8_kv_auto_selection_falls_back_when_attention_jit_is_unavailable():
         )
 
     attention_jit_usable.assert_called_once_with()
-    assert backend.get_name() == "TRITON_ATTN"
+    assert backend.get_name() == expected_backend
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda", "hip"])
