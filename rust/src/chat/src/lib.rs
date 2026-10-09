@@ -81,6 +81,9 @@ pub struct ChatRequestProcessor {
     reasoning_parser: ParserSelection,
     /// Server-side floor for tool-call structural tags.
     tool_strict_level: ToolStrictLevel,
+    /// Constrain the output of requests without a tool or structured-output
+    /// constraint.
+    always_constrain_output: bool,
 }
 
 impl ChatRequestProcessor {
@@ -94,6 +97,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: ToolStrictLevel::Auto,
+            always_constrain_output: false,
         }
     }
 
@@ -106,6 +110,7 @@ impl ChatRequestProcessor {
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
             tool_strict_level: ToolStrictLevel::Auto,
+            always_constrain_output: false,
         }
     }
 
@@ -123,6 +128,13 @@ impl ChatRequestProcessor {
     /// Configure the server-side floor for tool-call structural tags.
     pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
         self.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Configure whether requests without a tool or structured-output
+    /// constraint still get an output grammar.
+    pub fn with_always_constrain_output(mut self, always_constrain_output: bool) -> Self {
+        self.always_constrain_output = always_constrain_output;
         self
     }
 
@@ -236,6 +248,7 @@ impl ChatRequestProcessor {
                 tool_call_parser: &self.tool_call_parser,
                 reasoning_parser: &self.reasoning_parser,
                 tool_strict_level: self.tool_strict_level,
+                always_constrain_output: self.always_constrain_output,
             },
         )?;
         let mut text_request = self.prepare_text_request(request).await?;
@@ -298,6 +311,13 @@ impl ChatLlm {
     /// Set the server-side floor for tool-call structural tags.
     pub fn with_tool_strict_level(mut self, tool_strict_level: ToolStrictLevel) -> Self {
         self.processor.tool_strict_level = tool_strict_level;
+        self
+    }
+
+    /// Set whether requests without a tool or structured-output constraint
+    /// still get an output grammar.
+    pub fn with_always_constrain_output(mut self, always_constrain_output: bool) -> Self {
+        self.processor.always_constrain_output = always_constrain_output;
         self
     }
 

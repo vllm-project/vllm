@@ -67,7 +67,7 @@ pub(super) fn build_output_grammar(
             (choice, tools)
         },
     );
-    let answer = ctx.answer;
+    let answer = ctx.constrained_answer();
 
     let mut elements = match mode {
         KimiK3Mode::Reasoning => vec![think_body(), after_reasoning(calls, answer)],
@@ -530,5 +530,60 @@ mod tests {
               optional `<|close|>message<|sep|>`
         "#]],
         );
+    }
+
+    #[test]
+    fn free_answer_keeps_the_free_response() {
+        let free = Format::any_text();
+        let tools = tools();
+        let build = |mode, tool_choice: &ToolChoice, tool_strict_level, answer| {
+            build_output_grammar(
+                &mode,
+                &OutputGrammarContext {
+                    tools: &tools,
+                    tool_choice,
+                    tool_strict_level,
+                    parallel_tool_calls: true,
+                    answer,
+                },
+            )
+            .unwrap()
+        };
+
+        // With tools, the grammar the tool choice builds alone, even for
+        // non-strict `auto`.
+        for tool_choice in [ToolChoice::auto(), ToolChoice::required()] {
+            assert_eq!(
+                build(
+                    KimiK3Mode::Reasoning,
+                    &tool_choice,
+                    ToolStrictLevel::Auto,
+                    Some(&free)
+                ),
+                build(
+                    KimiK3Mode::Reasoning,
+                    &tool_choice,
+                    ToolStrictLevel::Function,
+                    None
+                ),
+                "{tool_choice:?}"
+            );
+        }
+
+        // Without a callable tool, the channels around free response text.
+        let grammar = build(
+            KimiK3Mode::Idle,
+            &ToolChoice::none(),
+            ToolStrictLevel::Auto,
+            Some(&free),
+        )
+        .unwrap();
+        assert_eq!(grammar.coverage, GrammarCoverage::FromTokenZero);
+        expect![[r#"
+            sequence
+              optional tag `<|open|>think<|sep|>` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+              tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
+              optional `<|close|>message<|sep|>`
+        "#]].assert_eq(&outline(&grammar.format));
     }
 }

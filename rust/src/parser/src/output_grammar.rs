@@ -135,7 +135,23 @@ pub struct OutputGrammarContext<'a> {
     /// The user's constraint on the answer text, such as a `response_format`
     /// JSON schema, normalized to a format. A builder that composes it inserts
     /// it where the model writes its answer; `None` leaves the answer free.
+    ///
+    /// An unrestricted [`Format::any_text`] asks for a grammar while leaving
+    /// the answer free; builders read the answer through `constrained_answer`.
     pub answer: Option<&'a Format>,
+}
+
+impl<'a> OutputGrammarContext<'a> {
+    /// The answer constraint, unless it leaves the answer free.
+    ///
+    /// `--always-constrain-output` supplies an unrestricted
+    /// [`Format::any_text`] answer to a request without one, so that every
+    /// request gets a grammar. Builders treat it like no answer and keep their
+    /// own free answer: composing it as an `Or` branch would admit any text,
+    /// malformed tool calls included.
+    pub(crate) fn constrained_answer(&self) -> Option<&'a Format> {
+        self.answer.filter(|answer| **answer != Format::any_text())
+    }
 }
 
 /// Errors produced while building an output grammar.
@@ -248,7 +264,8 @@ fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
     match ctx.tool_choice {
         ToolChoice::Value(ToolChoiceValue::None) => false,
         // With an answer constraint, the grammar must hold the calls `auto`
-        // allows, or the answer would exclude them.
+        // allows, or the answer would exclude them. A free answer asks for a
+        // grammar, whose calls then keep the builder's free text.
         ToolChoice::Value(ToolChoiceValue::Auto) => {
             ctx.tool_strict_level >= ToolStrictLevel::Function
                 || ctx.tools.iter().any(|tool| tool.strict == Some(true))

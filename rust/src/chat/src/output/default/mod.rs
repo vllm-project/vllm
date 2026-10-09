@@ -52,7 +52,8 @@ struct GrammarInputs {
     tool_strict_level: ToolStrictLevel,
     /// The request's structured-output constraint, normalized for composition
     /// into the output grammar. The original stays on the request until an
-    /// output grammar replaces it.
+    /// output grammar replaces it. Under `--always-constrain-output`, a
+    /// request without one gets an unrestricted [`Format::any_text`].
     answer: Option<Format>,
 }
 
@@ -71,6 +72,7 @@ impl DefaultChatOutputProcessor {
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
         tool_strict_level: ToolStrictLevel,
+        always_constrain_output: bool,
     ) -> ChatResult<Self> {
         Self::with_response_template(
             request,
@@ -80,6 +82,7 @@ impl DefaultChatOutputProcessor {
             tool_call_parser,
             reasoning_parser,
             tool_strict_level,
+            always_constrain_output,
         )
     }
 
@@ -93,6 +96,7 @@ impl DefaultChatOutputProcessor {
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
         tool_strict_level: ToolStrictLevel,
+        always_constrain_output: bool,
     ) -> ChatResult<Self> {
         let tool_name = tool_call_parser.resolve_tool_name(model_id);
         let reasoning_name = reasoning_parser.resolve_reasoning_name(model_id);
@@ -143,7 +147,11 @@ impl DefaultChatOutputProcessor {
                 tools: request.tools().to_vec(),
                 tool_choice: request.tool_choice().into(),
                 tool_strict_level,
-                answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
+                answer: match &request.sampling_params.structured_outputs {
+                    Some(params) => answer_format(params),
+                    // Free, but still asks the parser for a grammar.
+                    None => always_constrain_output.then(Format::any_text),
+                },
             }),
         })
     }
@@ -334,6 +342,7 @@ mod tests {
                 &ParserSelection::Explicit("qwen3_coder".to_string()),
                 &ParserSelection::None,
                 level,
+                false,
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
@@ -378,6 +387,7 @@ mod tests {
                 &ParserSelection::Explicit("qwen3_coder".to_string()),
                 &ParserSelection::None,
                 ToolStrictLevel::Auto,
+                false,
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
@@ -392,6 +402,54 @@ mod tests {
             panic!("expected the calls or the answer, got {:?}", built.format);
         };
         assert_eq!(branches.elements.last(), Some(&Format::json_schema(schema)));
+    }
+
+    #[test]
+    fn always_constrain_output_builds_a_grammar_without_constraints() {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let build = |always_constrain_output, structured_outputs| {
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(
+                    &[],
+                    tools.clone(),
+                    Some(ChatToolChoice::Auto),
+                    true,
+                )
+                .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            request.sampling_params.structured_outputs = structured_outputs;
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                &ParserSelection::Explicit("qwen3_coder".to_string()),
+                &ParserSelection::None,
+                ToolStrictLevel::Auto,
+                always_constrain_output,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            processor.build_output_grammar().unwrap()
+        };
+
+        // Non-strict `auto` gets the tool parser's call grammar, which keeps
+        // free text around the calls.
+        assert!(build(false, None).is_none());
+        let built = build(true, None).unwrap();
+        let tag = serde_json::to_value(xgrammar_structural_tag::StructuralTag::new(built.format))
+            .unwrap();
+        assert_eq!(tag["format"]["type"], "triggered_tags");
+
+        // A constraint the grammar cannot compose stays on the request.
+        let lark = StructuredOutputsParams::grammar("start: \"a\"");
+        assert!(build(true, Some(lark)).is_none());
     }
 
     #[test]
@@ -421,6 +479,7 @@ mod tests {
                 &ParserSelection::Explicit("qwen3_coder".to_string()),
                 &ParserSelection::None,
                 ToolStrictLevel::Auto,
+                false,
             )
             .unwrap();
             processor.initialize(&[]).unwrap();
@@ -445,6 +504,7 @@ mod tests {
             &selection,
             &selection,
             ToolStrictLevel::Auto,
+            false,
         )
         .unwrap();
     }
@@ -460,6 +520,7 @@ mod tests {
             &ParserSelection::Auto,
             &ParserSelection::Auto,
             ToolStrictLevel::Auto,
+            false,
         )
         .unwrap();
     }
@@ -478,6 +539,7 @@ mod tests {
                 tool,
                 reasoning,
                 ToolStrictLevel::Auto,
+                false,
             )
             .unwrap();
         }
@@ -493,6 +555,7 @@ mod tests {
             &ParserSelection::Auto,
             &ParserSelection::Explicit("gemma4".to_string()),
             ToolStrictLevel::Auto,
+            false,
         ) {
             Ok(_) => panic!("expected mixed Gemma4 parser selection to fail"),
             Err(error) => error,
@@ -540,6 +603,7 @@ mod tests {
             tool,
             reasoning,
             ToolStrictLevel::Auto,
+            false,
         )?;
         Ok(!request.decode_options.skip_special_tokens)
     }

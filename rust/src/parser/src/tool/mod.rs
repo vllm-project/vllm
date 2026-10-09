@@ -215,13 +215,14 @@ pub trait ToolParser: Send {
     /// Build the visible language with the request's answer constraint
     /// composed in, as the Python frontend does: an optional call becomes
     /// `Or[calls built as required, answer]`, and a tool choice that obliges a
-    /// call ignores the answer. Parsers override [`Self::build_call_format`]
+    /// call ignores the answer. A free answer leaves the calls as the tool
+    /// choice builds them. Parsers override [`Self::build_call_format`]
     /// instead.
     fn build_visible_format(
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<Format>> {
-        let Some(answer) = ctx.answer else {
+        let Some(answer) = ctx.constrained_answer() else {
             return self.build_call_format(ctx);
         };
         match call_required(ctx.tool_choice) {

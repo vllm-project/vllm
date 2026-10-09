@@ -170,6 +170,7 @@ impl ChatBackend for HfChatBackend {
                 options.tool_call_parser,
                 options.reasoning_parser,
                 options.tool_strict_level,
+                options.always_constrain_output,
             )?,
         ))
     }
@@ -381,6 +382,7 @@ mod tests {
             &mut request,
             NewChatOutputProcessorOptions {
                 tool_strict_level: crate::ToolStrictLevel::Auto,
+                always_constrain_output: false,
                 tool_call_parser: &ParserSelection::Explicit("json".to_string()),
                 reasoning_parser: &ParserSelection::Auto,
             },

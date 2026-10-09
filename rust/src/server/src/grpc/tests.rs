@@ -247,6 +247,7 @@ impl ChatBackend for FakeTextBackend {
             options.tool_call_parser,
             options.reasoning_parser,
             options.tool_strict_level,
+            options.always_constrain_output,
         )?))
     }
 }
@@ -296,6 +297,7 @@ impl ChatBackend for FakeMultimodalBackend {
             options.tool_call_parser,
             options.reasoning_parser,
             options.tool_strict_level,
+            options.always_constrain_output,
         )?))
     }
 }
