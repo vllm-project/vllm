@@ -128,6 +128,13 @@ class KVCacheBlocks:
         return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 
+@dataclass
+class GapCacheHit:
+    start_token: int
+    blocks: KVCacheBlocks
+    num_tokens: int
+
+
 class KVCacheManager:
     def __init__(
         self,
@@ -144,6 +151,7 @@ class KVCacheManager:
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        enable_gap_tolerant_reuse: bool = False,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
     ) -> None:
@@ -163,6 +171,9 @@ class KVCacheManager:
         # this comment because when the log stats is enabled there are still
         # potential configs we could expose in the future.
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
+        self.hash_block_size = hash_block_size
+        self.enable_gap_tolerant_reuse = enable_gap_tolerant_reuse
+        self.gap_cache_hits: dict[str, list[GapCacheHit]] = {}
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -285,7 +296,7 @@ class KVCacheManager:
         # or calls a pooling model with all pooling).
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0
-
+            self.discard_gap_cache_hits(request.request_id)
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
         # This can trigger recomputation of an entire block, rather than just
@@ -298,6 +309,39 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+        num_gap_hit_tokens = 0
+        if (
+            self.enable_gap_tolerant_reuse
+            and self.num_kv_cache_groups == 1
+            and not self.coordinator.eagle_group_ids
+        ):
+            first_miss = num_new_computed_tokens // self.hash_block_size
+            max_blocks = max_cache_hit_length // self.hash_block_size
+            hits: list[GapCacheHit] = []
+            run_start = -1
+            run_blocks: list[KVCacheBlock] = []
+            for block_idx in range(first_miss, max_blocks):
+                cached = self.block_pool.get_cached_block(
+                    request.block_hashes[block_idx], [0]
+                )
+                if cached is not None:
+                    if not run_blocks:
+                        run_start = block_idx
+                    run_blocks.append(cached[0])
+                    continue
+                if run_blocks:
+                    hits.append(self._make_gap_cache_hit(run_start, run_blocks))
+                    run_blocks = []
+            if run_blocks:
+                hits.append(self._make_gap_cache_hit(run_start, run_blocks))
+            if hits:
+                for hit in hits:
+                    self.block_pool.touch(hit.blocks.blocks[0])
+                self.gap_cache_hits[request.request_id] = hits
+                num_gap_hit_tokens = sum(hit.num_tokens for hit in hits)
+                self.record_prefix_cache_stats(
+                    request, num_hits=num_new_computed_tokens + num_gap_hit_tokens
+                )
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
@@ -367,6 +411,48 @@ class KVCacheManager:
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
+
+    def _make_gap_cache_hit(
+        self, start_block: int, blocks: list[KVCacheBlock]
+    ) -> GapCacheHit:
+        return GapCacheHit(
+            start_token=start_block * self.hash_block_size,
+            blocks=self.create_kv_cache_blocks((blocks,)),
+            num_tokens=len(blocks) * self.hash_block_size,
+        )
+
+    def append_ready_gap_cache_hits(
+        self, request: Request
+    ) -> tuple[KVCacheBlocks, int]:
+        hits = self.gap_cache_hits.get(request.request_id)
+        if not hits:
+            return self.empty_kv_cache_blocks, 0
+
+        appended = self.empty_kv_cache_blocks
+        num_tokens = 0
+        while hits and hits[0].start_token == request.num_computed_tokens + num_tokens:
+            hit = hits.pop(0)
+            self.coordinator.append_pinned_computed_blocks(
+                request.request_id, hit.blocks.blocks
+            )
+            appended = appended + hit.blocks
+            num_tokens += hit.num_tokens
+        if not hits:
+            self.gap_cache_hits.pop(request.request_id, None)
+        return appended, num_tokens
+
+    def cap_tokens_before_gap_hit(
+        self, request_id: str, num_computed_tokens: int, num_new_tokens: int
+    ) -> int:
+        hits = self.gap_cache_hits.get(request_id)
+        if not hits:
+            return num_new_tokens
+        return min(num_new_tokens, hits[0].start_token - num_computed_tokens)
+
+    def discard_gap_cache_hits(self, request_id: str) -> None:
+        for hit in self.gap_cache_hits.pop(request_id, ()):
+            for blocks in hit.blocks.blocks:
+                self.block_pool.free_blocks(blocks)
 
     def allocate_slots(
         self,
@@ -626,6 +712,7 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
+        self.discard_gap_cache_hits(request.request_id)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
