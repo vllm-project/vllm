@@ -113,6 +113,23 @@ class WorkerBase:
         """Adopt the KV cache layout resolved by the engine core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
 
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is None
+            or not kv_transfer_config.is_kv_transfer_instance
+            or not kv_transfer_config.has_connector("NixlConnector")
+        ):
+            return
+
+        # Group geometry can depend on the resolved layout. Finalize NIXL's
+        # interleave before profiling builds a temporary KV cache and CUDA graphs.
+        from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+
+        kv_cache_groups = get_kv_cache_groups(
+            self.vllm_config, self.get_kv_cache_spec()
+        )
+        self.vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_groups)
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 

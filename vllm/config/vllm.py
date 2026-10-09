@@ -61,13 +61,13 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.sampling_params import BeamSearchParams, SamplingParams
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 else:
     PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
-    KVCacheConfig = Any
+    KVCacheGroupSpec = Any
 
 logger = init_logger(__name__)
 
@@ -3258,12 +3258,11 @@ class VllmConfig:
             )
 
     def adjust_dcp_kv_cache_interleave_size(
-        self, kv_cache_config: "KVCacheConfig"
+        self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
         """Normalize DCP interleave size against block_size for NIXL P/D.
 
-        Called by each worker (via ensure_kv_transfer_initialized), once it knows its
-        own final block_size via kv_cache_config.
+        Called by each worker once it knows its post-layout KV cache groups.
         """
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size <= 1:
@@ -3291,7 +3290,7 @@ class VllmConfig:
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
         # scaling by dcp_size (we need the local block_size here).
         local_block_size = min(
-            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+            group.kv_cache_spec.block_size for group in kv_cache_groups
         )
         if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
             interleave = self.parallel_config.cp_kv_cache_interleave_size
