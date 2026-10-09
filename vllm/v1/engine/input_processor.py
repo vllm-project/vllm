@@ -159,6 +159,7 @@ class InputProcessor:
                 self.speculative_config,
                 self.structured_outputs_config,
                 self.tokenizer,
+                diffusion_config=self.vllm_config.diffusion_config,
             )
             if params.prompt_logprob_token_ids is not None:
                 if not self.vllm_config.use_v2_model_runner:

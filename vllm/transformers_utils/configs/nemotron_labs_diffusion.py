@@ -12,6 +12,52 @@ from typing import Any
 
 from transformers import PreTrainedConfig
 
+from vllm.exceptions import VLLMValidationError
+
+
+def validate_read_params(params: Any, canvas_length: int, vocab_size: int) -> None:
+    """Validate a single-forward read before it reaches the model worker."""
+    extra = params.extra_args or {}
+    reading = extra.get("diffusion_read_only", False)
+    seed = extra.get("diffusion_seed_canvas")
+    # OpenAI vllm_xargs currently encodes booleans as numeric scalar values.
+    if not isinstance(reading, bool) and not (
+        type(reading) is int and reading in (0, 1)
+    ):
+        raise VLLMValidationError("diffusion_read_only must be a boolean or 0/1")
+    if seed is not None and (
+        not isinstance(seed, list)
+        or len(seed) != canvas_length
+        or any(type(t) is not int or not 0 <= t < vocab_size for t in seed)
+    ):
+        raise VLLMValidationError(
+            "diffusion_seed_canvas must contain exactly "
+            f"{canvas_length} valid token ids"
+        )
+    if seed is not None and not reading:
+        raise VLLMValidationError("diffusion_seed_canvas requires diffusion_read_only")
+    if not reading:
+        return
+    if seed is None or 100 not in seed:
+        raise VLLMValidationError("diffusion_read_only requires a seeded mask position")
+    if (
+        params.max_tokens is None
+        or params.max_tokens > canvas_length
+        or params.temperature != 0
+        or params.top_p != 1
+        or params.top_k not in (0, -1)
+    ):
+        raise VLLMValidationError(
+            "diffusion_read_only requires temperature=0, top_p=1, "
+            "top_k=0 and max_tokens <= canvas_length"
+        )
+    if extra.get("diffusion_canvas_length", canvas_length) != canvas_length:
+        raise VLLMValidationError(
+            "Nemotron reads require the full engine canvas length"
+        )
+    if extra.get("diffusion_max_steps", 1) != 1 or extra.get("diffusion_pinned"):
+        raise VLLMValidationError("Nemotron read-only scoring uses one masked forward")
+
 
 class NemotronLabsDiffusionConfig(PreTrainedConfig):
     model_type = "nemotron_labs_diffusion"

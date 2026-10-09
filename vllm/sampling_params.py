@@ -16,7 +16,12 @@ from pydantic import BeforeValidator, GetPydanticSchema, StrictInt
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+from vllm.config import (
+    DiffusionConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    StructuredOutputsConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -904,6 +909,7 @@ class SamplingParams(
         speculative_config: SpeculativeConfig | None,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
+        diffusion_config: DiffusionConfig | None = None,
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
@@ -911,7 +917,7 @@ class SamplingParams(
         self._validate_stop_token_ids(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
-        self._validate_diffusion(model_config)
+        self._validate_diffusion(model_config, diffusion_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1193,10 +1199,29 @@ class SamplingParams(
                 "are not yet supported with speculative decoding."
             )
 
-    def _validate_diffusion(self, model_config: ModelConfig) -> None:
+    def _validate_diffusion(
+        self,
+        model_config: ModelConfig,
+        diffusion_config: DiffusionConfig | None = None,
+    ) -> None:
         if not model_config.is_diffusion:
             return
 
+        if "NemotronLabsDiffusionModel" in model_config.architectures:
+            from vllm.transformers_utils.configs.nemotron_labs_diffusion import (
+                validate_read_params,
+            )
+
+            if self.extra_args and (
+                "diffusion_read_only" in self.extra_args
+                or "diffusion_seed_canvas" in self.extra_args
+            ):
+                width = (
+                    diffusion_config.canvas_length
+                    if diffusion_config is not None
+                    else model_config.hf_config.canvas_length
+                )
+                validate_read_params(self, width, model_config.get_vocab_size())
         # Nemotron supports ordinary per-request temperatures; other
         # diffusion models retain their engine-level schedule.
         per_request_temperature = (

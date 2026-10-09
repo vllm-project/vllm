@@ -8,6 +8,7 @@ model tests exercise the compiled sampler with the checkpoint's vocabulary.
 """
 
 import json
+import math
 import os
 from functools import partial
 
@@ -46,6 +47,160 @@ def test_config_registration():
     # canvas_length is the field ModelConfig.is_diffusion keys off of.
     assert cfg.canvas_length == 32
     assert cfg.mask_token_id == 100
+
+
+def test_read_only_emits_seeded_canvas_without_commit(eager_sampler):
+    """A read emits once; a normal neighbour retains its reveal schedule."""
+    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
+
+    canvas = torch.tensor([[3, 10, 4, 10], [10, 10, 10, 10]])
+    slots = torch.arange(2)
+    step = torch.zeros(2, dtype=torch.int32)
+    phase = torch.zeros(2, dtype=torch.bool)
+    sampled = torch.zeros(2, 4, dtype=torch.int32)
+    counts = torch.zeros(2, dtype=torch.int32)
+    logits = torch.zeros(8, 12)
+    logits[:, 7] = 4
+    _compiled_masked_step(
+        logits,
+        slots,
+        slots,
+        slots,
+        torch.full((2,), 4),
+        torch.zeros(2),
+        canvas,
+        step,
+        phase,
+        torch.zeros(2, 4),
+        torch.zeros(2, 4, dtype=torch.int32),
+        sampled,
+        counts,
+        torch.zeros(2, 4, dtype=torch.int64),
+        max_denoising_steps=4,
+        mask_token_id=10,
+        CL=4,
+        all_greedy=True,
+        capture_logprobs=True,
+        leftmost=True,
+        threshold_mode=False,
+        log_threshold=0,
+        read_only=torch.tensor([True, False]),
+    )
+    assert sampled[0].tolist() == [3, 7, 4, 7]
+    assert counts.tolist() == [4, 0]
+    assert canvas[1].tolist() == [7, 10, 10, 10]
+
+
+@pytest.mark.parametrize(
+    "extra,params",
+    [
+        ({"diffusion_read_only": True}, {}),
+        ({"diffusion_read_only": "yes"}, {}),
+        ({"diffusion_read_only": True, "diffusion_seed_canvas": [100]}, {}),
+        (
+            {"diffusion_read_only": True, "diffusion_seed_canvas": [100] * 4},
+            {"max_tokens": 5},
+        ),
+        ({"diffusion_read_only": True, "diffusion_seed_canvas": [100, 1, 2, -1]}, {}),
+    ],
+)
+def test_invalid_reads_fail_before_worker(extra, params):
+    from types import SimpleNamespace
+    from typing import cast
+
+    from vllm import SamplingParams
+    from vllm.config import DiffusionConfig, ModelConfig
+
+    model = SimpleNamespace(
+        is_diffusion=True,
+        architectures=["NemotronLabsDiffusionModel"],
+        get_vocab_size=lambda: 128,
+    )
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(
+        VLLMValidationError, match="diffusion_read_only|diffusion_seed_canvas"
+    ):
+        SamplingParams(
+            **dict(temperature=0, max_tokens=4, extra_args=extra) | params
+        )._validate_diffusion(
+            cast(ModelConfig, model), DiffusionConfig(canvas_length=4)
+        )
+
+
+def test_read_only_accepts_openai_xargs_boolean():
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.transformers_utils.configs.nemotron_labs_diffusion import (
+        validate_read_params,
+    )
+
+    request = ChatCompletionRequest(
+        model="nemotron",
+        messages=[{"role": "user", "content": "2+2?"}],
+        temperature=0,
+        max_tokens=4,
+        vllm_xargs={"diffusion_read_only": True, "diffusion_seed_canvas": [100] * 4},
+    )
+    validate_read_params(request.to_sampling_params(4, {}), 4, 128)
+
+
+@requires_gpu
+@requires_weights
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_read_only_indexed_scores_and_slot_reuse(monkeypatch, enforce_eager):
+    """Exact candidates include low-probability tokens and survive slot reuse."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    from vllm import LLM, SamplingParams
+    from vllm.distributed import cleanup_dist_env_and_memory
+    from vllm.inputs import TokensPrompt
+
+    tok = _load_tokenizer()
+    prompt = TokensPrompt(prompt_token_ids=_prompt_ids(tok, "cpu")[0].tolist())
+    candidates = [tok.encode(s, add_special_tokens=False)[0] for s in ("4", "5")]
+    candidates.append(0)
+    seed = [MASK_TOKEN_ID] * CANVAS_LENGTH
+    seed[1] = 900
+    llm = LLM(
+        model=MODEL_PATH,
+        enforce_eager=enforce_eager,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.6,
+        attention_config={"backend": "TRITON_ATTN"},
+    )
+    try:
+        read = SamplingParams(
+            temperature=0,
+            max_tokens=CANVAS_LENGTH,
+            ignore_eos=True,
+            logprob_token_ids=candidates,
+            extra_args={"diffusion_read_only": True, "diffusion_seed_canvas": seed},
+        )
+        normal = SamplingParams(
+            temperature=0, max_tokens=8, ignore_eos=True, logprobs=0
+        )
+        batch = llm.generate([prompt, prompt], [read, normal])
+        single = llm.generate([prompt], read)[0].outputs[0]
+        result = batch[0].outputs[0]
+        assert len(result.token_ids) == CANVAS_LENGTH
+        assert result.token_ids[1] == 900
+        assert result.token_ids == single.token_ids
+        assert result.logprobs is not None and single.logprobs is not None
+        for position in (0, 2, CANVAS_LENGTH - 1):
+            for token in candidates:
+                score = result.logprobs[position][token].logprob
+                assert math.isfinite(score)
+                # BF16 batched GEMMs need not produce identical logits.
+                assert math.exp(score) == pytest.approx(
+                    math.exp(single.logprobs[position][token].logprob), abs=0.02
+                )
+        # A following ordinary generation must not inherit the seeded template.
+        reused = llm.generate([prompt], normal)[0].outputs[0]
+        assert reused.token_ids == batch[1].outputs[0].token_ids
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize(

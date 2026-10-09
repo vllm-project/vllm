@@ -94,3 +94,70 @@ NEMOTRON_DLM_MODEL_PATH=/path/to/Nemotron-Labs-Diffusion-8B \
     .venv/bin/python -m pytest --confcutdir=tests/models/language/generation \
     tests/models/language/generation/test_nemotron_dllm.py -v
 ```
+
+## Structured decision reads
+
+The masked-diffusion backend also supports seeded, read-only canvases. Prompt
+prefill is followed by one bidirectional masked forward, without an autoregressive
+verification/commit pass. Normal generation remains unchanged.
+
+Reuse the structured diffusion example to expose a TypeSafe-shaped
+`POST /v1/systemone` API. This is an optional **separate gateway process**, not
+an endpoint built into `vllm serve`:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve nvidia/Nemotron-Labs-Diffusion-8B \
+  --served-model-name jev-latest --port 8000 \
+  --diffusion-config '{"canvas_length":32}' --max-logprobs 128 \
+  --enable-prefix-caching
+
+API_KEY="$DECISION_API_KEY" python examples/features/structured_diffusion/structured_server.py \
+  --backend nemotron --tokenizer nvidia/Nemotron-Labs-Diffusion-8B \
+  --model jev-latest --canvas 32 --upstream http://localhost:8000 --port 8011
+```
+
+`jev-latest` is a local serving alias, not the TypeSafe Jev checkpoint.
+The gateway supports choice, Noul and Score questions over string or JSON state:
+
+```bash
+curl http://localhost:8011/v1/systemone \
+  -H "Authorization: Bearer $DECISION_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"jev-latest","state":"Customer payouts have failed for three days.",
+       "questions":{"route":{"type":"choice","instructions":"Which team should handle this?",
+       "criteria":{"billing":"Payments and payouts","technical":"Infrastructure outages"}},
+       "urgent":{"type":"noul","instructions":"Has the problem lasted multiple days?"}}}'
+```
+
+Answers preserve the question IDs. Choice returns `choice`, `probabilities` and
+`confidence`; Noul returns `noul` (the probability of yes); Score returns a
+zero-indexed probability-weighted `score`, `legend`, `probabilities` and
+`confidence`. These are normalized model scores, not calibrated guarantees.
+
+This example accepts at most 64 questions and 26 alternatives per question.
+It chunks answer templates that exceed the canvas and keeps input order; there
+are no option- or position-ordering heuristics. Every option must resolve to one
+token at the same answer position. An incompatible template fails explicitly
+rather than approximating missing probabilities. Nemotron reads are text-only,
+deterministic (`samples=1`), and do not support the example's thinking or multi-step
+extensions. See the [OpenAPI schema](../../examples/features/structured_diffusion/systemone-openapi.yaml).
+
+For direct OpenAI-compatible calls, pass `logprob_token_ids` (up to 128 candidates),
+`return_tokens_as_token_ids=true`, `logprobs=true` and these `vllm_xargs`:
+
+```json
+{
+  "diffusion_read_only": true,
+  "diffusion_seed_canvas": [100, 100, 100, 100, 100, 100, 100, 100,
+                            100, 100, 100, 100, 100, 100, 100, 100,
+                            100, 100, 100, 100, 100, 100, 100, 100,
+                            100, 100, 100, 100, 100, 100, 100, 100]
+}
+```
+
+Use `temperature=0`, default `top_p=1`/`top_k=0`, and `max_tokens` no greater
+than the engine canvas length. The seed must contain exactly that many valid
+token IDs; `100` is the checkpoint's mask token. Non-mask positions remain fixed.
+The sampled tokens only transport the per-position logprobs: decisions should
+normalize the requested candidates at each mask position. Read-only scoring and
+indexed logprobs use the masked-diffusion backend.

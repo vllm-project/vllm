@@ -73,3 +73,22 @@ thought in its prompt, so the answer slots condition on it. The noise draws
 of a decision share one thought. `diagnostics.thought` returns the text, its
 length in tokens, whether the model closed the channel itself and the
 generation time.
+
+## Nemotron Labs Diffusion
+
+The same `/v1/systemone` gateway can serve Nemotron Labs Diffusion 3B/8B with
+`--backend nemotron`. See the [model guide](../../../docs/models/nemotron_labs_diffusion.md#structured-decision-reads)
+for launch commands and the [OpenAPI schema](systemone-openapi.yaml) for request shapes.
+This backend uses mask-token answer slots instead of random noise, one masked
+forward after prefill, and exact candidate logprobs. It does not reorder options
+or questions. Text/JSON state and choice, Noul and Score answers are supported;
+thinking, images and multiple samples are not.
+
+Verify a running gateway with:
+
+```bash
+python examples/features/structured_diffusion/nemotron_smoke.py --url http://localhost:8011
+```
+
+The smoke check validates answer shapes and finite, normalized probabilities for
+all three primitives and a 12-question request. It is not an accuracy benchmark.

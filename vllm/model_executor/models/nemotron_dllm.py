@@ -32,11 +32,12 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.nemotron_labs_diffusion import validate_read_params
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
@@ -267,6 +268,7 @@ def _compiled_masked_step(
     leftmost: bool,
     threshold_mode: bool,
     log_threshold: float,
+    read_only: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Update absorbing masked-token state and emit completed blocks.
 
@@ -299,12 +301,11 @@ def _compiled_masked_step(
         u = torch.rand_like(logits_3d).clamp_min(1e-20)
         gumbel = -torch.log(-torch.log(u))
         x0 = (logits_3d + req_temps[:, None, None] * gumbel).argmax(dim=-1)
-        # Keep the random argmax separate from downstream gather/reductions.
-        # Inductor can otherwise emit an out-of-scope reduction temporary
-        # for the checkpoint vocabulary on SM100.
-        torch._dynamo.graph_break()
     else:
         x0 = logits_3d.argmax(dim=-1)  # [num_decode, CL]
+    # Keep argmax separate from downstream gather/reductions. Inductor can
+    # otherwise emit an out-of-scope reduction temporary on SM100.
+    torch._dynamo.graph_break()
     chosen_logits = logits_3d.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
     x0_logprob = chosen_logits - logits_3d.logsumexp(dim=-1)
     neg_inf = torch.full_like(x0_logprob, float("-inf"))
@@ -338,6 +339,11 @@ def _compiled_masked_step(
         ranks = torch.empty_like(order)
         ranks.scatter_(1, order, pos.expand(num_decode, CL))
         transfer = mask_index & (ranks < k.unsqueeze(1))
+
+    reading = (
+        torch.zeros_like(is_commit) if read_only is None else read_only[decode_slots]
+    )
+    transfer |= mask_index & reading[:, None]
 
     # ---- At-unmask logprob/rank capture (sampling distribution) ----
     sample_logits = logits_3d
@@ -392,6 +398,12 @@ def _compiled_masked_step(
     )
     num_sampled[decode_idx] = is_commit.to(num_sampled.dtype) * emit_len.to(
         num_sampled.dtype
+    )
+    sampled[decode_idx] = torch.where(
+        reading[:, None], new_canvas.to(sampled.dtype), sampled[decode_idx]
+    )
+    num_sampled[decode_idx] = torch.where(
+        reading, valid_canvas_len.to(num_sampled.dtype), num_sampled[decode_idx]
     )
 
     # ---- Convergence: no masks remain, or step budget exhausted ----
@@ -643,6 +655,7 @@ class MaskedDiffusionSampler:
         confidence_threshold: float = 0.9,
     ):
         self.sampling_states = sampler.sampling_states
+        self.logprob_token_ids_state = sampler.logprob_token_ids_state
         self.req_states = sampler.req_states
         self.vocab_size = vocab_size
         self.diffusion_states = diffusion_states
@@ -666,8 +679,20 @@ class MaskedDiffusionSampler:
 
         # Per-slot top-k scores captured when each position is revealed.
         self._pending_logprobs: dict[int, LogprobsTensors] = {}
+        self._seed_canvases = StagedWriteTensor(
+            (max_num_reqs, self.canvas_length), dtype=torch.int64, device=device
+        )
+        self._read_only = StagedWriteTensor(
+            (max_num_reqs, 1), dtype=torch.int32, device=device
+        )
+        self._read_only.gpu.zero_()
+        self._seeded_slots: set[int] = set()
 
     def add_request(self, req_idx: int, sampling_params: Any) -> None:
+        extra = sampling_params.extra_args or {}
+        reading = extra.get("diffusion_read_only", False)
+        seed = extra.get("diffusion_seed_canvas")
+        validate_read_params(sampling_params, self.canvas_length, self.vocab_size)
         if use_penalty(sampling_params):
             logger.warning_once(
                 "Masked block-diffusion does not support repetition/frequency/"
@@ -677,9 +702,18 @@ class MaskedDiffusionSampler:
         # that was aborted between its converging denoise and commit steps.
         self._pending_logprobs.pop(req_idx, None)
         self.sampling_states.add_request(req_idx, sampling_params)
+        self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self._seeded_slots.discard(req_idx)
+        self._read_only.stage_write(req_idx, 0, [int(reading)])
+        if seed is not None:
+            self._seed_canvases.stage_write(req_idx, 0, seed)
+            self._seeded_slots.add(req_idx)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
+        self.logprob_token_ids_state.apply_staged_writes()
+        self._seed_canvases.apply_write()
+        self._read_only.apply_write()
 
     @property
     def penalties_state(self):
@@ -712,6 +746,12 @@ class MaskedDiffusionSampler:
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
         states.init_canvas(ps_gpu)
+        seeded = [int(slot) for slot in ps if int(slot) in self._seeded_slots]
+        if seeded:
+            seed_slots = async_tensor_h2d(
+                np.asarray(seeded, dtype=np.int64), device=states.device
+            )
+            states.canvas[seed_slots] = self._seed_canvases.gpu[seed_slots]
         self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
             ps_gpu
         ]
@@ -853,6 +893,9 @@ class MaskedDiffusionSampler:
         )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
+        max_token_ids = self.logprob_token_ids_state.max_num_token_ids(slots_np)
+        if max_token_ids:
+            max_num_logprobs = max(max_num_logprobs, max_token_ids)
 
         req_temps = self.sampling_states.temperature.gpu[decode_slots]
 
@@ -884,19 +927,33 @@ class MaskedDiffusionSampler:
             leftmost=self.leftmost,
             threshold_mode=self.threshold_mode,
             log_threshold=self.log_threshold,
+            read_only=self._read_only.gpu[:, 0] != 0,
         )
 
         # Capture each position's distribution at reveal, independently of
         # neighbouring requests' logprob settings and convergence steps.
         if max_num_logprobs > 0 and num_decode > 0:
             revealed = was_masked & (states.canvas[decode_slots] != self.mask_token_id)
+            revealed |= self._read_only.gpu[decode_slots] != 0
             for li, slot in enumerate(decode_slots_np):
                 slot = int(slot)
                 requested = int(self.sampling_states.num_logprobs[slot])
-                if requested <= 0:
+                custom_count = int(self.logprob_token_ids_state.num_token_ids.np[slot])
+                if requested <= 0 and not custom_count:
                     continue
                 current = compute_topk_scores(
-                    logits_3d[li], requested, states.canvas[slot]
+                    logits_3d[li],
+                    max(0, requested),
+                    states.canvas[slot],
+                    logprob_token_ids_state=(
+                        self.logprob_token_ids_state if custom_count else None
+                    ),
+                    expanded_idx_mapping=(
+                        torch.full((CL,), slot, dtype=torch.int32, device=device)
+                        if custom_count
+                        else None
+                    ),
+                    max_per_req_token_ids=custom_count,
                 )
                 previous = self._pending_logprobs.get(slot)
                 if previous is None:
@@ -928,7 +985,7 @@ class MaskedDiffusionSampler:
             for i, slot in enumerate(slots_np):
                 slot = int(slot)
                 lp = self._pending_logprobs.get(slot)
-                if self.sampling_states.num_logprobs[slot] > 0 and lp is not None:
+                if lp is not None:
                     token_ids, scores, ranks = (
                         lp.logprob_token_ids,
                         lp.logprobs,
