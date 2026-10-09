@@ -434,15 +434,15 @@ def triton_mla_sparse_attention(
     """Sparse MLA attention over topk indices.
 
     Args:
-        q:         [num_tokens, num_heads_q, dim_qk] bf16
-        kv:        [seq_kv, num_heads_kv=1, dim_qk] bf16
+        q:         [num_tokens, num_heads_q, dim_qk] fp16 or bf16
+        kv:        [seq_kv, num_heads_kv=1, dim_qk] fp16 or bf16
         indices:   [num_tokens, num_heads_kv=1, topk] int32
         sm_scale:  softmax scale
         num_kv_splits: override auto-heuristic; None/0 = auto, 1 = force single-pass.
         sm_count:  cached device SM count for the split heuristic.
 
     Returns:
-        out:   [num_tokens, num_heads_q, _BLOCK_DV] bf16
+        out:   [num_tokens, num_heads_q, _BLOCK_DV], same dtype as q
 
     """
     num_tokens, num_heads_q, dim_qk = q.shape
