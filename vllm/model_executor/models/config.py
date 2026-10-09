@@ -309,90 +309,10 @@ class EmbeddingGemma2ModelConfig(Gemma4Config):
             )
 
         model_config = vllm_config.model_config
-        orig_len = getattr(model_config, "original_max_model_len", None)
-        if orig_len in (None, -1):
-            default_len = 8192
-            # Check sentence_bert_config.json if available
-            try:
-                import json
-                from pathlib import Path
-
-                cfg_path = Path(model_config.model) / "sentence_bert_config.json"
-                if cfg_path.exists():
-                    data = json.loads(cfg_path.read_text())
-                    if "max_seq_length" in data and isinstance(
-                        data["max_seq_length"], int
-                    ):
-                        default_len = data["max_seq_length"]
-            except Exception:
-                pass
-
-            if model_config.max_model_len > default_len:
-                uncapped_len = model_config.max_model_len
-                logger.info(
-                    "EmbeddingGemma2: max_model_len not explicitly set; capping from "
-                    "%d to %d.",
-                    model_config.max_model_len,
-                    default_len,
-                )
-                model_config.max_model_len = default_len
-                scheduler_config = vllm_config.scheduler_config
-                if scheduler_config is not None:
-                    new_batched_tokens = max(
-                        model_config.max_model_len, scheduler_config.max_num_seqs
-                    )
-                    if scheduler_config.max_num_batched_tokens >= uncapped_len:
-                        if scheduler_config.max_num_batched_tokens > uncapped_len:
-                            logger.warning(
-                                "EmbeddingGemma2: lowering explicitly set "
-                                "scheduler_config.max_num_batched_tokens from %d to %d "
-                                "to match capped max_model_len.",
-                                scheduler_config.max_num_batched_tokens,
-                                new_batched_tokens,
-                            )
-                        else:
-                            logger.info(
-                                "EmbeddingGemma2: lowering "
-                                "scheduler_config.max_num_batched_tokens from %d to %d "
-                                "to match capped max_model_len.",
-                                scheduler_config.max_num_batched_tokens,
-                                new_batched_tokens,
-                            )
-                        scheduler_config.max_num_batched_tokens = new_batched_tokens
-                        if hasattr(vllm_config, "_set_compile_ranges"):
-                            vllm_config._set_compile_ranges()
-                    if scheduler_config.max_num_encoder_input_tokens >= uncapped_len:
-                        if scheduler_config.max_num_encoder_input_tokens > uncapped_len:
-                            logger.warning(
-                                "EmbeddingGemma2: lowering explicitly set "
-                                "scheduler_config.max_num_encoder_input_tokens "
-                                "from %d to %d to match capped max_model_len.",
-                                scheduler_config.max_num_encoder_input_tokens,
-                                new_batched_tokens,
-                            )
-                        scheduler_config.max_num_encoder_input_tokens = (
-                            new_batched_tokens
-                        )
-                    if scheduler_config.encoder_cache_size >= uncapped_len:
-                        if scheduler_config.encoder_cache_size > uncapped_len:
-                            logger.warning(
-                                "EmbeddingGemma2: lowering explicitly set "
-                                "scheduler_config.encoder_cache_size from %d to %d "
-                                "to match capped max_model_len.",
-                                scheduler_config.encoder_cache_size,
-                                new_batched_tokens,
-                            )
-                        scheduler_config.encoder_cache_size = new_batched_tokens
-                    if hasattr(scheduler_config, "verify_max_model_len"):
-                        scheduler_config.verify_max_model_len(
-                            model_config.max_model_len
-                        )
-        elif model_config.max_model_len > 32768:
-            logger.warning(
-                "EmbeddingGemma2: max_model_len=%d is large; "
-                "consider --max-model-len 8192 to bound encoder memory.",
-                model_config.max_model_len,
-            )
+        if model_config.max_model_len > 8192 and getattr(
+            model_config, "original_max_model_len", None
+        ) in (None, -1):
+            model_config.max_model_len = 8192
 
 
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
