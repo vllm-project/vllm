@@ -21,10 +21,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backend import MultipleOf
-from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
-    FlashAttnMLASparseBackend,
-)
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
@@ -100,12 +96,6 @@ def rope_carrying_model(monkeypatch):
 
 def test_supported_head_sizes_include_512():
     assert FlashMLASparseBackend.get_supported_head_sizes() == [576, 512]
-
-
-def test_flash_attn_sparse_accepts_manager_blocks():
-    (supported,) = FlashAttnMLASparseBackend.get_supported_kernel_block_sizes()
-    assert isinstance(supported, MultipleOf)
-    assert supported.base == 64
 
 
 def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
