@@ -63,7 +63,9 @@ class _WorkerRequestState:
     finished: bool = False
     logprob_keys: list[str] = field(default_factory=list)
     prompt_logprob_keys: list[str] = field(default_factory=list)
+    pending_logprob_blocks: list[tuple[bytes, str]] = field(default_factory=list)
     logprob_rows: dict[int, LogprobRows] = field(default_factory=dict)
+    logprob_cursor: int | None = None
     prompt_logprob_rows: dict[int, LogprobRows] = field(default_factory=dict)
     published_artifact_positions: dict[str, frozenset[int]] = field(
         default_factory=dict
@@ -191,11 +193,13 @@ class AuxOutputWorkerConnector:
         if max_bytes is None:
             max_logprobs = max(vllm_config.model_config.max_logprobs, 0)
             bytes_per_row = max(16, (max_logprobs + 1) * 8 + 4)
+            # NPZ stores array headers and metadata in addition to row data.
+            # Reserve this per artifact so the derived capacity does not fail
+            # closed solely because a block has a larger serialization header.
+            artifact_overhead = 4096
+            bytes_per_block = hash_block_size * bytes_per_row + artifact_overhead
             max_bytes = (
-                kv_cache_config.num_blocks
-                * hashes_per_kv_block
-                * hash_block_size
-                * bytes_per_row
+                kv_cache_config.num_blocks * hashes_per_kv_block * bytes_per_block
             )
         if self._enable_logprobs or self._enable_prompt_logprobs:
             self._logprob_store = BackgroundBlockObjectStore(
@@ -359,12 +363,40 @@ class AuxOutputWorkerConnector:
                 state.prompt_replay_prefix = int(token_start)
 
             if request_id in pending.logprobs:
-                sample_start = max(state.prompt_len, int(token_start) + 1)
+                proposed_start = max(state.prompt_len, int(token_start) + 1)
+                sample_start = state.logprob_cursor
+                if sample_start is None:
+                    sample_start = proposed_start
+                assert proposed_start >= sample_start, (
+                    "auxiliary logprobs capture moved backwards"
+                )
+                if proposed_start > sample_start:
+                    assert sample_start < state.scheduled_cursor, (
+                        "auxiliary logprobs capture has an unbacked token gap"
+                    )
                 rows = rows_from_lists(pending.logprobs[request_id], sample_start)
+                self._bind_pending_logprob_blocks(state, rows)
                 state.logprob_rows[sample_start] = rows
+                state.logprob_cursor = sample_start + len(rows.positions)
             if request_id in pending.prompt_logprobs:
                 value = pending.prompt_logprobs[request_id]
-                prompt_start = state.prompt_len - value.logprobs.shape[0]
+                num_rows = value.logprobs.shape[0]
+                full_prompt_rows = max(state.prompt_len - 1, 0)
+                if num_rows == full_prompt_rows:
+                    # The V1 GPU runner returns its accumulated full-prompt
+                    # tensor on the final prefill step. With a cached prefix,
+                    # the prefix portion is allocated but not populated.
+                    row_start = state.prompt_replay_prefix or 0
+                    prompt_start = row_start + 1
+                    value = type(value)(
+                        value.logprob_token_ids[row_start:],
+                        value.logprobs[row_start:],
+                        value.selected_token_ranks[row_start:],
+                    )
+                else:
+                    # The sampler's chunk output is the suffix ending at the
+                    # prompt boundary, so align it from the prompt length.
+                    prompt_start = state.prompt_len - num_rows
                 rows = rows_from_tensors(value, prompt_start)
                 state.prompt_logprob_rows[prompt_start] = rows
 
@@ -503,13 +535,17 @@ class AuxOutputWorkerConnector:
                 prompt_chunks.append(
                     self._read_logprob_rows(state.prompt_logprob_keys[:num_hit_blocks])
                 )
-            if request_id in pending.prompt_logprobs:
-                value = pending.prompt_logprobs[request_id]
-                start = state.prompt_len - value.logprobs.shape[0]
-                prompt_chunks.append(rows_from_tensors(value, start))
             merged_prompt = concat_rows(prompt_chunks)
             if int(num_sampled[index]) > 0:
                 expected = np.arange(1, state.prompt_len, dtype=np.int64)
+                if merged_prompt is not None:
+                    mask = merged_prompt.positions < state.prompt_len
+                    merged_prompt = LogprobRows(
+                        merged_prompt.positions[mask],
+                        merged_prompt.token_ids[mask],
+                        merged_prompt.values[mask],
+                        merged_prompt.ranks[mask],
+                    )
                 if merged_prompt is None and not len(expected):
                     generated = pending.logprobs.get(request_id)
                     assert generated is not None
@@ -597,7 +633,9 @@ class AuxOutputWorkerConnector:
                     )
                     existing = store.get_optional(key)
                     if existing is not None:
-                        merged = concat_rows([artifact, decode_rows(existing)])
+                        # Keep the newly computed row when a preemption or
+                        # resumed execution recomputes the same position.
+                        merged = concat_rows([decode_rows(existing), artifact])
                         assert merged is not None
                         artifact = merged
                     store.put(
@@ -748,10 +786,13 @@ class AuxOutputWorkerConnector:
                     block_batches.append((state, []))
             for request_id, fingerprint in metadata.logprobs.items():
                 state = self._requests[request_id]
-                keys = self._logprob_keys(
-                    metadata.block_hashes.get(request_id, ()), fingerprint
+                keys, pending_blocks = self._resolve_logprob_keys(
+                    metadata.logprob_block_hashes.get(request_id, ()),
+                    metadata.logprob_boundary_token_ids.get(request_id, ()),
+                    fingerprint,
                 )
                 state.logprob_keys.extend(keys)
+                state.pending_logprob_blocks.extend(pending_blocks)
                 retained_logprob_keys.extend(keys)
             for request_id, fingerprint in metadata.prompt_logprobs.items():
                 state = self._requests[request_id]
@@ -759,11 +800,13 @@ class AuxOutputWorkerConnector:
                     state.prompt_logprob_keys = state.logprob_keys
                 else:
                     keys = self._logprob_keys(
-                        metadata.block_hashes.get(request_id, ()), fingerprint
+                        metadata.logprob_block_hashes.get(request_id, ()),
+                        metadata.logprob_boundary_token_ids.get(request_id, ()),
+                        fingerprint,
                     )
                     state.prompt_logprob_keys.extend(keys)
                     retained_logprob_keys.extend(keys)
-            self._publish_logprob_blocks(metadata.block_hashes)
+            self._publish_logprob_blocks(metadata.logprob_block_hashes)
             finished_now: list[str] = []
             for request_id in metadata.finished_requests:
                 state = self._requests[request_id]
@@ -787,10 +830,61 @@ class AuxOutputWorkerConnector:
             self._teardown(finished_now)
 
     def _logprob_keys(
-        self, block_hashes: Iterable[bytes], fingerprint: str
+        self,
+        block_hashes: Iterable[bytes],
+        boundary_token_ids: Sequence[int | None],
+        fingerprint: str,
     ) -> list[str]:
+        keys, pending = self._resolve_logprob_keys(
+            block_hashes, boundary_token_ids, fingerprint
+        )
+        assert not pending, "auxiliary logprobs boundary token is missing"
+        return keys
+
+    def _resolve_logprob_keys(
+        self,
+        block_hashes: Iterable[bytes],
+        boundary_token_ids: Sequence[int | None],
+        fingerprint: str,
+    ) -> tuple[list[str], list[tuple[bytes, str]]]:
         prefix = f"vllm-logprobs/v1/{self._generation}/{fingerprint}/"
-        return [prefix + block_hash.hex() for block_hash in block_hashes]
+        hashes = list(block_hashes)
+        assert len(hashes) == len(boundary_token_ids), (
+            "auxiliary logprobs block metadata is misaligned"
+        )
+        keys = []
+        pending = []
+        for block_hash, token_id in zip(hashes, boundary_token_ids, strict=True):
+            if token_id is None:
+                pending.append((block_hash, fingerprint))
+            else:
+                assert not pending, (
+                    "only trailing auxiliary logprobs blocks may lack boundary tokens"
+                )
+                keys.append(f"{prefix}{block_hash.hex()}/{token_id}")
+        assert len(pending) <= 1, (
+            "only one trailing auxiliary logprobs block may lack a boundary token"
+        )
+        return keys, pending
+
+    def _bind_pending_logprob_blocks(
+        self, state: _WorkerRequestState, rows: LogprobRows
+    ) -> None:
+        store = self._logprob_store
+        if store is None or not state.pending_logprob_blocks:
+            return
+        retained = []
+        for position, token_ids in zip(rows.positions, rows.token_ids, strict=True):
+            if position % self._logprob_block_size or not state.pending_logprob_blocks:
+                continue
+            block_hash, fingerprint = state.pending_logprob_blocks.pop(0)
+            key = self._logprob_keys([block_hash], [int(token_ids[0])], fingerprint)[0]
+            state.logprob_keys.append(key)
+            if state.prompt_logprob_keys is not state.logprob_keys:
+                state.prompt_logprob_keys.append(key)
+            retained.append(key)
+        if retained:
+            store.put([], retain_keys=retained)
 
     def close(self) -> None:
         with self._lock:

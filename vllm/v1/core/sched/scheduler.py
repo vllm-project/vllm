@@ -420,6 +420,7 @@ class Scheduler(SchedulerInterface):
                     vllm_config.aux_output_config.enable_prompt_logprobs_replay
                 ),
                 logprobs_mode=vllm_config.model_config.logprobs_mode,
+                hash_block_size=self.hash_block_size,
             )
             if vllm_config.aux_output_config.enabled
             else None

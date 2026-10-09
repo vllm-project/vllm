@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -92,6 +93,41 @@ def test_variable_store_round_trips_logprob_rows():
     store.close()
 
 
+def test_variable_store_rolls_back_references_after_failed_put():
+    store = VariableBlockObjectStore(max_bytes=4)
+    store.put([BlockObject("first", b"1111")], retain_keys=["first"])
+
+    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
+        store.put(
+            [BlockObject("second", b"2222")],
+            retain_keys=["second", "first"],
+        )
+
+    assert store.get_concatenated(["first"]) == b"1111"
+    store.put([], release_keys=["first"])
+    store.put([BlockObject("third", b"3333")])
+    store.close()
+
+
+def test_decode_rows_rejects_missing_and_non_scalar_schema():
+    missing = io.BytesIO()
+    np.savez(missing, positions=np.array([], dtype=np.int64))
+    with pytest.raises(ValueError, match="malformed auxiliary"):
+        decode_rows(missing.getvalue())
+
+    non_scalar = io.BytesIO()
+    np.savez(
+        non_scalar,
+        schema_version=np.array([1], dtype=np.int32),
+        positions=np.array([], dtype=np.int64),
+        token_ids=np.empty((0, 1), dtype=np.int32),
+        values=np.empty((0, 1), dtype=np.float32),
+        ranks=np.empty(0, dtype=np.int32),
+    )
+    with pytest.raises(ValueError, match="unsupported auxiliary"):
+        decode_rows(non_scalar.getvalue())
+
+
 def _logprob_rows(start: int, count: int) -> LogprobRows:
     positions = np.arange(start, start + count, dtype=np.int64)
     token_ids = np.stack((positions, positions + 100), axis=1).astype(np.int32)
@@ -158,6 +194,82 @@ def test_worker_incrementally_updates_sparse_generated_logprob_block():
     worker.close()
 
 
+def test_worker_recomputed_logprob_row_replaces_cached_value():
+    worker = _make_logprob_worker()
+    state = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    state.logprob_keys = ["block"]
+    state.logprob_rows[_BLOCK_SIZE] = _logprob_rows(_BLOCK_SIZE, 1)
+    worker._requests["request"] = state
+    worker._publish_logprob_blocks(["request"])
+
+    replacement = _logprob_rows(_BLOCK_SIZE, 1)
+    replacement.token_ids[:] = 999
+    replacement.values[:] = 999
+    replacement.ranks[:] = 999
+    second = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    second.logprob_keys = ["block"]
+    second.logprob_rows[_BLOCK_SIZE] = replacement
+    worker._requests["second"] = second
+    worker._publish_logprob_blocks(["second"])
+
+    stored = worker._read_logprob_rows(["block"])
+    np.testing.assert_array_equal(stored.token_ids, replacement.token_ids)
+    np.testing.assert_array_equal(stored.values, replacement.values)
+    worker.close()
+
+
+def test_worker_replays_generated_logprobs_after_speculative_rejection():
+    worker = _make_logprob_worker()
+    worker._requests["request"] = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+
+    first_rows = _logprob_rows(_BLOCK_SIZE, 1)
+    first = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([_BLOCK_SIZE - 1], dtype=np.int32),
+        query_start_loc=np.array([0, 5], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([4], dtype=np.int32),
+        logprobs={
+            "request": LogprobsLists(
+                first_rows.token_ids,
+                first_rows.values,
+                first_rows.ranks,
+            )
+        },
+        replay_logprobs=frozenset({"request"}),
+    )
+    worker._commit_output(first)
+
+    second_rows = _logprob_rows(_BLOCK_SIZE + 1, 1)
+    second = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([2 * _BLOCK_SIZE], dtype=np.int32),
+        query_start_loc=np.array([0, 1], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        logprobs={
+            "request": LogprobsLists(
+                second_rows.token_ids,
+                second_rows.values,
+                second_rows.ranks,
+            )
+        },
+        replay_logprobs=frozenset({"request"}),
+    )
+    worker._commit_output(second)
+
+    state = worker._requests["request"]
+    assert state.logprob_cursor == _BLOCK_SIZE + 2
+    assert sorted(state.logprob_rows) == [_BLOCK_SIZE, _BLOCK_SIZE + 1]
+    worker.close()
+
+
 def test_worker_merges_cached_prompt_rows_with_chunked_live_suffix():
     worker = _make_logprob_worker()
     cached = _logprob_rows(1, _BLOCK_SIZE)
@@ -208,6 +320,129 @@ def test_worker_merges_cached_prompt_rows_with_chunked_live_suffix():
     np.testing.assert_array_equal(
         output.prompt_logprobs.selected_token_ranks.numpy(),
         np.arange(1, 2 * _BLOCK_SIZE, dtype=np.int32),
+    )
+    worker.close()
+
+
+def test_worker_discards_unpopulated_full_prompt_cache_prefix():
+    worker = _make_logprob_worker()
+    cached = _logprob_rows(1, _BLOCK_SIZE)
+    worker._logprob_store.put([BlockObject("block", encode_rows(cached))])
+    state = _WorkerRequestState(
+        prompt_len=2 * _BLOCK_SIZE,
+        prompt_replay_prefix=_BLOCK_SIZE,
+    )
+    state.logprob_keys = ["block"]
+    state.prompt_logprob_keys = state.logprob_keys
+    worker._requests["request"] = state
+
+    full = _logprob_rows(1, 2 * _BLOCK_SIZE - 1)
+    full.token_ids[:_BLOCK_SIZE] = -999
+    full.values[:_BLOCK_SIZE] = -999
+    full.ranks[:_BLOCK_SIZE] = -999
+    prompt_logprobs = LogprobsTensors(
+        torch.from_numpy(full.token_ids),
+        torch.from_numpy(full.values),
+        torch.from_numpy(full.ranks),
+    )
+    generated = _logprob_rows(2 * _BLOCK_SIZE, 1)
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([2 * _BLOCK_SIZE - 1], dtype=np.int32),
+        query_start_loc=np.array([0, 1], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        logprobs={
+            "request": LogprobsLists(
+                generated.token_ids,
+                generated.values,
+                generated.ranks,
+            )
+        },
+        prompt_logprobs={"request": prompt_logprobs},
+        replay_logprobs=frozenset({"request"}),
+        replay_prompt_logprobs=frozenset({"request"}),
+    )
+
+    output = worker._commit_output(pending)["request"]
+
+    assert output.prompt_logprobs is not None
+    np.testing.assert_array_equal(
+        output.prompt_logprobs.logprob_token_ids.numpy(),
+        np.concatenate((cached.token_ids, full.token_ids[_BLOCK_SIZE:])),
+    )
+    worker.close()
+
+
+def test_worker_fails_when_generated_logprob_artifact_is_missing():
+    worker = _make_logprob_worker()
+    state = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    state.logprob_keys = ["missing"]
+    worker._requests["request"] = state
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([_BLOCK_SIZE - 1], dtype=np.int32),
+        query_start_loc=np.array([0, 1], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        replay_logprobs=frozenset({"request"}),
+    )
+
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        worker._commit_output(pending)
+    worker.close()
+
+
+def test_worker_binds_full_prompt_block_to_first_generated_token():
+    worker = _make_logprob_worker()
+    block_hash = b"a" * 32
+    fingerprint = "fingerprint"
+    generated = _logprob_rows(_BLOCK_SIZE, 1)
+    key = worker._logprob_keys(
+        [block_hash], [int(generated.token_ids[0, 0])], fingerprint
+    )[0]
+    cached = _logprob_rows(1, _BLOCK_SIZE)
+    worker._logprob_store.put([BlockObject(key, encode_rows(cached))])
+    state = _WorkerRequestState(
+        prompt_len=_BLOCK_SIZE,
+        prompt_replay_prefix=_BLOCK_SIZE,
+        pending_logprob_blocks=[(block_hash, fingerprint)],
+    )
+    state.prompt_logprob_keys = state.logprob_keys
+    worker._requests["request"] = state
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([_BLOCK_SIZE - 1], dtype=np.int32),
+        query_start_loc=np.array([0, 1], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        logprobs={
+            "request": LogprobsLists(
+                generated.token_ids,
+                generated.values,
+                generated.ranks,
+            )
+        },
+        replay_logprobs=frozenset({"request"}),
+        replay_prompt_logprobs=frozenset({"request"}),
+    )
+
+    output = worker._commit_output(pending)["request"]
+
+    assert state.logprob_keys == [key]
+    assert not state.pending_logprob_blocks
+    assert output.prompt_logprobs is not None
+    np.testing.assert_array_equal(
+        output.prompt_logprobs.logprob_token_ids.numpy(), cached.token_ids[:-1]
     )
     worker.close()
 
@@ -271,6 +506,7 @@ class _SchedulerRequest:
     num_computed_tokens: int = 0
     num_in_flight_tokens: int = 0
     finished: bool = False
+    token_ids: list[int] | None = None
     sampling_params: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
     )
@@ -278,6 +514,10 @@ class _SchedulerRequest:
     @property
     def num_prompt_tokens(self) -> int:
         return self.num_tokens - self.num_output_tokens
+
+    @property
+    def all_token_ids(self) -> list[int]:
+        return self.token_ids or list(range(self.num_tokens))
 
     def is_finished(self) -> bool:
         return self.finished
@@ -1668,6 +1908,82 @@ def test_scheduler_marks_only_opted_in_logprob_requests():
     assert metadata.logprobs.keys() == {opted_in.request_id}
     assert metadata.prompt_logprobs.keys() == {opted_in.request_id}
     assert metadata.block_hashes.keys() == {opted_in.request_id}
+    assert metadata.logprob_block_hashes.keys() == {opted_in.request_id}
+
+
+def test_logprob_artifact_identity_includes_boundary_token():
+    connector = AuxOutputSchedulerConnector(
+        enable_routed_experts=False,
+        enable_logprobs=True,
+        hash_block_size=_BLOCK_SIZE,
+    )
+    requests = []
+    for request_id, boundary_token_id in (("first", 10), ("second", 20)):
+        request = _scheduler_request(request_id, [b"a" * 32], num_tokens=5)
+        request.token_ids = [1, 2, 3, 4, boundary_token_id]
+        request.sampling_params = SimpleNamespace(
+            routed_experts_prompt_start=0,
+            extra_args={"aux_output_replay": True},
+            num_logprobs=2,
+            prompt_logprobs=None,
+            logprob_token_ids=None,
+            prompt_logprob_token_ids=None,
+        )
+        requests.append(request)
+
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id for request in requests], [0, 0], [5, 5]),
+        {request.request_id: request for request in requests},
+    )
+
+    worker = _make_logprob_worker()
+    first_key = worker._logprob_keys(
+        metadata.logprob_block_hashes["first"],
+        metadata.logprob_boundary_token_ids["first"],
+        metadata.logprobs["first"],
+    )
+    second_key = worker._logprob_keys(
+        metadata.logprob_block_hashes["second"],
+        metadata.logprob_boundary_token_ids["second"],
+        metadata.logprobs["second"],
+    )
+
+    assert first_key != second_key
+    worker.close()
+
+
+def test_scheduler_sends_pending_logprob_hash_without_boundary_token():
+    connector = AuxOutputSchedulerConnector(
+        enable_routed_experts=False,
+        enable_logprobs=True,
+        hash_block_size=_BLOCK_SIZE,
+    )
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=_BLOCK_SIZE)
+    request.token_ids = [1, 2, 3, 4]
+    request.sampling_params = SimpleNamespace(
+        routed_experts_prompt_start=0,
+        extra_args={"aux_output_replay": True},
+        num_logprobs=2,
+        prompt_logprobs=None,
+        logprob_token_ids=None,
+        prompt_logprob_token_ids=None,
+    )
+
+    first = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [_BLOCK_SIZE]),
+        {request.request_id: request},
+    )
+    assert list(first.logprob_block_hashes[request.request_id]) == [b"a" * 32]
+    assert first.logprob_boundary_token_ids[request.request_id] == (None,)
+
+    request.num_tokens += 1
+    request.token_ids.append(99)
+    second = connector.build_connector_meta(
+        _step_output([request.request_id], [_BLOCK_SIZE], [1]),
+        {request.request_id: request},
+    )
+
+    assert request.request_id not in second.logprob_block_hashes
 
 
 def test_scheduler_connector_preserves_request_finish_order():

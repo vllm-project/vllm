@@ -131,13 +131,19 @@ Keep R3 in its fixed-size store and add a typed causal-logprobs artifact in a
 variable-size store. Prompt and generated rows share one position space and,
 when their layouts match, one artifact. An artifact block is identified by:
 
-`(schema_version, generation, compatibility_fingerprint, kv_block_hash)`
+`(schema_version, generation, compatibility_fingerprint, kv_block_hash,
+boundary_target_token_id)`
 
 The compatibility fingerprint covers logprobs mode and scoring layout. The KV
-block hash supplies token, cache-salt, prompt-embedding, and LoRA identity;
-the store is scoped to one engine/model generation. Online weight updates are
-rejected because there is not yet a reliable weight-version identity. Request
-ID is deliberately absent so identical shared-prefix blocks remain reusable.
+block hash supplies token, cache-salt, prompt-embedding, and LoRA identity. The
+boundary target token is also required because a block stores causal rows in
+`(start, end]`: row `end` includes the selected/target token at `end`, which is
+not covered by the KV hash for `[start, end)`. When the trailing boundary token
+is not known at scheduling time, the worker keeps the hash pending and binds it
+to the sampled token before the first replay lookup. The store is scoped to one
+engine/model generation. Online weight updates are rejected because there is
+not yet a reliable weight-version identity. Request ID is deliberately absent
+so compatible shared-prefix blocks remain reusable.
 
 The stored payload is a versioned NPZ record with explicit absolute positions,
 token IDs, score values, and selected-token ranks. Decode validates schema and
@@ -170,7 +176,9 @@ logprob compatibility fingerprint, and the token ranges that need to be
 emitted/replayed. Preserve the current R3 start semantics independently:
 `routed_experts_prompt_start` must not become the implicit start for logprobs.
 Continue sending newly available block hashes and terminal events once, as
-today.
+today. Logprob block metadata additionally carries one optional boundary target
+token ID per hash. A missing trailing ID is resolved from the sampler's selected
+token column before replay or publication.
 
 The metadata must distinguish:
 
@@ -184,11 +192,16 @@ The metadata must distinguish:
 For generated token logprobs, tap the existing sampler logprob tensors before
 conversion/serialization and gather rows by request plus cumulative per-request
 generated-token offsets. Store only accepted tokens; speculative rejected
-suffixes must never be published as canonical artifacts.
+suffixes must never be published as canonical artifacts. Maintain an accepted
+generated-row cursor independently from the scheduler's optimistic token start,
+so the next async step reconnects after a rejected speculative suffix.
 
 For prompt logprobs, capture token-aligned rows from `PromptLogprobsWorker`
 after its chunk aggregation and before the result is discarded. Preserve the
-current chunked-prefill behavior. To make prompt-logprob cache hits useful, an
+cached-prefix boundary when the GPU runner returns a full-prompt CPU tensor:
+its cached prefix is allocated but not populated, so only the live suffix may
+be merged with replayed rows. Preserve the current chunked-prefill behavior. To
+make prompt-logprob cache hits useful, an
 opted-in request may read prefix KV blocks; the connector supplies prompt
 logprobs for the cached portion and the worker computes the uncached portion
 as usual.

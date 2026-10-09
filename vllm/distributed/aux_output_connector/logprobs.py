@@ -71,15 +71,23 @@ def encode_rows(rows: LogprobRows) -> bytes:
 
 
 def decode_rows(payload: bytes) -> LogprobRows:
-    with np.load(io.BytesIO(payload), allow_pickle=False) as data:
-        if data["schema_version"].item() != _SCHEMA_VERSION:
-            raise ValueError("unsupported auxiliary logprobs schema version")
-        rows = LogprobRows(
-            data["positions"].astype(np.int64, copy=False),
-            data["token_ids"].astype(np.int32, copy=False),
-            data["values"].astype(np.float32, copy=False),
-            data["ranks"].astype(np.int32, copy=False),
-        )
+    try:
+        with np.load(io.BytesIO(payload), allow_pickle=False) as data:
+            schema_version = data["schema_version"]
+            if schema_version.shape != () or schema_version.item() != _SCHEMA_VERSION:
+                raise ValueError("unsupported auxiliary logprobs schema version")
+            rows = LogprobRows(
+                data["positions"].astype(np.int64, copy=False),
+                data["token_ids"].astype(np.int32, copy=False),
+                data["values"].astype(np.float32, copy=False),
+                data["ranks"].astype(np.int32, copy=False),
+            )
+    except (KeyError, OSError, ValueError, TypeError) as error:
+        if isinstance(error, ValueError) and str(error).startswith(
+            "unsupported auxiliary"
+        ):
+            raise
+        raise ValueError("malformed auxiliary logprobs artifact") from error
     num_rows = len(rows.positions)
     if (
         rows.positions.ndim != 1

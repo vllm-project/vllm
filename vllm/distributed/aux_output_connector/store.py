@@ -40,18 +40,29 @@ class VariableBlockObjectStore:
         self._lru: OrderedDict[str, bytes] = OrderedDict()
         self._references: dict[str, int] = {}
 
-    def _evict_to_fit(self, extra: int, protected: set[str]) -> None:
-        while self._used_bytes + extra > self._max_bytes:
-            for key, payload in self._lru.items():
-                if key not in self._references and key not in protected:
-                    self._used_bytes -= len(payload)
-                    del self._lru[key]
-                    break
-            else:
-                raise BlockObjectStoreError(
-                    "auxiliary output store cannot retain the requested batch: "
-                    f"limit={self._max_bytes} bytes"
-                )
+    def _eviction_victims(
+        self,
+        extra: int,
+        protected: set[str],
+        reference_updates: dict[str, int],
+    ) -> list[str]:
+        required = self._used_bytes + extra - self._max_bytes
+        if required <= 0:
+            return []
+        victims = []
+        reclaimed = 0
+        for key, payload in self._lru.items():
+            references = reference_updates.get(key, self._references.get(key, 0))
+            if references > 0 or key in protected:
+                continue
+            victims.append(key)
+            reclaimed += len(payload)
+            if reclaimed >= required:
+                return victims
+        raise BlockObjectStoreError(
+            "auxiliary output store cannot retain the requested batch: "
+            f"limit={self._max_bytes} bytes"
+        )
 
     def put(
         self,
@@ -61,21 +72,32 @@ class VariableBlockObjectStore:
         release_keys: Iterable[str] = (),
     ) -> None:
         unique = {obj.key: obj.payload for obj in objects}
-        for key in retain_keys:
-            self._references[key] = self._references.get(key, 0) + 1
+        retains = tuple(retain_keys)
+        releases = tuple(release_keys)
+        reference_updates: dict[str, int] = {}
+        for key in retains:
+            count = reference_updates.get(key, self._references.get(key, 0))
+            reference_updates[key] = count + 1
         terminal = []
-        for key in release_keys:
-            count = self._references.get(key, 0) - 1
-            if count > 0:
-                self._references[key] = count
-            else:
-                self._references.pop(key, None)
+        for key in releases:
+            count = reference_updates.get(key, self._references.get(key, 0)) - 1
+            reference_updates[key] = max(count, 0)
+            if count <= 0:
                 terminal.append(key)
         extra = sum(
             len(payload) - len(self._lru.get(key, b""))
             for key, payload in unique.items()
         )
-        self._evict_to_fit(extra, set(unique) - set(terminal))
+        victims = self._eviction_victims(
+            extra, set(unique) - set(terminal), reference_updates
+        )
+        for key, count in reference_updates.items():
+            if count > 0:
+                self._references[key] = count
+            else:
+                self._references.pop(key, None)
+        for victim in victims:
+            self._used_bytes -= len(self._lru.pop(victim))
         for key, payload in unique.items():
             if key in self._lru:
                 self._used_bytes += len(payload) - len(self._lru[key])

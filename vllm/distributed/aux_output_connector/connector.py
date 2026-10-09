@@ -37,6 +37,10 @@ class AuxOutputConnectorMetadata:
     logprobs: dict[str, str] = field(default_factory=dict)
     prompt_logprobs: dict[str, str] = field(default_factory=dict)
     prompt_lens: dict[str, int] = field(default_factory=dict)
+    logprob_block_hashes: dict[str, PackedBlockHashes] = field(default_factory=dict)
+    logprob_boundary_token_ids: dict[str, tuple[int | None, ...]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -57,11 +61,16 @@ class AuxOutputSchedulerConnector:
         enable_logprobs: bool = False,
         enable_prompt_logprobs: bool = False,
         logprobs_mode: str = "raw_logprobs",
+        hash_block_size: int = 1,
     ) -> None:
         # Number of hashes already sent to the worker for each active request.
         self._sent_hash_counts: dict[str, int] = {}
+        self._sent_logprob_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
         self._finished_requests: dict[str, PackedBlockHashes | None] = {}
+        self._finished_logprob_blocks: dict[
+            str, tuple[PackedBlockHashes, tuple[int | None, ...]] | None
+        ] = {}
         self._logprob_fingerprints: dict[str, str] = {}
         self._prompt_logprob_fingerprints: dict[str, str] = {}
         self._generation = 0
@@ -69,6 +78,7 @@ class AuxOutputSchedulerConnector:
         self._enable_prompt_logprobs = enable_prompt_logprobs
         self._logprobs_mode = logprobs_mode
         self._enable_routed_experts = enable_routed_experts
+        self._hash_block_size = hash_block_size
 
     def build_connector_meta(
         self,
@@ -78,6 +88,8 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
+        logprob_block_hashes: dict[str, PackedBlockHashes] = {}
+        logprob_boundary_token_ids: dict[str, tuple[int | None, ...]] = {}
         for request_id in scheduler_output.num_scheduled_tokens:
             request = requests[request_id]
             assert request.sampling_params is not None
@@ -114,6 +126,12 @@ class AuxOutputSchedulerConnector:
             if packed is not None:
                 block_hashes_by_request[request_id] = packed
             self._sent_hash_counts[request_id] = len(request.block_hashes)
+            if replay_logprobs or replay_prompt_logprobs:
+                self._add_logprob_hashes(
+                    request,
+                    logprob_block_hashes,
+                    logprob_boundary_token_ids,
+                )
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         for request_id, num_sent in self._sent_hash_counts.items():
@@ -125,6 +143,15 @@ class AuxOutputSchedulerConnector:
                 continue
             block_hashes_by_request[request_id] = packed
             self._sent_hash_counts[request_id] = len(request.block_hashes)
+            if (
+                request_id in self._logprob_fingerprints
+                or request_id in self._prompt_logprob_fingerprints
+            ):
+                self._add_logprob_hashes(
+                    request,
+                    logprob_block_hashes,
+                    logprob_boundary_token_ids,
+                )
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
@@ -132,6 +159,12 @@ class AuxOutputSchedulerConnector:
             for request_id, block_hashes in self._finished_requests.items()
             if block_hashes is not None
         )
+        for request_id, update in self._finished_logprob_blocks.items():
+            if update is None:
+                continue
+            hashes, boundary_token_ids = update
+            logprob_block_hashes[request_id] = hashes
+            logprob_boundary_token_ids[request_id] = boundary_token_ids
         metadata = AuxOutputConnectorMetadata(
             self._generation,
             scheduled_requests,
@@ -139,7 +172,7 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             {
                 request_id: self._logprob_fingerprints[request_id]
-                for request_id in block_hashes_by_request
+                for request_id in logprob_block_hashes
                 if request_id in self._logprob_fingerprints
             }
             | {
@@ -149,7 +182,7 @@ class AuxOutputSchedulerConnector:
             },
             {
                 request_id: self._prompt_logprob_fingerprints[request_id]
-                for request_id in block_hashes_by_request
+                for request_id in logprob_block_hashes
                 if request_id in self._prompt_logprob_fingerprints
             }
             | {
@@ -161,8 +194,11 @@ class AuxOutputSchedulerConnector:
                 request_id: requests[request_id].num_prompt_tokens
                 for request_id in scheduled_requests
             },
+            logprob_block_hashes,
+            logprob_boundary_token_ids,
         )
         self._finished_requests = {}
+        self._finished_logprob_blocks = {}
         for request_id in finished_requests:
             self._logprob_fingerprints.pop(request_id, None)
             self._prompt_logprob_fingerprints.pop(request_id, None)
@@ -269,6 +305,44 @@ class AuxOutputSchedulerConnector:
         self._finished_requests[request_id] = self._pack_new_hashes(
             request.block_hashes, num_sent
         )
+        logprob_sent = self._sent_logprob_hash_counts.pop(request_id, None)
+        if logprob_sent is not None:
+            self._finished_logprob_blocks[request_id] = self._logprob_hash_update(
+                request, logprob_sent
+            )
+
+    def _add_logprob_hashes(
+        self,
+        request: Request,
+        hashes_by_request: dict[str, PackedBlockHashes],
+        boundaries_by_request: dict[str, tuple[int | None, ...]],
+    ) -> None:
+        request_id = request.request_id
+        num_sent = self._sent_logprob_hash_counts.setdefault(request_id, 0)
+        update = self._logprob_hash_update(request, num_sent)
+        if update is None:
+            return
+        hashes, boundary_token_ids = update
+        hashes_by_request[request_id] = hashes
+        boundaries_by_request[request_id] = boundary_token_ids
+        self._sent_logprob_hash_counts[request_id] = num_sent + len(boundary_token_ids)
+
+    def _logprob_hash_update(
+        self, request: Request, num_sent: int
+    ) -> tuple[PackedBlockHashes, tuple[int | None, ...]] | None:
+        num_hashes = len(request.block_hashes)
+        packed = self._pack_new_hashes(request.block_hashes, num_sent)
+        if packed is None:
+            return None
+        boundary_token_ids = tuple(
+            (
+                request.all_token_ids[(index + 1) * self._hash_block_size]
+                if (index + 1) * self._hash_block_size < request.num_tokens
+                else None
+            )
+            for index in range(num_sent, num_hashes)
+        )
+        return packed, boundary_token_ids
 
     @staticmethod
     def _pack_new_hashes(
@@ -284,7 +358,9 @@ class AuxOutputSchedulerConnector:
         """Start a new auxiliary output namespace after a prefix-cache reset."""
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
+        self._sent_logprob_hash_counts.clear()
         self._finished_requests.clear()
+        self._finished_logprob_blocks.clear()
         self._logprob_fingerprints.clear()
         self._prompt_logprob_fingerprints.clear()
         self._generation += 1
