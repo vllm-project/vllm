@@ -55,6 +55,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.models.qwen3_5.amd import mono_decode
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -356,6 +357,9 @@ class Qwen3_5ForCausalLMBase(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        self._mono = None
+        if mono_decode.enabled():
+            self._mono = mono_decode.MonoDecode(self.model, vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -375,6 +379,10 @@ class Qwen3_5ForCausalLMBase(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
+        if self._mono is not None and self._mono.eligible(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        ):
+            return self._mono.forward(input_ids, positions)
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
