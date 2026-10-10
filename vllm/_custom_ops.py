@@ -15,6 +15,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import warn_if_cuda_driver_cannot_jit_ptx
 
 logger = init_logger(__name__)
 
@@ -1087,6 +1088,15 @@ def cutlass_mxfp4_moe_mm(
     )
 
 
+def _check_marlin_cuda_driver() -> None:
+    # Every Marlin user (AWQ, GPTQ, compressed-tensors, FP8, FP4, MoE, ...)
+    # prepares its weights through the repack/preprocess ops below before the
+    # first Marlin GEMM, so this is the single place to diagnose a driver that
+    # is too old to JIT the Marlin PTX. Logged at most once per process.
+    if current_platform.is_cuda():
+        warn_if_cuda_driver_cannot_jit_ptx("Marlin")
+
+
 # gptq_marlin
 def gptq_marlin_repack(
     b_q_weight: torch.Tensor,
@@ -1095,6 +1105,7 @@ def gptq_marlin_repack(
     num_bits: int,
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
+    _check_marlin_cuda_driver()
     return torch.ops._C.gptq_marlin_repack(
         b_q_weight, size_k, size_n, num_bits, is_a_8bit
     )
@@ -1127,6 +1138,7 @@ def awq_marlin_repack(
     num_bits: int,
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
+    _check_marlin_cuda_driver()
     return torch.ops._C.awq_marlin_repack(
         b_q_weight, size_k, size_n, num_bits, is_a_8bit
     )
@@ -1158,6 +1170,7 @@ def gptq_marlin_moe_repack(
     num_bits: int,
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
+    _check_marlin_cuda_driver()
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
     output = torch.empty(
@@ -1179,6 +1192,7 @@ def awq_marlin_moe_repack(
     num_bits: int,
     is_a_8bit: bool = False,
 ) -> torch.Tensor:
+    _check_marlin_cuda_driver()
     num_experts = b_q_weight.shape[0]
     assert size_k % 16 == 0
     output = torch.empty(
@@ -1198,6 +1212,7 @@ def marlin_int4_fp8_preprocess(
     qzeros_or_none: torch.Tensor | None = None,
     inplace: bool = False,
 ):
+    _check_marlin_cuda_driver()
     return torch.ops._C.marlin_int4_fp8_preprocess(qweight, qzeros_or_none, inplace)
 
 
