@@ -10,6 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from http import HTTPStatus
 from typing import Any, Literal, get_args
 
 import jinja2
@@ -49,9 +50,14 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
@@ -808,7 +814,12 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
-        generator = await self.create_chat_completion(chat_req, raw_request)
+        try:
+            generator = await self.create_chat_completion(chat_req, raw_request)
+        except VLLMValidationError as e:
+            if (error := self._prompt_too_long_error(e)) is not None:
+                return error
+            raise
 
         if isinstance(generator, ErrorResponse):
             return generator
@@ -817,6 +828,29 @@ class AnthropicServingMessages(OpenAIServingChat):
             return self.messages_full_converter(generator)
 
         return self.message_stream_converter(generator)
+
+    def _prompt_too_long_error(self, e: VLLMValidationError) -> ErrorResponse | None:
+        """Anthropic's error for a prompt that alone exceeds the context window.
+
+        Clients such as Claude Code match this message to compact the
+        conversation instead of failing every following request.
+        """
+        max_model_len = self.model_config.max_model_len
+        if (
+            e.parameter != "input_tokens"
+            or not isinstance(e.value, int)
+            or e.value <= max_model_len
+        ):
+            return None
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=(
+                    f"prompt is too long: {e.value} tokens > {max_model_len} maximum"
+                ),
+                type="invalid_request_error",
+                code=HTTPStatus.BAD_REQUEST.value,
+            )
+        )
 
     def messages_full_converter(
         self,
