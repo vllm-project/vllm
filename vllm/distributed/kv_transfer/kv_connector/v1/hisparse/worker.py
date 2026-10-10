@@ -198,9 +198,11 @@ class HiSparseConnectorWorker:
         forward_context = self.vllm_config.compilation_config.static_forward_context
         cache_handles: list[HiSparseCacheHandle] = []
         cache_layer_names: list[str] = []
+        hot_spec: HiSparseHotSpec | None = None
         for group in self.kv_cache_config.kv_cache_groups:
             if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
                 continue
+            hot_spec = group.kv_cache_spec
             for cache_name in group.layer_names:
                 assert cache_name.endswith(HISPARSE_HOT_SUFFIX)
                 layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
@@ -209,6 +211,17 @@ class HiSparseConnectorWorker:
 
         if not cache_handles:
             raise RuntimeError("HiSparse connector found no hot-cache handles.")
+        assert hot_spec is not None
+        # Fail at startup, not mid-decode, on a width mismatch.
+        assert (
+            hot_spec.blocks_per_request * hot_spec.block_size
+            == cache_handles[0].runtime.region_stride
+        ), (
+            f"HiSparse hot spec allocates {hot_spec.blocks_per_request} "
+            f"blocks of {hot_spec.block_size} tokens per request, but the "
+            f"runtime hot region is {cache_handles[0].runtime.region_stride} "
+            "rows per request."
+        )
         hot_backings: dict[int, torch.Tensor] = {}
         registered_host_pools: dict[int, torch.Tensor] = {}
         shared_host_regions: dict[int, SharedOffloadRegion] = {}
