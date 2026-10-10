@@ -962,6 +962,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
+        self.adaptive_verification = bool(
+            self.vllm_config.speculative_config
+            and self.vllm_config.speculative_config.enable_adaptive_verification
+        )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
 
         next_n = self.num_speculative_tokens + 1
@@ -1554,6 +1558,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             min_decode_len = int(decode_lens_cpu.min().item())
             write_is_uniform = min_decode_len == max_decode_len
             next_n = 1 + self.num_speculative_tokens
+            if self.adaptive_verification:
+                # Varlen FULL graphs are captured by distributing the graph's
+                # token bucket over as many one-token dummy requests as
+                # possible. Runtime adaptive budgets can put up to next_n
+                # tokens in one request, so the capture-time scatter width and
+                # branch must describe that upper bound rather than the dummy
+                # partition. Device per-request lengths still select the live
+                # rows at replay.
+                max_decode_len = next_n
+                write_is_uniform = False
             # The kernel sees max_decode_len Q rows, not the configured next_n,
             # so legality is per-step: on SM90 a uniformly 3-deep batch has no
             # native kernel. max_decode_len <= 1 always has one.
