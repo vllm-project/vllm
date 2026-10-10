@@ -198,3 +198,33 @@ def test_output_projection_fallback_does_not_warm_fp8_quantization(monkeypatch):
         types.SimpleNamespace(support_deep_gemm=lambda: False),
     )
     assert module.FusedInvRopeFP8QuantKernel().get_warmup_keys(None) == []
+
+
+def test_output_projection_uses_logical_size_for_packed_weights():
+    """Packed weight dimensions must not change grouping of projection inputs."""
+    wo_a = nn.Module()
+    wo_a.input_size = 4
+    wo_a.weight = nn.Parameter(
+        torch.zeros((4, 8), dtype=torch.int32), requires_grad=False
+    )
+    wo_a.weight_scale = nn.Parameter(torch.ones(1), requires_grad=False)
+
+    def project(x):
+        assert x.shape[-1] == 4
+        return torch.cat((x[..., :2], 2 * x[..., :2]), dim=-1)
+
+    wo_a.forward = project
+    out = inv_rope_bf16_o_proj(
+        torch.tensor([[[1, 2, 3, 4], [5, 6, 7, 8]]], dtype=torch.bfloat16),
+        torch.tensor([0], dtype=torch.long),
+        torch.tensor([[1.0, 0.0]], dtype=torch.float32),
+        wo_a,
+        n_groups=2,
+        heads_per_group=1,
+        nope_dim=2,
+        rope_dim=2,
+        o_lora_rank=2,
+    )
+    torch.testing.assert_close(
+        out, torch.tensor([[[1, 2], [10, 12]]], dtype=torch.bfloat16)
+    )
