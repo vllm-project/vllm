@@ -13,10 +13,11 @@ from typing import (
     NamedTuple,
     Protocol,
     TypeAlias,
+    assert_never,
 )
 
 import torch
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar
 
 from vllm.config import SchedulerConfig
 from vllm.inputs import (
@@ -1534,13 +1535,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         with timing_ctx.record("merge_mm_kwargs"):
-            mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
-                cache,
-                mm_hashes=mm_hashes,
-                mm_is_cached=mm_is_cached,
-                mm_missing_kwargs=mm_missing_kwargs,
-                mm_missing_prompt_updates=mm_missing_prompt_updates,
-            )
+            try:
+                mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
+                    cache,
+                    mm_hashes=mm_hashes,
+                    mm_is_cached=mm_is_cached,
+                    mm_missing_kwargs=mm_missing_kwargs,
+                    mm_missing_prompt_updates=mm_missing_prompt_updates,
+                )
+            finally:
+                cache.release_sender_touches()
 
         return MultiModalProcessingResult(
             prompt_ids=self._postprocess_prompt(inputs.prompt),

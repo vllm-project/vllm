@@ -23,7 +23,6 @@ th {
 | ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
 | ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
 | BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
-| Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
 | RandomMultiModal (Image/Video) | ✅ | ✅ | `synthetic` |
 | RandomForReranking | ✅ | ✅ | `synthetic` |
@@ -773,16 +772,17 @@ Using KV cache metrics for load pattern configuration:
 ```bash
 vllm bench throughput \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset-name sonnet \
-  --dataset-path vllm/benchmarks/sonnet.txt \
+  --dataset-name random \
+  --random-input-len 500 \
+  --random-output-len 150 \
   --num-prompts 10
 ```
 
 If successful, you will see the following output
 
 ```text
-Throughput: 7.15 requests/s, 4656.00 total tokens/s, 1072.15 output tokens/s
-Total num prompt tokens:  5014
+Throughput: 7.15 requests/s, 4647.50 total tokens/s, 1072.50 output tokens/s
+Total num prompt tokens:  5000
 Total num output tokens:  1500
 ```
 

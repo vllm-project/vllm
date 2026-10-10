@@ -99,6 +99,7 @@ def test_machete_rejects_invalid_config(
     )
     can_impl, reason = MacheteLinearKernel.can_implement(config)
     assert not can_impl
+    assert reason is not None
     assert expected_reason in reason
 
 

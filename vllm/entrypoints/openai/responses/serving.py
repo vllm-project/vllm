@@ -12,10 +12,10 @@ from typing import Any, Final, cast
 from fastapi import Request
 from openai.types.responses import (
     ResponseOutputItem,
+    ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStatus,
-    response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from pydantic import TypeAdapter
@@ -69,10 +69,14 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     extract_function_tool_names,
     extract_tool_types,
+    reuse_streamed_item_ids,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -139,6 +143,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -332,6 +337,16 @@ class OpenAIServingResponses(GenerateBaseServing):
         if maybe_validation_error is not None:
             return maybe_validation_error
 
+        maybe_template_error = self.online_renderer.validate_chat_template(
+            request_chat_template=None,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=(
+                self.online_renderer.trust_request_chat_template
+            ),
+        )
+        if maybe_template_error is not None:
+            return maybe_template_error
+
         self._preflight()
 
         if request.store and not self.enable_store:
@@ -434,6 +449,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             response_parser = self._make_response_parser(
                 request, tokenizer, chat_template_kwargs
             )
+            if response_parser is not None:
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_input
+                ).token_ids
+                if prompt_token_ids is not None:
+                    response_parser.set_prompt_token_ids(prompt_token_ids)
 
             context: ConversationContext
             function_tool_names = extract_function_tool_names(request.tools)
@@ -691,6 +712,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                     context.request,
                     context.response_messages,
                 )
+                if context.response_parser is not None:
+                    prompt_token_ids = self._extract_prompt_components(
+                        engine_input
+                    ).token_ids
+                    if prompt_token_ids is not None:
+                        context.response_parser.set_prompt_token_ids(prompt_token_ids)
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
@@ -756,17 +783,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             assert isinstance(context, HarmonyContext)
             output = []
             harmony_msgs = context.messages[context.num_init_messages :]
-            if harmony_msgs:
-                fn_names = context.function_tool_names
-                for msg in harmony_msgs[:-1]:
-                    output.extend(harmony_to_response_output(msg, fn_names))
-                output.extend(
-                    harmony_to_response_output(
-                        harmony_msgs[-1],
-                        fn_names,
-                        incomplete=context.last_append_flush_status,
-                    )
+            # Streamed messages are a subsequence of harmony_msgs, in order.
+            streamed = iter(context.streamed_items_by_message)
+            next_streamed = next(streamed, None)
+            for i, msg in enumerate(harmony_msgs):
+                items = harmony_to_response_output(
+                    msg,
+                    context.function_tool_names,
+                    incomplete=(
+                        i == len(harmony_msgs) - 1 and context.last_append_flush_status
+                    ),
                 )
+                if next_streamed is not None and next_streamed[0] is msg:
+                    reuse_streamed_item_ids(items, next_streamed[1])
+                    next_streamed = next(streamed, None)
+                output.extend(items)
 
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
@@ -810,14 +841,19 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
-            # TODO: Build final response items from the accumulated streaming
-            # parser results instead of reparsing the complete output.
-            output = self._make_response_output_items(
-                request,
-                final_output,
-                tokenizer,
-                parser=context.response_parser,
+            streamed_items = context.streamed_output_items
+            self._log_final_output(
+                request, final_output, is_streaming=streamed_items is not None
             )
+            if streamed_items is not None:
+                output = streamed_items
+            else:
+                output = self._make_response_output_items(
+                    request,
+                    final_output,
+                    tokenizer,
+                    parser=context.response_parser,
+                )
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -959,32 +995,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         return out
 
-    def _create_stream_response_logprobs(
+    def _log_final_output(
         self,
-        token_ids: Sequence[int],
-        logprobs: SampleLogprobs | None,
-        tokenizer: TokenizerLike,
-        top_logprobs: int | None = None,
-    ) -> list[response_text_delta_event.Logprob]:
-        lgs = self._create_response_logprobs(
-            token_ids=token_ids,
-            logprobs=logprobs,
-            tokenizer=tokenizer,
-            top_logprobs=top_logprobs,
-        )
-        return [
-            response_text_delta_event.Logprob(
-                token=lg.token,
-                logprob=lg.logprob,
-                top_logprobs=[
-                    response_text_delta_event.LogprobTopLogprob(
-                        token=tl.token, logprob=tl.logprob
-                    )
-                    for tl in lg.top_logprobs
-                ],
+        request: ResponsesRequest,
+        final_output: CompletionOutput,
+        is_streaming: bool,
+    ) -> None:
+        if self.enable_log_outputs and self.request_logger:
+            self.request_logger.log_outputs(
+                request_id=request.request_id,
+                outputs=final_output.text,
+                output_token_ids=final_output.token_ids,
+                finish_reason=final_output.finish_reason,
+                is_streaming=is_streaming,
+                delta=False,
             )
-            for lg in lgs
-        ]
 
     def _make_response_output_items(
         self,
@@ -993,17 +1018,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         tokenizer: TokenizerLike,
         parser: Parser | None = None,
     ) -> list[ResponseOutputItem]:
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            self.request_logger.log_outputs(
-                request_id=request.request_id,
-                outputs=final_output.text,
-                output_token_ids=final_output.token_ids,
-                finish_reason=final_output.finish_reason,
-                is_streaming=False,
-                delta=False,
-            )
-
         # Compute logprobs if requested
         logprobs = None
         if request.is_include_output_logprobs() and final_output.logprobs:
@@ -1028,7 +1042,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
-                tool_calls=tool_calls,
+                tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
             )
@@ -1192,16 +1206,16 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
 
-        hide_stream_metadata = not request.include_reasoning and self.parser is not None
+        hide_stream_metadata = (
+            not request.include_reasoning and context.response_parser is not None
+        )
 
-        def _get_logprobs(
-            output: CompletionOutput,
-        ) -> list[response_text_delta_event.Logprob]:
+        def _get_logprobs(output: CompletionOutput) -> list[Logprob]:
             if not request.is_include_output_logprobs():
                 return []
             if hide_stream_metadata:
                 return []
-            return self._create_stream_response_logprobs(
+            return self._create_response_logprobs(
                 token_ids=output.token_ids,
                 logprobs=output.logprobs,
                 tokenizer=tokenizer,
@@ -1231,6 +1245,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             if not delta_message:
                 continue
+            delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
 
             for dm in split_delta(delta_message):
                 target_state, tool_call = processor.resolve_target_state(dm)
@@ -1248,6 +1263,9 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
+
+        assert isinstance(context, SimpleContext)
+        context.streamed_output_items = processor.output_items
 
     async def _process_harmony_streaming_events(
         self,
@@ -1279,16 +1297,24 @@ class OpenAIServingResponses(GenerateBaseServing):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
+                    done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
                         completed_message, state, ctx.function_tool_names
                     ):
+                        if isinstance(event, ResponseOutputItemDoneEvent):
+                            done_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
 
                     for event in emit_tool_action_events(
                         completed_message, state, self.tool_server
                     ):
+                        if isinstance(event, ResponseOutputItemDoneEvent):
+                            done_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
+                    ctx.streamed_items_by_message.append(
+                        (completed_message, done_items)
+                    )
                     state.reset_for_new_item()
 
     async def responses_stream_generator(

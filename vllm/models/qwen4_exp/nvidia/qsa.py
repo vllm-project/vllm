@@ -4,15 +4,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import ClassVar, cast
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.attention import (
@@ -20,15 +22,21 @@ from vllm.model_executor.layers.attention.attention import (
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    extract_layer_index,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.utils.torch_utils import (
     kv_cache_dtype_str_to_dtype,
 )
@@ -69,6 +77,79 @@ class Qwen4ExpQSAMetadata(FlashAttentionMetadata):
     num_reqs: int
     req_id_per_token: torch.Tensor
     is_cudagraph_capture: bool = False
+
+
+class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
+    """Pack sharded Q/gate, K, V and replicated indexer Q/K in one GEMM."""
+
+    def __init__(
+        self,
+        qkv_proj: QKVParallelLinear,
+        index_size: int,
+        quant_config: QuantizationConfig | None,
+    ) -> None:
+        self.num_kv_head_replicas = qkv_proj.num_kv_head_replicas
+        super().__init__(
+            input_size=qkv_proj.input_size,
+            output_sizes=[*qkv_proj.output_sizes, index_size * qkv_proj.tp_size],
+            bias=False,
+            params_dtype=qkv_proj.params_dtype,
+            quant_config=quant_config,
+            prefix=qkv_proj.prefix,
+        )
+
+    def _load_shard(
+        self,
+        loader: Callable[..., None],
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        loaded_shard_id: int | tuple[int, ...] | None,
+    ) -> None:
+        tp_rank = self.tp_rank
+        param_tp_rank = getattr(param, "tp_rank", None)
+        if loaded_shard_id == 3:
+            shard_rank = 0
+        elif loaded_shard_id in (1, 2):
+            shard_rank = tp_rank // self.num_kv_head_replicas
+        else:
+            shard_rank = tp_rank
+        self.tp_rank = shard_rank
+        if param_tp_rank is not None:
+            param.tp_rank = shard_rank
+        try:
+            loader(param, loaded_weight, loaded_shard_id)
+        finally:
+            self.tp_rank = tp_rank
+            if param_tp_rank is not None:
+                param.tp_rank = param_tp_rank
+
+    def weight_loader(self, param, loaded_weight, loaded_shard_id=None) -> None:
+        self._load_shard(super().weight_loader, param, loaded_weight, loaded_shard_id)
+
+    def weight_loader_v2(self, param, loaded_weight, loaded_shard_id=None) -> None:
+        self._load_shard(
+            super().weight_loader_v2, param, loaded_weight, loaded_shard_id
+        )
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        def remap_shards():
+            for name, weight in weights:
+                shard_id = getattr(weight, "shard_id", None)
+                if isinstance(shard_id, str):
+                    weight = weight.detach()
+                    weight.shard_id = {"q": 0, "k": 1, "v": 2}[shard_id]
+                yield name, weight
+
+        return super().load_weights(remap_shards())
+
+
+def qsa_kv_cache_dtype(cache_config: CacheConfig, prefix: str) -> CacheDType:
+    """The layer's KV cache dtype, honoring ``--kv-cache-dtype-skip-layers``."""
+    if str(extract_layer_index(prefix)) in cache_config.kv_cache_dtype_skip_layers:
+        return "auto"
+    return cache_config.cache_dtype
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -400,7 +481,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         elif tp_size % self.total_num_kv_heads:
             raise ValueError("TP size must be divisible by replicated QSA KV heads")
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = int(config.head_dim or self.hidden_size // self.num_heads)
+        self.head_dim = int(config.head_dim or self.hidden_size // self.total_num_heads)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -462,7 +543,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
 
         self.layer_name = f"{prefix}.attn"
         self.attn_type = AttentionType.DECODER
-        self.kv_cache_dtype = cache_config.cache_dtype
+        self.kv_cache_dtype = qsa_kv_cache_dtype(cache_config, prefix)
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, model_config
         )
@@ -495,6 +576,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.indexer",
         )
+        self.fuse_indexer_projection = vllm_config.lora_config is None
+        if self.fuse_indexer_projection:
+            self.index_qk_size = self.indexer.index_qk_proj.output_size
+            self.qkv_proj = Qwen4ExpQSAQKVIndexerLinear(
+                self.qkv_proj,
+                self.index_qk_size,
+                model.without_modelopt_fp4(quant_config),
+            )
+            del self.indexer.index_qk_proj
+
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # PACKED selection buffer: the trailing column holds each row's
         # valid-entry count (written by the expand kernel) — never a token
@@ -517,6 +608,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             row_width=self.num_kv_heads * 2 * self.head_dim,
             kv_dtype=self.kv_cache_torch_dtype,
         )
+        # Fused prepare writes directly to the ordinary main cache; HiSparse
+        # must select its resident write target before updating KV.
+        self.use_fused_qsa_prepare = (
+            self.hisparse_cache is None
+            and self.use_fused_qk_norm_rope_gate
+            and self.indexer.use_fused_pre_indexer
+        )
         if self.hisparse_cache is not None:
             self.register_buffer(
                 "physical_topk_indices_buffer",
@@ -533,6 +631,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.impl.process_weights_after_loading(act_dtype)
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        mapper = None
+        if self.fuse_indexer_projection:
+            mapper = WeightsMapper(
+                orig_to_new_stacked={
+                    "indexer.index_qk_proj.": ("qkv_proj.", 3),
+                }
+            )
+        return AutoWeightsLoader(self).load_weights(weights, mapper=mapper)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
@@ -583,16 +691,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self._hisparse_kv_view(resident),
             slots,
         )
-        mirror = cache.mirror_write_target(num_rows)
-        if mirror is not None:
-            staging, staging_slots = mirror
-            impl.do_kv_cache_update(
-                self,
-                key[:num_rows],
-                value[:num_rows],
-                self._hisparse_kv_view(staging),
-                staging_slots,
-            )
         # FULL warmup and capture both run with runtime mode NONE, without a
         # connector mirror phase. Replay mirrors real rows at worker finish.
         if not metadata.is_cudagraph_capture:
@@ -611,6 +709,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 cache.source_block_table,
                 logical[:, :-1],
                 block_size=cache.view.block_size,
+                num_valid_rows=metadata.query_start_loc[-1:],
             )
             assert isinstance(resolved, torch.Tensor)
             physical[:, :-1].copy_(resolved)
@@ -657,7 +756,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 )
                 return
             prefill_cache = resident
-            prefill_table = cache.block_table
             prefill_requests = metadata.req_id_per_token[num_decode:num_tokens]
             if not cache.all_context_pages_resident:
                 assert cache.source_block_table is not None
@@ -672,8 +770,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                     block_size,
                     capacity,
                 )
+                state_indices = cache.runtime.request_state_indices
+                assert state_indices is not None
                 plan.ensure_gpu_sources(
-                    cache.block_table[first_prefill : metadata.num_reqs], block_size
+                    cache.block_table,
+                    state_indices[first_prefill : metadata.num_reqs],
+                    block_size,
                 )
                 prefill_cache = cache.runtime.gather_prefill_cache(
                     cache.runtime.host_cache.view(
@@ -684,6 +786,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 )
                 prefill_table = plan.block_table
                 prefill_requests = prefill_requests - first_prefill
+            else:
+                prefill_table = cache.batch_block_table()
             impl.forward_qsa(
                 self,
                 query[num_decode:num_tokens],
@@ -707,12 +811,15 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self,
         projected_qk: torch.Tensor,
         positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        query: torch.Tensor | None,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         output: torch.Tensor,
-        output_gate: torch.Tensor,
+        output_gate: torch.Tensor | None,
+        qkv: torch.Tensor,
     ) -> None:
+        # query/key/value/output_gate are None when the fused prepare runs
+        # inside the indexer launch.
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
             metadata = metadata[0]
@@ -730,14 +837,19 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
-        selected = self.indexer(
+        selected, main_outputs = self.indexer(
             projected_qk,
             positions,
             self.topk_indices_buffer[:num_tokens],
+            attn=self,
+            qkv=qkv,
+            slot_mapping=main_metadata.slot_mapping,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         if self.hisparse_cache is not None:
+            assert query is not None and output_gate is not None
+            assert key is not None and value is not None
             self._forward_hisparse(
                 query,
                 key,
@@ -748,13 +860,18 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
             return
         impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
-        impl.do_kv_cache_update(
-            self,
-            key,
-            value,
-            self.kv_cache,
-            main_metadata.slot_mapping,
-        )
+        if main_outputs is None:
+            assert key is not None and value is not None
+            impl.do_kv_cache_update(
+                self,
+                key,
+                value,
+                self.kv_cache,
+                main_metadata.slot_mapping,
+            )
+        else:
+            query, output_gate = main_outputs
+        assert query is not None and output_gate is not None
         impl.forward_qsa(
             self,
             query,
@@ -774,15 +891,23 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        assert gate is not None
+        if self.fuse_indexer_projection:
+            qkv, projected_qk = qkv.split(
+                [2 * self.q_size + 2 * self.kv_size, self.index_qk_size], dim=-1
+            )
+        else:
+            projected_qk, _ = self.indexer.index_qk_proj(hidden_states)
         num_tokens = hidden_states.shape[0]
-        query = q.view(num_tokens, self.num_heads, self.head_dim)
-        key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
-        value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
-        attn_output = torch.empty_like(query)
-        # Keep the index projection outside the eager break.
-        projected_qk, _ = self.indexer.index_qk_proj(hidden_states)
+        if not self.use_fused_qsa_prepare:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            assert gate is not None
+            query = q.view(num_tokens, self.num_heads, self.head_dim)
+            key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
+            value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+        else:
+            # Norm/RoPE/gate and the K/V cache write happen inside _run_qsa.
+            query = key = value = gate = None
+        attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
         self._run_qsa(
             projected_qk,
             positions,
@@ -791,6 +916,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             value,
             attn_output,
             gate,
+            qkv,
         )
         flat_output = attn_output.view(num_tokens, -1)
         output, _ = self.o_proj(flat_output)

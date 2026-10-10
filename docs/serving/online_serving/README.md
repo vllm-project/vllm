@@ -76,6 +76,9 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Generative Scoring API](generative_scoring.md) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
+- [Structured Decisions API](structured_decisions.md) (`/v1/systemone`)
+    - Applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
+    - Answers typed questions about a state with a probability for every allowed answer.
 
 ## Instrumentator APIs
 
@@ -125,8 +128,10 @@ Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out`
 
 ### Tokens IN <> Tokens OUT APIs
 
-- `/inference/v1/generate` - Generate completions
-- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
+- [Generate API](token_in_token_out.md) (`/inference/v1/generate`)
+    - Generate completions from token IDs, optionally with detokenized text (`output_mode`)
+- `/inference/v1/abort_requests` - Abort in-flight requests (registered wherever `/inference/v1/generate` is)
+- `/abort_requests` - Unauthenticated alias of `/inference/v1/abort_requests` (`--tokens-only` only)
 
 ### Renderer APIs
 

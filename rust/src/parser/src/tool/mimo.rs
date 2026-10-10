@@ -26,7 +26,8 @@ impl ToolParser for MiMoToolParser {
     }
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        self.inner.structural_tag_builder()
+        // MiMo's template emits compact tags without the newlines Qwen3-Coder uses.
+        Some(xgrammar_structural_tag::Model::Mimo.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -64,6 +65,7 @@ mod tests {
             name: "convert".into(),
             description: None,
             strict: None,
+            defer_loading: None,
             parameters: json!({"type": "object", "properties": {
                 "flag": {"type": "boolean"}, "empty": {"type": ["string", "null"]},
                 "text": {"type": "string"}, "literal": {"type": "string"}, "payload": {"type": "object"}
@@ -87,5 +89,33 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn structural_tag_uses_compact_mimo_tags() {
+        use xgrammar_structural_tag::builders::StructuralTagOptions;
+        use xgrammar_structural_tag::{
+            FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
+        };
+
+        let parser = MiMoToolParser::create(&[]).unwrap();
+        let builder = parser.structural_tag_builder().expect("MiMo exposes a builder");
+        let tools = [ToolParam::Function(FunctionToolParam::new(
+            FunctionDefinition::new("get_weather"),
+        ))];
+        let tag = build_structural_tag(
+            builder,
+            &tools,
+            ToolChoice::required(),
+            StructuralTagOptions::default().with_reasoning(false),
+        )
+        .unwrap();
+        let value = serde_json::to_value(tag).unwrap();
+        assert_eq!(value["format"]["triggers"], json!(["<tool_call>"]));
+        assert_eq!(
+            value["format"]["tags"][0]["begin"],
+            "<tool_call><function=get_weather>"
+        );
+        assert_eq!(value["format"]["tags"][0]["end"], "</function></tool_call>");
     }
 }

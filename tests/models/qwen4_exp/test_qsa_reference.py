@@ -15,6 +15,7 @@ from vllm.models.qwen4_exp.nvidia import (
 )
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
+from vllm.models.qwen4_exp.nvidia.qsa import qsa_kv_cache_dtype
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.utils import clear_layer_kv_caches
@@ -56,16 +57,24 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
             rope_position_offset=0,
         ),
         compressed_key_cache=SimpleNamespace(kv_cache=torch.empty(0)),
-        use_fused_pre_indexer=True,
         rotary_emb=SimpleNamespace(cos_sin_cache=torch.empty(0)),
         q_layernorm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
         k_layernorm=SimpleNamespace(weight=torch.ones(1)),
         compress_ratio=2,
     )
+    attn = SimpleNamespace(
+        use_fused_qsa_prepare=True,
+        kv_cache=torch.empty(0, 1, 1, 2),
+        kv_cache_dtype="auto",
+        q_norm=SimpleNamespace(weight=torch.ones(1), variance_epsilon=1e-6),
+        k_norm=SimpleNamespace(weight=torch.ones(1)),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
 
     monkeypatch.setattr(
         indexer_qsa,
-        "qsa_pre_indexer",
+        "qsa_prepare",
         lambda *args, **kwargs: updates.append((args, kwargs)),
     )
     monkeypatch.setattr(
@@ -79,11 +88,14 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
         lambda *args, **kwargs: selections.append((args, kwargs)),
     )
 
-    actual = indexer_qsa.QSAIndexer.forward(
+    actual, _ = indexer_qsa.QSAIndexer.forward(
         indexer,
         torch.zeros(2, 2),
         torch.tensor([7, 8]),
         rows,
+        attn=attn,
+        qkv=torch.zeros(2, 4),
+        slot_mapping=torch.arange(2),
     )
 
     assert actual is rows
@@ -240,11 +252,12 @@ def test_qsa_fp8_loaded_scales_reach_writer_and_attention(
     tmp_path, dist_init, workspace_init
 ) -> None:
     """Checkpoint K/V scales must govern both stored bytes and attention."""
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.model_executor.models.utils import AutoWeightsLoader
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -258,7 +271,8 @@ def test_qsa_fp8_loaded_scales_reach_writer_and_attention(
         num_attention_heads=24,
         num_key_value_heads=2,
         head_dim=64,
-        num_experts=0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -439,7 +453,7 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
     builder.k_work_metadata_buffer = torch.empty(0, 2, dtype=torch.int32, device=device)
     query_start_loc = torch.tensor([0, 7, 13, 13], dtype=torch.int32, device=device)
     token_to_req = torch.tensor([0] * 7 + [1] * 6 + [0] * 3, device=device)
-    block_table = torch.tensor([[1], [0], [2]], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[1], [3], [2]], dtype=torch.int32, device=device)
     common = SimpleNamespace(
         num_actual_tokens=16,
         num_reqs=3,
@@ -464,16 +478,20 @@ def test_qsa_circular_buffer_metadata_keeps_only_each_requests_suffix() -> None:
         4,
         -1,
         -1,
-        3,
-        0,
-        1,
-        2,
+        15,
+        12,
+        13,
+        14,
         -1,
         -1,
         -1,
     ]
 
     assert metadata.slot_mapping.tolist() == expected
+
+    # A dummy batch puts every request on the null block, which owns no ring.
+    block_table.zero_()
+    assert builder.build(0, common).slot_mapping.tolist() == [-1] * 16
 
 
 @pytest.mark.parametrize("chunk_start", list(range(8)))
@@ -491,7 +509,7 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
     query_len = num_spec + 1
 
     slots = qsa_cache.circular_qsa_slot_mapping(
-        torch.tensor([[0]], dtype=torch.int32),
+        torch.tensor([[1]], dtype=torch.int32),
         torch.zeros(query_len, dtype=torch.int32),
         torch.arange(chunk_start, chunk_start + query_len),
         capacity,
@@ -499,7 +517,7 @@ def test_qsa_circular_buffer_survives_one_speculative_step(chunk_start: int) -> 
     )
 
     committed = torch.arange(chunk_start - chunk_start % compress_ratio, chunk_start)
-    assert set(slots.tolist()).isdisjoint((committed % capacity).tolist())
+    assert set((slots % capacity).tolist()).isdisjoint((committed % capacity).tolist())
 
 
 def _qsa_key_cache(
@@ -571,6 +589,19 @@ def test_qsa_ring_capacity_covers_one_speculative_step(
         block_size=48, compress_ratio=compress_ratio
     ).get_kv_cache_spec(SimpleNamespace(num_speculative_tokens=num_spec))
     assert spec.block_size == expected
+
+
+def test_qsa_kv_cache_dtype_honors_skip_layers() -> None:
+    """``--kv-cache-dtype-skip-layers`` keeps the listed QSA layers unquantized.
+
+    The MTP layer's own attention is the one that matters on Flash-Next: FP8
+    there cuts draft acceptance at depth while the target layers stay FP8.
+    """
+    cache_config = SimpleNamespace(cache_dtype="fp8", kv_cache_dtype_skip_layers=["48"])
+    assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "auto"
+    assert qsa_kv_cache_dtype(cache_config, "model.layers.47.self_attn") == "fp8"
+    cache_config.kv_cache_dtype_skip_layers = []
+    assert qsa_kv_cache_dtype(cache_config, "mtp.layers.48.self_attn") == "fp8"
 
 
 @requires_qsa_kernels
@@ -648,7 +679,6 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         _metadata=lambda: (raw_metadata, compressed_metadata),
         skip_topk=True,
         index_kv_heads=1,
-        use_fused_pre_indexer=False,
         index_n_heads=1,
         index_head_dim=64,
         indexer_dtype=torch.bfloat16,
@@ -671,6 +701,7 @@ def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
         torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
         torch.zeros(8, dtype=torch.long, device=device),
         torch.full((5, 5), -1, dtype=torch.int32, device=device),
+        attn=SimpleNamespace(use_fused_qsa_prepare=False),
     )
     torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
     expected_compressed = torch.zeros_like(compressed_cache)
@@ -1402,11 +1433,12 @@ def _run_qsa_hisparse_prefill_case(
 ) -> None:
     from dataclasses import replace
 
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.models.utils import AutoWeightsLoader
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -1426,7 +1458,9 @@ def _run_qsa_hisparse_prefill_case(
         num_attention_heads=24,
         num_key_value_heads=heads,
         head_dim=dim,
-        num_experts=0,
+        partial_rotary_factor=1.0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -1473,6 +1507,11 @@ def _run_qsa_hisparse_prefill_case(
             ]
         )
         owner.process_weights_after_loading(torch.bfloat16)
+    # Even when fusion is supported, main KV writes must use the HiSparse
+    # resident target exercised below instead of the ordinary cache.
+    assert owner.use_fused_qk_norm_rope_gate
+    assert owner.indexer.use_fused_pre_indexer
+    assert not owner.use_fused_qsa_prepare
     row_width = heads * 2 * dim
     original = torch.randn(
         num_blocks,
@@ -1505,6 +1544,9 @@ def _run_qsa_hisparse_prefill_case(
     )
     resident_table = source_table.clone()
     resident_table[1, 0] = 0
+    # Residency uses persistent state rows, independent of this batch's order.
+    state_indices = torch.tensor([1, 0, 2, 3], device="cuda", dtype=torch.int32)
+    resident_table = resident_table.index_select(0, state_indices)
     slots = torch.tensor([31, 32, 79, 80], device="cuda", dtype=torch.int64)
     requests = torch.tensor([0, 0, 1, 1], device="cuda", dtype=torch.int32)
     positions = torch.tensor([15, 16, 31, 32], device="cuda", dtype=torch.int64)
@@ -1520,9 +1562,10 @@ def _run_qsa_hisparse_prefill_case(
     with torch.no_grad():
         for parameter in owner.parameters():
             parameter.zero_()
-        owner.qkv_proj.weight[2 * owner.q_size + owner.kv_size :, :4].copy_(
-            value.flatten(1).transpose(0, 1)
-        )
+        owner.qkv_proj.weight[
+            2 * owner.q_size + owner.kv_size : 2 * owner.q_size + 2 * owner.kv_size,
+            :4,
+        ].copy_(value.flatten(1).transpose(0, 1))
         owner.o_proj.weight[torch.arange(256, device="cuda"), output_columns] = 1
     common = CommonAttentionMetadata(
         num_actual_tokens=4,
@@ -1583,8 +1626,8 @@ def _run_qsa_hisparse_prefill_case(
         slot_mapping=slots,
     )
     cache.source_block_table = source_table
+    runtime.request_state_indices = state_indices
     cache.all_context_pages_resident = False
-    cache.mirror_from_resident = True
     owner.bind_kv_cache(original.transpose(1, 2))
     if capture_warmup or connector_warmup:
         from functools import partial
@@ -1622,7 +1665,9 @@ def _run_qsa_hisparse_prefill_case(
     monkeypatch.setattr(owner.impl, "do_kv_cache_update", capture_writer)
 
     def save_selection(module, inputs, output):
-        selected_before_attention.append(output.clone())
+        selected, main_outputs = output
+        assert main_outputs is None
+        selected_before_attention.append(selected.clone())
 
     selection_hook = owner.indexer.register_forward_hook(save_selection)
     host, registered = allocate_pinned_host_pool(original.nbytes)
@@ -1806,6 +1851,8 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     import json
     from dataclasses import replace
 
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
         HiSparseConnectorMetadata,
@@ -1816,7 +1863,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.models.utils import AutoWeightsLoader
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -1829,6 +1875,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     from vllm.v1.hisparse.types import (
         SparseKVOffloadCommand,
         SparseKVPageTransfer,
+        SparseKVResidencyUpdate,
         SparseKVRowMirror,
     )
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -1842,13 +1889,14 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         mtp_num_hidden_layers=1,
         mtp={"hybrid": True},
         index_share_for_mtp_iteration=True,
-        layer_types=["qwen_sparse_attention"],
+        layer_types=["full_attention"],
         hidden_size=256,
         intermediate_size=512,
         num_attention_heads=24,
         num_key_value_heads=heads,
         head_dim=dim,
-        num_experts=0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -1924,7 +1972,8 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     source_table = torch.tensor(
         [[1, 2, 0], [3, 4, 5]], device=device, dtype=torch.int32
     )
-    resident_table = source_table.clone()
+    residency = source_table.flip(0).clone().unsqueeze(1)
+    resident_table = residency[:, 0]
     saved_source_table = source_table.clone()
     # K+1 verification rows end in each request's live resident tail.
     initial_positions = torch.tensor([28, 29, 30, 31, 44, 45, 46, 47], device=device)
@@ -1942,9 +1991,10 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     with torch.no_grad():
         for parameter in owner.parameters():
             parameter.zero_()
-        owner.qkv_proj.weight[2 * owner.q_size + owner.kv_size :, :tokens].copy_(
-            values.flatten(1).transpose(0, 1)
-        )
+        owner.qkv_proj.weight[
+            2 * owner.q_size + owner.kv_size : 2 * owner.q_size + 2 * owner.kv_size,
+            :tokens,
+        ].copy_(values.flatten(1).transpose(0, 1))
         owner.o_proj.weight[torch.arange(256, device=device), output_columns] = 1
     cache.bind_cache(
         backing.view(torch.uint8),
@@ -1956,6 +2006,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         slot_mapping=slots,
     )
     cache.source_block_table = source_table
+    cache.residency = residency
     cache.mirror_slot_mapping = host_slots
     cache.runtime.resident_source_index = 0
     # This multi-query path uses prefill staging, but the public worker owns a
@@ -2060,9 +2111,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         cache.runtime.bind_source_cache(
             host_pages.flatten(2), registered_host_pool=registered
         )
-        initialize_hisparse_runtime_buffers(
-            [cache], max_num_reqs=2, max_num_batched_tokens=128
-        )
+        initialize_hisparse_runtime_buffers([cache], max_num_reqs=2)
         worker = HiSparseConnectorWorker(
             vllm_config,
             KVCacheConfig(num_blocks=blocks, kv_cache_tensors=[], kv_cache_groups=[]),
@@ -2070,8 +2119,10 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         worker.initialize(
             [cache], [owner.layer_name], hot_backing, 2, blocks, device, [registered]
         )
+        worker.set_request_state_indices(
+            torch.tensor([1, 0], dtype=torch.int32, device=device)
+        )
         cache.all_context_pages_resident = True
-        cache.mirror_from_resident = True
         build_metadata(capture=True)
         with (
             torch.inference_mode(),
@@ -2141,9 +2192,9 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         transfer = SparseKVPageTransfer(91, 1, (1,), after_forward=False)
         worker.start_step(
             HiSparseConnectorMetadata(
-                SparseKVOffloadCommand([transfer]), (), (), {}, True
+                SparseKVOffloadCommand([transfer]), (), (), {}, True, {}
             ),
-            torch.tensor([0, 1], dtype=torch.int32, device=device),
+            torch.tensor([1, 0], dtype=torch.int32, device=device),
             num_tokens=0,
         )
         worker.finish_forward()
@@ -2163,7 +2214,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         # A peer's public QSA forward writes the reused physical span. Its host
         # source is different, so the original request's sealed host page survives.
         source_table.copy_(torch.tensor([[6, 0, 0], [0, 0, 0]], device=device))
-        resident_table.copy_(torch.tensor([[1, 0, 0], [0, 0, 0]], device=device))
         raw_table.copy_(torch.tensor([[3], [0]], device=device))
         query_starts.copy_(torch.tensor([0, 4, 4], device=device))
         seq_lens.copy_(torch.tensor([4, 0], device=device))
@@ -2174,9 +2224,14 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         build_metadata(active=1)
         worker.start_step(
             HiSparseConnectorMetadata(
-                None, (), (), {"peer": (SparseKVRowMirror((16,), 96, 4),)}, True
+                None,
+                (),
+                (),
+                {"peer": (SparseKVRowMirror((16,), 96, 4),)},
+                True,
+                {"peer": SparseKVResidencyUpdate([0, 1, 2], ([1, 0, 0],))},
             ),
-            torch.tensor([1, -1], dtype=torch.int32, device=device),
+            torch.tensor([0, -1], dtype=torch.int32, device=device),
             request_ids=["peer"],
             num_tokens=tokens,
         )
@@ -2212,8 +2267,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         # padding, its first page is host-only, and its live tail changes again.
         source_table.copy_(saved_source_table)
         source_table[1].zero_()
-        resident_table.copy_(source_table)
-        resident_table[0, 0] = 0
         raw_table.copy_(torch.tensor([[1], [0]], device=device))
         seq_lens.copy_(torch.tensor([32, 0], device=device))
         positions.copy_(initial_positions)
@@ -2229,9 +2282,14 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         )
         worker.start_step(
             HiSparseConnectorMetadata(
-                None, (), (), {"target": (SparseKVRowMirror((44,), 44, 4),)}, False
+                None,
+                (),
+                (),
+                {"target": (SparseKVRowMirror((44,), 44, 4),)},
+                False,
+                {"target": SparseKVResidencyUpdate([0, 1, 2], ([0, 2, 0],))},
             ),
-            torch.tensor([0, -1], dtype=torch.int32, device=device),
+            torch.tensor([1, -1], dtype=torch.int32, device=device),
             request_ids=["target"],
             num_tokens=tokens,
         )
@@ -2390,6 +2448,8 @@ def _run_qsa_hisparse_worker_case(
     import json
     from dataclasses import replace
 
+    from transformers import Qwen4ExpTextConfig
+
     from vllm.config import AttentionConfig, HiSparseConfig, set_current_vllm_config
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
         HiSparseConnectorMetadata,
@@ -2399,7 +2459,6 @@ def _run_qsa_hisparse_worker_case(
     )
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
-    from vllm.models.qwen4_exp.config import Qwen4ExpTextConfig
     from vllm.models.qwen4_exp.nvidia.mtp import Qwen4ExpMultiTokenPredictor
     from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAAttention
     from vllm.utils.torch_utils import set_default_torch_dtype
@@ -2410,7 +2469,7 @@ def _run_qsa_hisparse_worker_case(
         initialize_hisparse_runtime_buffers,
         release_pinned_state,
     )
-    from vllm.v1.hisparse.types import SparseKVRowMirror
+    from vllm.v1.hisparse.types import SparseKVResidencyUpdate, SparseKVRowMirror
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.worker.gpu.states import RequestState
 
@@ -2426,7 +2485,8 @@ def _run_qsa_hisparse_worker_case(
         num_attention_heads=24,
         num_key_value_heads=heads,
         head_dim=dim,
-        num_experts=0,
+        num_experts=4,
+        num_experts_per_tok=2,
         ple_layer_ids=[],
         indexer_n_heads=8,
         indexer_kv_heads=1,
@@ -2508,7 +2568,8 @@ def _run_qsa_hisparse_worker_case(
     )
     original_hot_table = hot_table.clone()
     source_table = torch.empty((2, 2), dtype=torch.int32, device=device)
-    resident_table = torch.empty_like(source_table)
+    residency = torch.zeros((2, 1, 2), dtype=torch.int32, device=device)
+    resident_table = residency[:, 0]
     slots = torch.full((2,), -1, dtype=torch.int64, device=device)
     host_slots = slots.clone()
     query_starts = torch.empty(3, dtype=torch.int32, device=device)
@@ -2558,7 +2619,9 @@ def _run_qsa_hisparse_worker_case(
                 )
             )
 
-        def save_selection(module, inputs, selected, *, layer=layer):
+        def save_selection(module, inputs, output, *, layer=layer):
+            selected, main_outputs = output
+            assert main_outputs is None
             selected_before_attention[layer].copy_(selected)
 
         selection_hooks.append(owner.indexer.register_forward_hook(save_selection))
@@ -2607,13 +2670,12 @@ def _run_qsa_hisparse_worker_case(
                 pages.flatten(2), registered_host_pool=registered
             )
             handle.runtime.resident_source_index = 0
+            handle.residency = residency
             handle.source_block_table = source_table
             handle.mirror_slot_mapping = host_slots
             handle.view.cache[1].copy_(reference[layer, 2].flatten(1).to(device))
             handle.view.cache[2].copy_(reference[layer, 4].flatten(1).to(device))
-        initialize_hisparse_runtime_buffers(
-            handles, max_num_reqs=2, max_num_batched_tokens=128
-        )
+        initialize_hisparse_runtime_buffers(handles, max_num_reqs=2)
         worker = HiSparseConnectorWorker(
             vllm_config,
             KVCacheConfig(
@@ -2649,7 +2711,6 @@ def _run_qsa_hisparse_worker_case(
             offset = 3 if write_history else 5 + step
             write_page = 0 if write_history else 1
             source_table.zero_()
-            resident_table.zero_()
             raw_table.zero_()
             slots.fill_(-1)
             host_slots.fill_(-1)
@@ -2661,13 +2722,18 @@ def _run_qsa_hisparse_worker_case(
             )
             hidden.normal_()
             mirrors = {}
+            residency_updates = {}
             for row, (name, host_block, resident_block) in enumerate(
                 zip(names, source_ids, resident_ids)
             ):
                 source_table[row].copy_(
                     torch.tensor([host_block, host_block + 1], device=device)
                 )
-                resident_table[row, write_page] = resident_block
+                resident_blocks = [0, 0]
+                resident_blocks[write_page] = resident_block
+                residency_updates[name] = SparseKVResidencyUpdate(
+                    [0, 1], (resident_blocks,)
+                )
                 raw_table[row, 0] = host_block
                 slots[row] = resident_block * block_size + offset
                 destination = (host_block + write_page) * block_size + offset
@@ -2702,7 +2768,12 @@ def _run_qsa_hisparse_worker_case(
             if start_forward:
                 worker.start_step(
                     HiSparseConnectorMetadata(
-                        None, (), (1, 2) if step == 2 else (), mirrors, False
+                        None,
+                        (),
+                        (1, 2) if step == 2 else (),
+                        mirrors,
+                        False,
+                        residency_updates,
                     ),
                     torch.tensor(
                         [states.req_id_to_index[name] for name in names],
@@ -2713,6 +2784,11 @@ def _run_qsa_hisparse_worker_case(
                     num_tokens=active,
                 )
                 worker.prepare_forward(metadata)
+                for name, resident_block in zip(names, resident_ids):
+                    state_row = states.req_id_to_index[name]
+                    assert (
+                        resident_table[state_row, write_page].item() == resident_block
+                    )
             return names, source_ids, resident_ids, offset
 
         def forward():
@@ -2993,6 +3069,7 @@ def _run_qsa_hisparse_worker_case(
                         (),
                         {"peer": (SparseKVRowMirror((133,), 261, 2),)},
                         False,
+                        {"peer": SparseKVResidencyUpdate([0, 1], ([0, 2],))},
                     ),
                     torch.tensor([peer_slot], dtype=torch.int32, device=device),
                     request_ids=["peer"],
@@ -3157,6 +3234,9 @@ def _run_qsa_hisparse_worker_case(
                             source_table,
                             priming,
                             block_size=block_size,
+                            num_valid_rows=metadata[owner.layer_name].query_start_loc[
+                                -1:
+                            ],
                         )
                         handle.runtime.begin_forward()
                 before = [

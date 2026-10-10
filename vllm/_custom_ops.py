@@ -2587,6 +2587,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     skip_index_branch: bool = False,
     q_fp8_out: torch.Tensor | None = None,
     q_fp8_scale: float = 1.0,
+    kv_k_scale: torch.Tensor | None = None,
+    kv_v_scale: torch.Tensor | None = None,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2610,7 +2612,14 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     attention's flat TMA descriptor.
 
     If ``q_fp8_out`` is given, the same normalized q is also written in FP8
-    E4M3 using ``q_fp8_scale`` as its dequantization scale.
+    E4M3 using ``q_fp8_scale`` as its dequantization scale. Without ``q_out``,
+    q is then written only in FP8 and the q slice of ``qkv`` is left as is.
+
+    ``kv_cache_dtype="nvfp4"`` quantizes k/v into the packed HND
+    ``[num_blocks, 2 * num_kv_heads, block_size, 72]`` uint8 cache using the
+    device dequantization scales ``kv_k_scale``/``kv_v_scale``. Slot
+    ``2 * head + side`` (K = 0, V = 1) holds that head's E2M1 data followed by
+    its E4M3 block scales, so every head is one contiguous run of the page.
 
     When ``skip_index_branch`` is true, sparse rows still keep their packed
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
@@ -2641,6 +2650,8 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         skip_index_branch,
         q_fp8_out,
         q_fp8_scale,
+        kv_k_scale,
+        kv_v_scale,
     )
 
 
@@ -3666,7 +3677,7 @@ def causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor | None,
     has_initial_state: torch.Tensor | None,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd_cpu(
         x,
@@ -3678,7 +3689,7 @@ def causal_conv1d_fwd_cpu(
         has_initial_state,
         silu_activation,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -3689,7 +3700,7 @@ def causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
@@ -3701,7 +3712,7 @@ def causal_conv1d_update_cpu(
         num_accepted_tokens,
         conv_state_indices,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -4434,18 +4445,23 @@ def cpu_gemm_wna16(
     pack_factor: int,
     isa_hint: str,
 ) -> torch.Tensor:
-    output = torch.empty((input.size(0), scales.size(1)), dtype=input.dtype)
+    # Match int4_scaled_mm_cpu: flatten >2-D activations to [M, K] for the
+    # C++ kernel, then restore the original leading dims on the output.
+    x_shape = input.shape
+    x_2d = input.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else input
+    out = torch.empty((x_2d.size(0), scales.size(1)), dtype=input.dtype)
     torch.ops._C.cpu_gemm_wna16(
-        input,
+        x_2d,
         q_weight,
-        output,
+        out,
         scales,
         zeros,
         bias,
         pack_factor,
         isa_hint,
     )
-    return output
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+    return out
 
 
 def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
