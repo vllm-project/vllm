@@ -402,17 +402,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(TORCH_STABLE_STRING_CONTENTS MATCHES "auto strptr = new std::string")
       set(TORCH_SHADOW_INCLUDE_DIR
         "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers")
+      set(_stable_hdr_staging_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/torch_patched_headers_staging")
 
-      file(MAKE_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}/torch/csrc/stable")
+      # Copy only if different so reconfiguring doesn't force a rebuild.
+      file(MAKE_DIRECTORY "${_stable_hdr_staging_dir}/torch/csrc/stable")
       file(COPY_FILE
         "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
-        "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}")
+        "${_stable_hdr_staging_dir}/${_stable_hdr_rel}")
 
       execute_process(
         COMMAND patch --batch --forward -p1
           "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
-        WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        WORKING_DIRECTORY "${_stable_hdr_staging_dir}"
         COMMAND_ERROR_IS_FATAL ANY)
+
+      file(MAKE_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}/torch/csrc/stable")
+      file(COPY_FILE
+        "${_stable_hdr_staging_dir}/${_stable_hdr_rel}"
+        "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}"
+        ONLY_IF_DIFFERENT)
 
       include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
     endif()
@@ -529,12 +538,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       set(MACHETE_GEN_SCRIPT
         ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/machete/generate.py)
       file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
+      set(MACHETE_GEN_STAMP
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/machete/generated/generate.hash)
+      read_generator_stamp(MACHETE_LAST_GEN_HASH ${MACHETE_GEN_STAMP})
 
       message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
-      message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
+      message(STATUS "Last run machete generate script hash: ${MACHETE_LAST_GEN_HASH}")
 
-      if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
-          OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
+      if (NOT "${MACHETE_LAST_GEN_HASH}" STREQUAL "${MACHETE_GEN_SCRIPT_HASH}")
+        file(REMOVE ${MACHETE_GEN_STAMP})
         execute_process(
           COMMAND ${CMAKE_COMMAND} -E env
           PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
@@ -551,8 +563,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
                               "\nCheck the log for details: "
                               "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
         else()
-          set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
-              CACHE STRING "Last run machete generate script hash" FORCE)
+          file(WRITE ${MACHETE_GEN_STAMP} ${MACHETE_GEN_SCRIPT_HASH})
           message(STATUS "Machete generation completed successfully.")
         endif()
       else()
@@ -660,12 +671,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
       list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
       set(MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
+      set(MARLIN_GEN_STAMP
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/marlin/generate_kernels.hash)
+      read_generator_stamp(MARLIN_LAST_GEN_HASH_AND_ARCH ${MARLIN_GEN_STAMP})
 
       message(STATUS "Marlin generation script hash: ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
-      message(STATUS "Last run Marlin generate script hash: $CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+      message(STATUS "Last run Marlin generate script hash: ${MARLIN_LAST_GEN_HASH_AND_ARCH}")
 
-      if (NOT DEFINED CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-          OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH_AND_ARCH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
+      if (NOT "${MARLIN_LAST_GEN_HASH_AND_ARCH}" STREQUAL "${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+        file(REMOVE ${MARLIN_GEN_STAMP})
         execute_process(
           COMMAND ${CMAKE_COMMAND} -E env
           PYTHONPATH=$ENV{PYTHONPATH}
@@ -682,8 +696,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
                               "\nCheck the log for details: "
                               "${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log")
         else()
-          set(MARLIN_GEN_SCRIPT_HASH_AND_ARCH ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-              CACHE STRING "Last run Marlin generate script hash and arch" FORCE)
+          file(WRITE ${MARLIN_GEN_STAMP} ${MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
           message(STATUS "Marlin generation completed successfully.")
         endif()
       else()
@@ -1353,12 +1366,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
     list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
     set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
+    set(MOE_MARLIN_GEN_STAMP
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/moe/marlin_moe_wna16/generate_kernels.hash)
+    read_generator_stamp(MOE_MARLIN_LAST_GEN_HASH_AND_ARCH ${MOE_MARLIN_GEN_STAMP})
 
     message(STATUS "Marlin MOE generation script hash with arch: ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
-    message(STATUS "Last run Marlin MOE generate script hash with arch: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+    message(STATUS "Last run Marlin MOE generate script hash with arch: ${MOE_MARLIN_LAST_GEN_HASH_AND_ARCH}")
 
-    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
+    if (NOT "${MOE_MARLIN_LAST_GEN_HASH_AND_ARCH}" STREQUAL "${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+      file(REMOVE ${MOE_MARLIN_GEN_STAMP})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$ENV{PYTHONPATH}
@@ -1375,8 +1391,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                             "\nCheck the log for details: "
                             "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
       else()
-        set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-            CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
+        file(WRITE ${MOE_MARLIN_GEN_STAMP} ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
         message(STATUS "Marlin MOE generation completed successfully.")
       endif()
     else()

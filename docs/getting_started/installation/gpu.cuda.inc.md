@@ -178,13 +178,20 @@ uv pip install -e . --torch-backend=auto
     For example, you can install [ccache](https://github.com/ccache/ccache) using `conda install ccache` or `apt install ccache` .
     As long as `which ccache` command can find the `ccache` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
-    When using `ccache` with `pip install -e .`, you should run `CCACHE_NOHASHDIR="true" pip install --no-build-isolation -e .`. This is because `pip` creates a new folder with a random name for each build, preventing `ccache` from recognizing that the same files are being built.
+    `ccache` helps most after clean builds or branch switches. If you build from several checkouts, set `CCACHE_NOHASHDIR="true"` so they can share cache entries.
 
     [sccache](https://github.com/mozilla/sccache) works similarly to `ccache`, but has the capability to utilize caching in remote storage environments.
     The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.
 
 !!! note "Faster Kernel Development"
-    For frequent C++/CUDA kernel changes, after the initial `uv pip install -e .` setup, consider using the [Incremental Compilation Workflow](../../contributing/incremental_build.md) for significantly faster rebuilds of only the modified kernel code.
+    To rebuild after C++/CUDA changes, install the build dependencies once and re-run the install without build isolation. Editable installs keep their CMake build directory under `build/`, so only the changed files are recompiled:
+
+    ```bash
+    uv pip install -r requirements/build/cuda.txt --torch-backend=auto
+    uv pip install -e . --no-build-isolation
+    ```
+
+    With build isolation, every build runs in a fresh environment and recompiles everything. To drive CMake directly, see the [Incremental Compilation Workflow](../../contributing/incremental_build.md).
 
 ##### Use an existing PyTorch installation
 
