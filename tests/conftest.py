@@ -868,15 +868,22 @@ class HfRunner:
         for inputs in all_inputs:
             generate_kwargs = dict(kwargs)
             generate_kwargs.setdefault("tokenizer", self.tokenizer)
-            output: "GenerateOutput" = self.model.generate(
-                **self.wrap_device(inputs),
-                use_cache=use_cache,
-                do_sample=False,
-                max_new_tokens=max_tokens,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
-                **generate_kwargs,
-            )
+            old_deterministic = torch.backends.mkldnn.deterministic
+            if current_platform.is_xpu():
+                torch.backends.mkldnn.deterministic = True
+            try:
+                output: "GenerateOutput" = self.model.generate(
+                    **self.wrap_device(inputs),
+                    use_cache=use_cache,
+                    do_sample=False,
+                    max_new_tokens=max_tokens,
+                    output_hidden_states=True,
+                    return_dict_in_generate=True,
+                    **generate_kwargs,
+                )
+            finally:
+                if current_platform.is_xpu():
+                    torch.backends.mkldnn.deterministic = old_deterministic
 
             # Encoder-decoder models return decoder_hidden_states instead of
             # hidden_states
