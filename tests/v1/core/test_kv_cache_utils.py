@@ -1865,6 +1865,42 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_kv_cache_config_skips_uniform_group_owned_by_other_pp_stage():
+    """A PP stage that owns none of a uniform-type group's layers keeps the
+    global spec, but must not allocate cache for the other stage's layers."""
+    spec_a = new_kv_cache_spec()
+    spec_b = new_kv_cache_spec(num_kv_heads=4)
+    global_groups = [
+        KVCacheGroupSpec(
+            ["layer1", "layer2"],
+            UniformTypeKVCacheSpecs(
+                block_size=16, kv_cache_specs={"layer1": spec_a, "layer2": spec_a}
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["layer3"],
+            UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer3": spec_b}),
+        ),
+    ]
+    groups = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups, {"layer2": spec_a}
+    )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+    )
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=2**20
+    )
+    assert [tensor.layers for tensor in kv_cache_config.kv_cache_tensors] == [
+        ["layer2"]
+    ]
+
+
 @pytest.mark.parametrize("sliding_window", [None, 256])
 @pytest.mark.parametrize("disable_hybrid", [False, True])
 @pytest.mark.parametrize("pcp_size", [1, 4])
