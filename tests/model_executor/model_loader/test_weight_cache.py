@@ -189,8 +189,6 @@ QWEN_EP_CASE = ModelCase(
         enable_expert_parallel=True,
         dtype="bfloat16",
         gpu_memory_utilization=0.6,
-        # Keep the KV budget fixed while the daemon loads concurrently.
-        kv_cache_memory_bytes=1 << 30,
         enforce_eager=True,
         max_model_len=1024,
     ),
