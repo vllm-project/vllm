@@ -184,6 +184,9 @@ class FourierRotaryEmbedding(RotaryEmbedding):
 
         return query, key
 
+    # Learned per-head frequencies do not use the standard cached RoPE operation.
+    forward_platform = forward_native
+
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         """Load fope weights."""
         world_size = get_tensor_model_parallel_world_size()

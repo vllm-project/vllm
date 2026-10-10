@@ -5,7 +5,7 @@ import importlib.metadata
 import os
 import platform
 from datetime import timedelta
-from functools import cache, lru_cache, wraps
+from functools import cache, lru_cache, partial, wraps
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -18,6 +18,8 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .spec import PlatformSpec
+from .spec.rotary_embedding import custom_rope
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -636,6 +638,20 @@ class RocmPlatform(Platform):
         "online",
         "gpt_oss_mxfp4",
     ]
+
+    @property
+    def spec(self) -> PlatformSpec:
+        from vllm import _custom_ops as ops
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if rocm_aiter_ops.is_triton_rotary_embed_enabled():
+            return PlatformSpec(
+                rope=partial(
+                    custom_rope, rocm_aiter_ops.get_triton_rotary_embedding_op()
+                ),
+                rope_cache_dtype=torch.bfloat16,
+            )
+        return PlatformSpec(rope=partial(custom_rope, ops.rotary_embedding))
 
     @classmethod
     def import_kernels(cls) -> None:
