@@ -38,25 +38,38 @@ def decode_torchcodec(
     device: str = "cpu",
 ) -> tuple[npt.NDArray | torch.Tensor, VideoSourceMetadata, list[int], list[int]]:
     check_torchcodec_available()
-    decoder = TorchCodecVideoBackendMixin.make_torchcodec_decoder(
-        data,
-        num_ffmpeg_threads=num_ffmpeg_threads,
-        seek_mode=seek_mode,
-        device=device,
-    )
-    check_frame_pixel_limit(
-        decoder.metadata.width or 0,
-        decoder.metadata.height or 0,
-    )
-    source = loader_cls._prepare_source(
-        TorchCodecVideoBackendMixin.get_torchcodec_metadata(decoder)
-    )
-    frame_idx = loader_cls.compute_frames_index_to_sample(
-        source=source, target=target, **sampling_kwargs
-    )
-    frames, valid = TorchCodecVideoBackendMixin.decode_torchcodec_frames(
-        decoder, frame_idx, device=device
-    )
+    # TorchCodec surfaces decode failures on user-supplied bytes as
+    # RuntimeError; convert to ValueError so the server returns a client
+    # error instead of a 500 (same pattern as the pynvvideocodec backend).
+    try:
+        decoder = TorchCodecVideoBackendMixin.make_torchcodec_decoder(
+            data,
+            num_ffmpeg_threads=num_ffmpeg_threads,
+            seek_mode=seek_mode,
+            device=device,
+        )
+        check_frame_pixel_limit(
+            decoder.metadata.width or 0,
+            decoder.metadata.height or 0,
+        )
+        source = loader_cls._prepare_source(
+            TorchCodecVideoBackendMixin.get_torchcodec_metadata(decoder)
+        )
+        frame_idx = loader_cls.compute_frames_index_to_sample(
+            source=source, target=target, **sampling_kwargs
+        )
+        frames, valid = TorchCodecVideoBackendMixin.decode_torchcodec_frames(
+            decoder, frame_idx, device=device
+        )
+    except RuntimeError as exc:
+        msg = f"Failed to decode video with the torchcodec backend: {exc}"
+        if seek_mode == "approximate":
+            msg += (
+                " This can happen with seek_mode='approximate' when the "
+                "file's container metadata overstates the decodable frame "
+                "count; retry with seek_mode='exact'."
+            )
+        raise ValueError(msg) from exc
     return frames, source, frame_idx, valid
 
 
