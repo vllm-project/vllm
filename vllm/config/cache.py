@@ -13,10 +13,10 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    is_quantized_kv_cache,
 )
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
+    is_quantized_kv_cache,
     kv_cache_uses_per_token_head_scales,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
