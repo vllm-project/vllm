@@ -172,6 +172,8 @@ class OffloadingEvent:
     # Secondary tier identifier that generated the event, or None for primary.
     ownership: str | None = None
     removal_expected: bool = False
+    # Failed allocations release metadata without announcing a public eviction.
+    metadata_only: bool = False
 
 
 """

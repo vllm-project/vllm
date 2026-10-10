@@ -478,7 +478,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({4, 5, 3}, {8}),
+        expected_evictions=({4, 5, 3}, {8}, {9}),
     )
 
 
