@@ -920,7 +920,7 @@ def rocm_fp8_mqa_logits(
 
     k_fp8, scale = kv
 
-    if _ON_GFX942 and rocm_aiter_ops.is_enabled():
+    if (_ON_GFX942 or _ON_GFX950) and rocm_aiter_ops.is_enabled():
         from aiter.ops.flydsl import flydsl_fp8_mqa_logits
 
         return flydsl_fp8_mqa_logits(
