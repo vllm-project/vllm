@@ -107,12 +107,14 @@ def _store_block(
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
     view_slice = buffer.cast("B")[offset : offset + block_size]
     o_direct = O_DIRECT if use_o_direct else 0
+    # Only clean up after acquiring our own temp file. A failed exclusive open
+    # can mean that another writer is still using this path.
+    fd = os.open(
+        tmp_path,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | o_direct,
+        0o644,
+    )
     try:
-        fd = os.open(
-            tmp_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | o_direct,
-            0o644,
-        )
         try:
             written = os.write(fd, view_slice)
             if written < len(view_slice):
