@@ -3,6 +3,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -198,3 +199,102 @@ async def test_empty_input_stream_finishes_without_engine_request():
 
     assert queue.get_nowait() is STREAM_FINISHED
     llm._add_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_input_stream_cancels_and_awaits():
+    """No chunk send may complete after _stop_input_stream returns."""
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request_id="r1")
+    sent = []
+
+    async def slow_send():
+        await asyncio.sleep(30)
+        sent.append("chunk")
+
+    task = asyncio.create_task(slow_send())
+    queue._input_stream_task = task
+    await asyncio.sleep(0)
+
+    await AsyncLLM._stop_input_stream(queue)
+
+    assert task.cancelled()
+    assert queue._input_stream_task is None
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_handle_inputs_stamps_first_chunk():
+    """The frontend marks exactly the first chunk of a session."""
+    llm = AsyncLLM.__new__(AsyncLLM)
+    llm._validate_streaming_input_sampling_params = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+    llm._run_output_handler = MagicMock()
+    llm._add_request = AsyncMock()
+    llm.model_config = MagicMock()
+
+    reqs = [MagicMock(prompt_embeds=None) for _ in range(3)]
+    reqs[0].request_id = "r1-int"
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs.side_effect = reqs
+    llm.input_processor.assign_request_id = MagicMock()
+
+    async def two_chunks():
+        yield StreamingInput(prompt="frame-1")
+        yield StreamingInput(prompt="frame-2")
+
+    with mock.patch(
+        "vllm.v1.engine.async_llm.extract_prompt_components",
+        return_value=("", None, None),
+    ):
+        await llm._add_streaming_input_request(
+            "r1", two_chunks(), SamplingParams(max_tokens=4)
+        )
+        for _ in range(6):
+            await asyncio.sleep(0)
+
+    assert reqs[1].first_chunk is True
+    assert reqs[2].first_chunk is False
+
+
+@pytest.mark.asyncio
+async def test_input_stream_task_cleared_only_after_final_send():
+    """The task pointer must stay set until the final request is sent, so a
+    concurrent abort can still cancel-and-await the task (no send may ever
+    happen after an abort)."""
+    llm = AsyncLLM.__new__(AsyncLLM)
+    llm._validate_streaming_input_sampling_params = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+    llm._run_output_handler = MagicMock()
+    llm.model_config = MagicMock()
+
+    reqs = [MagicMock(prompt_embeds=None) for _ in range(2)]
+    reqs[0].request_id = "r1-int"
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs.side_effect = reqs
+    llm.input_processor.assign_request_id = MagicMock()
+
+    holder: dict[str, RequestOutputCollector] = {}
+    pointer_set_during_send = []
+
+    async def capture_add_request(*args, **kwargs):
+        pointer_set_during_send.append(holder["queue"]._input_stream_task is not None)
+
+    llm._add_request = AsyncMock(side_effect=capture_add_request)
+
+    async def one_chunk():
+        yield StreamingInput(prompt="frame-1")
+
+    with mock.patch(
+        "vllm.v1.engine.async_llm.extract_prompt_components",
+        return_value=("", None, None),
+    ):
+        holder["queue"] = await llm._add_streaming_input_request(
+            "r1", one_chunk(), SamplingParams(max_tokens=4)
+        )
+        for _ in range(6):
+            await asyncio.sleep(0)
+
+    # Two sends (the chunk, then the final request); the pointer must have
+    # been set for BOTH, and cleared only once everything was sent.
+    assert pointer_set_during_send == [True, True]
+    assert holder["queue"]._input_stream_task is None
