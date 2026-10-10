@@ -16,6 +16,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.utils.math_utils import cdiv
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -335,11 +336,32 @@ class QSAIndexer(nn.Module):
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         from .ops.qsa import qsa_select_paged_tokens
+        from .ops.qsa_flydsl import flydsl_select_paged_tokens
 
+        block_table = metadata.block_table
+        if metadata.num_prefills:
+            # The table is max_model_len wide and K1 sizes its grid and score
+            # buffer from that width. Batches with prefills never replay a
+            # full graph, so size both to the longest live request instead.
+            tokens_per_page = metadata.storage_block_size * metadata.compress_ratio
+            block_table = block_table[:, : cdiv(metadata.max_seq_len, tokens_per_page)]
+        selected = flydsl_select_paged_tokens(
+            q,
+            self.compressed_key_cache.kv_cache,
+            block_table,
+            metadata.token_to_req,
+            metadata.logical_positions,
+            metadata.seq_lens,
+            self.token_topk,
+            self.compress_ratio,
+            out,
+        )
+        if selected is not None:
+            return selected
         return qsa_select_paged_tokens(
             q,
             self.compressed_key_cache.kv_cache,
-            metadata.block_table,
+            block_table,
             metadata.token_to_req,
             metadata.logical_positions,
             metadata.seq_lens,
