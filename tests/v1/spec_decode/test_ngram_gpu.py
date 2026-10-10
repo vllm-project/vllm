@@ -147,7 +147,7 @@ def _propose(
         next_prefill_tokens=torch.zeros(B, dtype=torch.int32, device=DEVICE),
         temperature=torch.zeros(B, dtype=torch.float32, device=DEVICE),
         seeds=torch.zeros(B, dtype=torch.int64, device=DEVICE),
-        dp_sync=None,
+        dp_sync_state=None,
     )
     return drafts.cpu().tolist()
 
