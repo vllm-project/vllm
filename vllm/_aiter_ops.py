@@ -1167,7 +1167,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
     )
     assert result is not None
@@ -1219,7 +1220,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
         emit_bf16=True,
     )

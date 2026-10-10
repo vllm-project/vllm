@@ -335,8 +335,8 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
-            # Exclude groups that opt out of prefix caching (e.g. GLM-5.3-Flash
-            # kpool tail, a 1-block/req scratch buffer with block_size=kpool):
+            # Exclude groups that opt out of prefix caching (e.g. a circular
+            # buffer, a 1-block/req scratch buffer with a small ring block):
             # their small block_size would otherwise drag the global block_size
             # below the real allocator block size and desync it from mamba.
             participating = [
@@ -362,7 +362,10 @@ class EngineCore:
             scheduler_block_size,
             hash_block_size,
         )
-        for kv_cache_config in kv_cache_configs:
+        # The scheduler's config is a deep copy taken before these are resolved,
+        # so set them there too: the KV connector's scheduler side reads the same
+        # fields as its workers.
+        for kv_cache_config in (*kv_cache_configs, scheduler_kv_cache_config):
             kv_cache_config.hash_block_size = hash_block_size
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
