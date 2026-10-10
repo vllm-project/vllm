@@ -63,13 +63,11 @@ def test_load_start_phase(
 
     request_indices = torch.tensor([3, 1])
     request_ids = ["first", "second"]
-    attn_metadata = {"layer": object()}
-    connector.pre_forward(
-        output,
-        request_state_indices=request_indices,
-        request_ids=request_ids,
-        attn_metadata=attn_metadata,
+    input_batch = SimpleNamespace(
+        idx_mapping=request_indices, req_ids=request_ids, num_tokens=5
     )
+    attn_metadata = {"layer": object()}
+    connector.pre_forward(output, input_batch, attn_metadata=attn_metadata)
     assert events == (
         ["handle", "bind", "start"] if has_sync_kv_loads else ["handle", "bind"]
     )
@@ -80,6 +78,8 @@ def test_load_start_phase(
     kwargs = connector.kv_connector.start_load_kv.call_args.kwargs
     assert kwargs["request_state_indices"] is request_indices
     assert kwargs["request_ids"] is request_ids
+    assert kwargs["num_tokens"] == 5
+    assert kwargs["scheduler_output"] is output
     assert kwargs["attn_metadata"] is attn_metadata
 
     # A subsequent step without a forward must not reuse the prior batch.

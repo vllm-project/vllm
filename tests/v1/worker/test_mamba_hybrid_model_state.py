@@ -314,6 +314,17 @@ def test_padded_rows_keep_the_sentinel(monkeypatch):
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, 0, -1, -1]
 
 
+def test_rows_wider_than_the_speculative_state_window_keep_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _mamba_hybrid_state(num_speculative_tokens=7)
+    input_batch = _input_batch([12, 8, 1], None, [False, False, False])
+
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, 0, 0]
+
+
 def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
     monkeypatch,
 ):
