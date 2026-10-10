@@ -3,12 +3,15 @@
 """Utils for model executor."""
 
 import copy
+import functools
+import mmap
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 _weights_pre_processed: ContextVar[bool] = ContextVar(
@@ -66,6 +69,32 @@ def set_weight_attrs(
         if current_platform.use_sync_weight_loader() and key == "weight_loader":
             value = current_platform.make_synced_weight_loader(value)
         setattr(weight, key, value)
+
+
+@functools.cache
+def _is_integrated_gpu(device: torch.device) -> bool:
+    return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)
+
+
+def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    """`dst.copy_(src)` for weight loaders.
+
+    On integrated GPUs, a host-to-device copy straight from a safetensors mmap
+    takes its page faults inside the driver copy, which is several times slower
+    than faulting them on the CPU, so touch one byte per page of `src` first.
+    PyTorch already stages non-contiguous and dtype-converting copies through
+    a CPU temporary.
+    """
+    if (
+        src.device.type == "cpu"
+        and src.dtype == dst.dtype
+        and src.is_contiguous()
+        and _is_integrated_gpu(dst.device)
+    ):
+        flat = src.reshape(-1).view(torch.uint8)
+        flat[:: mmap.PAGESIZE].sum()
+        flat[-1:].sum()
+    return dst.copy_(src)
 
 
 def replace_parameter(
