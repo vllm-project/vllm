@@ -22,7 +22,7 @@ pub(super) fn hf_tojson_filter(
     let ensure_ascii = kwargs.get::<Option<bool>>("ensure_ascii")?.unwrap_or(false);
     let indent = parse_indent(
         kwargs.get::<Option<ViaDeserialize<IndentArg>>>("indent")?.map(|value| value.0),
-    );
+    )?;
     let separators = parse_separators(
         kwargs
             .get::<Option<ViaDeserialize<SeparatorsArg>>>("separators")?
@@ -62,19 +62,57 @@ enum IndentArg {
     String(String),
 }
 
-fn parse_indent(value: Option<IndentArg>) -> Option<String> {
-    match value? {
-        IndentArg::Bool(indent) => Some(if indent {
+/// Upper bound on whitespace allocated for `tojson(indent=...)`.
+///
+/// Chat templates only need small indents (typically 2 or 4). Without a cap,
+/// a caller-controlled integer creates a single allocation proportional to
+/// `indent` that is not covered by the MiniJinja fuel budget.
+const MAX_TOJSON_INDENT: usize = 16;
+
+fn parse_indent(value: Option<IndentArg>) -> Result<Option<String>, MinijinjaError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        IndentArg::Bool(indent) => Ok(Some(if indent {
             " ".to_owned()
         } else {
             String::new()
-        }),
-        IndentArg::Integer(indent) => Some(if indent > 0 {
-            " ".repeat(indent as usize)
-        } else {
-            String::new()
-        }),
-        IndentArg::String(indent) => Some(indent),
+        })),
+        IndentArg::Integer(indent) => {
+            if indent <= 0 {
+                return Ok(Some(String::new()));
+            }
+            let indent = usize::try_from(indent).map_err(|_| {
+                MinijinjaError::new(
+                    ErrorKind::InvalidOperation,
+                    format!(
+                        "tojson indent {indent} exceeds the maximum of {MAX_TOJSON_INDENT}"
+                    ),
+                )
+            })?;
+            if indent > MAX_TOJSON_INDENT {
+                return Err(MinijinjaError::new(
+                    ErrorKind::InvalidOperation,
+                    format!(
+                        "tojson indent {indent} exceeds the maximum of {MAX_TOJSON_INDENT}"
+                    ),
+                ));
+            }
+            Ok(Some(" ".repeat(indent)))
+        }
+        IndentArg::String(indent) => {
+            if indent.len() > MAX_TOJSON_INDENT {
+                return Err(MinijinjaError::new(
+                    ErrorKind::InvalidOperation,
+                    format!(
+                        "tojson indent length {} exceeds the maximum of {MAX_TOJSON_INDENT}",
+                        indent.len()
+                    ),
+                ));
+            }
+            Ok(Some(indent))
+        }
     }
 }
 
@@ -276,6 +314,30 @@ mod tests {
         let error = render_error("{{ payload|tojson(indent='-->') }}", json!({"a": 1}));
         expect!["invalid operation: invalid indent value for tojson: string contains unexpected character '-' (in <string>:1)"]
             .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn tojson_rejects_excessive_integer_indent() {
+        let error = render_error("{{ payload|tojson(indent=100000000) }}", json!([]));
+        expect!["invalid operation: tojson indent 100000000 exceeds the maximum of 16 (in <string>:1)"]
+            .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn tojson_rejects_excessive_string_indent() {
+        let indent = " ".repeat(17);
+        let error = render_error(
+            &format!("{{{{ payload|tojson(indent='{indent}') }}}}"),
+            json!([1, 2]),
+        );
+        expect!["invalid operation: tojson indent length 17 exceeds the maximum of 16 (in <string>:1)"]
+            .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn tojson_accepts_max_integer_indent() {
+        let rendered = render("{{ payload|tojson(indent=16) }}", json!([1]));
+        assert_eq!(rendered, "[\n                1\n]");
     }
 
     #[test]
