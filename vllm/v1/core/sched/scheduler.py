@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
+    mamba_prefill_checkpoint_needs_fresh_row,
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
@@ -484,6 +485,14 @@ class Scheduler(SchedulerInterface):
                 hash_block_size=self.hash_block_size,
                 mamba_block_size=block_size,
                 checkpoint_alignment=self.mamba_prefill_checkpoint_alignment,
+            )
+            and (
+                # The worker block table of a running request is append-only,
+                # so a checkpoint column at or before its initial-state column
+                # may hold a stale block id. Only a request computing its
+                # first chunk gets a fresh row; others split at the boundary.
+                request.num_computed_tokens == 0
+                or not mamba_prefill_checkpoint_needs_fresh_row(start, end, block_size)
             )
         )
         if use_internal_checkpoint:

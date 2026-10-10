@@ -1130,7 +1130,14 @@ def is_mamba_prefill_checkpoint_valid(
     mamba_block_size: int,
     checkpoint_alignment: int | None,
 ) -> bool:
-    """Whether a backend can export the checkpoint in this query."""
+    """Whether a backend can export the checkpoint in this query.
+
+    The checkpoint goes to block-table column ``cdiv(query_end, block) - 2``,
+    the one before the running state's. A query starting mid-block may put it
+    at or before the column holding its initial state (see
+    `mamba_prefill_checkpoint_needs_fresh_row`); a block-aligned start may not,
+    as that column is the prefix-cache hit block itself.
+    """
     if checkpoint_alignment is None:
         return False
     assert checkpoint_alignment > 0
@@ -1139,11 +1146,32 @@ def is_mamba_prefill_checkpoint_valid(
     checkpoint_col = cdiv(query_end, mamba_block_size) - 2
     return (
         query_start % hash_block_size == 0
-        and checkpoint_col > initial_state_col
+        and checkpoint_col >= 0
+        and (checkpoint_col > initial_state_col or query_start % mamba_block_size != 0)
         and query_start + hash_block_size <= checkpoint_position
         and query_start < checkpoint_position < query_end
         and (checkpoint_position - query_start) % checkpoint_alignment == 0
     )
+
+
+def mamba_prefill_checkpoint_needs_fresh_row(
+    query_start: int,
+    query_end: int,
+    mamba_block_size: int,
+) -> bool:
+    """Whether a valid checkpoint lands at or before the initial-state column.
+
+    This happens when a prefill resumes mid-block (a fine-grained prefix hit)
+    and ends within the next block or the same one. The target column then
+    precedes the columns appended this step: a worker block-table row that is
+    only appended to (a running request) still holds a stale block id there,
+    possibly one already freed or cached. Such a checkpoint may therefore only
+    be scheduled for a row the worker receives whole this step, i.e. a new or
+    resumed request; the scheduler splits other rows before the checkpoint.
+    """
+    initial_state_col = (query_start - 1) // mamba_block_size
+    checkpoint_col = cdiv(query_end, mamba_block_size) - 2
+    return checkpoint_col <= initial_state_col
 
 
 @dataclass(frozen=True)
