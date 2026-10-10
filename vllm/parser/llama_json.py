@@ -90,20 +90,19 @@ def _top_level_name(raw: str) -> str | None:
     return _name_from_span(scan_top_level(raw, ("name",)))
 
 
-def _envelope_name(raw: str) -> str | None:
-    """Classify *raw* as a tool-call envelope and return its name.
-
-    Needs a ``parameters``/``arguments`` key alongside ``name``: a bare
-    ``{"name": "f"}`` and prose JSON merely containing a ``name`` field are
-    both not a call.
-    """
-    name = _top_level_name(raw)
+def _name_if_envelope(name: str | None, raw: str) -> str | None:
+    """*name* is a call's name only if a ``parameters``/``arguments`` key
+    sits alongside it: a bare ``{"name": "f"}`` and prose JSON merely
+    containing a ``name`` field are both not a call."""
     if name is None:
         return None
     keys = top_level_keys(raw)
-    if "arguments" in keys or "parameters" in keys:
-        return name
-    return None
+    return name if ("arguments" in keys or "parameters" in keys) else None
+
+
+def _envelope_name(raw: str) -> str | None:
+    """Classify *raw* as a tool-call envelope and return its name."""
+    return _name_if_envelope(_top_level_name(raw), raw)
 
 
 def _llama_bare_arg_converter(raw_args: str, partial: bool) -> str:
@@ -118,48 +117,12 @@ def _llama_bare_arg_converter(raw_args: str, partial: bool) -> str:
 
 def _llama_arg_converter(raw_args: str, partial: bool) -> str:
     """Carve the arguments value out of the envelope (verbatim, prefix-
-    stable; see ``inkling._inkling_arg_converter`` for the rationale), cut
-    back to what still closes into valid JSON, and closed once final."""
+    stable; see ``inkling._inkling_arg_converter`` for the rationale), then
+    hand off to ``_llama_bare_arg_converter`` to close it into valid JSON."""
     span = _args_value_span(raw_args)
     if span is None:
         return "" if partial else "{}"
-    end, closers = closeable_prefix(span)
-    if partial:
-        return span[:end]
-    if end == 0:
-        return "{}"
-    return span[:end] + closers
-
-
-_CONSTRAINING_KEYS = (
-    "properties",
-    "additionalProperties",
-    "patternProperties",
-    "required",
-    "anyOf",
-    "oneOf",
-    "allOf",
-    "$ref",
-    "enum",
-    "const",
-)
-
-
-def _constrains_object(schema: dict) -> bool:
-    """Whether *schema* restricts which objects are valid.
-
-    ``{}``, ``{"type": "object"}`` and an empty ``properties`` accept
-    anything, including the ``{"name", "parameters"}`` envelope. Anything
-    else narrows the shape, so the model emits bare parameters.
-    """
-    for key in _CONSTRAINING_KEYS:
-        value = schema.get(key)
-        if key == "properties":
-            if isinstance(value, dict) and value:
-                return True
-        elif value is not None:
-            return True
-    return False
+    return _llama_bare_arg_converter(span, partial)
 
 
 @functools.cache
@@ -242,6 +205,37 @@ class _ArgScan:
         self.spliced: str = ""  # members already spliced/streamed
         self.cursor: int = 0
         self.member: ValueScan | None = None  # trailing member's scan
+
+
+_CONSTRAINING_KEYS = (
+    "properties",
+    "additionalProperties",
+    "patternProperties",
+    "required",
+    "anyOf",
+    "oneOf",
+    "allOf",
+    "$ref",
+    "enum",
+    "const",
+)
+
+
+def _constrains_object(schema: dict) -> bool:
+    """Whether *schema* restricts which objects are valid.
+
+    ``{}``, ``{"type": "object"}`` and an empty ``properties`` accept
+    anything, including the ``{"name", "parameters"}`` envelope. Anything
+    else narrows the shape, so the model emits bare parameters.
+    """
+    for key in _CONSTRAINING_KEYS:
+        value = schema.get(key)
+        if key == "properties":
+            if isinstance(value, dict) and value:
+                return True
+        elif value is not None:
+            return True
+    return False
 
 
 class LlamaJsonParser(ParserEngine):
@@ -385,52 +379,61 @@ class LlamaJsonParser(ParserEngine):
                 delta.content = (delta.content or "") + held
         return delta
 
-    def _try_extract_name(self, idx: int) -> str | None:
-        # Top-level only (the engine's regex would match a nested "name"),
-        # gated on an args key proving this is actually a call.
-        if self._named_bare_args_name is not None:
-            return self._named_bare_args_name
-        raw = self._tool_slots[idx].args
-        span = self._resumable_name_span(idx, raw)
-        if span is None:
-            return None
-        name = _name_from_span(span)
-        if name is None:
-            return None
-        keys = top_level_keys(raw)
-        return name if ("arguments" in keys or "parameters" in keys) else None
+    def _events_to_delta(
+        self,
+        events: list[SemanticEvent],
+        finished: bool = False,
+    ) -> DeltaMessage | None:
+        events = self._coalesce_arg_events(events)
+        if self._suppress_tool_calls:
+            # Bare-JSON markup is indistinguishable from ordinary JSON
+            # content, so tool_choice="none" returns it as content, not dropped.
+            events = [
+                SemanticEvent(EventType.TEXT_CHUNK, e.value, e.tool_index)
+                if e.value and e.type == EventType.ARG_VALUE_CHUNK
+                else e
+                for e in events
+            ]
+        else:
+            events = self._filter_events(events, finished=finished)
+        return super()._events_to_delta(events, finished=finished)
 
-    def _resumable_name_span(self, idx: int, raw: str) -> str | None:
-        """``scan_top_level(raw, ("name",))`` carried across feeds."""
-        scan = self._arg_scan(idx)
-        key = scan.name_key
-        if key is None or not key.resumable(raw):
-            key = scan.name_key = KeyScan()
-            scan.name_value = None
-        start = key.start(raw, ("name",))
-        if start < 0:
-            return None
-        value = scan.name_value
-        if value is None or not value.resumable(raw):
-            value = scan.name_value = ValueScan(start)
-        return raw[start : value.end(raw)]
+    @staticmethod
+    def _coalesce_arg_events(
+        events: list[SemanticEvent],
+    ) -> list[SemanticEvent]:
+        """Merge each run of consecutive same-index ARG_VALUE_CHUNK events.
 
-    def _slot_args(self, dense_idx: int) -> str:
-        if dense_idx < len(self._tool_slots):
-            return self._tool_slots[dense_idx].args
-        return ""
+        The engine emits ~one arg event per char, each triggering a full
+        O(len) rescan (arg converter plus the engine's safe-prefix scan),
+        making a call O(n^2). Coalescing runs the rescan once per feed
+        instead of once per char, so non-streaming becomes O(n). Boundary
+        events (START/NAME/END) break the run, preserving call indices.
+        """
+        out: list[SemanticEvent] = []
+        buf: list[str] = []
+        buf_idx: int | None = None
 
-    @property
-    def _suppress_content(self) -> bool:
-        """Whether no further content may be emitted: either a real call
-        has completed, or the request forced a tool choice and the whole
-        output is tool calls by construction."""
-        return self._drop_content or self._forced_tool_choice
+        def flush() -> None:
+            nonlocal buf_idx
+            if buf_idx is not None:
+                out.append(
+                    SemanticEvent(EventType.ARG_VALUE_CHUNK, "".join(buf), buf_idx)
+                )
+                buf.clear()
+                buf_idx = None
 
-    def _flush_held_ws(self, out: list[SemanticEvent]) -> None:
-        if self._held_ws:
-            out.append(SemanticEvent(EventType.TEXT_CHUNK, "".join(self._held_ws)))
-            self._held_ws.clear()
+        for event in events:
+            if event.type == EventType.ARG_VALUE_CHUNK:
+                if buf_idx is not None and event.tool_index != buf_idx:
+                    flush()
+                buf_idx = event.tool_index
+                buf.append(event.value)
+            else:
+                flush()
+                out.append(event)
+        flush()
+        return out
 
     def _filter_events(
         self,
@@ -559,72 +562,108 @@ class LlamaJsonParser(ParserEngine):
         del out[start:]
         out.extend(kept)
 
-    @staticmethod
-    def _coalesce_arg_events(
-        events: list[SemanticEvent],
-    ) -> list[SemanticEvent]:
-        """Merge each run of consecutive same-index ARG_VALUE_CHUNK events.
+    @property
+    def _suppress_content(self) -> bool:
+        """Whether no further content may be emitted: either a real call
+        has completed, or the request forced a tool choice and the whole
+        output is tool calls by construction."""
+        return self._drop_content or self._forced_tool_choice
 
-        The engine emits ~one arg event per char, each triggering a full
-        O(len) rescan (arg converter plus the engine's safe-prefix scan),
-        making a call O(n^2). Coalescing runs the rescan once per feed
-        instead of once per char, so non-streaming becomes O(n). Boundary
-        events (START/NAME/END) break the run, preserving call indices.
+    def _flush_held_ws(self, out: list[SemanticEvent]) -> None:
+        if self._held_ws:
+            out.append(SemanticEvent(EventType.TEXT_CHUNK, "".join(self._held_ws)))
+            self._held_ws.clear()
+
+    def _slot_args(self, dense_idx: int) -> str:
+        if dense_idx < len(self._tool_slots):
+            return self._tool_slots[dense_idx].args
+        return ""
+
+    def _arg_scan(self, idx: int) -> _ArgScan:
+        slot = self._tool_slots[idx]
+        scan = self._arg_scans.get(idx)
+        if scan is None or scan.slot is not slot:
+            scan = self._arg_scans[idx] = _ArgScan(slot)
+        return scan
+
+    def _try_extract_name(self, idx: int) -> str | None:
+        # Top-level only (the engine's regex would match a nested "name"),
+        # gated on an args key proving this is actually a call.
+        if self._named_bare_args_name is not None:
+            return self._named_bare_args_name
+        raw = self._tool_slots[idx].args
+        span = self._resumable_name_span(idx, raw)
+        return _name_if_envelope(_name_from_span(span), raw)
+
+    def _resumable_name_span(self, idx: int, raw: str) -> str | None:
+        """``scan_top_level(raw, ("name",))`` carried across feeds."""
+        scan = self._arg_scan(idx)
+        key = scan.name_key
+        if key is None or not key.resumable(raw):
+            key = scan.name_key = KeyScan()
+            scan.name_value = None
+        start = key.start(raw, ("name",))
+        if start < 0:
+            return None
+        value = scan.name_value
+        if value is None or not value.resumable(raw):
+            value = scan.name_value = ValueScan(start)
+        return raw[start : value.end(raw)]
+
+    def _partial_args(self, scan: _ArgScan, raw: str) -> str:
+        """``_llama_arg_converter(raw, True)`` with the envelope scan
+        carried across feeds instead of restarted on every one."""
+        value = scan.value
+        if value is None:
+            key = scan.key
+            if key is None or not key.resumable(raw):
+                key = scan.key = KeyScan()
+            start = key.start(raw, _ARG_KEYS)
+            if start < 0:
+                return ""
+            value = scan.value = ValueScan(start)
+        elif not value.resumable(raw):
+            value = scan.value = ValueScan(value.start)
+        # A ``None`` end means the value is still open, i.e. runs to the
+        # end of the envelope.
+        span = raw[value.start : value.end(raw)]
+        return span[: closeable_prefix(span)[0]]
+
+    def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
+        """Stream a schema-spliced prefix instead of raw model text.
+
+        The engine streams verbatim and only coerces at flush; the
+        re-serialised result then isn't an extension of what was already
+        sent, so the correction is silently dropped. Splicing each value
+        as it streams keeps the stream append-only and non-streaming-convergent.
         """
-        out: list[SemanticEvent] = []
-        buf: list[str] = []
-        buf_idx: int | None = None
-
-        def flush() -> None:
-            nonlocal buf_idx
-            if buf_idx is not None:
-                out.append(
-                    SemanticEvent(EventType.ARG_VALUE_CHUNK, "".join(buf), buf_idx)
-                )
-                buf.clear()
-                buf_idx = None
-
-        for event in events:
-            if event.type == EventType.ARG_VALUE_CHUNK:
-                if buf_idx is not None and event.tool_index != buf_idx:
-                    flush()
-                buf_idx = event.tool_index
-                buf.append(event.value)
-            else:
-                flush()
-                out.append(event)
-        flush()
-        return out
-
-    def _tool_properties(self, func_name: str) -> dict:
-        """Cache the tool's schema properties by name: ``find_tool_properties``
-        walks the whole tool list, and streaming resolves the schema again
-        per argument chunk. Dropped when a request swaps the tool list.
-        """
-        if not func_name:
-            return {}
-        if self._properties_tools is not self._tools:
-            self._properties_tools = self._tools
-            self._properties_cache = {}
-        properties = self._properties_cache.get(func_name)
-        if properties is None:
-            properties = find_tool_properties(self._tools, func_name)
-            self._properties_cache[func_name] = properties
-        return properties
-
-    def _fix_arg_types(self, args_json: str, func_name: str) -> str:
-        """Coerce argument values in place instead of re-serialising.
-
-        The engine's ``json.dumps`` of the coerced object needn't match
-        the verbatim model text Llama streams, so it fails the append-only
-        ``startswith`` guard and is dropped -- leaving truncated JSON.
-        Splicing also works on a truncated envelope, keeping non-streaming
-        byte-identical to streaming there too.
-        """
-        properties = self._tool_properties(func_name)
-        if not properties or not args_json.startswith("{"):
-            return args_json
-        return splice_types(args_json, 0, len(args_json), {"properties": properties})
+        if self._arg_converter is None or not self._stream_arg_deltas:
+            return super()._compute_arg_delta(idx, raw_delta)
+        slot = self._tool_slots[idx]
+        # The incremental scan knows this parser's own conversion; anything
+        # else configured keeps the plain per-feed call.
+        incremental = self._arg_converter is _llama_arg_converter
+        scan = self._arg_scan(idx) if incremental else None
+        try:
+            current = (
+                self._partial_args(scan, slot.args)
+                if scan is not None
+                else self._arg_converter(slot.args, True)
+            )
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return None
+        if not current:
+            return None
+        properties = self._tool_properties(slot.name)
+        if properties:
+            safe = self._stable_arg_prefix(current, properties, slot.string_keys, scan)
+        else:
+            safe = self._safe_arg_prefix(current, slot.string_keys)
+        prev = slot.streamed_json
+        if not safe or safe == prev or (prev and not safe.startswith(prev)):
+            return None
+        slot.streamed_json = safe
+        return safe[len(prev) :]
 
     def _stable_arg_prefix(
         self,
@@ -709,83 +748,32 @@ class LlamaJsonParser(ParserEngine):
             scan.member = member
         return settled + raw[cursor:tail_end]
 
-    def _arg_scan(self, idx: int) -> _ArgScan:
-        slot = self._tool_slots[idx]
-        scan = self._arg_scans.get(idx)
-        if scan is None or scan.slot is not slot:
-            scan = self._arg_scans[idx] = _ArgScan(slot)
-        return scan
+    def _fix_arg_types(self, args_json: str, func_name: str) -> str:
+        """Coerce argument values in place instead of re-serialising.
 
-    def _partial_args(self, scan: _ArgScan, raw: str) -> str:
-        """``_llama_arg_converter(raw, True)`` with the envelope scan
-        carried across feeds instead of restarted on every one."""
-        value = scan.value
-        if value is None:
-            key = scan.key
-            if key is None or not key.resumable(raw):
-                key = scan.key = KeyScan()
-            start = key.start(raw, _ARG_KEYS)
-            if start < 0:
-                return ""
-            value = scan.value = ValueScan(start)
-        elif not value.resumable(raw):
-            value = scan.value = ValueScan(value.start)
-        # A ``None`` end means the value is still open, i.e. runs to the
-        # end of the envelope.
-        span = raw[value.start : value.end(raw)]
-        return span[: closeable_prefix(span)[0]]
-
-    def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
-        """Stream a schema-spliced prefix instead of raw model text.
-
-        The engine streams verbatim and only coerces at flush; the
-        re-serialised result then isn't an extension of what was already
-        sent, so the correction is silently dropped. Splicing each value
-        as it streams keeps the stream append-only and non-streaming-convergent.
+        The engine's ``json.dumps`` of the coerced object needn't match
+        the verbatim model text Llama streams, so it fails the append-only
+        ``startswith`` guard and is dropped -- leaving truncated JSON.
+        Splicing also works on a truncated envelope, keeping non-streaming
+        byte-identical to streaming there too.
         """
-        if self._arg_converter is None or not self._stream_arg_deltas:
-            return super()._compute_arg_delta(idx, raw_delta)
-        slot = self._tool_slots[idx]
-        # The incremental scan knows this parser's own conversion; anything
-        # else configured keeps the plain per-feed call.
-        incremental = self._arg_converter is _llama_arg_converter
-        scan = self._arg_scan(idx) if incremental else None
-        try:
-            current = (
-                self._partial_args(scan, slot.args)
-                if scan is not None
-                else self._arg_converter(slot.args, True)
-            )
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return None
-        if not current:
-            return None
-        properties = self._tool_properties(slot.name)
-        if properties:
-            safe = self._stable_arg_prefix(current, properties, slot.string_keys, scan)
-        else:
-            safe = self._safe_arg_prefix(current, slot.string_keys)
-        prev = slot.streamed_json
-        if not safe or safe == prev or (prev and not safe.startswith(prev)):
-            return None
-        slot.streamed_json = safe
-        return safe[len(prev) :]
+        properties = self._tool_properties(func_name)
+        if not properties or not args_json.startswith("{"):
+            return args_json
+        return splice_types(args_json, 0, len(args_json), {"properties": properties})
 
-    def _events_to_delta(
-        self,
-        events: list[SemanticEvent],
-        finished: bool = False,
-    ) -> DeltaMessage | None:
-        events = self._coalesce_arg_events(events)
-        if self._suppress_tool_calls:
-            # Bare-JSON markup is indistinguishable from ordinary JSON
-            # content, so tool_choice="none" returns it as content, not dropped.
-            events = [
-                SemanticEvent(EventType.TEXT_CHUNK, e.value, e.tool_index)
-                if e.value and e.type == EventType.ARG_VALUE_CHUNK
-                else e
-                for e in events
-            ]
-        else:
-            events = self._filter_events(events, finished=finished)
-        return super()._events_to_delta(events, finished=finished)
+    def _tool_properties(self, func_name: str) -> dict:
+        """Cache the tool's schema properties by name: ``find_tool_properties``
+        walks the whole tool list, and streaming resolves the schema again
+        per argument chunk. Dropped when a request swaps the tool list.
+        """
+        if not func_name:
+            return {}
+        if self._properties_tools is not self._tools:
+            self._properties_tools = self._tools
+            self._properties_cache = {}
+        properties = self._properties_cache.get(func_name)
+        if properties is None:
+            properties = find_tool_properties(self._tools, func_name)
+            self._properties_cache[func_name] = properties
+        return properties

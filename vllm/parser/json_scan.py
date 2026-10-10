@@ -205,27 +205,6 @@ def decode_key(raw_slice: str) -> str:
         return raw_slice
 
 
-def string_close(raw: str, start: int, pos: int) -> tuple[int, int]:
-    """End of the string opening at ``raw[start]``, searching from ``raw[pos]``.
-
-    Returns ``(end, resume)``: index past the closing quote, or -1 and the
-    resume point while unterminated. Even trailing backslashes mean the
-    quote closes (same as toggling escape char by char), so resuming
-    mid-scan matches a scan from ``start``.
-    """
-    i = pos
-    while True:
-        quote = raw.find('"', i)
-        if quote < 0:
-            return -1, len(raw)
-        back = quote - 1
-        while back >= start and raw[back] == "\\":
-            back -= 1
-        if (quote - back) % 2:
-            return quote + 1, quote + 1
-        i = quote + 1
-
-
 def scan_json_value(raw: str, start: int) -> int | None:
     """End index (exclusive) of the JSON value at ``raw[start]``, or ``None``
     while unterminated. Handles objects/arrays/strings/primitives (numbers
@@ -260,6 +239,27 @@ def scan_json_value(raw: str, start: int) -> int | None:
         if raw[i] in ",}]" or raw[i] in WS:
             return i
     return None
+
+
+def string_close(raw: str, start: int, pos: int) -> tuple[int, int]:
+    """End of the string opening at ``raw[start]``, searching from ``raw[pos]``.
+
+    Returns ``(end, resume)``: index past the closing quote, or -1 and the
+    resume point while unterminated. Even trailing backslashes mean the
+    quote closes (same as toggling escape char by char), so resuming
+    mid-scan matches a scan from ``start``.
+    """
+    i = pos
+    while True:
+        quote = raw.find('"', i)
+        if quote < 0:
+            return -1, len(raw)
+        back = quote - 1
+        while back >= start and raw[back] == "\\":
+            back -= 1
+        if (quote - back) % 2:
+            return quote + 1, quote + 1
+        i = quote + 1
 
 
 class ValueScan:
@@ -418,6 +418,19 @@ class KeyScan:
         return i
 
 
+def scan_top_level(raw: str, key_names: tuple[str, ...]) -> str | None:
+    """Raw text span of the first top-level *key_names* value in a
+    (possibly incomplete) envelope. Verbatim substring (prefix-stable,
+    required by the engine's arg-delta diffing), possibly unterminated;
+    ``None`` when not started.
+    """
+    value_start = scan_top_level_start(raw, key_names)
+    if value_start < 0:
+        return None
+    # A ``None`` end means the value is unterminated: it runs to the end.
+    return raw[value_start : scan_json_value(raw, value_start)]
+
+
 def top_level_keys(raw: str) -> set[str]:
     """Return the completed top-level keys of a (possibly incomplete)
     JSON object: strings at depth 1 followed by ``:``."""
@@ -437,17 +450,40 @@ def top_level_keys(raw: str) -> set[str]:
     return keys
 
 
-def scan_top_level(raw: str, key_names: tuple[str, ...]) -> str | None:
-    """Raw text span of the first top-level *key_names* value in a
-    (possibly incomplete) envelope. Verbatim substring (prefix-stable,
-    required by the engine's arg-delta diffing), possibly unterminated;
-    ``None`` when not started.
+def scan_string_end(raw: str, start: int) -> tuple[int, int]:
+    """Scan the JSON string opening at ``raw[start]``.
+
+    Returns ``(end, safe_end)``: ``end`` past the closing quote (-1 while
+    unterminated, on an invalid escape, or a raw control char), and
+    ``safe_end`` the longest prefix a closing quote can be appended to.
     """
-    value_start = scan_top_level_start(raw, key_names)
-    if value_start < 0:
-        return None
-    # A ``None`` end means the value is unterminated: it runs to the end.
-    return raw[value_start : scan_json_value(raw, value_start)]
+    n = len(raw)
+    i = start + 1
+    while True:
+        # JSON forbids raw control chars in strings, so one ends the
+        # string just as an invalid escape does.
+        match = _STR_STOP.search(raw, i)
+        if match is None:
+            return -1, n
+        stop = match.start()
+        ch = raw[stop]
+        if ch == '"':
+            return stop + 1, stop
+        if ch != "\\":
+            return -1, stop
+        if stop + 1 >= n:
+            return -1, stop
+        nxt = raw[stop + 1]
+        if nxt == "u":
+            if stop + 6 > n:
+                return -1, stop
+            if any(c not in _HEX for c in raw[stop + 2 : stop + 6]):
+                return -1, stop
+            i = stop + 6
+        elif nxt in _ESCAPES:
+            i = stop + 2
+        else:
+            return -1, stop
 
 
 def scan_number(raw: str, start: int) -> tuple[int, int]:
@@ -485,42 +521,6 @@ def scan_number(raw: str, start: int) -> tuple[int, int]:
         if i > exp_start:
             complete = i
     return i, complete
-
-
-def scan_string_end(raw: str, start: int) -> tuple[int, int]:
-    """Scan the JSON string opening at ``raw[start]``.
-
-    Returns ``(end, safe_end)``: ``end`` past the closing quote (-1 while
-    unterminated, on an invalid escape, or a raw control char), and
-    ``safe_end`` the longest prefix a closing quote can be appended to.
-    """
-    n = len(raw)
-    i = start + 1
-    while True:
-        # JSON forbids raw control chars in strings, so one ends the
-        # string just as an invalid escape does.
-        match = _STR_STOP.search(raw, i)
-        if match is None:
-            return -1, n
-        stop = match.start()
-        ch = raw[stop]
-        if ch == '"':
-            return stop + 1, stop
-        if ch != "\\":
-            return -1, stop
-        if stop + 1 >= n:
-            return -1, stop
-        nxt = raw[stop + 1]
-        if nxt == "u":
-            if stop + 6 > n:
-                return -1, stop
-            if any(c not in _HEX for c in raw[stop + 2 : stop + 6]):
-                return -1, stop
-            i = stop + 6
-        elif nxt in _ESCAPES:
-            i = stop + 2
-        else:
-            return -1, stop
 
 
 def closeable_prefix(raw: str) -> tuple[int, str]:
