@@ -1208,6 +1208,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       message(STATUS
         "Building fused KDA chunk for HIP archs: ${FUSED_KDA_CHUNK_HIP_ARCHS}")
     endif()
+
+    set(DCP_DIRECT_A2A_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER DCP_DIRECT_A2A_HIP_ARCHS INCLUDE REGEX "gfx942|gfx950")
+    if(DCP_DIRECT_A2A_HIP_ARCHS)
+      list(APPEND VLLM_STABLE_EXT_SRC
+        "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce_rocm.cu")
+    endif()
   endif()
 
   message(STATUS "Enabling C_stable extension.")
