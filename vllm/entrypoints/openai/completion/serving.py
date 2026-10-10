@@ -383,7 +383,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                     if request.logprobs is not None:
                         assert out_logprobs is not None, "Did not output logprobs"
-                        if request.packed_top_logprobs:
+                        if request.return_top_k_logprobs:
                             logprobs = create_packed_completion_logprobs(
                                 delta_token_ids,
                                 out_logprobs,
@@ -570,7 +570,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     out_logprobs = output.logprobs
                     output_text = output.text
 
-                if request.packed_top_logprobs:
+                if request.return_top_k_logprobs:
                     logprobs = create_packed_completion_logprobs(
                         token_ids, out_logprobs, request.logprobs
                     )

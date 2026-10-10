@@ -848,7 +848,7 @@ async def test_packed_logprobs_match_standard_completion(client, stream):
     result = await client.completions.create(
         **kwargs,
         stream=stream,
-        extra_body={**extra, "packed_top_logprobs": True, "stream_interval": 4},
+        extra_body={**extra, "return_top_k_logprobs": True, "stream_interval": 4},
     )
     choices = []
     if stream:
@@ -866,12 +866,12 @@ async def test_packed_logprobs_match_standard_completion(client, stream):
     for choice in choices:
         lp = choice.logprobs
         sampled.extend(lp.token_logprobs)
-        packed = lp.model_extra["packed_top_logprobs"]
-        ids = np.frombuffer(base64.b64decode(packed["token_ids_b64"]), "<i4").reshape(
-            packed["shape"]
+        packed = lp.model_extra["top_k"]
+        ids = np.frombuffer(base64.b64decode(packed["token_ids"]), "<i4").reshape(
+            (packed["num_positions"], packed["k"])
         )
-        values = np.frombuffer(base64.b64decode(packed["logprobs_b64"]), "<f4").reshape(
-            packed["shape"]
+        values = np.frombuffer(base64.b64decode(packed["logprobs"]), "<f4").reshape(
+            (packed["num_positions"], packed["k"])
         )
         rows.extend(zip(ids, values))
     expected = baseline.choices[0].logprobs

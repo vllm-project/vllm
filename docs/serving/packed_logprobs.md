@@ -1,16 +1,18 @@
 # Packed completion logprobs
 
 For RL and distillation clients that consume numeric candidate scores, set
-`packed_top_logprobs: true` on `/v1/completions` with positive `logprobs` and
+`return_top_k_logprobs: true` on `/v1/completions` with positive `logprobs` and
 `return_tokens_as_token_ids: true`. Both streaming and non-streaming requests
 are supported. Echo, beam search and `logprob_token_ids` are rejected.
 Requests without this flag retain their existing response schema.
 
-`choices[i].logprobs.packed_top_logprobs` contains `shape: [tokens, k]`,
-`token_ids_dtype: "<i4"`, `logprobs_dtype: "<f4"`, `token_ids_b64` and
-`logprobs_b64`. Each base64 string contains raw little-endian, row-major
-int32/float32 bytes, without an `.npy` header. `top_logprobs` is empty;
-`tokens`, `token_logprobs` and `text_offset` still describe the sampled tokens.
+`choices[i].logprobs.top_k` uses the packed format proposed for
+`/inference/v1/generate` in [#60915](https://github.com/vllm-project/vllm/pull/60915):
+`num_positions`, `k`, `token_ids` and `logprobs`. Each base64 string contains raw
+little-endian, row-major int32/float32 bytes with shape `[num_positions, k]`,
+without an `.npy` header. `top_logprobs` is empty; `tokens`, `token_logprobs` and
+`text_offset` still describe the sampled tokens. The completion API always
+returns sampled scores in `token_logprobs`; no second flag is needed.
 Sampled scores retain the completion API's lower clamp of -9999.
 
 ```python
@@ -26,15 +28,15 @@ response = client.completions.create(
     max_tokens=16,
     logprobs=8,
     extra_body={
-        "packed_top_logprobs": True,
+        "return_top_k_logprobs": True,
         "return_tokens_as_token_ids": True,
     },
 )
-packed = response.choices[0].logprobs.model_extra["packed_top_logprobs"]
-ids = np.frombuffer(base64.b64decode(packed["token_ids_b64"]), dtype="<i4")
-scores = np.frombuffer(base64.b64decode(packed["logprobs_b64"]), dtype="<f4")
-ids = ids.reshape(packed["shape"])
-scores = scores.reshape(packed["shape"])
+packed = response.choices[0].logprobs.model_extra["top_k"]
+ids = np.frombuffer(base64.b64decode(packed["token_ids"]), dtype="<i4")
+scores = np.frombuffer(base64.b64decode(packed["logprobs"]), dtype="<f4")
+ids = ids.reshape(packed["num_positions"], packed["k"])
+scores = scores.reshape(packed["num_positions"], packed["k"])
 ```
 
 With `stream=True`, each SSE choice carries arrays for only its new tokens.
@@ -50,16 +52,8 @@ score even when it is outside the head. Candidate arrays preserve negative
 infinity. The server's configured logprobs mode still determines whether
 scores are raw or processed; this flag does not change sampling.
 
-This Python path uses the existing `FlatLogprobs` container, skips
-output-candidate detokenization, and packs directly without reconstructing
-candidate `Logprob` objects. It adds no native extensions or GPU kernels.
-Prompt scores keep their existing representation on the wire and decoding.
-
-To measure CPU formatting, JSON encoding, response size and client decoding:
-
-```bash
-python benchmarks/benchmark_packed_logprobs.py --tokens 1000 --top-k 8 32 128
-```
-
-This synthetic benchmark excludes inference, engine logprob processing, HTTP,
-and SSE framing; its timings are not end-to-end generation throughput.
+This Python path uses upstream's existing list-backed `FlatLogprobs` container,
+skips output-candidate detokenization, and packs its primitive columns without
+reconstructing candidate `Logprob` objects. Packing allocates CPU arrays
+proportional to positions × k. Prompt scores keep their existing representation
+on the wire and decoding. No native extensions or GPU kernels are added.

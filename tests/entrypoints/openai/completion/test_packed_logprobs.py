@@ -42,9 +42,9 @@ def test_packed_head_tail_ties_and_infinity_without_materialization():
         append_logprobs_for_next_position(scores, ids, values, [None] * 3, rank, 2)
     with patch.object(FlatLogprobs, "__getitem__", side_effect=AssertionError):
         result = create_packed_completion_logprobs([9, 2, 9, 2], scores, 2)
-    packed = result.packed_top_logprobs
-    ids = np.frombuffer(pybase64.b64decode(packed.token_ids_b64), "<i4").reshape(4, 2)
-    values = np.frombuffer(pybase64.b64decode(packed.logprobs_b64), "<f4").reshape(4, 2)
+    packed = result.top_k
+    ids = np.frombuffer(pybase64.b64decode(packed.token_ids), "<i4").reshape(4, 2)
+    values = np.frombuffer(pybase64.b64decode(packed.logprobs), "<f4").reshape(4, 2)
     np.testing.assert_array_equal(ids, [[2, 3], [2, 3], [2, 3], [2, 3]])
     np.testing.assert_array_equal(
         values, [[-0.5, -1.5], [-0.5, -1.5], [-1, -1], [0, -np.inf]]
@@ -52,7 +52,7 @@ def test_packed_head_tail_ties_and_infinity_without_materialization():
     assert result.token_logprobs == [-4.0, -0.5, -1.0, 0.0]
     assert result.top_logprobs == []
     assert "Infinity" not in result.model_dump_json()
-    assert "packed_top_logprobs" not in CompletionLogProbs().model_dump()
+    assert "top_k" not in CompletionLogProbs().model_dump()
 
     scores.logprobs[0] = -np.inf
     assert (
@@ -63,8 +63,8 @@ def test_packed_head_tail_ties_and_infinity_without_materialization():
 
 def test_empty_packed_completion():
     result = create_packed_completion_logprobs([], FlatLogprobs(), 2)
-    assert result.packed_top_logprobs.shape == (0, 2)
-    assert result.packed_top_logprobs.token_ids_b64 == ""
+    assert (result.top_k.num_positions, result.top_k.k) == (0, 2)
+    assert result.top_k.token_ids == ""
     assert result.text_offset == []
 
 
@@ -85,7 +85,7 @@ def test_reject_unsupported_packed_requests(override):
         model="test",
         prompt=[1],
         logprobs=2,
-        packed_top_logprobs=True,
+        return_top_k_logprobs=True,
         return_tokens_as_token_ids=True,
     )
     with pytest.raises(ValueError):
@@ -98,7 +98,7 @@ def test_packed_request_uses_flat_engine_scores_without_candidate_decoding(strea
         model="test",
         prompt=[1],
         logprobs=2,
-        packed_top_logprobs=True,
+        return_top_k_logprobs=True,
         return_tokens_as_token_ids=True,
         stream=stream,
         prompt_logprobs=None if stream else 1,
@@ -178,7 +178,7 @@ async def test_packed_stream_slices_preserve_tail_scores_offsets_and_usage():
         stream=True,
         stream_options={"include_usage": True},
         logprobs=2,
-        packed_top_logprobs=True,
+        return_top_k_logprobs=True,
         return_token_ids=True,
         return_tokens_as_token_ids=True,
     )
@@ -216,10 +216,10 @@ async def test_packed_stream_slices_preserve_tail_scores_offsets_and_usage():
         count = len(choice["token_ids"])
         assert lp["token_logprobs"] == [-4.0] * count
         assert not lp.get("top_logprobs")
-        packed = lp["packed_top_logprobs"]
-        assert packed["token_ids_dtype"] == "<i4"
-        assert packed["logprobs_dtype"] == "<f4"
-        ids = np.frombuffer(pybase64.b64decode(packed["token_ids_b64"]), "<i4").reshape(
+        packed = lp["top_k"]
+        assert packed["num_positions"] == count
+        assert packed["k"] == 2
+        ids = np.frombuffer(pybase64.b64decode(packed["token_ids"]), "<i4").reshape(
             count, 2
         )
         np.testing.assert_array_equal(ids, np.tile([2, 3], (count, 1)))

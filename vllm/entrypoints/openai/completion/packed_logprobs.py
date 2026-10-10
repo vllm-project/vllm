@@ -9,7 +9,7 @@ import pybase64
 
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
-    PackedTopLogprobs,
+    PackedTopK,
 )
 from vllm.logprobs import FlatLogprobs, PromptLogprobs, SampleLogprobs
 
@@ -43,11 +43,10 @@ def create_packed_completion_logprobs(
         tokens=tokens,
         token_logprobs=np.maximum(values[starts], -9999.0).tolist(),
         text_offset=offsets if tokens else [],
-        packed_top_logprobs=PackedTopLogprobs(
-            shape=(len(token_ids), k),
-            token_ids_dtype="<i4",
-            logprobs_dtype="<f4",
-            token_ids_b64=pybase64.b64encode(head_ids.tobytes()).decode("ascii"),
-            logprobs_b64=pybase64.b64encode(head_values.tobytes()).decode("ascii"),
+        top_k=PackedTopK(
+            num_positions=len(token_ids),
+            k=k,
+            token_ids=pybase64.b64encode(head_ids.tobytes()).decode("ascii"),
+            logprobs=pybase64.b64encode(head_values.tobytes()).decode("ascii"),
         ),
     )

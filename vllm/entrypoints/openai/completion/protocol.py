@@ -94,7 +94,7 @@ class CompletionRequest(OpenAIBaseModel):
     )
     allowed_token_ids: list[int] | None = None
     prompt_logprobs: int | None = None
-    packed_top_logprobs: bool = False
+    return_top_k_logprobs: bool = False
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -372,7 +372,7 @@ class CompletionRequest(OpenAIBaseModel):
         if self.ec_transfer_params:
             # Pass in ec_transfer_params via extra_args
             extra_args["ec_transfer_params"] = self.ec_transfer_params
-        return SamplingParams.from_optional(
+        params = SamplingParams.from_optional(
             n=self.n,
             **sampling_params,
             watermarking=self.watermarking,
@@ -384,8 +384,6 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
             prompt_logprobs=prompt_logprobs,
-            flat_logprobs=self.packed_top_logprobs,
-            skip_output_logprob_detokenization=self.packed_top_logprobs,
             logprob_token_ids=self.logprob_token_ids or None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
@@ -404,10 +402,14 @@ class CompletionRequest(OpenAIBaseModel):
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
+        if self.return_top_k_logprobs:
+            params.flat_logprobs = True
+            params._detokenize_logprobs = False
+        return params
 
     @model_validator(mode="after")
-    def check_packed_top_logprobs(self):
-        if self.packed_top_logprobs and (
+    def check_return_top_k_logprobs(self):
+        if self.return_top_k_logprobs and (
             self.echo
             or self.use_beam_search
             or self.logprob_token_ids
@@ -416,7 +418,7 @@ class CompletionRequest(OpenAIBaseModel):
             or not self.return_tokens_as_token_ids
         ):
             raise ValueError(
-                "packed_top_logprobs requires positive logprobs and "
+                "return_top_k_logprobs requires positive logprobs and "
                 "return_tokens_as_token_ids=true; echo, beam search "
                 "and logprob_token_ids are unsupported"
             )
@@ -647,18 +649,18 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
-class PackedTopLogprobs(OpenAIBaseModel):
-    """Row-major arrays of the highest-k candidates, without normalization.
+class PackedTopK(OpenAIBaseModel):
+    """Engine top-k slots as base64 little-endian int32/float32 arrays.
 
-    Ties retain engine top-k order. Sampled-token scores
-    remain in CompletionLogProbs even when the sampled token is outside k.
+    Both arrays have shape [num_positions, k], in engine candidate order.
+    Candidate scores are not clamped or renormalized; sampled-token scores
+    remain in CompletionLogProbs.token_logprobs, even outside the top-k.
     """
 
-    shape: tuple[int, int]
-    token_ids_dtype: Literal["<i4"] = "<i4"
-    logprobs_dtype: Literal["<f4"] = "<f4"
-    token_ids_b64: str
-    logprobs_b64: str
+    num_positions: int
+    k: int
+    token_ids: str
+    logprobs: str
 
 
 class CompletionLogProbs(OpenAIBaseModel):
@@ -666,7 +668,7 @@ class CompletionLogProbs(OpenAIBaseModel):
     token_logprobs: list[float | None] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
     top_logprobs: list[dict[str, float] | None] = Field(default_factory=list)
-    packed_top_logprobs: PackedTopLogprobs | None = Field(
+    top_k: PackedTopK | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 

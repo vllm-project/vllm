@@ -363,8 +363,6 @@ class SamplingParams(
     When set, logprobs for exactly these token IDs will be returned,
     in addition to the sampled token. This is useful for scoring tasks
     where you want to compare probabilities of specific label tokens."""
-    skip_output_logprob_detokenization: bool = False
-    """Skip decoding output logprob candidates, retaining prompt decoding."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
@@ -421,6 +419,8 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
+    # Disable sample-logprob decoding for numeric output; keep prompt decoding.
+    _detokenize_logprobs: bool = True
 
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
@@ -469,8 +469,6 @@ class SamplingParams(
         min_tokens: int = 0,
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
-        flat_logprobs: bool = False,
-        skip_output_logprob_detokenization: bool = False,
         prompt_logprob_token_ids: np.ndarray | list[list[int]] | None = None,
         prompt_logprob_start: int | None = None,
         detokenize: bool = True,
@@ -539,8 +537,6 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
-            flat_logprobs=flat_logprobs,
-            skip_output_logprob_detokenization=skip_output_logprob_detokenization,
             prompt_logprob_token_ids=prompt_logprob_token_ids,
             prompt_logprob_start=prompt_logprob_start,
             logprob_token_ids=logprob_token_ids,
