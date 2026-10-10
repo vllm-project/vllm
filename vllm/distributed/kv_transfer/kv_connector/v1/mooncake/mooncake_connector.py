@@ -4,9 +4,10 @@ import asyncio
 import itertools
 import logging
 import queue
+import secrets
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -75,6 +76,9 @@ from vllm.v1.worker.utils import select_common_block_size
 logger = init_logger(__name__)
 
 _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
+# Decode restarts mint new layout ids, so stale peer layouts pile up. Evicting
+# one only costs that peer a LAYOUT_MISS and one layout resend.
+_MAX_PEER_LAYOUTS: Final[int] = 1024
 
 try:
     from mooncake.engine import TransferEngine
@@ -622,6 +626,9 @@ class MooncakeXferMetadata(
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
+    # Random per register_kv_caches, so ids never repeat across restarts.
+    # 0 means the peer sends the layout on every pull.
+    layout_id: int = 0
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -631,6 +638,9 @@ class MooncakeXferResponseStatus(IntEnum):
     CONTINUE = 1
     # Something wrong, see err_msg
     ERROR = 2
+    # P does not hold the layout for this layout_id; resend it.
+    # Only sent for pulls with a nonzero layout_id and no layout.
+    LAYOUT_MISS = 3
 
 
 class MooncakeXferResponse(
@@ -641,6 +651,9 @@ class MooncakeXferResponse(
     ok_reqs: list[ReqId] | None = None
     err_reqs: list[ReqId] | None = None
     err_msg: str | None = None
+    # The pull's layout_id once P holds that layout. D omits the layout only
+    # after seeing it, so a P that predates this field always gets it.
+    layout_id: int = 0
 
 
 @dataclass
@@ -1245,6 +1258,14 @@ class MooncakeConnectorWorker:
             tuple,
             tuple[list[TransferRegion], list[TransferRegion], str | None],
         ] = {}
+        # (host, port, tp_rank, pp_size, tp_size, layout_id) -> regions, in LRU
+        # order. Filled only after a pull that actually carried the layout.
+        self._layout_by_peer: OrderedDict[
+            tuple, tuple[list[TransferRegion], list[TransferRegion]]
+        ] = OrderedDict()
+        self._kv_layout_id = 0
+        # Decode side: worker addresses that echoed the current layout_id.
+        self._acked_layout_peers: set[str] = set()
 
         assert (parallel_config := vllm_config.parallel_config)
         dp_rank = parallel_config.data_parallel_index
@@ -1534,14 +1555,30 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        local_regions, remote_regions, prep_err = self._prepare_transfer_regions(meta)
-        if prep_err is not None:
-            response = MooncakeXferResponse(
-                status=MooncakeXferResponseStatus.ERROR,
-                err_msg=prep_err,
+        if meta.layout_id and not meta.kv_caches_base_addr:
+            stored = self._lookup_peer_layout(meta)
+            if stored is None:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.LAYOUT_MISS,
+                    err_msg=(
+                        f"Mooncake KV layout {meta.layout_id:#x} from "
+                        f"{meta.remote_hostname}:{meta.remote_port} is not cached."
+                    ),
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
+            local_regions, remote_regions = stored
+        else:
+            local_regions, remote_regions, prep_err = self._prepare_transfer_regions(
+                meta
             )
-            await sock.send_multipart((identity, self._encoder.encode(response)))
-            return
+            if prep_err is not None:
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.ERROR,
+                    err_msg=prep_err,
+                )
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+                return
         validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
@@ -1602,6 +1639,7 @@ class MooncakeConnectorWorker:
                     status=MooncakeXferResponseStatus.FINISH,
                     err_reqs=list(pending_reqs),
                     err_msg="Timeout waiting for P side ready.",
+                    layout_id=meta.layout_id,
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 break
@@ -1692,6 +1730,7 @@ class MooncakeConnectorWorker:
                 ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
+                layout_id=meta.layout_id,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
 
@@ -1991,6 +2030,10 @@ class MooncakeConnectorWorker:
         self.region_row_offsets = []
         self.opaque_packed_storages = set()
         self._prepared_transfer_regions.clear()
+        self._layout_by_peer.clear()
+        self._acked_layout_peers.clear()
+        # Odd, so never 0 (the "layout on every pull" marker).
+        self._kv_layout_id = secrets.randbits(63) | 1
 
         packed_storage_to_region: dict[int, int] = {}
         packed_view_to_region: dict[tuple[int, int, int], int] = {}
@@ -2311,64 +2354,74 @@ class MooncakeConnectorWorker:
         pull_metas: dict[ReqId, PullReqMeta],
     ):
         req_ids = set(pull_metas)
-        metadata = MooncakeXferMetadata(
-            remote_hostname=self.hostname,
-            remote_port=self.rpc_port,
-            remote_tp_size=self.tp_size,
-            remote_tp_rank=self.tp_rank,
-            remote_pp_size=self.pp_size,
-            req_blocks={
-                req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
-                for req_id, pull_meta in pull_metas.items()
-            },
-            kv_caches_base_addr=self.kv_caches_base_addr,
-            block_lens=self.block_len_per_layer,
-            kv_block_lens=self.kv_block_len_per_layer,
-            registered_layer_names=self.registered_layer_names,
-            registered_layer_indices=self.registered_layer_indices,
-            registered_group_indices=self.registered_group_indices,
-            registered_shared_group_ids=[
-                list(groups) for groups in self.region_shared_groups
-            ],
-            registered_row_offsets=self.region_row_offsets,
+        include_layout = (
+            not self._kv_layout_id or worker_addr not in self._acked_layout_peers
         )
-
-        encoded_data = self._encoder.encode(metadata)
-        logger.debug(
-            "Size of encoded MooncakeXferMetadata: %d bytes", len(encoded_data)
-        )
-        logger.debug(
-            "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
-        )
-
-        # Send query for the request.
-        try:
-            with make_zmq_socket(
-                self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
-            ) as sock:
-                # If something goes wrong, let P wait timeout first (in asyncio.wait()).
-                sock.setsockopt(
-                    zmq.RCVTIMEO, (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000
+        # Each pass either returns or breaks out of the recv loop to resend
+        # the layout after a LAYOUT_MISS.
+        while True:
+            metadata = self._build_pull_metadata(
+                pull_metas, include_layout=include_layout
+            )
+            encoded_data = self._encoder.encode(metadata)
+            logger.debug(
+                "MooncakeXferMetadata to %s is %d bytes (%s).",
+                worker_addr,
+                len(encoded_data),
+                "layout" if include_layout else "blocks",
+            )
+            logger.debug(
+                "Sending kv transfer request for %s on path: %s", req_ids, worker_addr
+            )
+            try:
+                with make_zmq_socket(
+                    self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
+                ) as sock:
+                    sock.setsockopt(
+                        zmq.RCVTIMEO,
+                        (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000,
+                    )
+                    await sock.send(encoded_data)
+                    while True:
+                        ret_msg = await sock.recv()
+                        response = self._xfer_resp_decoder.decode(ret_msg)
+                        status = response.status
+                        if status == MooncakeXferResponseStatus.LAYOUT_MISS:
+                            self._acked_layout_peers.discard(worker_addr)
+                            if not include_layout:
+                                logger.info(
+                                    "Mooncake prefill %s lost the KV layout; "
+                                    "resending it.",
+                                    worker_addr,
+                                )
+                                include_layout = True
+                                break
+                        if status in (
+                            MooncakeXferResponseStatus.ERROR,
+                            MooncakeXferResponseStatus.LAYOUT_MISS,
+                        ):
+                            self._handle_failed_recv(
+                                pull_metas,
+                                req_ids,
+                                response.err_msg or "transfer error",
+                            )
+                            return
+                        if (
+                            self._kv_layout_id
+                            and response.layout_id == self._kv_layout_id
+                        ):
+                            self._acked_layout_peers.add(worker_addr)
+                        self.process_pulling_result(response, pull_metas)
+                        if status == MooncakeXferResponseStatus.FINISH:
+                            return
+            except zmq.ContextTerminated:
+                logger.debug(
+                    "ZMQ context terminated, exiting Mooncake receiver thread."
                 )
-                await sock.send(encoded_data)
-                while True:
-                    ret_msg = await sock.recv()
-                    response = self._xfer_resp_decoder.decode(ret_msg)
-                    if response.status == MooncakeXferResponseStatus.ERROR:
-                        self._handle_failed_recv(
-                            pull_metas,
-                            req_ids,
-                            response.err_msg or "transfer error",
-                        )
-                        return
-                    self.process_pulling_result(response, pull_metas)
-                    if response.status == MooncakeXferResponseStatus.FINISH:
-                        break
-        except zmq.ContextTerminated:
-            logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
-        except Exception as e:
-            self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
-            return
+                return
+            except Exception as e:
+                self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
+                return
 
     def _handle_failed_recv(
         self,
@@ -2627,6 +2680,8 @@ class MooncakeConnectorWorker:
         )
         cached = self._prepared_transfer_regions.get(cache_key)
         if cached is not None:
+            # A new layout_id can carry a layout this cache already holds.
+            self._remember_peer_layout(meta, cached)
             return cached
 
         def finish(
@@ -2720,12 +2775,86 @@ class MooncakeConnectorWorker:
                 n_aligned,
                 len(local_regions),
             )
-        self._prepared_transfer_regions[cache_key] = (
-            local_regions,
-            remote_regions,
-            None,
+        prepared = (local_regions, remote_regions, None)
+        self._prepared_transfer_regions[cache_key] = prepared
+        self._remember_peer_layout(meta, prepared)
+        return prepared
+
+    def _peer_layout_key(self, meta: MooncakeXferMetadata) -> tuple:
+        return (
+            meta.remote_hostname,
+            meta.remote_port,
+            meta.remote_tp_rank,
+            meta.remote_pp_size,
+            meta.remote_tp_size,
+            meta.layout_id,
         )
-        return local_regions, remote_regions, None
+
+    def _remember_peer_layout(
+        self,
+        meta: MooncakeXferMetadata,
+        prepared: tuple[list[TransferRegion], list[TransferRegion], str | None],
+    ) -> None:
+        local_regions, remote_regions, err = prepared
+        if err is not None or not meta.layout_id:
+            return
+        key = self._peer_layout_key(meta)
+        self._layout_by_peer[key] = (local_regions, remote_regions)
+        self._layout_by_peer.move_to_end(key)
+        while len(self._layout_by_peer) > _MAX_PEER_LAYOUTS:
+            self._layout_by_peer.popitem(last=False)
+
+    def _lookup_peer_layout(
+        self, meta: MooncakeXferMetadata
+    ) -> tuple[list[TransferRegion], list[TransferRegion]] | None:
+        key = self._peer_layout_key(meta)
+        stored = self._layout_by_peer.get(key)
+        if stored is not None:
+            self._layout_by_peer.move_to_end(key)
+        return stored
+
+    def _build_pull_metadata(
+        self,
+        pull_metas: dict[ReqId, PullReqMeta],
+        *,
+        include_layout: bool,
+    ) -> MooncakeXferMetadata:
+        req_blocks = {
+            req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
+            for req_id, pull_meta in pull_metas.items()
+        }
+        if not include_layout:
+            return MooncakeXferMetadata(
+                remote_hostname=self.hostname,
+                remote_port=self.rpc_port,
+                remote_tp_size=self.tp_size,
+                remote_tp_rank=self.tp_rank,
+                remote_pp_size=self.pp_size,
+                layout_id=self._kv_layout_id,
+                req_blocks=req_blocks,
+                kv_caches_base_addr=[],
+                block_lens=[],
+                kv_block_lens=[],
+            )
+        return MooncakeXferMetadata(
+            remote_hostname=self.hostname,
+            remote_port=self.rpc_port,
+            remote_tp_size=self.tp_size,
+            remote_tp_rank=self.tp_rank,
+            remote_pp_size=self.pp_size,
+            layout_id=self._kv_layout_id,
+            req_blocks=req_blocks,
+            kv_caches_base_addr=self.kv_caches_base_addr,
+            block_lens=self.block_len_per_layer,
+            kv_block_lens=self.kv_block_len_per_layer,
+            registered_layer_names=self.registered_layer_names,
+            registered_layer_indices=self.registered_layer_indices,
+            registered_group_indices=self.registered_group_indices,
+            registered_shared_group_ids=[
+                list(groups) for groups in self.region_shared_groups
+            ],
+            registered_row_offsets=self.region_row_offsets,
+        )
 
     def _validate_head_resharding_layout(
         self, remote_tp_size: int, local_regions: list[TransferRegion]
