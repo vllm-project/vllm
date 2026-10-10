@@ -44,7 +44,7 @@
 /vllm/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
 /vllm/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
 /vllm/entrypoints/pooling @noooop @DarkLight1337
-/vllm/entrypoints/rl @aoshen02
+/vllm/entrypoints/rl @aoshen02 @njhill
 /vllm/entrypoints/scale_out @noooop @DarkLight1337
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
@@ -63,7 +63,7 @@
 /tests/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
 /tests/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
 /tests/entrypoints/pooling @noooop @DarkLight1337
-/tests/entrypoints/rl @robertgshaw2-redhat @njhill @aarnphm @NickLucche @AndreasKaratzas @aoshen02
+/tests/entrypoints/rl @aoshen02 @njhill
 /tests/entrypoints/scale_out @noooop @DarkLight1337
 /tests/entrypoints/speech_to_text/realtime @njhill
 /tests/entrypoints/speech_to_text @NickLucche
