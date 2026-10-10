@@ -6562,37 +6562,50 @@ def test_encoder_cache_rejects_mismatched_embed_count_within_request():
     assert output.finish_reason == FinishReason.ERROR
 
 
-def test_free_encoder_inputs_defers_for_eagle_lookahead():
-    """With EAGLE speculative decoding, the encoder input is retained one extra
-    position so the drafter's +1 look-ahead mm-embedding gather (which reads one
-    position past the target's computed range) still finds it cached. This is
-    the primary mechanism that prevents the drafter "Encoder cache miss"; the
-    worker-side token-embedding fallback is only a backstop."""
-    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
-    # create_scheduler only builds ngram spec configs; force the eagle path that
-    # _free_encoder_inputs keys off (its read-ahead deferral).
-    scheduler.use_eagle = True
-    scheduler.num_prefill_lookahead = 1
-    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+@pytest.mark.parametrize("prefill_lookahead", [1, 3])
+def test_drafter_lookahead_encoder_cache_cap_makes_progress(prefill_lookahead):
+    """Regression test for #40707: with a drafter look-ahead, two adjacent
+    images that only fit in the encoder cache one at a time must not deadlock.
+    Stopping short of the second image by the look-ahead used to leave the
+    first image unfreed, so the second could never be allocated."""
+    image_len = 600
+    scheduler = create_scheduler(max_num_batched_tokens=900, max_model_len=2048)
+    scheduler.num_prefill_lookahead = prefill_lookahead
+    scheduler.max_num_encoder_input_tokens = 900
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=900)
+
+    num_tokens = 2 * image_len + 20
     request = create_requests(
         num_requests=1,
-        num_tokens=250,
-        mm_positions=mm_positions,
+        num_tokens=num_tokens,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=10, length=image_len),
+                PlaceholderRange(offset=10 + image_len, length=image_len),
+            ]
+        ],
+        max_tokens=1,
+        req_ids=["req"],
     )[0]
-    manager = scheduler.encoder_cache_manager
-    manager.allocate(request, 0)
-    mm_end = 150  # offset + length
+    scheduler.add_request(request)
 
-    # Confirmed progress reaches the range end: without spec decode this frees
-    # (see test below), but the drafter's +1 look-ahead still needs it.
-    request.num_computed_tokens = mm_end
-    scheduler._free_encoder_inputs(request)
-    assert manager.get_cached_input_ids(request) == {0}
-
-    # One position past the range end: the +1 look-ahead has now passed it.
-    request.num_computed_tokens = mm_end + 1
-    scheduler._free_encoder_inputs(request)
-    assert manager.get_cached_input_ids(request) == set()
+    scheduled_inputs = []
+    while request.num_computed_tokens < num_tokens:
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens.get("req", 0) > 0
+        scheduled_inputs += output.scheduled_encoder_inputs.get("req", [])
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=["req"],
+                req_id_to_index={"req": 0},
+                sampled_token_ids=[[]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+    assert scheduled_inputs == [0, 1]
 
 
 def test_free_encoder_inputs_unchanged_without_spec_decode():

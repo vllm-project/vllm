@@ -1925,12 +1925,11 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                if num_computed_tokens + shift_computed_tokens < start_pos:
+                if num_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
-                    # encoder input.
-                    num_new_tokens = start_pos - (
-                        num_computed_tokens + shift_computed_tokens
-                    )
+                    # encoder input. No drafter shift here: its read-ahead into
+                    # this unencoded input falls back to token embeddings.
+                    num_new_tokens = start_pos - num_computed_tokens
                 else:
                     # Because of prefix caching, num_computed_tokens is greater
                     # than start_pos even though its encoder input is not
@@ -2516,11 +2515,6 @@ class Scheduler(SchedulerInterface):
         if not cached_encoder_input_ids:
             return
 
-        # Defer the free by the drafter's look-ahead so an entry stays
-        # referenced until the drafter's read-ahead has also passed it,
-        # mirroring the shift the encoder scheduling path applies.
-        spec_lookahead = self.num_prefill_lookahead
-
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.
         for input_id in list(cached_encoder_input_ids):
@@ -2533,12 +2527,13 @@ class Scheduler(SchedulerInterface):
                 # KVs have been calculated and cached already.
                 self._free_encoder_input(request, input_id)
             elif (
-                start_pos + num_tokens + spec_lookahead
+                start_pos + num_tokens
                 <= request.num_computed_tokens - request.num_output_placeholders
             ):
-                # Processed, stored in the decoder KV cache, and far enough past
-                # the placeholder range (plus the drafter's look-ahead) that no
-                # rejection or drafter gather can reference it.
+                # Processed, stored in the decoder KV cache, and past the
+                # placeholder range with no pending rejection that could roll
+                # back into it. The drafter only reads ahead of
+                # num_computed_tokens, so it cannot reference this input either.
                 self._free_encoder_input(request, input_id)
 
     def _free_encoder_input(self, request: Request, input_id: int) -> None:
