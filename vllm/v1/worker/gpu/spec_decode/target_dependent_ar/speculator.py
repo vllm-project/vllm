@@ -14,11 +14,9 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
-from vllm.v1.worker.utils import get_uniform_decode_token_count
+from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
 
 logger = init_logger(__name__)
 
@@ -46,8 +44,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         self.inputs_embeds: torch.Tensor | None = None
 
-        self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
-        self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+        self.use_fused_multi_step_decode = False
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -84,29 +81,27 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         if self.num_speculative_steps == 1:
             self.supports_decode_metadata_update = False
             return
-        super()._configure_decode_metadata_update()
 
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        # Initialize cudagraph manager for draft prefill (draft position 0).
-        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config,
-            self.device,
-            cudagraph_mode,
-            self.num_speculative_steps + 1,
-            # Draft prefill shares the target's padded attention metadata.
-            varlen_decode=self.enable_adaptive_verification,
+        if not self.advance_draft_positions:
+            self.use_fused_multi_step_decode = True
+            return
+
+        unsupported_backends = sorted(
+            {
+                attn_group.backend.get_name()
+                for attn_groups in self.attn_groups
+                for attn_group in attn_groups
+                if not attn_group.supports_draft_decode_metadata_update
+            }
         )
-
-        # PIECEWISE cudagraphs are not supported for draft decodes.
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        else:
-            cudagraph_mode = CUDAGraphMode.NONE
-
-        # Initialize cudagraph manager for draft decodes (draft positions > 0).
-        self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
-        )
+        self.use_fused_multi_step_decode = not unsupported_backends
+        if unsupported_backends:
+            logger.info_once(
+                "Fused multi-step draft decode is not supported by attention "
+                "backend(s) %s; falling back to rebuilding attention metadata "
+                "between draft steps.",
+                ", ".join(unsupported_backends),
+            )
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
