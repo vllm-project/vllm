@@ -454,7 +454,10 @@ class ElasticEPScalingExecutor:
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
-            if draft_model := getattr(speculator, "model", None):
+            draft_model = getattr(speculator, "model", None)
+            # MRV1 keeps the draft model on model_runner.drafter instead.
+            draft_model = draft_model or self.worker.model_runner.get_draft_model()
+            if draft_model is not None:
                 reset_compile_wrapper(draft_model)
 
         gc.collect()
