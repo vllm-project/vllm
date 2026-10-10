@@ -12,7 +12,6 @@ from collections.abc import AsyncIterator, MutableSequence
 from contextlib import asynccontextmanager
 from typing import Any
 
-import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import configure_logging_from_args, init_logger
@@ -150,7 +149,7 @@ async def build_and_serve(
         # NOTE: When the 'disable_uvicorn_access_log' value is True,
         # no access log will be output.
         access_log=not args.disable_uvicorn_access_log,
-        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+        timeout_keep_alive=args.http_timeout_keep_alive,
         ssl_keyfile=args.ssl_keyfile,
         ssl_certfile=args.ssl_certfile,
         ssl_ca_certs=args.ssl_ca_certs,

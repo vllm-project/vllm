@@ -45,7 +45,7 @@ def serve_parser():
 
 
 ### Test config parsing
-def test_config_arg_parsing(serve_parser, cli_config_file):
+def test_config_arg_parsing(serve_parser, cli_config_file, tmp_path, monkeypatch):
     args = serve_parser.parse_args([])
     assert args.port == 8000
     args = serve_parser.parse_args(["--config", cli_config_file])
@@ -68,6 +68,23 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
         ]
     )
     assert args.port == 9000
+
+    config_path = tmp_path / "keep_alive.yaml"
+    config_path.write_text("http-timeout-keep-alive: 30\n")
+    monkeypatch.setenv("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "20")
+    args = serve_parser.parse_args(["--config", str(config_path)])
+    validate_parsed_serve_args(args)
+    assert args.http_timeout_keep_alive == 30
+    args = serve_parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "--http-timeout-keep-alive",
+            "10",
+        ]
+    )
+    validate_parsed_serve_args(args)
+    assert args.http_timeout_keep_alive == 10
 
 
 def test_logging_config_cli_args(serve_parser):
@@ -396,6 +413,44 @@ def test_sse_keep_alive_interval_non_integer(serve_parser, value):
     """Non-integer values fail argparse's int parsing with SystemExit."""
     with pytest.raises(SystemExit):
         serve_parser.parse_args(args=["--sse-keep-alive-interval", value])
+
+
+@pytest.mark.parametrize(
+    "cli_args, expected",
+    [
+        ([], 5),
+        (["--http-timeout-keep-alive", "0"], 0),
+        (["--http-timeout-keep-alive", "30"], 30),
+    ],
+)
+def test_http_timeout_keep_alive_valid(serve_parser, cli_args, expected):
+    """The default is five seconds and zero or positive values parse exactly."""
+    args = serve_parser.parse_args(args=cli_args)
+    validate_parsed_serve_args(args)
+    assert args.http_timeout_keep_alive == expected
+
+
+def test_http_timeout_keep_alive_uses_legacy_env_when_not_configured(
+    monkeypatch, serve_parser
+):
+    monkeypatch.setenv("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "30")
+    args = serve_parser.parse_args(args=[])
+    validate_parsed_serve_args(args)
+    assert args.http_timeout_keep_alive == 30
+
+
+def test_http_timeout_keep_alive_cli_overrides_legacy_env(monkeypatch, serve_parser):
+    monkeypatch.setenv("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "30")
+    args = serve_parser.parse_args(args=["--http-timeout-keep-alive", "10"])
+    validate_parsed_serve_args(args)
+    assert args.http_timeout_keep_alive == 10
+
+
+@pytest.mark.parametrize("value", ["-1", "-5"])
+def test_http_timeout_keep_alive_negative(serve_parser, value):
+    args = serve_parser.parse_args(args=["--http-timeout-keep-alive", value])
+    with pytest.raises(ValueError, match="http-timeout-keep-alive"):
+        validate_parsed_serve_args(args)
 
 
 @pytest.mark.parametrize(

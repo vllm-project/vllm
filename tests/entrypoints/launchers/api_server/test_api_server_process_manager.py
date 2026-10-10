@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import multiprocessing
 import os
 import socket
@@ -417,7 +418,9 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
     Credentials must not reach the log line."""
     import subprocess as subprocess_mod
 
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.launchers.cli_args import (
+        make_arg_parser,
+    )
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import RustFrontendProcessManager
 
@@ -469,7 +472,9 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
     """Config-only model selection must be forwarded to the Rust frontend."""
     import subprocess as subprocess_mod
 
-    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.entrypoints.launchers.cli_args import (
+        make_arg_parser,
+    )
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.utils import RustFrontendProcessManager
 
@@ -511,6 +516,60 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
         sock.close()
 
     assert '"model_tag": "org/model"' in caplog.text
+
+
+def test_rust_frontend_forwards_http_keep_alive_cli_value(monkeypatch):
+    """The Rust frontend receives the Python CLI value, not a legacy env var."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.launchers.cli_args import (
+        make_arg_parser,
+        validate_parsed_serve_args,
+    )
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", "--http-timeout-keep-alive", "30"]
+    )
+    validate_parsed_serve_args(args)
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs))
+        return _FakeProc()
+
+    monkeypatch.setenv("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "10")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_address="ipc:///tmp/in",
+            output_address="ipc:///tmp/out",
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+        )
+    finally:
+        sock.close()
+
+    [(cmd, _)] = popen_calls
+    args_json = json.loads(cmd[cmd.index("--args-json") + 1])
+    assert args_json["http_timeout_keep_alive"] == 30
 
 
 def test_rust_frontend_inherits_grpc_listener(monkeypatch):
