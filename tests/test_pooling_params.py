@@ -213,43 +213,21 @@ def test_token_classify(pooling_type: str):
             pooling_params.verify(model_config)
 
 
-def test_embeddinggemma2_embedding_size_matches_native_dim():
-    """EG2 projects hidden_size(512) -> embedding_dim(768).
+def test_matryoshka_accepts_native_embedding_width_without_network():
+    """Matryoshka dims up to embedding_size must verify (EG2-style 768).
 
-    Matryoshka validation must use the native embedding width, not hidden size.
-    Requires a local HF cache (or network) for google/embeddinggemma-2.
+    Uses the same MockMatryoshkaModelConfig pattern as the existing upper-
+    bound test so CI always exercises this path without a HF checkpoint.
+    Pair with test_pooling_embedding_dim_preferred_over_hidden_size_without_network
+    for ModelConfig.embedding_size resolution.
     """
-    import os
-
-    from huggingface_hub.errors import LocalEntryNotFoundError
-
-    model = os.environ.get("EG2_MODEL", "google/embeddinggemma-2")
-    overrides = {
-        "is_matryoshka": True,
-        "matryoshka_dimensions": [128, 256, 512, 768],
-    }
-    try:
-        model_config = ModelConfig(
-            model,
-            runner="pooling",
-            tokenizer=model,
-            tokenizer_mode="auto",
-            trust_remote_code=False,
-            seed=0,
-            dtype="bfloat16",
-            hf_overrides=overrides,
-        )
-    except LocalEntryNotFoundError:
-        pytest.skip(f"{model} not available in local HF cache")
-    except OSError as exc:
-        pytest.skip(f"could not load {model}: {exc}")
-
-    emb_dim = getattr(model_config.hf_text_config, "embedding_dim", None)
-    hidden = model_config.get_hidden_size()
-    assert emb_dim == 768
-    assert hidden == 512
-    assert model_config.embedding_size == emb_dim
-    assert model_config.is_matryoshka
+    model_config = MockMatryoshkaModelConfig(
+        pooler_config=PoolerConfig(seq_pooling_type="MEAN"),
+        is_matryoshka=True,
+        matryoshka_dimensions=[128, 256, 512, 768],
+        embedding_size=768,
+        served_model_name="google/embeddinggemma-2",
+    )
 
     for dim in (128, 256, 512, 768):
         PoolingParams(task="embed", dimensions=dim).verify(model_config)
