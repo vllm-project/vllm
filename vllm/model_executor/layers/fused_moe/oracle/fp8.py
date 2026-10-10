@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     prepare_fp8_moe_layer_for_deepgemm,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
@@ -98,6 +100,7 @@ def _get_priority_backends(
         Fp8MoeBackend.CPU,
         Fp8MoeBackend.HPC,
     ]
+    _AVAILABLE_BACKENDS = prioritize_humming(_AVAILABLE_BACKENDS)
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))
@@ -606,6 +609,21 @@ def convert_to_fp8_moe_kernel_format(
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
+
+        # Online quantization has not installed the quantized tensors yet.
+        scale_name = (
+            "weight_scale_inv"
+            if hasattr(layer, "w13_weight_scale_inv")
+            else "weight_scale"
+        )
+        for prefix, weight, scale, input_scale in (
+            ("w13", w13, w13_scale, w13_input_scale),
+            ("w2", w2, w2_scale, w2_input_scale),
+        ):
+            replace_parameter(layer, f"{prefix}_weight", weight)
+            replace_parameter(layer, f"{prefix}_{scale_name}", scale)
+            if input_scale is not None:
+                replace_parameter(layer, f"{prefix}_input_scale", input_scale)
 
         convert_to_humming_moe_kernel_format(
             layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)

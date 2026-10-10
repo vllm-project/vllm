@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -248,7 +249,8 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
 
 @pytest.mark.asyncio
-async def test_chat_error_stream():
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_chat_error_stream(include_usage: bool):
     """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
@@ -313,6 +315,67 @@ async def test_chat_error_stream():
         messages=[{"role": "user", "content": "Test prompt"}],
         max_tokens=10,
         stream=True,
+        stream_options={"include_usage": include_usage},
+    )
+
+    response = await serving_chat.create_chat_completion(request)
+
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert len(chunks) >= 2
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_chat_error_stream_first_chunk(include_usage: bool):
+    """An error before the first token must reach the streaming client."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    completion_output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="error",
+    )
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+        stream_options={"include_usage": include_usage},
     )
 
     response = await serving_chat.create_chat_completion(request)
@@ -580,7 +643,15 @@ def test_batch_structural_tag_response_format_invalid(format_value):
         )
 
 
-@pytest.mark.parametrize("structural_tag", ["not json", ""])
+@pytest.mark.parametrize(
+    "structural_tag",
+    [
+        "not json",
+        "",
+        # json.loads raises a plain ValueError, not JSONDecodeError
+        '{"type": "structural_tag", "x": ' + "1" * 5000 + "}",
+    ],
+)
 def test_structured_outputs_structural_tag_invalid(structural_tag):
     """Malformed direct structured_outputs structural tags should be rejected."""
     with pytest.raises(
@@ -591,6 +662,25 @@ def test_structured_outputs_structural_tag_invalid(structural_tag):
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],
             structured_outputs={"structural_tag": structural_tag},
+        )
+
+
+@pytest.mark.parametrize("field", ["response_format", "structured_outputs"])
+def test_deeply_nested_structural_tag_rejected(field):
+    """Structural tags are compiled during request parsing, so a deeply nested
+    one must be rejected there instead of blocking the server while converting,
+    and reported as too deep rather than malformed."""
+    schema = '{"type": "array", "items": ' * 200 + "{}" + "}" * 200
+    tag = (
+        '{"type": "structural_tag", "format": {"type": "json_schema", '
+        f'"json_schema": {schema}}}}}'
+    )
+    value = json.loads(tag) if field == "response_format" else {"structural_tag": tag}
+    with pytest.raises(VLLMValidationError, match="nested too deeply"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            **{field: value},
         )
 
 

@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.models.qwen4_exp.nvidia.ops.ple import ple_conv
+from vllm.models.qwen4_exp.common.ops.ple import ple_conv
 from vllm.v1.attention.backends.ple_recoverssm import _PleConvCommit
 
 C, KSIZE, DIL, SQ, NB = 512, 4, 3, 4, 8

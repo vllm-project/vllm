@@ -51,6 +51,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -178,6 +179,10 @@ class KVConnectorWorkerMetadata(ABC):
 
 class KVConnectorBase_V1(ABC):
     """Base class for KV connectors."""
+
+    # Source label for this connector's external hits. Subclasses must set
+    # HOST/DISK/P2P or override get_external_cache_hit_sources().
+    _cache_hit_source = CacheHitSource.EXTERNAL_UNSPECIFIED
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -527,6 +532,24 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> dict[CacheHitSource, int]:
+        """Split ``num_external_tokens`` by the cache tier that supplied them.
+
+        Called after :meth:`update_state_after_alloc`, so the load plan is
+        known. Counts must sum to ``num_external_tokens``; a mismatch is
+        reported as ``external_unspecified``. Only non-zero counts are
+        included.
+
+        Default: all tokens under ``_cache_hit_source``.
+        """
+        if num_external_tokens == 0:
+            return {}
+        return {self._cache_hit_source: num_external_tokens}
+
     @abstractmethod
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -560,7 +583,11 @@ class KVConnectorBase_V1(ABC):
         """Build the connector metadata for this step.
 
         This function should NOT modify fields in the scheduler_output.
-        Also, calling this function will reset the state of the connector.
+        FIXME: one exception:
+        synchronous READ connectors may remove attention blocks they fully
+        overwrite this step from new_block_ids_to_zero. They must complete
+        those loads before the blocks are used and fail the step if a load fails.
+        Calling this function will reset the state of the connector.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.

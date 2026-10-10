@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -702,6 +702,21 @@ def make_modular_kernel(
     return modular_kernel
 
 
+def _shuffle_weights_for_aiter(rank_weights: WeightTensors) -> WeightTensors:
+    """Pre-shuffle weights so AITER selects its prebuilt `preshuffle_on` module.
+
+    Production shuffles in `process_weights_after_loading`; this harness builds its
+    tensors directly, so without this every call asks for a `preshuffle_off` module
+    that is not prebuilt, and JIT-compiles a kernel the image already ships.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    w1, w2 = rocm_aiter_ops.shuffle_weights(rank_weights.w1, rank_weights.w2)
+    w1.is_shuffled = True
+    w2.is_shuffled = True
+    return replace(rank_weights, w1=w1, w2=w2)
+
+
 def _maybe_convert_weights_for_experts(
     config: Config,
     rank_weights: WeightTensors,
@@ -714,6 +729,15 @@ def _maybe_convert_weights_for_experts(
 
     fe_type = config.fused_experts_type
     fe_name = getattr(fe_type, "__name__", "")
+
+    # AITER's prebuilt modules carry a gfx950 instance table even on gfx942 and reject
+    # intermediate sizes that are not a multiple of 256, but only for the fp8 per-tensor
+    # and per-token schemes. Those keep JIT-compiling until
+    # https://github.com/ROCm/aiter/issues/5766 is fixed.
+    if fe_name == "AiterExperts" and (
+        config.quant_dtype is None or config.quant_block_shape is not None
+    ):
+        return _shuffle_weights_for_aiter(rank_weights)
 
     backend: Fp8MoeBackend | None = None
     if fe_name == "TrtLlmFp8ExpertsModular":

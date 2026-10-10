@@ -625,7 +625,7 @@ class Qwen4ExpForCausalLM(
     SupportsReplaySSM,
 ):
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj", "indexer.index_qk_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -644,6 +644,12 @@ class Qwen4ExpForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
+        if vllm_config.lora_config is not None:
+            # LoRA does not support the merged QKV/indexer projection, so its
+            # packed mapping must keep the indexer separate.
+            self.packed_modules_mapping = self.packed_modules_mapping | {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            }
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.quant_config = vllm_config.quant_config
@@ -900,6 +906,7 @@ class Qwen4ExpForConditionalGeneration(
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
+        "qkv_proj": Qwen4ExpForCausalLM.packed_modules_mapping["qkv_proj"],
         "kv_proj": ["key_proj", "value_proj"],
         "input_mix_weight_down_block_inject": [
             "input_mix_weight_down",
@@ -917,6 +924,12 @@ class Qwen4ExpForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
+        if vllm_config.lora_config is not None:
+            # LoRA does not support the merged QKV/indexer projection, so its
+            # packed mapping must keep the indexer separate.
+            self.packed_modules_mapping = self.packed_modules_mapping | {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            }
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is None:
