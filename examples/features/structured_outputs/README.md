@@ -34,19 +34,19 @@ See [feature docs](https://docs.vllm.ai/en/latest/features/structured_outputs.ht
 Run all constraints, non-streaming:
 
 ```bash
-uv run structured_outputs_offline.py
+uv run structured_outputs_client.py
 ```
 
 Run all constraints, streaming:
 
 ```bash
-uv run structured_outputs_offline.py --stream
+uv run structured_outputs_client.py --stream
 ```
 
 Run certain constraints, for example `structural_tag` and `regex`, streaming:
 
 ```bash
-uv run structured_outputs_offline.py \
+uv run structured_outputs_client.py \
     --constraint structural_tag regex \
     --stream
 ```
@@ -54,5 +54,5 @@ uv run structured_outputs_offline.py \
 Run all constraints, with reasoning models and streaming:
 
 ```bash
-uv run structured_outputs_offline.py --reasoning --stream
+uv run structured_outputs_client.py --reasoning --stream
 ```
