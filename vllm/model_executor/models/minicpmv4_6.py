@@ -970,11 +970,13 @@ class MiniCPMV4_6ForConditionalGeneration(
         orig_to_new_prefix={
             # transformers v5.7+ uses `vision_tower` and nests `vit_merger`
             # inside it. Order matters: more specific prefix must come first.
-            "model.vision_tower.vit_merger.": "vit_merger.",
-            "model.vision_tower.": "vpm.",
+            # No trailing dot, so module names in quantization configs (e.g.
+            # AWQ `modules_to_not_convert`) are mapped as well.
+            "model.vision_tower.vit_merger": "vit_merger",
+            "model.vision_tower": "vpm",
+            "model.merger": "merger",
             "model.vpm.": "vpm.",
             "model.vit_merger.": "vit_merger.",
-            "model.merger.": "merger.",
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "mtp.": None,

@@ -276,16 +276,14 @@ class AutoGPTQConfig(QuantizationConfig):
         hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
-        if self.modules_in_block_to_quantize:
-            if is_list_of(self.modules_in_block_to_quantize, list):
-                # original modules_in_block_to_quantize: list[list[str]]
-                # flatten original modules_in_block_to_quantize
-                self.modules_in_block_to_quantize = [
-                    item
-                    for sublist in self.modules_in_block_to_quantize
-                    for item in sublist
-                ]
-            return
+        if is_list_of(self.modules_in_block_to_quantize, list):
+            # original modules_in_block_to_quantize: list[list[str]]
+            # flatten original modules_in_block_to_quantize
+            self.modules_in_block_to_quantize = [
+                item
+                for sublist in self.modules_in_block_to_quantize
+                for item in sublist
+            ]
 
         unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
         metadata = get_safetensors_params_metadata(model_name, revision=revision)
@@ -295,7 +293,17 @@ class AutoGPTQConfig(QuantizationConfig):
             if (dtype := info.get("dtype", None))
             and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
         }
-        self.modules_in_block_to_quantize = list(quant_layers)
+        if self.modules_in_block_to_quantize:
+            # These names are relative to the quantized blocks, so they also
+            # match same-named layers outside them (e.g. `self_attn.q_proj` in
+            # a vision tower). Keep only the layers the checkpoint quantized.
+            quant_layers = {
+                layer
+                for layer in quant_layers
+                if any(module in layer for module in self.modules_in_block_to_quantize)
+            }
+        if quant_layers:
+            self.modules_in_block_to_quantize = list(quant_layers)
 
 
 class AutoGPTQLinearMethod(LinearMethodBase):
