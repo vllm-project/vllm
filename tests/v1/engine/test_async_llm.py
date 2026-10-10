@@ -1357,3 +1357,41 @@ async def test_pause_keep_multi_request():
         for result in results:
             assert result.finished
             assert len(result.outputs[0].token_ids) == 10
+
+        @pytest.mark.asyncio
+    @pytest.mark.parametrize("output_kind", [
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ])
+    async def test_parallel_sampling_async_engine_output_kinds(output_kind):
+        prompt = "San Francisco is a"
+        n_outputs = 2
+        
+        sampling_params = SamplingParams(
+            n=n_outputs,
+            max_tokens=5,
+            temperature=0.7,
+            output_kind=output_kind,
+        )
+
+         
+        engine_args = AsyncEngineArgs(model="facebook/opt-125m", enforce_eager=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+
+        request_id = f"test-async-{output_kind.name}"
+        
+        
+        generator = engine.generate(prompt, sampling_params, request_id)
+        
+        final_output = None
+        async for request_output in generator:
+            final_output = request_output
+            
+        assert final_output is not None
+        
+
+        assert len(final_output.outputs) == n_outputs
+        
+        for completion in final_output.outputs:
+            assert completion.text is not None
