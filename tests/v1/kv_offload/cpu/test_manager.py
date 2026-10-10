@@ -519,6 +519,72 @@ def test_prepare_load_preserves_key_order():
     manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
 
+def test_prepare_load_failure_reports_eviction():
+    """A key evicted after lookup() is reported with its eviction age."""
+    manager = make_cpu_manager(num_chunks=1)
+    key_a, key_b = to_key(1), to_key(2)
+    manager.prepare_store([key_a], _EMPTY_REQ_CTX)
+    manager.complete_store([key_a], _EMPTY_REQ_CTX)
+    assert manager.lookup(key_a, _EMPTY_REQ_CTX) is LookupResult.HIT
+    manager.prepare_store([key_b], _EMPTY_REQ_CTX)
+
+    req_context = make_req_context(req_id="req-1")
+    req_context.set_offload_key_position(key_a, 16)
+    with pytest.raises(AssertionError) as exc_info:
+        manager.prepare_load([key_a], req_context)
+    message = str(exc_info.value)
+    assert "req_id='req-1'" in message
+    assert "per missing key: [(16, " in message
+    assert "per missing key: [(16, None)]" not in message
+
+
+def test_prepare_load_failure_reports_never_stored_key():
+    """A key that was never stored shows up at the edge of the load range,
+    with no eviction behind it."""
+    manager = make_cpu_manager(num_chunks=4)
+    keys = to_keys([1, 2, 3])
+    manager.prepare_store(keys[1:], _EMPTY_REQ_CTX)
+    manager.complete_store(keys[1:], _EMPTY_REQ_CTX)
+
+    req_context = make_req_context()
+    for i, key in enumerate(keys):
+        req_context.set_offload_key_position(key, (i + 1) * 16)
+    with pytest.raises(AssertionError) as exc_info:
+        manager.prepare_load(keys, req_context)
+    message = str(exc_info.value)
+    assert "1 of 3 keys in this load are missing" in message
+    assert "per missing key: [(16, None)]; load end_token range: 16-48" in message
+
+
+def test_prepare_load_failure_eviction_history_is_bounded(monkeypatch):
+    monkeypatch.setattr(CPUOffloadingManager, "EVICTION_HISTORY_SIZE", 1)
+    manager = make_cpu_manager(num_chunks=1)
+    for key in to_keys([1, 2, 3]):
+        manager.prepare_store([key], _EMPTY_REQ_CTX)
+        manager.complete_store([key], _EMPTY_REQ_CTX)
+
+    # Key 1 was evicted first and has left the one-entry history.
+    with pytest.raises(AssertionError) as exc_info:
+        manager.prepare_load([to_key(1)], _EMPTY_REQ_CTX)
+    message = str(exc_info.value)
+    assert "per missing key: [(None, None)]" in message
+    assert "eviction history: 1 keys" in message
+
+
+def test_prepare_load_failure_after_reset_has_no_eviction_history():
+    manager = make_cpu_manager(num_chunks=1)
+    for key in to_keys([1, 2]):
+        manager.prepare_store([key], _EMPTY_REQ_CTX)
+        manager.complete_store([key], _EMPTY_REQ_CTX)
+    manager.reset_cache()
+
+    with pytest.raises(AssertionError) as exc_info:
+        manager.prepare_load([to_key(1)], _EMPTY_REQ_CTX)
+    message = str(exc_info.value)
+    assert "per missing key: [(None, None)]" in message
+    assert "eviction history: 0 keys" in message
+
+
 def test_lru_batch_eviction_failure_is_atomic():
     manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
     policy = manager._policy

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import OrderedDict
+import time
+from collections import OrderedDict, deque
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
@@ -55,6 +56,9 @@ class CPUOffloadingManager(OffloadingManager):
     to the CachePolicy implementation.
     """
 
+    # Recent evictions, reported if prepare_load finds a key missing.
+    EVICTION_HISTORY_SIZE = 10_000
+
     def __init__(
         self,
         num_chunks: int,
@@ -83,6 +87,9 @@ class CPUOffloadingManager(OffloadingManager):
         self.stores_skipped_in_current_batch: int = 0
         self.allocation_sizes_in_current_batch: list[int] = []
         self._cache_generation = 0
+        self._recent_evictions: deque[tuple[OffloadKey, float]] = deque(
+            maxlen=self.EVICTION_HISTORY_SIZE
+        )
 
         # Number of chunk references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -218,7 +225,9 @@ class CPUOffloadingManager(OffloadingManager):
         chunks = []
         for key in keys:
             chunk = self._policy.get(key)
-            assert chunk is not None, f"Chunk {key!r} not found in cache"
+            assert chunk is not None, self._missing_chunk_message(
+                key, keys, req_context
+            )
             assert chunk.is_ready, f"Chunk {key!r} is not ready for reading"
             if chunk.ref_cnt == 0:
                 self._policy.mark_non_evictable(key)
@@ -229,6 +238,38 @@ class CPUOffloadingManager(OffloadingManager):
         if record_access:
             self._record_request_cache_access(keys, req_context, reused_keys=keys)
         return self._get_load_store_spec(keys, chunks)
+
+    def _missing_chunk_message(
+        self,
+        key: OffloadKey,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+    ) -> str:
+        now = time.monotonic()
+        evicted_at = dict(self._recent_evictions)
+        position = req_context.get_offload_key_position
+        missing = [k for k in keys if self._policy.get(k) is None]
+        missing_info = [
+            (position(k), round(now - evicted_at[k], 3) if k in evicted_at else None)
+            for k in missing[:16]
+        ]
+        load_positions = [p for k in keys if (p := position(k)) is not None]
+        load_range = (
+            f"{min(load_positions)}-{max(load_positions)}" if load_positions else None
+        )
+        history_span = (
+            round(now - self._recent_evictions[0][1], 3)
+            if self._recent_evictions
+            else 0.0
+        )
+        return (
+            f"Chunk {key!r} not found in cache (group={get_offload_group_idx(key)}, "
+            f"req_id={req_context.req_id!r}). {len(missing)} of {len(keys)} keys "
+            f"in this load are missing. (end_token, seconds since eviction) per "
+            f"missing key: {missing_info}; load end_token range: {load_range}; "
+            f"eviction history: {len(self._recent_evictions)} keys over "
+            f"{history_span}s."
+        )
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
@@ -329,9 +370,11 @@ class CPUOffloadingManager(OffloadingManager):
             self._num_evictable_cache_chunks -= len(evicted)
             assert self._num_evictable_cache_chunks >= 0
 
+            now = time.monotonic()
             for key, chunk in evicted:
                 self._free_chunk(chunk)
                 to_evict.append(key)
+                self._recent_evictions.append((key, now))
 
         if to_evict and self.events is not None:
             self.events.append(
@@ -439,6 +482,7 @@ class CPUOffloadingManager(OffloadingManager):
 
         self._free_list.clear()
         self._num_allocated_chunks = 0
+        self._recent_evictions.clear()
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
