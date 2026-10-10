@@ -40,9 +40,54 @@ MNKS = [
 ]
 
 
-def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
+def _mxfp4_aiter_weights(w1, w2, start, end, dsv4=False):
+    """MXFP4-quantize experts [start, end) into AITER's W4A4 kernel layout.
+
+    With dsv4, use the DeepSeek V4.1 a4w4 layout instead: a W4A16 quant config
+    with SEPARATED gate/up shuffling, as loaded under
+    VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1.
+    """
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        convert_weight_to_mxfp4_moe_kernel_format,
+        make_mxfp4_moe_quant_config,
+    )
+
+    def quantize(w):
+        w = w[start:end]
+        q, s = dynamic_mxfp4_quant(w.flatten(0, 1))
+        return q.view(*w.shape[:2], -1), s.view(*w.shape[:2], -1)
+
+    (q1, s1), (q2, s2) = quantize(w1), quantize(w2)
+    if dsv4:
+        backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+        q1, q2, s1, s2, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+            backend,
+            None,
+            q1,
+            q2,
+            s1,
+            s2,
+            activation=MoEActivation.SILU,
+            use_separated_a4w4=True,
+        )
+    else:
+        backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+        q1, q2, s1, s2, _, _ = convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+            backend, None, q1, q2, s1, s2
+        )
+    return q1, q2, make_mxfp4_moe_quant_config(backend, s1, s2)
+
+
+def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
     from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import AiterExperts
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+        rocm_aiter_fused_experts,
+    )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
@@ -50,6 +95,9 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
     rocm_aiter_ops.refresh_env_variables()
     init_workspace_manager(pgi.device)
     set_random_seed(47)
+    fp8 = scheme == "fp8_token_channel"
+    dsv4 = scheme == "mxfp4_dsv4"
+    mxfp4 = scheme == "mxfp4" or dsv4
     dtype = current_platform.fp8_dtype() if fp8 else None
     (_, w1, s1, _), (_, w2, s2, _) = make_test_weights(
         32, n, k, quant_dtype=dtype, per_out_ch_quant=fp8
@@ -81,30 +129,50 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
             max_num_tokens=256,
         ),
         moe_parallel_config=parallel,
+        use_mxfp4_w4a4_dsv4=dsv4,
     )
     start, end = pgi.rank * 16, (pgi.rank + 1) * 16
-    quant = FusedMoEQuantConfig.make(
-        dtype,
-        per_act_token_quant=fp8,
-        per_out_ch_quant=fp8,
-        w1_scale=None if s1 is None else s1[start:end].contiguous(),
-        w2_scale=None if s2 is None else s2[start:end].contiguous(),
-    )
+    if mxfp4:
+        local_w1, local_w2, quant = _mxfp4_aiter_weights(w1, w2, start, end, dsv4)
+        ref_w1, ref_w2, ref_quant = _mxfp4_aiter_weights(w1, w2, 0, 32, dsv4)
+    else:
+        quant = FusedMoEQuantConfig.make(
+            dtype,
+            per_act_token_quant=fp8,
+            per_out_ch_quant=fp8,
+            w1_scale=None if s1 is None else s1[start:end].contiguous(),
+            w2_scale=None if s2 is None else s2[start:end].contiguous(),
+        )
+        local_w1, local_w2 = rocm_aiter_ops.shuffle_weights(
+            w1[start:end].contiguous(), w2[start:end].contiguous()
+        )
+        local_w1.is_shuffled = local_w2.is_shuffled = True
     prepare = maybe_make_prepare_finalize(config, quant)
     assert isinstance(prepare, MoriPrepareAndFinalize)
     assert prepare.use_fp8_dispatch == fp8
+    assert prepare.use_fp4_dispatch == mxfp4
     assert prepare.num_dispatchers() == 2
     experts = AiterExperts(config, quant)
     assert not experts.expects_unquantized_inputs
+    expert_rows = []
+    experts_apply = experts.apply
+
+    def recording_apply(**kwargs):
+        expert_rows.append(kwargs["hidden_states"].shape[0])
+        return experts_apply(**kwargs)
+
+    experts.apply = recording_apply
     kernel = FusedMoEKernel(prepare, experts)
-    local_w1, local_w2 = rocm_aiter_ops.shuffle_weights(
-        w1[start:end].contiguous(), w2[start:end].contiguous()
-    )
-    local_w1.is_shuffled = local_w2.is_shuffled = True
     expert_mask = torch.zeros(32, dtype=torch.int32, device=pgi.device)
     expert_mask[start:end] = 1
 
     def reference(route_weights):
+        if mxfp4:
+            # AITER's non-EP MXFP4 path quantizes the BF16 input the same way
+            # as FP4 dispatch, so the BF16 tolerances below still apply.
+            return rocm_aiter_fused_experts(
+                x, ref_w1, ref_w2, route_weights, ids, config, quant_config=ref_quant
+            )
         return torch_experts(
             x,
             w1,
@@ -117,8 +185,15 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
             per_act_token_quant=fp8,
         )
 
+    num_tokens_across_dp = torch.tensor([m, m], dtype=torch.int32, device="cpu")
+
     def run():
-        with set_forward_context(None, vllm_config):
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=m,
+            num_tokens_across_dp=num_tokens_across_dp,
+        ):
             return kernel.apply(
                 x,
                 local_w1,
@@ -158,6 +233,8 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
 
     actual = run()
     check(actual)
+    # The experts see the valid receive prefix, not mori's max-sized buffer.
+    assert expert_rows[-1] == 2 * m
     if graph:
         saved = actual.clone()
         run()
@@ -177,9 +254,14 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, fp8, graph):
     not current_platform.is_rocm() or not has_mori(), reason="Requires ROCm MoRI"
 )
 @pytest.mark.parametrize("m,n,k", MNKS)
-@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8_token_channel"])
+@pytest.mark.parametrize("scheme", ["bf16", "fp8_token_channel", "mxfp4", "mxfp4_dsv4"])
 @multi_gpu_test(num_gpus=2)
-def test_mori_moe(m, n, k, fp8):
+def test_mori_moe(m, n, k, scheme):
+    if scheme in ("mxfp4", "mxfp4_dsv4"):
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            pytest.skip("AITER MXFP4 W4A4 MoE requires gfx950")
     config = VllmConfig(
         parallel_config=ParallelConfig(
             data_parallel_size=2,
@@ -193,4 +275,4 @@ def test_mori_moe(m, n, k, fp8):
         "VLLM_ROCM_USE_AITER_MOE": "1",
         "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": "0",
     }
-    parallel_launch_with_config(2, _mori_worker, config, env, m, n, k, fp8, m == 32)
+    parallel_launch_with_config(2, _mori_worker, config, env, m, n, k, scheme, m == 32)

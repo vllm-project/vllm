@@ -329,14 +329,24 @@ def maybe_make_prepare_finalize(
     elif moe.use_mori_kernels:
         assert quant_config is not None
 
+        # MXFP4 activations are dispatched as packed FP4 with their e8m0
+        # block scales, which the experts consume without re-quantizing.
+        use_fp4_dispatch = moe.use_mori_fp4_dispatch(quant_config)
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
-        use_fp8_dispatch = (
+        use_fp8_dispatch = not use_fp4_dispatch and (
             quant_config.is_per_act_token
             or quant_config.is_block_quantized
             or quant_config.is_per_tensor
         )
-        if use_fp8_dispatch:
+        if use_fp4_dispatch:
+            # One e8m0 scale per 32-element block. token_hidden_size stays
+            # the unpacked hidden size: mori sizes its token buffers by the
+            # BF16 input type, which also covers the BF16 combine.
+            quant_dtype = torch.float4_e2m1fn_x2
+            scale_dim = moe.hidden_dim // 32
+            scale_type_size = torch.float8_e8m0fnu.itemsize
+        elif use_fp8_dispatch:
             # For PTPC (per token per channel) or per-tensor quant,
             # scale dim is 1. For 1x128 quant, scale dim is
             # hidden_dim // 128
@@ -346,18 +356,20 @@ def maybe_make_prepare_finalize(
                 if (quant_config.is_per_act_token or quant_config.is_per_tensor)
                 else moe.hidden_dim // 128
             )
+            scale_type_size = torch.float32.itemsize
         else:
             # Unquantized dispatch (e.g. AITER with defer_input_quant):
             # dispatch raw BF16/FP16 data, no scales needed.
             quant_dtype = moe.in_dtype
             scale_dim = 0
+            scale_type_size = 0
         all_to_all_args = dict(
             rank=all2all_manager.rank,
             num_ep_ranks=all2all_manager.world_size,
             quant_dtype=quant_dtype,
             token_hidden_size=moe.hidden_dim,
             scale_dim=scale_dim,
-            scale_type_size=0 if scale_dim == 0 else torch.float32.itemsize,
+            scale_type_size=scale_type_size,
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             input_dtype=moe.in_dtype,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
@@ -370,6 +382,7 @@ def maybe_make_prepare_finalize(
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
+            use_fp4_dispatch=use_fp4_dispatch,
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:

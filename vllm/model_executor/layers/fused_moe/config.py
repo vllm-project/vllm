@@ -1545,6 +1545,17 @@ class FusedMoEConfig:
     def use_mori_kernels(self):
         return self.moe_parallel_config.use_mori_kernels
 
+    def use_mori_fp4_dispatch(self, quant_config: FusedMoEQuantConfig) -> bool:
+        """Whether MoRI dispatches packed MXFP4 activations with e8m0 scales.
+
+        Covers MXFP4 W4A4 checkpoints and DeepSeek V4.1 a4w4, whose W4A16
+        quant config runs MXFP4 activations in AITER.
+        """
+        return self.use_mori_kernels and (
+            quant_config.use_mxfp4_w4a4
+            or (quant_config.use_mxfp4_w4a16 and self.use_mxfp4_w4a4_dsv4)
+        )
+
     @property
     def use_fi_nvl_two_sided_kernels(self):
         return self.moe_parallel_config.use_fi_nvl_two_sided_kernels
