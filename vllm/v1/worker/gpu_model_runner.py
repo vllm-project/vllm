@@ -376,6 +376,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         return output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self._model_runner_output.kv_connector_output
+
 
 def _copy_pooler_output_to_cpu(
     raw_pooler_output: PoolerOutput, finished_mask: list[bool]
@@ -459,6 +463,10 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensors once the copy has completed.
         del self._raw_pooler_output
         return self._model_runner_output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self._model_runner_output.kv_connector_output
 
 
 class ExecuteModelState(NamedTuple):
