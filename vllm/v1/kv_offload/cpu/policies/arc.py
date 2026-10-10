@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Set as AbstractSet
 
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.cpu.policies.base import (
+    DEPRIORITIZED_SCAN_BUDGET,
     CachePolicy,
     ChunkStatus,
     order_request_keys,
@@ -48,6 +50,8 @@ class ARCCachePolicy(CachePolicy):
         - B1 hit: Recent access patterns matter more → increase T1.
         - B2 hit: Frequent access patterns matter more → decrease T1.
     """
+
+    supports_deprioritized_eviction = True
 
     def __init__(self, cache_capacity: int):
         super().__init__(cache_capacity)
@@ -144,19 +148,29 @@ class ARCCachePolicy(CachePolicy):
         self.b2.clear()
         self.target_t1_size = 0.0
 
-    @override
-    def evict(
-        self, n: int, protected: set[OffloadKey]
-    ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
-        if n == 0:
-            return []
+    def _select(
+        self,
+        n: int,
+        skip: Callable[[OffloadKey], bool],
+        budget: int | None = None,
+        virtual_t1_size: int | None = None,
+    ) -> tuple[list[tuple[OffloadKey, ChunkStatus, bool]], int]:
+        """Pick up to n eviction candidates in ARC order, without mutating.
 
+        budget caps how many skipped entries are walked past before giving up,
+        keeping a deprioritized-aware pass constant-time on a large cache.
+        virtual_t1_size carries T1 accounting across a second pass, so victims
+        already chosen are not counted twice against the T1 target. Returns the
+        candidates and the T1 size they leave behind.
+        """
+        skipped = 0
         # Collect candidates atomically: simulate T1 size changes as we select,
         # but do not modify actual data structures until all n are found.
         candidates: list[
             tuple[OffloadKey, ChunkStatus, bool]
         ] = []  # (key, chunk, from_t1)
-        virtual_t1_size = len(self.t1)
+        if virtual_t1_size is None:
+            virtual_t1_size = len(self.t1)
         # Keep the scans monotonic: restarting from the LRU end after every
         # selection makes a batch eviction quadratic in the number of chunks.
         t1_iter = iter(self.t1.items())
@@ -165,9 +179,13 @@ class ARCCachePolicy(CachePolicy):
         def next_candidate(
             entries: Iterator[tuple[OffloadKey, ChunkStatus]],
         ) -> tuple[OffloadKey, ChunkStatus] | None:
+            nonlocal skipped
             for key, chunk in entries:
-                if chunk.ref_cnt == 0 and key not in protected:
+                if chunk.ref_cnt == 0 and not skip(key):
                     return key, chunk
+                skipped += 1
+                if budget is not None and skipped > budget:
+                    return None
             return None
 
         for _ in range(n):
@@ -187,11 +205,42 @@ class ARCCachePolicy(CachePolicy):
             if candidate is None:
                 entry = next_candidate(t1_iter)
                 if entry is None:
-                    return None
+                    break
                 candidate = (*entry, True)
                 virtual_t1_size -= 1
 
             candidates.append(candidate)
+
+        return candidates, virtual_t1_size
+
+    @override
+    def evict(
+        self,
+        n: int,
+        protected: set[OffloadKey],
+        deprioritized: AbstractSet[OffloadKey] = frozenset(),
+    ) -> list[tuple[OffloadKey, ChunkStatus]] | None:
+        if n == 0:
+            return []
+
+        candidates, virtual_t1_size = self._select(
+            n,
+            lambda key: key in protected or key in deprioritized,
+            budget=max(n, DEPRIORITIZED_SCAN_BUDGET) if deprioritized else None,
+        )
+        if len(candidates) < n and deprioritized:
+            # Every other candidate is taken; fill the rest from the
+            # deprioritized ones, still in ARC order and still accounting for
+            # the T1 entries the first pass already spoke for.
+            taken = {key for key, _, _ in candidates}
+            rest, _ = self._select(
+                n - len(candidates),
+                lambda key: key in protected or key in taken,
+                virtual_t1_size=virtual_t1_size,
+            )
+            candidates += rest
+        if len(candidates) < n:
+            return None
 
         # Apply all evictions now that we know n candidates exist.
         result: list[tuple[OffloadKey, ChunkStatus]] = []
