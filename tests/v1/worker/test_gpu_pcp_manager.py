@@ -151,7 +151,9 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
         (2, [7], [True], 4),
         (2, [3], [False], 3),
         (2, [3, 8], [False, True], 7),
-        (4, [2, 9], [False, True], 4),
+        (4, [2, 16], [False, True], 6),
+        # Too short to give all eight chunks a token, so replicated.
+        (4, [2, 9], [False, True], 11),
     ],
 )
 def test_num_tokens_for_dispatch_uses_largest_pcp_rank(
@@ -570,8 +572,13 @@ def test_split_prefill_rows_repeat_the_request_and_its_full_extent():
     assert extents.tolist() == [164, 164, 3]
 
 
+@pytest.mark.parametrize(
+    ("dcp_world_size", "shard_decode_requests"), [(1, True), (1, False), (2, False)]
+)
 @pytest.mark.parametrize("query_len", [1, 2, 3, 5, 6, 9])
-def test_dcp_replicates_prefills_too_short_to_split(query_len):
+def test_replicates_prefills_too_short_to_split(
+    query_len, dcp_world_size, shard_decode_requests
+):
     """A prefill that cannot fill 2*pcp chunks is replicated, not split."""
     pcp_world_size = 2
     num_scheduled_tokens = np.array([query_len], dtype=np.int32)
@@ -583,8 +590,8 @@ def test_dcp_replicates_prefills_too_short_to_split(query_len):
             pcp_world_size=pcp_world_size,
             pcp_rank=rank,
             device=torch.device("cpu"),
-            shard_decode_requests=False,
-            dcp_world_size=2,
+            shard_decode_requests=shard_decode_requests,
+            dcp_world_size=dcp_world_size,
         )
         assert manager.replicated_requests(num_scheduled_tokens, is_prefilling)[0]
         rows = list(
@@ -593,6 +600,125 @@ def test_dcp_replicates_prefills_too_short_to_split(query_len):
         assert rows == [(0, 0, query_len)]
         rows_per_rank.append(rows)
     assert rows_per_rank[0] == rows_per_rank[1]
+
+
+def _prefill_rows_by_rank(
+    pcp_world_size: int, shard_decode_requests: bool, query_len: int
+) -> list[list[tuple[int, int, int]]]:
+    manager = PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=shard_decode_requests,
+        dcp_world_size=1,
+    )
+    num_scheduled_tokens = np.array([query_len], dtype=np.int32)
+    is_prefilling = np.ones(1, dtype=np.bool_)
+    return [
+        list(manager._iter_rank_chunks(rank, num_scheduled_tokens, is_prefilling))
+        for rank in range(pcp_world_size)
+    ]
+
+
+@pytest.mark.parametrize("shard_decode_requests", [True, False])
+@pytest.mark.parametrize(
+    ("query_len", "expect_replicated"),
+    [
+        (1, True),
+        (2, True),
+        (7, True),
+        (15, True),
+        (16, False),
+        (17, True),
+        (31, False),
+    ],
+)
+def test_pcp_only_short_prefill_gives_every_rank_work(
+    query_len, expect_replicated, shard_decode_requests
+):
+    """Without DCP, a prefill too short to give every PCP rank both of its
+    chunks must still be replicated: a rank left without the prefill skips
+    the prefill KV collectives the other ranks enter, and the step hangs."""
+    pcp_world_size = 8
+    manager = PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=shard_decode_requests,
+        dcp_world_size=1,
+    )
+    replicated = manager.replicated_requests(
+        np.array([query_len], dtype=np.int32), np.ones(1, dtype=np.bool_)
+    )
+    assert bool(replicated[0]) is expect_replicated
+
+    rows_by_rank = _prefill_rows_by_rank(
+        pcp_world_size, shard_decode_requests, query_len
+    )
+    for rank, rows in enumerate(rows_by_rank):
+        if expect_replicated:
+            assert rows == [(0, 0, query_len)], f"{rank=}"
+        else:
+            assert len(rows) == 2 and all(length > 0 for _, _, length in rows), (
+                f"{rank=} {rows=}"
+            )
+    if not expect_replicated:
+        covered = sorted(
+            token
+            for rows in rows_by_rank
+            for _, offset, length in rows
+            for token in range(offset, offset + length)
+        )
+        assert covered == list(range(query_len))
+
+
+@pytest.mark.parametrize("shard_decode_requests", [True, False])
+@pytest.mark.parametrize("query_len", [32, 241, 1000, 4097, 187648])
+def test_pcp_only_long_prefill_is_still_split(query_len, shard_decode_requests):
+    pcp_world_size = 8
+    rows_by_rank = _prefill_rows_by_rank(
+        pcp_world_size, shard_decode_requests, query_len
+    )
+    chunk_size = -(-query_len // (2 * pcp_world_size))
+    for rank, rows in enumerate(rows_by_rank):
+        assert [offset for _, offset, _ in rows] == [
+            rank * chunk_size,
+            (2 * pcp_world_size - 1 - rank) * chunk_size,
+        ]
+    assert sum(length for rows in rows_by_rank for _, _, length in rows) == query_len
+
+
+def test_sharded_decode_replicates_short_prefill_on_every_rank(monkeypatch):
+    """Only decodes are sharded; a replicated prefill runs on every rank, and
+    rank 0 writes its KV and provides its hidden states."""
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        dcp_world_size=1,
+    )
+    monkeypatch.setattr(pcp_manager_module, "async_tensor_h2d", _copy_to_cpu)
+
+    # Requests: decode, short prefill (2 tokens), decode.
+    segments_by_rank, per_rank_num_tokens = manager._build_batch_layout(
+        num_scheduled_tokens=np.array([1, 2, 1], dtype=np.int32),
+        num_computed_tokens=np.array([16, 30, 16], dtype=np.int32),
+        is_prefilling=np.array([False, True, False]),
+        query_start_loc_np=np.array([0, 1, 3, 4], dtype=np.int32),
+    )
+
+    request_indices = [
+        [segment.global_batch_req_idx for segment in rank] for rank in segments_by_rank
+    ]
+    assert request_indices == [[0, 1], [2, 1]]
+    assert per_rank_num_tokens == [3, 3]
+    # gathered: rank 0 = [d0, p0, p1], rank 1 = [d2, p0, p1]
+    assert torch.equal(manager._hidden_restore_idx, torch.tensor([0, 1, 2, 3]))
+    assert torch.equal(
+        manager._gathered_kv_write_mask,
+        torch.tensor([True, True, True, True, False, False]),
+    )
 
 
 @pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
