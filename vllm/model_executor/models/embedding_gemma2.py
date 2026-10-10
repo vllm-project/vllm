@@ -46,11 +46,12 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ProcessingInfo,
     _get_max_soft_tokens,
 )
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsMultiModal
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
     default_pooling_type,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import (
     recursive_replace_linear,
 )
@@ -977,7 +978,9 @@ def _embedding_gemma2_weights_mapper(
     dummy_inputs=EmbeddingGemma2DummyInputsBuilder,
 )
 @default_pooling_type(seq_pooling_type="MEAN", tok_pooling_type="ALL")
-class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
+class EmbeddingGemma2Model(
+    nn.Module, SupportsMultiModal, SupportsLoRA, VllmModelForPooling
+):
     """Multimodal pooling embedding model supporting text, vision, and audio."""
 
     is_pooling_model = True
@@ -1103,6 +1106,23 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
 
     def get_language_model(self) -> nn.Module:  # type: ignore[override]
         return self.language_model
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        connectors = [
+            name
+            for name in ("embed_vision", "embed_audio")
+            if getattr(self, name) is not None
+        ]
+        towers = [
+            name
+            for name in ("vision_tower", "audio_tower")
+            if getattr(self, name) is not None
+        ]
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector=connectors,
+            tower_model=towers,
+        )
 
     def forward(
         self,

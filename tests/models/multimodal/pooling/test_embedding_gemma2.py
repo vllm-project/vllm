@@ -658,3 +658,50 @@ def test_sentence_transformer_tokenizer_config_max_seq_length(tmp_path):
     loaded = get_sentence_transformer_tokenizer_config(str(tmp_path))
     assert loaded is not None
     assert loaded["max_seq_length"] == 8192
+
+
+@needs_model
+def test_lora_applies_only_to_its_request(vllm_runner, st_model, tmp_path):
+    from peft import LoraConfig, get_peft_model
+    from PIL import Image
+
+    from vllm.lora.request import LoRARequest
+
+    text = "task: search result | query: red bicycle"
+    img = Image.new("RGB", (224, 224), color=(0, 128, 255))
+    img_prompt = "Describe this image: <|image|>"
+    base_text = st_model.encode([text], normalize_embeddings=True)
+    base_img = st_model.encode(
+        [{"image": img, "text": img_prompt}], normalize_embeddings=True
+    )
+
+    torch.manual_seed(0)
+    peft_model = get_peft_model(
+        st_model[0].auto_model,
+        LoraConfig(
+            r=8,
+            lora_alpha=16,
+            target_modules=r".*language_model.*\.(q|k|v|o|gate|up|down)_proj",
+        ),
+    )
+    for name, param in peft_model.named_parameters():
+        if "lora_B" in name:
+            torch.nn.init.normal_(param, std=0.05)
+    peft_model.save_pretrained(tmp_path)
+    try:
+        lora_text = st_model.encode([text], normalize_embeddings=True)
+    finally:
+        peft_model.unload()
+    assert _cos(lora_text, base_text).item() < 0.99, "adapter had no effect"
+
+    with vllm_runner(
+        MODEL, runner="pooling", max_model_len=8192, enable_lora=True, max_lora_rank=8
+    ) as vm:
+        out = vm.llm.embed(
+            [text, text, {"prompt": img_prompt, "multi_modal_data": {"image": img}}],
+            lora_request=[LoRARequest("eg2-lora", 1, str(tmp_path)), None, None],
+        )
+    got = [[o.outputs.embedding] for o in out]
+    assert _cos(got[0], lora_text).item() >= TEXT_COS
+    assert _cos(got[1], base_text).item() >= TEXT_COS
+    assert _cos(got[2], base_img).item() >= MM_COS
