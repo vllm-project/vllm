@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import json
 import os
 import pickle
+import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +17,7 @@ import torch
 import vllm.envs as envs
 import vllm.kernels  # noqa: F401 to register kernels
 from vllm import ir
+from vllm.compilation import decorators as compile_decorators
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
@@ -25,6 +28,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
+    ParallelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -35,7 +39,7 @@ from vllm.model_executor.layers.activation import GeluAndMulSparse
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from ..utils import create_new_process_for_each_test
+from ..utils import create_new_process_for_each_test, get_open_port
 
 
 @pytest.fixture
@@ -190,6 +194,124 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+def _uniform_aot_load_worker(
+    rank: int, port: int, cache_root: str, force: bool
+) -> None:
+    """Two gloo ranks share a cache root; rank 1 loses its artifact on restart."""
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=2,
+    )
+    try:
+        os.environ["VLLM_CACHE_ROOT"] = cache_root
+        os.environ["VLLM_USE_AOT_COMPILE"] = "1"
+        os.environ["VLLM_USE_MEGA_AOT_ARTIFACT"] = "1"
+        os.environ["VLLM_USE_STANDALONE_COMPILE"] = "1"
+        disable_envs_cache()
+        args = (torch.randn(10, 10),)
+
+        # Spy on the load attempt itself: the uniform gate must skip it
+        # entirely when any rank lacks a usable artifact, not just fail it.
+        real_try_load = compile_decorators._try_load_aot_compiled_fn
+        attempts = {"n": 0}
+
+        def counting_try_load(*a, **k):
+            attempts["n"] += 1
+            return real_try_load(*a, **k)
+
+        compile_decorators._try_load_aot_compiled_fn = counting_try_load
+
+        def fresh_run() -> CompiledMod:
+            vllm_config = VllmConfig(
+                parallel_config=ParallelConfig(rank=rank),
+                compilation_config=CompilationConfig(
+                    mode=CompilationMode.VLLM_COMPILE,
+                    backend="inductor",
+                ),
+            )
+            with use_vllm_config(vllm_config):
+                mod = CompiledMod(vllm_config=vllm_config)
+                mod(*args)
+            return mod
+
+        def run_and_count() -> tuple[bool, int]:
+            before = attempts["n"]
+            loaded = fresh_run().was_aot_compile_fn_loaded_from_disk
+            return loaded, attempts["n"] - before
+
+        # Phase A: both ranks compile and save their artifacts.
+        outcomes = {}
+        outcomes["a_loaded"], outcomes["a_attempts"] = run_and_count()
+        rank_dirs = list(
+            Path(cache_root).glob(
+                f"torch_compile_cache/torch_aot_compile/*/rank_{rank}_0"
+            )
+        )
+        assert rank_dirs and (rank_dirs[0] / "model").is_file()
+        disable_envs_cache()
+
+        if rank == 1:
+            shutil.rmtree(rank_dirs[0])
+
+        if force:
+            os.environ["VLLM_FORCE_AOT_LOAD"] = "1"
+            disable_envs_cache()
+            with pytest.raises(RuntimeError, match="VLLM_FORCE_AOT_LOAD"):
+                fresh_run()
+            return
+
+        # Phase B: rank 1 lost its artifact. The load decision is collective,
+        # so both ranks must take the compile path, not just the rank that
+        # lost it. Phase C then sees a uniform decision again once both
+        # artifacts are re-saved (load where the local torch supports it;
+        # success of the load itself is test_save_and_load's contract).
+        outcomes["b_loaded"], outcomes["b_attempts"] = run_and_count()
+        disable_envs_cache()
+        outcomes["c_loaded"], outcomes["c_attempts"] = run_and_count()
+        Path(cache_root, f"outcome_{rank}.json").write_text(json.dumps(outcomes))
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_aot_load_decision_is_uniform_across_ranks(tmp_path: Path):
+    """A rank missing its artifact sends every rank to the compile path."""
+    torch.multiprocessing.spawn(
+        _uniform_aot_load_worker,
+        args=(get_open_port(), str(tmp_path), False),
+        nprocs=2,
+        join=True,
+    )
+    rank0, rank1 = (
+        json.loads((tmp_path / f"outcome_{rank}.json").read_text()) for rank in (0, 1)
+    )
+    # No artifacts exist yet: the existence gate sends both ranks to the
+    # compile path without any load attempt.
+    assert rank0["a_loaded"] is False and rank1["a_loaded"] is False
+    assert rank0["a_attempts"] == 0 and rank1["a_attempts"] == 0
+    # Rank 1 lost its artifact: still no load attempt anywhere; a per-rank
+    # gate would have let rank 0 try (and here fail) its own load.
+    assert rank0["b_loaded"] is False and rank1["b_loaded"] is False
+    assert rank0["b_attempts"] == 0 and rank1["b_attempts"] == 0
+    # Artifacts re-saved: both ranks attempt the load together, and whether
+    # it succeeds or not the outcome stays uniform across ranks.
+    assert rank0["c_attempts"] == 1 and rank1["c_attempts"] == 1
+    assert rank0["c_loaded"] == rank1["c_loaded"]
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_force_aot_load_fails_uniformly_across_ranks(tmp_path: Path):
+    """FORCE raises on every rank, not just the rank missing the artifact."""
+    torch.multiprocessing.spawn(
+        _uniform_aot_load_worker,
+        args=(get_open_port(), str(tmp_path), True),
+        nprocs=2,
+        join=True,
+    )
 
 
 @pytest.mark.skipif(
