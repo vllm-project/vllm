@@ -165,6 +165,8 @@ def _backend_incompatibility_reason(
             return "group activation ordering is not supported"
         if quant_config.strategy != QuantizationStrategy.GROUP:
             return "only group-wise scales are supported"
+        if quant_config.group_size % 32 != 0:
+            return "group size must be a multiple of 32"
 
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
