@@ -118,6 +118,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
+        self.aiter_ag_comm: AiterCustomAllreduce | None = None
         self.use_aiter_ag_rs: bool = False
 
         # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
@@ -181,6 +182,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.aiter_ar_comm = None
             else:
                 self.use_aiter_ag_rs = True
+
+        # aiter all-gather for the MLA DCP query gather, instantiated
+        # dedicatedly so that DCP all-reduce keep their current backend.
+        if (
+            unique_name.split(":")[0] == "dcp"
+            and self.world_size in (2, 4, 8)
+            and current_platform.is_rocm()
+            and rocm_aiter_ops.is_custom_all_reduce_enabled()
+        ):
+            aiter_ag_comm = AiterCustomAllreduce(
+                group=self.cpu_group, device=self.device
+            )
+            self.aiter_ag_comm = None if aiter_ag_comm.disabled else aiter_ag_comm
 
         if (
             use_custom_allreduce
@@ -775,6 +789,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.aiter_ar_comm is not None:
             self.aiter_ar_comm.close()
             self.aiter_ar_comm = None
+        if self.aiter_ag_comm is not None:
+            self.aiter_ag_comm.close()
+            self.aiter_ag_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None

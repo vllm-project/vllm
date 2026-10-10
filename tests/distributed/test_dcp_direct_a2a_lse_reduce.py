@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -395,6 +396,7 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
     import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = MagicMock(world_size=2)
+    group.device_communicator.aiter_ag_comm = None
     gathered_query = torch.empty(1, 4, 8)
     group.all_gather.return_value = gathered_query
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
@@ -1090,6 +1092,64 @@ def test_distributed_direct_a2a_matches_reference(world_size: int):
             "TEST_LSE_DTYPE": "bfloat16",
             "LSE_BASE_E": "0",
         },
+    )
+
+
+def _distributed_aiter_q_gather_worker(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(backend="nccl")
+    try:
+        from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+            AiterCustomAllreduce,
+        )
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        aiter_comm = AiterCustomAllreduce(dist.new_group(backend="gloo"), device)
+        assert not aiter_comm.disabled
+        dtype = _dtype_from_name(env["TEST_DTYPE"])
+        # Kimi-K3 at TP8: 12 local heads of kv_lora 512 + rope 64, padded to 128.
+        heads_per_rank, head_dim, padded_num_heads = 12, 576, 128
+        manager = MagicMock(padded_num_heads=padded_num_heads)
+        manager._gather_query = MagicMock(side_effect=AssertionError("fell back"))
+        for num_tokens in (1, 7, 160):
+            local_query = torch.randn(
+                num_tokens, heads_per_rank, head_dim, device=device
+            ).to(dtype)
+            actual = dcp.MLADCPManager._aiter_query_gather(
+                manager, aiter_comm, local_query
+            )
+            # Compare bytes: RCCL has no fp8 all-gather.
+            local_bytes = local_query.view(torch.uint8)
+            gathered = [torch.empty_like(local_bytes) for _ in range(world_size)]
+            dist.all_gather(gathered, local_bytes)
+            expected = torch.cat(gathered, dim=1)
+            assert actual.dtype == dtype
+            assert actual.view(torch.uint8).shape == expected.shape
+            assert actual.untyped_storage().nbytes() >= (
+                num_tokens * padded_num_heads * head_dim * actual.element_size()
+            )
+            assert torch.equal(actual.view(torch.uint8), expected), (
+                f"rank {rank} tokens {num_tokens}"
+            )
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm only.")
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 8, reason="Need at least 8 GPUs."
+)
+@pytest.mark.parametrize("dtype_name", ["bfloat16", "float8_e4m3fn"])
+def test_distributed_aiter_q_gather_matches_rccl(dtype_name: str):
+    """The last-dim AITER gather must equal the head-dim gather byte for byte."""
+    _distributed_run(
+        _distributed_aiter_q_gather_worker,
+        world_size=8,
+        extra_env={"TEST_DTYPE": dtype_name},
     )
 
 
