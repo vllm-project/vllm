@@ -270,8 +270,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         num_prefill_lookahead = max(1, vllm_config.num_prefill_lookahead_tokens)
-        use_dense_all_token_ids = (
-            self.speculative_config is not None and self.speculative_config.use_ngram()
+        use_dense_all_token_ids = self.speculative_config is not None and (
+            self.speculative_config.use_ngram()
+            or self.speculative_config.method == "suffix"
         )
 
         # General request states.
@@ -1142,6 +1143,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
+        on_requests_finished = getattr(self.speculator, "on_requests_finished", None)
+        if on_requests_finished is not None and finished_req_ids:
+            # Before the slots are freed: drafters with cross-request memory
+            # read the finished requests' token history. Preempted requests
+            # resume with the same tokens and are not passed.
+            on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)

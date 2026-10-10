@@ -854,7 +854,9 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     assert hf_config.architectures == [expected_architecture]
 
 
-@pytest.mark.parametrize("method", ["extract_hidden_states", "ngram", "ngram_gpu"])
+@pytest.mark.parametrize(
+    "method", ["extract_hidden_states", "ngram", "ngram_gpu", "suffix"]
+)
 def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
@@ -867,6 +869,18 @@ def test_v2_model_runner_supports_speculative_method(method):
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_suffix_config_without_arctic_inference(monkeypatch):
+    """Suffix decoding config no longer needs Arctic Inference: Model Runner
+    V2 runs it on the GPU, and the V1 proposer checks for Arctic itself."""
+    import vllm.utils.import_utils as import_utils
+
+    monkeypatch.setattr(import_utils, "has_arctic_inference", lambda: False)
+    config = SpeculativeConfig(method="suffix")
+    assert config.num_speculative_tokens == config.suffix_decoding_max_tree_depth
+    with pytest.raises(ValueError, match="suffix_decoding_corpus_tokens"):
+        SpeculativeConfig(method="suffix", suffix_decoding_corpus_tokens=-1)
 
 
 @pytest.mark.parametrize("use_heterogeneous_vocab", [False, True])

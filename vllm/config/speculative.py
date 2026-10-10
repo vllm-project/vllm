@@ -17,7 +17,7 @@ from vllm.config.utils import config, replace
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
-from vllm.utils.import_utils import LazyLoader, has_arctic_inference
+from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
@@ -511,6 +511,12 @@ class SpeculativeConfig:
     exceeded, will trigger eviction in FIFO order. If set to 0, the global
     suffix tree is disabled and past responses are not cached (prompt trees
     are still used)."""
+
+    suffix_decoding_corpus_tokens: int = 1 << 20
+    """Model Runner V2 only: token capacity of the GPU corpus of finished
+    responses used for cross-request matching. Oldest responses are
+    overwritten first. Set 0 (or `suffix_decoding_max_cached_requests` to 0)
+    to match only within each request's own prompt and output."""
 
     suffix_decoding_max_spec_factor: float = 1.0
     """The maximum spec factor for suffix decoding. The spec factor controls
@@ -1587,11 +1593,8 @@ class SpeculativeConfig:
         return self
 
     def _validate_suffix_decoding(self):
-        if not has_arctic_inference():
-            raise ImportError(
-                "Arctic Inference is required for suffix decoding. "
-                "Install via `pip install arctic-inference==0.1.1`."
-            )
+        # Arctic Inference is only needed by the V1 model runner; its proposer
+        # checks for it. Model Runner V2 runs suffix decoding on the GPU.
         if self.num_speculative_tokens is None:
             # Suffix decoding decides the actual number of speculative tokens
             # dynamically and treats num_speculative_tokens as a maximum limit.
@@ -1605,6 +1608,11 @@ class SpeculativeConfig:
             raise ValueError(
                 f"suffix_decoding_max_tree_depth="
                 f"{self.suffix_decoding_max_tree_depth} must be >= 1"
+            )
+        if not 0 <= self.suffix_decoding_corpus_tokens < (1 << 31):
+            raise ValueError(
+                f"suffix_decoding_corpus_tokens="
+                f"{self.suffix_decoding_corpus_tokens} must be in [0, 2**31)"
             )
         if self.suffix_decoding_max_cached_requests < 0:
             raise ValueError(
