@@ -19,6 +19,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     log_non_default_args,
     log_version_and_model,
 )
+from vllm.entrypoints.warmup import load_warmup_config
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
@@ -372,6 +373,12 @@ def validate_api_server_args(args):
             f"invalid reasoning parser: {reasoning_parser} "
             f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
+
+    # Parse --warmup-config before the engine starts so that a bad path or
+    # malformed config fails fast. The parsed config replaces the raw value
+    # and is passed through `args` to every API server worker.
+    if getattr(args, "warmup_config", None) is not None:
+        args.warmup_config = load_warmup_config(args.warmup_config)
 
 
 @instrument(span_name="API server setup")

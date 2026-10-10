@@ -138,6 +138,12 @@ async def build_and_serve(
     app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
+    # Warm up after the app state exists so prompts are rendered exactly as
+    # the serving endpoints render them, but before accepting traffic.
+    warmup_config = load_warmup_config(args.warmup_config)
+    if warmup_config is not None:
+        await warmup_engine(engine_client, app.state.online_renderer, warmup_config)
+
     logger.info("Starting vLLM server on %s", listen_address)
 
     return await serve_http(
@@ -197,10 +203,6 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
-        warmup_cfg = load_warmup_config(args.warmup_config)
-        if warmup_cfg is not None:
-            await warmup_engine(engine_client, warmup_cfg)
-
         shutdown_task = await build_and_serve(
             engine_client, listen_address, sock, args, peer_loads, **uvicorn_kwargs
         )
