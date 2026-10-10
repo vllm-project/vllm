@@ -2274,7 +2274,8 @@ class VllmConfig:
                     value,
                 )
         # Log the custom passes that are enabled
-        self.compilation_config.pass_config.log_enabled_passes()
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            self.compilation_config.pass_config.log_enabled_passes()
 
     def _set_max_num_scheduled_tokens(self):
         """In most cases, the scheduler may schedule a batch with as many tokens as the
