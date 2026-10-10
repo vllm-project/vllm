@@ -193,6 +193,8 @@ async def init_generate_state(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            enable_log_outputs=args.enable_log_outputs,
+            enable_log_deltas=args.enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
             disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
         )
