@@ -199,6 +199,9 @@ pub struct TextRequest {
     pub request_id: String,
     /// Prompt text or prompt token IDs for this request.
     pub prompt: Prompt,
+    /// Source character spans aligned with the prepared prompt token IDs.
+    #[serde(skip)]
+    pub prompt_token_offsets: Option<Vec<(usize, usize)>>,
     /// Multimodal features prepared by a higher-level frontend. Raw text
     /// requests keep this empty; multimodal chat uses it with pre-tokenized
     /// prompt IDs.
@@ -262,6 +265,7 @@ impl TextRequest {
         Self {
             request_id: "test-request".to_string(),
             prompt: Prompt::Text("test".to_string()),
+            prompt_token_offsets: None,
             mm_features: None,
             sampling_params: SamplingParams::default(),
             decode_options: TextDecodeOptions::default(),
