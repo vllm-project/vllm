@@ -1396,6 +1396,18 @@ class Worker(WorkerBase):
         )
 
     def execute_dummy_batch(self) -> None:
+        # WideEP MoE DP lockstep: headless / idle ranks may only enter via
+        # execute_dummy_batch. Always _dummy_run(1) when dp_size > 1 so EP
+        # collectives stay aligned with execute_model(0-token) ranks.
+        #
+        # Do not skip via a sticky latch set by execute_model. That latch can
+        # remain True across engine steps when execute_dummy_batch was not
+        # paired with the call that set it (dp_lockstep). Skipping a needed
+        # dummy desyncs EP ranks (GLM-5.2 WideEP mid-gsm8k hang). Same-step
+        # double dummy is safe; a skipped dummy is not.
+        if self.parallel_config.data_parallel_size > 1:
+            self.model_runner._dummy_run(1)
+            return
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(
             num_tokens,

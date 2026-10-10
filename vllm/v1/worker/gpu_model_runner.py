@@ -4155,17 +4155,10 @@ class GPUModelRunner(
                     return make_empty_encoder_model_runner_output(scheduler_output)
 
             if not num_scheduled_tokens:
-                if (
-                    self.parallel_config.distributed_executor_backend
-                    == "external_launcher"
-                    and self.parallel_config.data_parallel_size > 1
-                ):
-                    # this is a corner case when both external launcher
-                    # and DP are enabled, num_scheduled_tokens could be
-                    # 0, and has_unfinished_requests in the outer loop
-                    # returns True. before returning early here we call
-                    # dummy run to ensure coordinate_batch_across_dp
-                    # is called into to avoid out of sync issues.
+                if self.parallel_config.data_parallel_size > 1:
+                    # Zero-token DP rank (multiproc / disagg WideEP, not only
+                    # external_launcher): run dummy so EP collectives stay in
+                    # lockstep with ranks that have tokens.
                     self._dummy_run(1)
                 if not has_kv_transfer_group():
                     # Return empty ModelRunnerOutput if no work to do.
