@@ -211,6 +211,9 @@ class SchedulerInterface(ABC):
     def set_pause_state(self, pause_state: PauseState) -> None:
         raise NotImplementedError
 
+    def set_preserve_paused_kv(self, preserve: bool) -> None:  # noqa: B027
+        """Optionally let the current pause skip waiting on retained KV."""
+
     @abstractmethod
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

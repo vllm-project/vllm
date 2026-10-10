@@ -417,6 +417,7 @@ class Scheduler(SchedulerInterface):
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+        self._preserve_paused_kv = False
 
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
@@ -2754,6 +2755,10 @@ class Scheduler(SchedulerInterface):
     def set_pause_state(self, pause_state: PauseState) -> None:
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
+        self._preserve_paused_kv = False
+
+    def set_preserve_paused_kv(self, preserve: bool) -> None:
+        self._preserve_paused_kv = preserve
 
     def _request_blocks_can_be_freed(self, request: Request) -> bool:
         # We must defer freeing blocks if an async kv connector may
@@ -2828,7 +2833,8 @@ class Scheduler(SchedulerInterface):
         # the scheduler alive.
         return (
             self.has_unfinished_requests()
-            or self.has_finished_requests()
+            or bool(self.finished_req_ids)
+            or (not self._preserve_paused_kv and self.has_finished_requests())
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
