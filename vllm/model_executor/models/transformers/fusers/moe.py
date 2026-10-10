@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
     is_op,
+    output_value,
     peel,
     trace,
 )
@@ -107,6 +108,13 @@ def _reaches(node: fx.Node, key: str) -> set[fx.Node]:
     return seen
 
 
+def _unreshape(node: object) -> object:
+    """Strip `reshape`/`view` wrappers."""
+    while is_op(node, "reshape") or is_op(node, "view"):
+        node = node.args[0]
+    return node
+
+
 class SharedExpertMLP(nn.Module):
     """Wraps an HF shared expert, applying the output gating it is paired with."""
 
@@ -138,12 +146,25 @@ def _moe_block_forward(self: nn.Module, hidden_states: torch.Tensor) -> torch.Te
     return out.reshape(orig_shape)
 
 
+def _external_moe_block_forward(
+    self: nn.Module, hidden_states: torch.Tensor
+) -> torch.Tensor:
+    """MoE block forward that keeps routing in the Transformers `self.gate`.
+
+    Any shared experts are handled inside `self.experts: MoERunner`."""
+    orig_shape = hidden_states.shape
+    hidden_states = hidden_states.reshape(-1, orig_shape[-1])
+    _, topk_weights, topk_ids = self.gate(hidden_states)
+    return self.experts(hidden_states, topk_ids, topk_weights).reshape(orig_shape)
+
+
 @dataclass
 class MoEBlockFuser:
     """Fuser for MoE block `experts`, `gate` and `shared_experts` (optional)."""
 
     gate_name: str
-    scoring_func: str
+    scoring_func: str | None
+    """`None` if the HF gate keeps routing (external routing)."""
     shared_name: str | None
     shared_gate_name: str | None
     router_dtype: torch.dtype | None = None
@@ -258,6 +279,41 @@ class MoEBlockFuser:
                 return None
         return cls(gate_name, scoring_func, shared_name, shared_gate_name, router_dtype)
 
+    @classmethod
+    def match_external(
+        cls, moe_block: nn.Module, experts_name: str
+    ) -> "MoEBlockFuser | None":
+        """Matches a block returning `experts(x, ids, weights) + shared(x)` with
+        `_, weights, ids = gate(x)`, `x` being the block's input, all up to reshapes.
+
+        Its shared expert can then run in `MoERunner` while `gate` keeps routing."""
+        if (graph := trace(moe_block)) is None:
+            return None
+        experts = find_node(
+            graph, lambda n: n.op == "call_module" and n.target == experts_name
+        )
+        gate = find_node(graph, lambda n: n.op == "call_module" and n.target == "gate")
+        add = _unreshape(output_value(graph))
+        if not (experts and gate and is_op(add, "add") and len(experts.args) == 3):
+            return None
+        x, ids, weights = experts.args
+        shared = add.args[1]
+        if not (
+            _unreshape(add.args[0]) is experts
+            and isinstance(shared, fx.Node)
+            and shared.op == "call_module"
+            and len(gate.args) == len(shared.args) == 1
+            and not (gate.kwargs or shared.kwargs)
+            and getattr(_unreshape(x), "op", None) == "placeholder"
+            and _unreshape(gate.args[0]) is _unreshape(shared.args[0]) is _unreshape(x)
+            and is_op(ids, "getitem")
+            and ids.args == (gate, 2)
+            and is_op(weights, "getitem")
+            and weights.args == (gate, 1)
+        ):
+            return None
+        return cls("gate", None, shared.target, None)
+
     def gate(
         self, moe_block: nn.Module, prefix: str, out_dtype: torch.dtype | None = None
     ) -> GateLinear:
@@ -298,4 +354,7 @@ class MoEBlockFuser:
 
     def rewrite_forward(self, moe_block: nn.Module) -> None:
         """Rewrite `moe_block.forward` to route through vLLM's fused MoE."""
-        moe_block.forward = types.MethodType(_moe_block_forward, moe_block)
+        forward = _moe_block_forward
+        if self.scoring_func is None:
+            forward = _external_moe_block_forward
+        moe_block.forward = types.MethodType(forward, moe_block)
