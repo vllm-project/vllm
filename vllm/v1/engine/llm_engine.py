@@ -518,6 +518,19 @@ class LLMEngine:
                 module.cleanup()
 
     def __del__(self):
+        # Explicitly tear down the engine core instead of relying on its own
+        # weakref.finalize firing once self.engine_core itself happens to
+        # become unreachable: that finalizer exists precisely because an
+        # in-process engine core otherwise holds GPU memory (model weights,
+        # KV cache, NCCL communicators) for the life of the process, but it
+        # only runs once every reference to self.engine_core is gone, which
+        # an incidental extra reference anywhere in this object's attribute
+        # graph can silently delay indefinitely. shutdown() is idempotent
+        # (InprocClient.shutdown() guards on self._finalizer.detach()), so
+        # calling it here eagerly is always safe.
+        if engine_core := getattr(self, "engine_core", None):
+            engine_core.shutdown()
+
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
