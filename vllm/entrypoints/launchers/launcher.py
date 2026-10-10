@@ -374,9 +374,8 @@ def validate_api_server_args(args):
         )
 
 
-@instrument(span_name="API server setup")
-def setup_server(args, *, reuse_port: bool):
-    """Validate API server args and create the server socket."""
+def prepare_server_args(args):
+    """Load parser plugins and validate serving arguments before engine startup."""
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
 
@@ -388,9 +387,19 @@ def setup_server(args, *, reuse_port: bool):
 
     validate_api_server_args(args)
 
+
+@instrument(span_name="API server setup")
+def setup_server(args, *, reuse_port: bool):
+    """Validate API server args and create the server socket."""
+    prepare_server_args(args)
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
+    return bind_server_socket(args, reuse_port=reuse_port)
+
+
+def bind_server_socket(args, *, reuse_port: bool):
+    """Bind after argument validation; startup capture defers this until recovery."""
     if args.uds:
         sock = create_server_unix_socket(args.uds)
     else:

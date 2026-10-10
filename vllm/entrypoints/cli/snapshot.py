@@ -17,6 +17,8 @@ else:
 
 
 def validate_create_args(args: argparse.Namespace) -> None:
+    if getattr(args, "snapshot_config", None) is not None:
+        raise ValueError("--snapshot-config is only supported by ordinary vllm serve")
     model = str(getattr(args, "model_tag", None) or args.model)
     revision = str(getattr(args, "revision", None) or "")
     if (
