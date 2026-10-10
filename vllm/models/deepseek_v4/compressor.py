@@ -319,7 +319,15 @@ class DeepseekCompressor(nn.Module):
                 head_dim=self.head_dim,
                 compress_ratio=self.compress_ratio,
             )
-            if current_platform.is_cuda() and self.head_dim == 512:
+            # Warm up the same implementation selected in forward.
+            if (
+                current_platform.is_cuda()
+                and self.head_dim == 512
+                and (
+                    vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+                    or (current_platform.has_device_capability(90) and has_cutedsl())
+                )
+            ):
                 from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
                     _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
                     _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
