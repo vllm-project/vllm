@@ -20,12 +20,19 @@ from tests.utils import (
     multi_gpu_test,
 )
 from vllm.distributed import get_tp_group
+from vllm.model_executor.layers.activation import SituAndMul
 from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.models.kimi_k3.amd import latent_moe_runner
+from vllm.models.kimi_k3.amd import linear as kimi_linear
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
-from vllm.models.kimi_k3.amd.linear import KimiRoutedOutputTransform
+from vllm.models.kimi_k3.amd.linear import (
+    _KIMI_K3_MERGED_FRONT_MAX_TOKENS,
+    KimiMoE,
+    KimiRoutedOutputTransform,
+    _get_kimi_k3_large_front_workspace,
+)
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -439,3 +446,266 @@ def test_falls_back_when_the_config_breaks_the_shard(
 
     assert not runner._tail_shardable
     assert runner._up_proj_shard_size == 0
+
+
+def test_large_front_workspace_is_shared_within_one_worker() -> None:
+    device = torch.device("cuda:0")
+    first = _get_kimi_k3_large_front_workspace(device)
+    second = _get_kimi_k3_large_front_workspace(device)
+
+    assert first is second
+    assert first.front.shape == (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 6016)
+    assert first.front.dtype == torch.float32
+    assert first.shared.shape == (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 768)
+    assert first.router.shape == (_KIMI_K3_MERGED_FRONT_MAX_TOKENS, 896)
+    assert first.routed.shape == (
+        _KIMI_K3_MERGED_FRONT_MAX_TOKENS,
+        LATENT_SIZE,
+    )
+
+
+@pytest.mark.parametrize(
+    "num_tokens,expected",
+    [
+        (0, False),
+        (1, True),
+        (16, True),
+        (17, False),
+        (31, False),
+        (32, True),
+        (33, False),
+        (48, True),
+        (64, True),
+        (80, True),
+        (96, True),
+        (112, True),
+        (128, True),
+        (129, False),
+        (192, True),
+        (193, False),
+        (255, False),
+        (256, False),
+        (257, False),
+        (511, False),
+        (512, True),
+        (513, False),
+        (1024, True),
+        (1025, False),
+        (1536, True),
+        (1537, False),
+        (2048, True),
+        (2049, False),
+    ],
+)
+def test_large_front_supports_only_measured_runtime_ranges(
+    num_tokens: int,
+    expected: bool,
+) -> None:
+    layer = object.__new__(KimiMoE)
+    object.__setattr__(layer, "_kimi_k3_large_front_available", True)
+
+    assert layer._supports_kimi_k3_large_front(num_tokens) is expected
+
+
+def _large_front_config_layer() -> tuple[KimiMoE, ROCmLatentMoERunner]:
+    layer = object.__new__(KimiMoE)
+    runner = object.__new__(ROCmLatentMoERunner)
+    quant_method = SimpleNamespace(is_monolithic=False, moe_kernel=None)
+    routed_experts = SimpleNamespace(
+        quant_method=quant_method,
+        _ensure_moe_quant_config_init=lambda: None,
+    )
+    object.__setattr__(
+        runner,
+        "moe_config",
+        SimpleNamespace(
+            dp_size=1,
+            ep_size=1,
+            pcp_size=1,
+            is_sequence_parallel=False,
+        ),
+    )
+    object.__setattr__(runner, "_tail_shardable", True)
+    object.__setattr__(runner, "routed_experts", routed_experts)
+    object.__setattr__(layer, "experts", runner)
+    object.__setattr__(
+        layer,
+        "shared_experts",
+        SimpleNamespace(act_fn=SituAndMul(beta=4, linear_beta=25)),
+    )
+    return layer, runner
+
+
+def test_large_front_configuration_gate_accepts_serving_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layer, _ = _large_front_config_layer()
+    monkeypatch.setattr(kimi_linear, "on_gfx950", lambda: True)
+    monkeypatch.setattr(
+        kimi_linear,
+        "_kimi_k3_moe_front_weights_are_compatible",
+        lambda *args: True,
+    )
+    weight = torch.empty(1)
+
+    assert layer._supports_kimi_k3_large_front_config(weight, weight, weight)
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "architecture",
+        "data-parallel",
+        "expert-parallel",
+        "prefill-context-parallel",
+        "sequence-parallel",
+        "unshardable-tail",
+        "pre-reduced-output",
+        "monolithic-experts",
+        "activation",
+        "weights",
+    ],
+)
+def test_large_front_configuration_gate_rejects_unsupported_config(
+    unsupported: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layer, runner = _large_front_config_layer()
+    monkeypatch.setattr(kimi_linear, "on_gfx950", lambda: True)
+    monkeypatch.setattr(
+        kimi_linear,
+        "_kimi_k3_moe_front_weights_are_compatible",
+        lambda *args: True,
+    )
+
+    if unsupported == "architecture":
+        monkeypatch.setattr(kimi_linear, "on_gfx950", lambda: False)
+    elif unsupported == "data-parallel":
+        runner.moe_config.dp_size = 2
+    elif unsupported == "expert-parallel":
+        runner.moe_config.ep_size = 2
+    elif unsupported == "prefill-context-parallel":
+        runner.moe_config.pcp_size = 2
+    elif unsupported == "sequence-parallel":
+        runner.moe_config.is_sequence_parallel = True
+    elif unsupported == "unshardable-tail":
+        runner._tail_shardable = False
+    elif unsupported == "pre-reduced-output":
+        runner.routed_experts.quant_method.moe_kernel = SimpleNamespace(
+            output_is_reduced=lambda: True
+        )
+    elif unsupported == "monolithic-experts":
+        runner.routed_experts.quant_method.is_monolithic = True
+    elif unsupported == "activation":
+        layer.shared_experts.act_fn = SituAndMul(beta=1, linear_beta=None)
+    elif unsupported == "weights":
+        monkeypatch.setattr(
+            kimi_linear,
+            "_kimi_k3_moe_front_weights_are_compatible",
+            lambda *args: False,
+        )
+    else:
+        raise AssertionError(unsupported)
+
+    weight = torch.empty(1)
+    assert not layer._supports_kimi_k3_large_front_config(weight, weight, weight)
+
+
+def test_hipblaslt_initialization_is_process_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aiter
+
+    calls = 0
+
+    def _initialize() -> None:
+        nonlocal calls
+        calls += 1
+
+    kimi_linear._initialize_kimi_k3_hipblaslt.cache_clear()
+    monkeypatch.setattr(aiter, "hipb_create_extension", _initialize)
+    kimi_linear._initialize_kimi_k3_hipblaslt()
+    kimi_linear._initialize_kimi_k3_hipblaslt()
+    kimi_linear._initialize_kimi_k3_hipblaslt.cache_clear()
+
+    assert calls == 1
+
+
+def test_hipblaslt_initialization_is_lazy_until_hipblas_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aiter.ops import gradlib
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        kimi_linear,
+        "_kimi_k3_large_front_gemm_config",
+        lambda m: {"libtype": "hipblaslt", "solidx": 7},
+    )
+    monkeypatch.setattr(
+        kimi_linear,
+        "_initialize_kimi_k3_hipblaslt",
+        lambda: calls.append("initialize"),
+    )
+    monkeypatch.setattr(gradlib, "_hipb_mm", lambda *args: calls.append("gemm"))
+
+    kimi_linear._kimi_k3_large_front_gemm(
+        torch.empty(1, 1),
+        torch.empty(1, 1),
+        torch.empty(1, 1),
+    )
+
+    assert calls == ["initialize", "gemm"]
+
+
+def test_large_front_core_skips_recomputing_shared_stage1() -> None:
+    calls: list[dict] = []
+    topk_weights = torch.empty(512, 16)
+    topk_ids = torch.empty(512, 16, dtype=torch.int32)
+    fused_output = torch.empty(512, LATENT_SIZE, dtype=DTYPE)
+    shared_output = torch.empty(512, HIDDEN_SIZE, dtype=DTYPE)
+    shared_intermediate = torch.empty(512, 768, dtype=DTYPE)
+
+    class QuantMethod:
+        is_monolithic = False
+        topk_indices_dtype = torch.int32
+
+    def forward_modular(**kwargs):
+        calls.append(kwargs)
+        return fused_output
+
+    initialized = False
+
+    def ensure_quant_config() -> None:
+        nonlocal initialized
+        initialized = True
+
+    runner = _runner(
+        routed_experts=SimpleNamespace(
+            quant_method=QuantMethod(),
+            _ensure_moe_quant_config_init=ensure_quant_config,
+            forward_modular=forward_modular,
+        ),
+        router=SimpleNamespace(
+            select_experts=lambda **kwargs: (topk_weights, topk_ids)
+        ),
+        _shared_experts=SimpleNamespace(
+            _layer=SimpleNamespace(down_proj=lambda intermediate: (shared_output, None))
+        ),
+    )
+    hidden_states = torch.empty(512, LATENT_SIZE, dtype=DTYPE)
+    router_logits = torch.empty(512, 896, dtype=torch.float32)
+
+    actual_shared, actual_fused = runner.run_kimi_k3_large_moe_core(
+        hidden_states,
+        router_logits,
+        shared_intermediate,
+    )
+
+    assert initialized
+    assert actual_shared is shared_output
+    assert actual_fused is fused_output
+    assert len(calls) == 1
+    assert calls[0]["x"] is hidden_states
+    assert calls[0]["shared_experts"] is None
+    assert calls[0]["shared_experts_input"] is None
