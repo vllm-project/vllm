@@ -102,10 +102,18 @@ class MockSubscriber:
         poll_ms = _FIRST_EVENT_POLL_MS
         deadline = time.monotonic() + _EVENT_DRAIN_TIMEOUT
         while time.monotonic() < deadline:
-            events = dict(poller.poll(poll_ms))
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            events = dict(poller.poll(min(poll_ms, remaining_ms)))
 
             if events.get(self.sub) != zmq.POLLIN:
-                return cpu_stored_events
+                # Once at least one CPU stored event has been seen, a single
+                # idle poll means the burst has drained, so return early.
+                # Before that, keep retrying until the deadline: publishing
+                # can be delayed (e.g. by real disk I/O in fs-tiering
+                # secondary tiers) well past the first poll window.
+                if cpu_stored_events:
+                    return cpu_stored_events
+                continue
 
             topic_bytes, _, payload = self.sub.recv_multipart()
 
