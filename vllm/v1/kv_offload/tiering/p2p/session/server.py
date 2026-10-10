@@ -85,6 +85,7 @@ class _OutboundRequestState:
     remaining: int = 0  # blocks that need to be transferred to client
     finishing: bool = False  # Signal finish request ASAP
     inflight: int = 0  # transfers submitted for this round, not yet polled
+    store_timed_out: bool = False
     # Job IDs that submit_store'd blocks for this round and have not
     # yet emitted a StoreResult. The terminal-finalize helper drains
     # this set; poll-done and poll-failed discard entries as their
@@ -322,6 +323,10 @@ class ServerRole:
         rnd = st.outbound.get(round_seq)
         if rnd is None:
             rnd = st.outbound[round_seq] = _OutboundRequestState()
+        if rnd.store_timed_out:
+            self._store_jobs.pop(job_id)
+            self._pending_store_results.append(StoreResult(job_id, success=False))
+            return
         if from_lookup:
             rnd.lookup_supplied = True
         result = rnd.add_stored_blocks(keys, block_ids, job_id)
@@ -765,7 +770,9 @@ class ServerRole:
                     tid,
                 )
                 continue
-            results.extend(self._settle_xfer_jobs(xfer, success=True))
+            results.extend(
+                self._settle_xfer_jobs(xfer, success=not xfer.round.store_timed_out)
+            )
             rnd = xfer.round
             st = self._requests.get(xfer.kv_request_id)
             if st is not None and st.outbound.get(xfer.round_key) is rnd:
@@ -773,7 +780,12 @@ class ServerRole:
                 assert rnd.remaining >= 0, (
                     f"remaining went negative for kv_request_id={xfer.kv_request_id}"
                 )
-                if rnd.remaining == 0:
+                if rnd.store_timed_out:
+                    if rnd.inflight == 0:
+                        self._finalize_outbound(
+                            xfer.kv_request_id, xfer.round_key, success=False
+                        )
+                elif rnd.remaining == 0:
                     self._finalize_outbound(
                         xfer.kv_request_id, xfer.round_key, success=True
                     )
@@ -800,6 +812,12 @@ class ServerRole:
             rnd = xfer.round
             st = self._requests.get(xfer.kv_request_id)
             if st is not None and st.outbound.get(xfer.round_key) is rnd:
+                if rnd.store_timed_out:
+                    if rnd.inflight == 0:
+                        self._finalize_outbound(
+                            xfer.kv_request_id, xfer.round_key, success=False
+                        )
+                    continue
                 del st.outbound[xfer.round_key]
                 if failed_rounds is None:
                     failed_rounds = []
@@ -918,7 +936,14 @@ class ServerRole:
         result.
         """
         results: list[StoreResult] = []
+        still_pinned = (
+            {jid for active in self._inflight.values() for jid in active.job_ids}
+            if xfer.round.store_timed_out
+            else set()
+        )
         for job_id in xfer.job_ids:
+            if job_id in still_pinned:
+                continue
             if self._store_jobs.pop(job_id, None) is None:
                 continue
             results.append(StoreResult(job_id=job_id, success=success))
@@ -953,7 +978,12 @@ class ServerRole:
         fetch). Other rounds of the id are untouched.
         """
         st = self._requests[kv_request_id]
-        req = st.outbound.pop(round_key)
+        req = st.outbound[round_key]
+        if req.store_timed_out and req.inflight:
+            return
+        del st.outbound[round_key]
+        if req.store_timed_out:
+            success = False
         if success is None:
             success = req.demand_received and req.remaining == 0
         settled = self._fail_round_jobs(req) if not success else None
@@ -996,24 +1026,34 @@ class ServerRole:
         inflight transfers in ``mode="wait"``. Sends ``AbortAckMsg`` once
         nothing remains inflight, or after ``_CANCEL_DRAIN_TIMEOUT_S``
         falls back to ``mode="immediate"`` and acks anyway.
+        Store-timed-out rounds retain their pins until cancellation is confirmed.
         """
         st = self._requests[kv_request_id]
         rnd = st.outbound.pop(round_seq, None)
         if rnd is not None:
-            # Its transfers are being cancelled; fail its jobs now
-            # instead of leaking them to the store timeout.
-            self._pending_store_results.extend(self._fail_round_jobs(rnd))
+            if rnd.store_timed_out:
+                st.outbound[round_seq] = rnd
+            else:
+                # Its transfers are being cancelled; fail its jobs now
+                # instead of leaking them to the store timeout.
+                self._pending_store_results.extend(self._fail_round_jobs(rnd))
         ids = [
             tid
             for tid, x in self._inflight.items()
             if x.kv_request_id == kv_request_id and x.round_key == round_seq
         ]
         if not ids:
+            if rnd is not None and rnd.store_timed_out:
+                self._finalize_outbound(
+                    kv_request_id, round_seq, success=False, send_done=False
+                )
             self._finalize_abort(kv_request_id, round_seq)
             return
 
         started_at = self._pending_aborts[(kv_request_id, round_seq)]
-        if time.monotonic() - started_at >= _CANCEL_DRAIN_TIMEOUT_S:
+        if time.monotonic() - started_at >= _CANCEL_DRAIN_TIMEOUT_S and not (
+            rnd is not None and rnd.store_timed_out
+        ):
             for tid in ids:
                 self._inflight_pop(tid)
             self._transport.cancel(ids, mode="immediate")
@@ -1037,6 +1077,10 @@ class ServerRole:
             if tid not in still_set:
                 self._inflight_pop(tid)
         if not still:
+            if rnd is not None and rnd.store_timed_out:
+                self._finalize_outbound(
+                    kv_request_id, round_seq, success=False, send_done=False
+                )
             self._finalize_abort(kv_request_id, round_seq)
 
     def _finalize_abort(self, kv_request_id: str, round_seq: int) -> None:
@@ -1129,10 +1173,44 @@ class ServerRole:
                     timed_out = []
                 timed_out.append(jid)
         if timed_out is None:
-            return []
+            if not any(xfer.round.store_timed_out for xfer in self._inflight.values()):
+                return []
+            timed_out = []
         results: list[StoreResult] = []
+        expired = set(timed_out)
+        rounds = {
+            (xfer.kv_request_id, xfer.round_key): xfer.round
+            for xfer in self._inflight.values()
+            if xfer.round.store_timed_out or expired.intersection(xfer.job_ids)
+        }
+        for (kv_request_id, round_key), rnd in rounds.items():
+            rnd.store_timed_out = True
+            tids = [tid for tid, xfer in self._inflight.items() if xfer.round is rnd]
+            still = set(self._transport.cancel(tids, mode="wait"))
+            for tid in tids:
+                if tid in still:
+                    continue
+                xfer = self._inflight_pop(tid)
+                assert xfer is not None
+                results.extend(self._settle_xfer_jobs(xfer, success=False))
+            st = self._requests.get(kv_request_id)
+            if (
+                rnd.inflight == 0
+                and st is not None
+                and st.outbound.get(round_key) is rnd
+            ):
+                self._finalize_outbound(kv_request_id, round_key, success=False)
+
+        # Cancellation may still be draining. Keep every affected pin until
+        # the transport confirms that no transfer reads its primary slot.
+        inflight_job_ids = {
+            jid for xfer in self._inflight.values() for jid in xfer.job_ids
+        }
         for jid in timed_out:
-            del self._store_jobs[jid]
+            if jid in inflight_job_ids:
+                continue
+            if self._store_jobs.pop(jid, None) is None:
+                continue
             results.append(StoreResult(job_id=jid, success=False))
             logger.warning("P2PSession %s: store job %d timed out", self._peer_id, jid)
         return results

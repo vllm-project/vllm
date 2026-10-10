@@ -1631,10 +1631,10 @@ class TestServerFlows:
         stores = session.poll().stores
         assert StoreResult(job_id=1, success=False) in stores
 
-    def test_store_timeout_then_late_completion_no_duplicate(self):
-        """A job timed out by _timeout_pending_store_jobs must not also
-        emit a contradictory StoreResult(success=True) when the transport
-        later reports the same transfer as done."""
+    @pytest.mark.parametrize("cancel_pending", [False, True])
+    def test_store_timeout_cancels_stuck_transfer_after_confirmation(
+        self, cancel_pending
+    ):
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1649,25 +1649,100 @@ class TestServerFlows:
         )
         session.poll()
         tid = next(iter(transport._transfers))
-
-        # Backdate the store job so the next poll times it out.
         session._server._store_jobs[1] = time.monotonic() - 60.0
-        stores = session.poll().stores
-        assert StoreResult(job_id=1, success=False) in stores
-        assert StoreResult(job_id=1, success=True) not in stores
+        if cancel_pending:
+            transport._cancel_still_inflight.add(tid)
+            for _ in range(3):
+                assert session.poll().stores == []
+                assert 1 in session._server._store_jobs
+                assert tid in session._server._inflight
+                assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
+            transport._cancel_still_inflight.clear()
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        assert transport._cancel_calls
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+        assert tid not in session._server._inflight
+        assert tid not in transport._transfers
+        terminal = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(terminal) == 1
+        assert terminal[0][TransferDoneMsg.SUCCESS] is False
+        assert session.poll().stores == []
 
-        # Transport later reports the same transfer as done — must not
-        # emit a second (contradictory) StoreResult for job_id=1.
-        transport._poll_done.append(tid)
-        stores = session.poll().stores
-        assert all(s.job_id != 1 for s in stores), (
-            f"unexpected duplicate StoreResult after timeout: {stores}"
+    @pytest.mark.parametrize("success", [True, False])
+    def test_store_timeout_keeps_pins_until_cancel_or_late_terminal(self, success):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-2", [b"k2"], [1], job_id=2)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [5],
+            }
         )
+        session.poll()
+        tid = next(iter(transport._transfers))
+        transport._cancel_still_inflight.add(tid)
 
-    def test_store_timeout_then_late_failure_no_duplicate(self):
-        """Symmetric guard: a timed-out job must not also emit a second
-        StoreResult(success=False) when the transport later reports the
-        same transfer as failed."""
+        for jid in (1, 2):
+            session._server._store_jobs[jid] = time.monotonic() - 60.0
+        # A StoreResult releases the primary slot. Only the job still
+        # waiting for a fetch may time out while the transfer is active.
+        assert session.poll().stores == [StoreResult(job_id=2, success=False)]
+        assert session.poll().stores == []
+        assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
+
+        completed = transport._poll_done if success else transport._poll_failed
+        completed.append(tid)
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        terminal = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(terminal) == 1
+        assert terminal[0][TransferDoneMsg.SUCCESS] is False
+        assert session.poll().stores == []
+
+    @pytest.mark.parametrize("success", [True, False, None])
+    def test_store_timeout_waits_for_other_transfers_in_round(self, success):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [5, 6],
+            }
+        )
+        session.poll()
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        first, second = list(transport._transfers)
+        session._server._store_jobs[1] = time.monotonic() - 60.0
+        transport._cancel_still_inflight.add(second)
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        assert first not in session._server._inflight
+        assert second in session._server._inflight
+        assert 2 in session._server._store_jobs
+        assert not any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
+        # Additional supply must not restart the timed-out round.
+        session.add_stored_blocks("req-1", [b"k3"], [2], job_id=3)
+        assert session.poll().stores == [StoreResult(job_id=3, success=False)]
+        assert set(session._server._inflight) == {second}
+        if success is None:
+            transport._cancel_still_inflight.clear()
+        else:
+            completed = transport._poll_done if success else transport._poll_failed
+            completed.append(second)
+        assert session.poll().stores == [StoreResult(job_id=2, success=False)]
+        terminal = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(terminal) == 1
+        assert terminal[0][TransferDoneMsg.SUCCESS] is False
+        assert session.poll().stores == []
+
+    def test_abort_during_store_timeout_keeps_unconfirmed_pins(self):
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
@@ -1682,18 +1757,27 @@ class TestServerFlows:
         )
         session.poll()
         tid = next(iter(transport._transfers))
-
+        transport._cancel_still_inflight.add(tid)
         session._server._store_jobs[1] = time.monotonic() - 60.0
-        stores = session.poll().stores
-        assert [s for s in stores if s.job_id == 1] == [
-            StoreResult(job_id=1, success=False)
-        ]
-
-        transport._poll_failed.append(tid)
-        stores = session.poll().stores
-        assert all(s.job_id != 1 for s in stores), (
-            f"unexpected duplicate StoreResult after timeout: {stores}"
+        assert session.poll().stores == []
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+                AbortFetchMsg.ROUND_SEQ: 0,
+            }
         )
+        assert session.poll().stores == []
+        session._server._pending_aborts[("req-1", 0)] = time.monotonic() - 60.0
+        assert session.poll().stores == []
+        assert 1 in session._server._store_jobs
+        assert tid in session._server._inflight
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+        assert not any(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent)
+        transport._cancel_still_inflight.clear()
+        assert session.poll().stores == [StoreResult(job_id=1, success=False)]
+        assert sum(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent) == 1
+        assert session.poll().stores == []
 
 
 # ---------------------------------------------------------------------------
