@@ -1526,6 +1526,76 @@ def _run_streaming_tool(engine, name: str, chunks: list[str]) -> dict:
     return json.loads(_collect_arg_deltas(deltas))
 
 
+class TestBatchArgConversion:
+    @pytest.mark.parametrize("argument_length", [256, 2048])
+    @pytest.mark.parametrize("entrypoint", ["parse", "extract_tool_calls_from_content"])
+    def test_conversion_work_scales_with_complete_input(
+        self, mock_request, argument_length, entrypoint
+    ):
+        from vllm.parser.granite import _granite_arg_converter, granite_config
+
+        converted_lengths = []
+
+        def converter(raw_args, partial):
+            converted_lengths.append(len(raw_args))
+            return _granite_arg_converter(raw_args, partial)
+
+        engine = _make_engine(
+            dataclasses.replace(granite_config(), arg_converter=converter),
+            vocab={"<|tool_call|>": 202},
+        )
+        arguments = {"payload": "x" * argument_length}
+        text = "<|tool_call|> " + json.dumps([{"name": "emit", "arguments": arguments}])
+        if entrypoint == "parse":
+            _, _, calls = engine.parse(text, mock_request)
+        else:
+            result = engine.extract_tool_calls_from_content(text, mock_request)
+            calls = [tool.function for tool in result.tool_calls]
+        assert len(calls) == 1
+        assert calls[0].name == "emit"
+        assert json.loads(calls[0].arguments) == arguments
+        # Count converter input instead of using a machine-dependent time limit.
+        # Re-converting every growing prefix performs quadratic work.
+        assert sum(converted_lengths) <= 4 * len(text)
+
+    @pytest.mark.parametrize("conversion_error", [False, True])
+    def test_batch_parse_preserves_subsequent_streaming(
+        self, mock_request, conversion_error
+    ):
+        from vllm.parser.granite import _granite_arg_converter, granite_config
+
+        fail = conversion_error
+
+        def converter(raw_args, partial):
+            if fail:
+                raise RuntimeError("converter failed")
+            return _granite_arg_converter(raw_args, partial)
+
+        engine = _make_engine(
+            dataclasses.replace(granite_config(), arg_converter=converter),
+            vocab={"<|tool_call|>": 202},
+        )
+        text = '<|tool_call|> [{"name": "emit", "arguments": {"payload": "batch"}}]'
+        if conversion_error:
+            with pytest.raises(RuntimeError, match="converter failed"):
+                engine.parse(text, mock_request)
+        else:
+            engine.parse(text, mock_request)
+
+        fail = False
+        prefix = '<|tool_call|> [{"name": "emit", "arguments": {"payload": "stream'
+        delta = engine.extract_tool_calls_streaming(
+            previous_text="",
+            current_text=prefix,
+            delta_text=prefix,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=mock_request,
+        )
+        assert _collect_arg_deltas([delta]) == '{"payload": "stream'
+
+
 class TestArgDeltaWithConverter:
     """Exercise _compute_arg_delta with arg_converter + stream_arg_deltas.
 

@@ -734,7 +734,14 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events, finished=True)
+        # Batch parsing only needs the completed arguments below, not each
+        # growing JSON prefix produced for a streaming response.
+        stream_arg_deltas = self._stream_arg_deltas
+        self._stream_arg_deltas = False
+        try:
+            delta = self._events_to_delta(events, finished=True)
+        finally:
+            self._stream_arg_deltas = stream_arg_deltas
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None
