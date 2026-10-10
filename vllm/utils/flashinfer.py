@@ -365,6 +365,19 @@ def has_flashinfer_comm() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cake_sampling() -> bool:
+    """Return whether FlashInfer's Cake radix top-k/top-p sampler is available."""
+    if not has_flashinfer():
+        return False
+    module = _get_submodule("flashinfer.cake_sampling")
+    return bool(
+        module
+        and callable(getattr(module, "top_k_top_p_sampling_from_probs", None))
+        and callable(getattr(module, "cake_sampling_route", None))
+    )
+
+
+@functools.cache
 def has_flashinfer_packed_fused_kda_decode() -> bool:
     """Return whether FlashInfer's packed fused KDA decode API is available."""
     if not has_flashinfer():

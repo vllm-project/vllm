@@ -111,6 +111,10 @@ class SamplingStates:
         top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
         return top_k, top_p
 
+    def max_top_k(self, idx_mapping_np: np.ndarray) -> int:
+        """Largest top-k in the batch; ``vocab_size`` if any request disables it."""
+        return int(np.max(self.top_k.np[idx_mapping_np]))
+
     def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
@@ -120,7 +124,8 @@ class SamplingStates:
         top_k, top_p = self.get_top_k_top_p(expanded_idx_mapping, idx_mapping_np)
         if top_k is None and top_p is None:
             return logits
-        return apply_top_k_top_p(logits, top_k, top_p)
+        k_max = self.max_top_k(idx_mapping_np) if top_k is not None else None
+        return apply_top_k_top_p(logits, top_k, top_p, k_max=k_max)
 
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self.temperature.np[idx_mapping_np] == 0.0))

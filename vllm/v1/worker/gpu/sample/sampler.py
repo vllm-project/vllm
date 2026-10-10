@@ -334,15 +334,22 @@ class Sampler:
         top_p: torch.Tensor | None,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        k_max = (
+            self.sampling_states.max_top_k(idx_mapping_np)
+            if top_k is not None
+            else None
+        )
         if use_fused_sampler:
             if self.use_flashinfer:
-                sampled = flashinfer_sample(processed_logits, top_k, top_p).to(
-                    torch.int64
-                )
+                sampled = flashinfer_sample(
+                    processed_logits, top_k, top_p, k_max=k_max
+                ).to(torch.int64)
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
-            processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+            processed_logits = apply_top_k_top_p(
+                processed_logits, top_k, top_p, k_max=k_max
+            )
             sampled = gumbel_sample(
                 processed_logits,
                 expanded_idx_mapping,
