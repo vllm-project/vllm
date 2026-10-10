@@ -25,11 +25,14 @@ It supports page size = 1.
 
 # Adapted from
 # https://github.com/ModelTC/lightllm/blob/f2a54f0912293f683bf1d1695fd12c4098a5bf82/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py#L1
+from functools import cache
+
 import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 
 
 def _prefer_narrow_kv_tile() -> bool:
@@ -223,6 +226,15 @@ def get_block_size(dtype: torch.dtype) -> int:
         return 64
 
 
+@cache
+def _fit_block_to_shared_memory(block: int, head_dim: int, element_size: int) -> int:
+    """Halve the tile until its Q, K and P tiles fit in shared memory."""
+    max_shared_mem = get_max_shared_memory_bytes()
+    while block > 16 and element_size * block * (2 * head_dim + block) > max_shared_mem:
+        block //= 2
+    return block
+
+
 def context_attention_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -247,6 +259,10 @@ def context_attention_fwd(
     BLOCK = get_block_size(q.dtype)
     if Lk >= 512:
         BLOCK = min(BLOCK, 32)
+    if current_platform.is_cuda():
+        BLOCK = _fit_block_to_shared_memory(
+            BLOCK, triton.next_power_of_2(Lk), q.element_size()
+        )
 
     sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
     # rescale with 1/ln(2) for triton exp2
