@@ -69,6 +69,10 @@ class LoadConfig:
     - None (default): Uses memory-mapped (lazy) loading. When an NFS
       filesystem is detected and the total checkpoint size fits within 90%%
       of available RAM, prefetching is enabled automatically.
+      On CUDA with safetensors >= 0.9.0rc1 (Linux), shards are instead
+      streamed to the GPUs by safetensors' CUDA prefetch loader: each shard is
+      read once per node and redistributed over the tensor-parallel group.
+      Set "lazy" to keep the memory-mapped reader.
     - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
       Unlike the default (None), auto-prefetch on NFS is not performed.
