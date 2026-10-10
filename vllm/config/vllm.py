@@ -1302,15 +1302,26 @@ class VllmConfig:
                 )
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method != "dspark"
+                and speculative_config.method not in ("dflash", "dspark")
             ):
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
                 )
-            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+            if speculative_config.method not in (
+                "dflash",
+                "dspark",
+                "eagle",
+                "eagle3",
+                "mtp",
+            ):
                 raise ValueError(
-                    "Watermarking supports only autoregressive model-based "
-                    "speculative decoding."
+                    "Watermarking supports only dflash, dspark, eagle, eagle3 and "
+                    "mtp speculative decoding."
+                )
+            if self._is_dflash_candidate_draft():
+                raise ValueError(
+                    "Watermarking does not support DFlash2 and LiLiCorr "
+                    "candidate-head drafters yet."
                 )
             if (
                 not watermark_config.allow_target_only_watermarking

@@ -145,6 +145,79 @@ class DraftWatermarker:
         contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
         return sampled
 
+    def sample_block(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        pos: torch.Tensor,
+        apply_temperature: bool,
+        is_drafting: bool,
+        logits_cache: torch.Tensor | None = None,
+        logits_cache_col: torch.Tensor | None = None,
+        use_fp64: bool = False,
+    ) -> torch.Tensor:
+        """Sample drafts flattened as (request, step), one step at a time.
+        The target verifies each draft with a context that includes the earlier
+        drafts of its request, so steps must be sampled in order even when
+        their logits were computed in parallel.
+        """
+        assert apply_temperature
+        assert is_drafting
+        assert logits_cache_col is not None
+        num_steps = self.num_speculative_steps
+        sampled_block = self.watermarker._try_sample_block(
+            logits,
+            self.contexts,
+            num_steps,
+            RandomSampler(
+                expanded_idx_mapping=idx_mapping,
+                temperatures=temperature,
+                seeds=seed,
+                positions=pos,
+                use_fp64=use_fp64,
+                is_drafting=True,
+                logits_cache=logits_cache,
+                logits_cache_col=logits_cache_col,
+            ),
+            enabled=self.enabled,
+            prior_contexts=self.prior_contexts,
+            all_token_ids=self.all_token_ids,
+            prompt_lens=self.prompt_lens,
+            total_lens=self.total_lens,
+            deduplicate_contexts=self.deduplicate_contexts,
+            deduplicate_contexts_max_history=self.deduplicate_contexts_max_history,
+        )
+        if sampled_block is not None:
+            return sampled_block
+        num_reqs = logits.shape[0] // num_steps
+
+        def by_step(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor.view(num_reqs, num_steps, *tensor.shape[1:])
+
+        logits = by_step(logits)
+        idx_mapping = by_step(idx_mapping)
+        pos = by_step(pos)
+        logits_cache_col = by_step(logits_cache_col)
+        sampled = torch.empty(
+            num_reqs, num_steps, dtype=torch.int64, device=logits.device
+        )
+        for step in range(num_steps):
+            sampled[:, step] = self.sample(
+                logits[:, step],
+                idx_mapping[:, step],
+                temperature,
+                seed,
+                pos[:, step],
+                apply_temperature,
+                is_drafting,
+                logits_cache=logits_cache,
+                logits_cache_col=logits_cache_col[:, step],
+                use_fp64=use_fp64,
+            )
+        return sampled.view(-1)
+
 
 def create_speculative_target_watermarker(watermarker: Watermarker) -> Watermarker:
     if isinstance(watermarker, SupportsSpeculativeDecoding):

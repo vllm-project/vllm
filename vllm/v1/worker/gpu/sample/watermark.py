@@ -530,8 +530,10 @@ def _philox_gumbel_from_logits(logits, word):
 
 
 @triton.jit
-def _gumbel_value(logits_ptr, output, mask):
+def _gumbel_value(logits_ptr, output, mask, temperature):
     logits = tl.load(logits_ptr, mask=mask, other=float("-inf")).to(tl.float32)
+    if temperature is not None:
+        logits = tl_math.div_rn(logits, temperature)
     return _philox_gumbel_from_logits(logits, output)
 
 
@@ -601,11 +603,13 @@ def _philox_gumbel_kernel(
     key_0_value,
     key_1_value,
     vocab_size,
+    num_temperatures,
     CONTEXT_WIDTH: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     USE_FP64: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
+    APPLY_TEMPERATURE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     block_index = tl.program_id(1)
@@ -618,6 +622,16 @@ def _philox_gumbel_kernel(
     if expanded_idx_mapping_ptr is not None:
         req_state_idx = tl.load(expanded_idx_mapping_ptr + row).to(tl.int64)
         valid_req = req_state_idx >= 0
+
+    row_temperature = None
+    if APPLY_TEMPERATURE:
+        # Matches `logits / where(t == 0, 1, t)` for t = temperature[idx], where
+        # the -1 index of a padding row wraps like a torch index.
+        row_temperature = tl.load(
+            temp_ptr
+            + tl.where(valid_req, req_state_idx, req_state_idx + num_temperatures)
+        ).to(tl.float32)
+        row_temperature = tl.where(row_temperature == 0, 1.0, row_temperature)
 
     if logits_cache_ptr is not None:
         if PER_TOKEN_COL:
@@ -648,6 +662,8 @@ def _philox_gumbel_kernel(
             logits = tl.load(logits_row + candidate, mask=mask, other=float("-inf")).to(
                 tl.float32
             )
+            if row_temperature is not None:
+                logits = tl_math.div_rn(logits, row_temperature)
             value, index = gumbel_noised_argmax(
                 logits,
                 candidate,
@@ -681,16 +697,16 @@ def _philox_gumbel_kernel(
     candidate_3 = candidate_0 + 3
     logits_row = logits_ptr + row * logits_stride
     value_0 = _gumbel_value(
-        logits_row + candidate_0, output_0, candidate_0 < vocab_size
+        logits_row + candidate_0, output_0, candidate_0 < vocab_size, row_temperature
     )
     value_1 = _gumbel_value(
-        logits_row + candidate_1, output_1, candidate_1 < vocab_size
+        logits_row + candidate_1, output_1, candidate_1 < vocab_size, row_temperature
     )
     value_2 = _gumbel_value(
-        logits_row + candidate_2, output_2, candidate_2 < vocab_size
+        logits_row + candidate_2, output_2, candidate_2 < vocab_size, row_temperature
     )
     value_3 = _gumbel_value(
-        logits_row + candidate_3, output_3, candidate_3 < vocab_size
+        logits_row + candidate_3, output_3, candidate_3 < vocab_size, row_temperature
     )
     best_value = value_0
     best_token = candidate_0
@@ -792,11 +808,248 @@ def philox_gumbel_sample(
         key & _UINT32_MASK_VALUE,
         key >> 32,
         vocab_size,
+        0,
         CONTEXT_WIDTH=contexts.shape[-1],
         BLOCK_SIZE=block_size,
         USE_FP64=use_fp64,
         IS_DRAFTING=is_drafting,
         PER_TOKEN_COL=logits_cache_col is not None and logits_cache_col.dim() > 0,
+        APPLY_TEMPERATURE=False,
     )
     max_block_index = local_max.argmax(dim=-1, keepdim=True)
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
+
+
+@triton.jit(do_not_specialize=["step"])
+def _draft_step_kernel(
+    sampled_ptr,
+    sampled_stride,
+    step,
+    local_argmax_ptr,
+    local_max_ptr,
+    num_blocks,
+    contexts_ptr,
+    context_stride,
+    skip_mask_ptr,
+    next_req_indices_ptr,
+    next_steps_ptr,
+    temp_ptr,
+    num_temperatures,
+    enabled_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    prompt_lens_ptr,
+    total_lens_ptr,
+    prior_contexts_ptr,
+    prior_contexts_stride_0,
+    prior_contexts_stride_1,
+    CONTEXT_WIDTH: tl.constexpr,
+    NUM_SPECULATIVE_STEPS: tl.constexpr,
+    MAX_HISTORY: tl.constexpr,
+    INCLUDE_PROMPT: tl.constexpr,
+    DEDUPLICATE: tl.constexpr,
+    SAMPLE: tl.constexpr,
+    PREPARE_NEXT: tl.constexpr,
+    BLOCKS_POW2: tl.constexpr,
+):
+    """Finish draft step `step` (if SAMPLE) and build the next step's skip mask."""
+    row = tl.program_id(0).to(tl.int64)
+    contexts_row_ptr = contexts_ptr + row * context_stride
+    if SAMPLE:
+        # Same pick as local_max.argmax(dim=-1): the first NaN, else the first max.
+        blocks = tl.arange(0, BLOCKS_POW2)
+        values = tl.load(
+            local_max_ptr + row * num_blocks + blocks,
+            mask=blocks < num_blocks,
+            other=float("-inf"),
+        )
+        is_nan = values != values
+        best = tl.max(tl.where(is_nan, float("-inf"), values), axis=0)
+        first_nan = tl.min(tl.where(is_nan, blocks, BLOCKS_POW2), axis=0)
+        first_max = tl.min(
+            tl.where((values == best) & (blocks < num_blocks), blocks, BLOCKS_POW2),
+            axis=0,
+        )
+        block = tl.where(first_nan < BLOCKS_POW2, first_nan, first_max)
+        token = tl.load(local_argmax_ptr + row * num_blocks + block)
+        tl.store(sampled_ptr + row * sampled_stride + step, token)
+
+        offsets = tl.arange(0, BLOCKS_POW2)
+        context = tl.load(
+            contexts_row_ptr + offsets + 1,
+            mask=offsets < CONTEXT_WIDTH - 1,
+            other=token,
+        )
+        tl.debug_barrier()
+        tl.store(contexts_row_ptr + offsets, context, mask=offsets < CONTEXT_WIDTH)
+        tl.debug_barrier()
+
+    if PREPARE_NEXT:
+        req_idx = tl.load(next_req_indices_ptr + row).to(tl.int64)
+        temperature = tl.load(
+            temp_ptr + tl.where(req_idx >= 0, req_idx, req_idx + num_temperatures)
+        )
+        active = tl.load(enabled_ptr + row) & (temperature != 0)
+        if DEDUPLICATE:
+            # The dedup kernel body runs in place on the skip mask buffer.
+            tl.store(skip_mask_ptr + row, active)
+            tl.debug_barrier()
+            _repeated_context_mask_kernel(
+                skip_mask_ptr,
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                next_req_indices_ptr,
+                prompt_lens_ptr,
+                total_lens_ptr,
+                next_steps_ptr,
+                1,
+                contexts_ptr,
+                context_stride,
+                None,
+                prior_contexts_ptr,
+                prior_contexts_stride_0,
+                prior_contexts_stride_1,
+                next_steps_ptr,
+                1,
+                skip_mask_ptr,
+                CONTEXT_WIDTH=CONTEXT_WIDTH,
+                NUM_SPECULATIVE_STEPS=NUM_SPECULATIVE_STEPS,
+                MAX_HISTORY=MAX_HISTORY,
+                INCLUDE_PROMPT=INCLUDE_PROMPT,
+                SKIP_PARTIAL_CONTEXT=False,
+                HAS_HISTORY_OFFSETS=True,
+                SPECULATIVE_CONTEXTS=False,
+                DRAFT_CONTEXTS=True,
+                BLOCK=512,
+            )
+            tl.debug_barrier()
+            active = tl.load(skip_mask_ptr + row)
+        tl.store(skip_mask_ptr + row, active == 0)
+
+
+def draft_philox_gumbel_sample(
+    logits: torch.Tensor,
+    contexts: torch.Tensor,
+    key: int,
+    *,
+    num_steps: int,
+    expanded_idx_mapping: torch.Tensor,
+    temperatures: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    enabled: torch.Tensor,
+    logits_cache: torch.Tensor,
+    logits_cache_col: torch.Tensor,
+    use_fp64: bool,
+    prior_contexts: torch.Tensor,
+    all_token_ids: torch.Tensor | None,
+    prompt_lens: torch.Tensor,
+    total_lens: torch.Tensor | None,
+    deduplicate: bool,
+    max_history: int | None,
+    include_prompt: bool,
+) -> torch.Tensor:
+    """Sample `num_steps` draft steps flattened as (request, step), in step order.
+
+    Bit-exact with sampling each step by `DraftWatermarker.sample`, but with two
+    kernel launches per step: the Philox block argmax (with the temperature
+    divide and the logits cache write), then a per-row kernel that picks the
+    token, shifts `contexts` and builds the next step's skip mask.
+    """
+    num_rows, vocab_size = logits.shape
+    num_reqs = num_rows // num_steps
+    assert logits.stride(-1) == 1 and contexts.stride(-1) == 1
+    assert logits.dtype == logits_cache.dtype, (
+        "logits cache source and destination must have the same dtype"
+    )
+    assert logits_cache.size(-1) >= vocab_size, (
+        f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
+        f"than the sampled logits ({vocab_size}). Cached logits would be truncated."
+    )
+    assert not deduplicate or (all_token_ids is not None and total_lens is not None), (
+        "context deduplication requires all_token_ids and total_lens"
+    )
+    logits = logits.view(num_reqs, num_steps, vocab_size)
+    # Step-major copies, so each step reads contiguous per-request slices.
+    expanded_idx_mapping, positions, logits_cache_col = (
+        tensor.view(num_reqs, num_steps).t().contiguous()
+        for tensor in (expanded_idx_mapping, positions, logits_cache_col)
+    )
+    block_size = 1024
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    local_argmax = logits.new_empty(num_reqs, num_blocks, dtype=torch.int64)
+    local_max = logits.new_empty(
+        num_reqs, num_blocks, dtype=torch.float64 if use_fp64 else torch.float32
+    )
+    skip_mask = torch.empty(num_reqs, dtype=torch.bool, device=logits.device)
+    sampled = logits.new_empty(num_reqs, num_steps, dtype=torch.int64)
+
+    def finish_step(step: int) -> None:
+        next_step = min(step + 1, num_steps - 1)
+        _draft_step_kernel[(num_reqs,)](
+            sampled,
+            sampled.stride(0),
+            step,
+            local_argmax,
+            local_max,
+            num_blocks,
+            contexts,
+            contexts.stride(0),
+            skip_mask,
+            expanded_idx_mapping[next_step],
+            logits_cache_col[next_step],
+            temperatures,
+            temperatures.shape[0],
+            enabled,
+            all_token_ids,
+            0 if all_token_ids is None else all_token_ids.stride(0),
+            prompt_lens,
+            total_lens,
+            prior_contexts,
+            prior_contexts.stride(0),
+            prior_contexts.stride(1),
+            CONTEXT_WIDTH=contexts.shape[-1],
+            NUM_SPECULATIVE_STEPS=prior_contexts.shape[1],
+            MAX_HISTORY=0 if max_history is None else max_history,
+            INCLUDE_PROMPT=include_prompt,
+            DEDUPLICATE=deduplicate,
+            SAMPLE=step >= 0,
+            PREPARE_NEXT=step + 1 < num_steps,
+            BLOCKS_POW2=triton.next_power_of_2(max(num_blocks, contexts.shape[-1])),
+        )
+
+    finish_step(-1)
+    for step in range(num_steps):
+        _philox_gumbel_kernel[(num_reqs, num_blocks)](
+            local_argmax,
+            local_argmax.stride(0),
+            local_max,
+            local_max.stride(0),
+            logits[:, step],
+            logits.stride(0),
+            contexts,
+            contexts.stride(0),
+            skip_mask,
+            expanded_idx_mapping[step],
+            seeds,
+            positions[step],
+            temperatures,
+            logits_cache,
+            logits_cache.stride(0),
+            logits_cache.stride(1),
+            logits_cache_col[step],
+            logits[:, step],
+            logits.stride(0),
+            key & _UINT32_MASK_VALUE,
+            key >> 32,
+            vocab_size,
+            temperatures.shape[0],
+            CONTEXT_WIDTH=contexts.shape[-1],
+            BLOCK_SIZE=block_size,
+            USE_FP64=use_fp64,
+            IS_DRAFTING=True,
+            PER_TOKEN_COL=True,
+            APPLY_TEMPERATURE=True,
+        )
+        finish_step(step)
+    return sampled.view(-1)

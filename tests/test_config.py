@@ -3712,34 +3712,48 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
         config._check_supports_watermarking()
 
 
-@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
-def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting"),
+    [
+        ("eagle", False),
+        ("eagle3", False),
+        ("mtp", False),
+        ("dspark", True),
+        ("dflash", True),
+    ],
+)
+def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
+    method, parallel_drafting
+):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
         method=method,
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
-        parallel_drafting=False,
+        parallel_drafting=parallel_drafting,
     )
 
     config._check_supports_watermarking()
 
 
-def test_dual_key_gumbel_supports_dspark():
+@pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
+def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
-        method="dspark",
+        method="dflash",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
         parallel_drafting=True,
+        draft_model_config=SimpleNamespace(architectures=[architecture]),
     )
 
-    config._check_supports_watermarking()
+    with pytest.raises(ValueError, match="candidate-head drafters"):
+        config._check_supports_watermarking()
 
 
-def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
+def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
     config.speculative_config = SimpleNamespace(
@@ -3749,7 +3763,7 @@ def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
         parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="autoregressive model-based"):
+    with pytest.raises(ValueError, match="Watermarking supports only"):
         config._check_supports_watermarking()
 
 
