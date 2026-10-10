@@ -81,6 +81,19 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def _v2_prefill_token_ids(request: Request) -> list[int]:
+    """Reuse the prompt list while there are no outputs, so it is pickled once."""
+    prompt = request.prompt_token_ids
+    if (
+        prompt is not None
+        and request.prompt_is_token_ids is None
+        and request.num_output_tokens == 0
+        and len(prompt) == len(request._all_token_ids)
+    ):
+        return prompt
+    return request._all_token_ids
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -1421,8 +1434,12 @@ class Scheduler(SchedulerInterface):
                 NewRequestData.from_request(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
+                    _v2_prefill_token_ids(req),
                     uses_mrope=self.model_uses_mrope,
+                    # M-RoPE position builders and the pooling runner take lists.
+                    pack_token_ids=(
+                        not self.model_uses_mrope and req.pooling_params is None
+                    ),
                 )
                 for req in scheduled_new_reqs
             ]
@@ -1677,6 +1694,7 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
+        session.packed_prompt_token_ids = None
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)

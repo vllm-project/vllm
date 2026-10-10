@@ -3,6 +3,7 @@
 
 import enum
 import time
+from array import array
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -186,6 +187,9 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
+
+        # int32 prompt_token_ids for NewRequestData, packed in the input thread.
+        self.packed_prompt_token_ids: array | None = None
 
         # Read-only views
         # Prevent directly appending to these lists since

@@ -6,6 +6,7 @@ import queue
 import signal
 import threading
 import time
+from array import array
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
@@ -82,7 +83,7 @@ from vllm.v1.engine.utils import (
     SignalCallback,
     get_physical_gpu_ids_for_local_dp_rank,
 )
-from vllm.v1.executor import Executor
+from vllm.v1.executor import Executor, UniProcExecutor
 from vllm.v1.fault_tolerance.engine_core_sentinel import (
     FT_UTILITY_METHOD,
     EngineCoreSentinel,
@@ -222,6 +223,13 @@ class EngineCore:
 
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
+        # Pack prompts here, off the scheduling path; in-process executors don't pickle.
+        self.pack_prompt_token_ids = (
+            vllm_config.use_v2_model_runner
+            and not vllm_config.model_config.uses_mrope
+            and not self.is_pooling_model
+            and not isinstance(self.model_executor, UniProcExecutor)
+        )
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
@@ -1089,6 +1097,8 @@ class EngineCore:
             )
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)
+        if self.pack_prompt_token_ids and req.prompt_token_ids is not None:
+            req.packed_prompt_token_ids = array("i", req.prompt_token_ids)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
