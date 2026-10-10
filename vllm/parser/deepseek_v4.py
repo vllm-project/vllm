@@ -239,6 +239,9 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),
         strip_content_whitespace_with_tools=False,
+        # The template renders ``{content}\n\n<｜DSML｜tool_calls>``; the
+        # reference parser consumes that ``\n\n`` as part of the opener.
+        content_tool_separator="\n\n",
         tool_args_json=False,
     )
 
