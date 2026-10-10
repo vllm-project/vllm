@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.fusion.quant_activation import InputQuantScales
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
@@ -46,6 +47,10 @@ class Mxfp8LinearKernel(ABC):
         does not support input quantization outside of the kernel, return None.
         """
         return None
+
+    def input_quant_scales(self, layer: torch.nn.Module) -> InputQuantScales:
+        """MXFP8 block scales are produced dynamically by the quantizer."""
+        return InputQuantScales()
 
     @classmethod
     @abstractmethod
