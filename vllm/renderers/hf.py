@@ -42,6 +42,7 @@ from vllm.multimodal.processing.processor import (
 from vllm.renderers.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
     ChatTemplateResolutionError,
+    assert_chat_template_rendered_messages,
     load_chat_template,
     parse_chat_messages,
     parse_chat_messages_async,
@@ -838,6 +839,21 @@ def safe_apply_chat_template(
         # 500 or any generic upstream wrapper message.
         logger.warning("Chat template rejected the request: %s", e)
         raise VLLMValidationError(_template_error_reason(e)) from e
+
+    # Post-condition: a non-empty message whose role the template does not
+    # handle must not vanish from the prompt. Custom roles still render
+    # when the template emits their content. HTTP 400 names the role.
+    assert_chat_template_rendered_messages(
+        conversation,
+        chat_template,
+        lambda messages: tokenizer.apply_chat_template(
+            conversation=messages,  # type: ignore[arg-type]
+            tools=tools,  # type: ignore[arg-type]
+            chat_template=chat_template,
+            tokenize=False,
+            **resolved_kwargs,
+        ),
+    )
 
     return plain
 
