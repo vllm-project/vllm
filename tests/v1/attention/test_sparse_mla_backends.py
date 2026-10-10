@@ -3,6 +3,7 @@
 """Unit tests for the sparse MLA backends and utilities."""
 
 import math
+import threading
 from collections import deque
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -110,6 +111,7 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.worker import ubatching
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -1938,6 +1940,75 @@ def test_sparse_mla_index_groups_own_distinct_physical_buffers():
     assert first.physical_topk_indices.data_ptr() != (
         second.physical_topk_indices.data_ptr()
     )
+
+
+def test_sparse_mla_index_group_keeps_topk_per_dbo_ubatch(monkeypatch):
+    """DBO runs microbatch 1's leader between microbatch 0's leader and its
+    followers; each microbatch's followers must still read its own top-k."""
+    device = torch.device(DEVICE_TYPE)
+    logical = torch.empty((2, 128), dtype=torch.int32, device=device)
+    builder = SparseMLAIndexGroupBuilder(logical, num_ubatches=2)
+
+    def make_impl(is_leader):
+        impl = object.__new__(FlashMLASparseImpl)
+        impl.init_topk_indices_buffer(None, logical, builder)
+        group, index = builder.register_layer(is_leader)
+        return impl, group, index
+
+    def set_ubatch(ubatch_id):
+        monkeypatch.setitem(
+            ubatching._THREAD_ID_TO_CONTEXT, threading.get_ident(), ubatch_id
+        )
+
+    # A leader without followers (e.g. every DeepSeek-V3.2 layer) adds no state.
+    _, leader_only_group, _ = make_impl(True)
+    leader, group, leader_index = make_impl(True)
+    follower, _, follower_index = make_impl(False)
+    assert leader_only_group.ubatch_states == ()
+    assert len(group.ubatch_states) == 1
+
+    set_ubatch(0)
+    assert leader.topk_indices_buffer is follower.topk_indices_buffer is logical
+    set_ubatch(1)
+    assert leader.topk_indices_buffer is follower.topk_indices_buffer
+    assert leader.topk_indices_buffer is not logical
+
+    metadata = SimpleNamespace(
+        block_table=torch.tensor([[2, 3], [4, 5]], dtype=torch.int32, device=device),
+        block_size=4,
+        req_id_per_token=torch.tensor([0, 1], dtype=torch.int32, device=device),
+    )
+
+    def run_layer(impl, ubatch_id, layer_index, first_topk=None):
+        set_ubatch(ubatch_id)
+        topk = impl.topk_indices_buffer[:2]
+        if first_topk is not None:
+            topk.fill_(-1)
+            topk[:, 0] = torch.tensor(first_topk, dtype=torch.int32, device=device)
+            group.set_logical_topk_ready(layer_index)
+        physical = group.convert_logical_to_physical_topk(
+            layer_index,
+            topk,
+            metadata,
+            block_stride_rows=None,
+            return_valid_counts=False,
+        )
+        return topk.clone(), physical.clone()
+
+    leaders = {
+        ubatch_id: run_layer(leader, ubatch_id, leader_index, first_topk)
+        for ubatch_id, first_topk in ((0, [0, 1]), (1, [5, 6]))
+    }
+    followers = {
+        ubatch_id: run_layer(follower, ubatch_id, follower_index)
+        for ubatch_id in (0, 1)
+    }
+    torch.accelerator.synchronize()
+
+    assert not torch.equal(leaders[0][1], leaders[1][1])
+    for ubatch_id in (0, 1):
+        for got, want in zip(followers[ubatch_id], leaders[ubatch_id]):
+            torch.testing.assert_close(got, want, rtol=0, atol=0)
 
 
 # HiSparse is host-resident-only and kernel-only: runtime construction

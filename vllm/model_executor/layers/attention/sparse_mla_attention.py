@@ -3,6 +3,7 @@
 """Shared MHA implementation and metadata builder for sparse MLA backends."""
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
@@ -49,6 +50,7 @@ from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
 )
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -599,30 +601,45 @@ class SharedTopkIndicesBuffer:
     The indexer owns the buffer, but `LLMBaseProposer.load_model` repoints the
     draft's indexers at the target's buffer after the impls are constructed, so
     it must be resolved per read rather than snapshotted. Backbone skip-topk
-    layers have no indexer and pass the buffer explicitly.
+    layers have no indexer and pass the buffer explicitly. Under DBO, every
+    microbatch after the first resolves to its own buffer, owned by the index
+    group builder.
     """
 
     _indexer: object | None = None
     _topk_indices_buffer: torch.Tensor | None = None
+    _ubatch_topk_indices_buffers: Sequence[torch.Tensor] = ()
 
     def init_topk_indices_buffer(
         self,
         indexer: object | None,
         topk_indices_buffer: torch.Tensor | None,
+        index_group_builder: SparseMLAIndexGroupBuilder | None = None,
     ) -> None:
         self._indexer = indexer
         self._topk_indices_buffer = topk_indices_buffer
+        if index_group_builder is not None:
+            # Kept by reference: the builder fills it when its first follower
+            # registers, after earlier leaders' impls were constructed.
+            self._ubatch_topk_indices_buffers = (
+                index_group_builder.ubatch_logical_topk_indices
+            )
 
     @property
     def topk_indices_buffer(self) -> torch.Tensor | None:
+        if self._ubatch_topk_indices_buffers:
+            ubatch_id = dbo_current_ubatch_id()
+            if ubatch_id > 0:
+                return self._ubatch_topk_indices_buffers[ubatch_id - 1]
         if self._indexer is not None:
             return self._indexer.topk_indices_buffer  # type: ignore[attr-defined]
         return self._topk_indices_buffer
 
     @topk_indices_buffer.setter
     def topk_indices_buffer(self, buffer: torch.Tensor | None) -> None:
-        # An explicit assignment supersedes the indexer.
+        # An explicit assignment supersedes the indexer and microbatch buffers.
         self._indexer = None
+        self._ubatch_topk_indices_buffers = ()
         self._topk_indices_buffer = buffer
 
 
@@ -669,7 +686,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             kv_b_proj,
         )
 
-        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer, index_group_builder)
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
         if index_group_builder is None and self.topk_indices_buffer is not None:
