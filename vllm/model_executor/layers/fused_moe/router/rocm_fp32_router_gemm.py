@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Low-token FP32 router GEMM for gfx950."""
+"""Low-token router GEMM with FP32 logits for gfx950."""
 
 import torch
 
@@ -18,6 +18,11 @@ ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES = frozenset(
         (6144, 256),
     }
 )
+# Shapes whose router weight stays in bf16 with fp32 logits. The kernel loads
+# the bf16 rows and accumulates in fp32, like torch.mm(..., out_dtype=float32),
+# and beats hipBLASLt only up to _BF16W_MAX_TOKENS tokens.
+ROCM_BF16W_ROUTER_GEMM_SUPPORTED_SHAPES = frozenset({(7168, 896)})
+_BF16W_MAX_TOKENS = 9
 
 
 @triton.jit
@@ -32,20 +37,24 @@ def _rocm_fp32_router_gemm_kernel(
     BLOCK_K: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    tl.assume(pid >= 0)
+    tl.assume(M >= 0)
     pid_m = pid // N
     pid_n = pid - pid_m * N
     offsets_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offsets_k = tl.arange(0, BLOCK_K)
     partials = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
 
-    for k_start in range(0, K, BLOCK_K):
-        offsets_k_block = k_start + offsets_k
+    for k_start in tl.range(0, K, BLOCK_K, num_stages=2):
+        k_offs = tl.max_contiguous(
+            tl.multiple_of(k_start + offsets_k, BLOCK_K), BLOCK_K
+        )
         hidden_states = tl.load(
-            hidden_states_ptr + offsets_m[:, None] * K + offsets_k_block[None, :],
+            hidden_states_ptr + offsets_m[:, None] * K + k_offs[None, :],
             mask=offsets_m[:, None] < M,
             other=0.0,
         ).to(tl.float32)
-        router_weight = tl.load(router_weight_ptr + pid_n * K + offsets_k_block)
+        router_weight = tl.load(router_weight_ptr + pid_n * K + k_offs)
         partials += hidden_states * router_weight[None, :]
 
     accumulator = tl.sum(partials, axis=1)
@@ -63,6 +72,10 @@ def _launch_config(
 ) -> tuple[int, int, int]:
     if (hidden_size, num_experts) == (4096, 8):
         return 1, 1024, 4
+    if (hidden_size, num_experts) == (7168, 896):
+        if num_tokens in (1, 2, 4):
+            return num_tokens, 1024, 2
+        return (8 if num_tokens <= 8 else 2), 1024, 2
 
     if num_tokens <= 4:
         return 1, 1024, 8
@@ -96,8 +109,16 @@ def _validate_inputs(
         raise ValueError("hidden_states and router_weight must be 2D tensors")
     if hidden_states.dtype not in (torch.bfloat16, torch.float32):
         raise ValueError("hidden_states must have dtype bfloat16 or float32")
-    if router_weight.dtype != torch.float32:
-        raise ValueError("router_weight must have dtype float32")
+    if router_weight.dtype == torch.float32:
+        supported_shapes, max_tokens = (
+            ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES,
+            _MAX_TOKENS,
+        )
+    elif router_weight.dtype == torch.bfloat16:
+        supported_shapes = ROCM_BF16W_ROUTER_GEMM_SUPPORTED_SHAPES
+        max_tokens = _BF16W_MAX_TOKENS
+    else:
+        raise ValueError("router_weight must have dtype float32 or bfloat16")
     if hidden_states.device.type != "cuda" or router_weight.device.type != "cuda":
         raise ValueError("hidden_states and router_weight must be GPU tensors")
     if hidden_states.device != router_weight.device:
@@ -105,17 +126,18 @@ def _validate_inputs(
     if not hidden_states.is_contiguous() or not router_weight.is_contiguous():
         raise ValueError("hidden_states and router_weight must be contiguous")
     shape = (hidden_states.shape[1], router_weight.shape[0])
-    if (
-        shape not in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
-        or router_weight.shape[1] != shape[0]
-    ):
+    if shape not in supported_shapes or router_weight.shape[1] != shape[0]:
+        if router_weight.dtype == torch.bfloat16 and (
+            shape in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
+        ):
+            raise ValueError(f"router_weight for shape {shape} must be float32")
         raise ValueError(
-            "supported (hidden_size, num_experts) shape pairs are "
-            "(3072, 256), (4096, 8), (4096, 192), (6144, 128), "
-            "and (6144, 256)"
+            f"unsupported (hidden_size, num_experts) shape {shape} for a "
+            f"{router_weight.dtype} router_weight; supported shapes: "
+            f"{sorted(supported_shapes)}"
         )
-    if not 0 <= hidden_states.shape[0] <= _MAX_TOKENS:
-        raise ValueError(f"num_tokens must be in [0, {_MAX_TOKENS}]")
+    if not 0 <= hidden_states.shape[0] <= max_tokens:
+        raise ValueError(f"num_tokens must be in [0, {max_tokens}]")
 
 
 def rocm_fp32_router_gemm(
@@ -132,6 +154,8 @@ def rocm_fp32_router_gemm(
         return output
 
     block_m, block_k, num_warps = _launch_config(hidden_size, num_experts, num_tokens)
+    # The kernel loads K without a mask.
+    assert hidden_size % block_k == 0, (hidden_size, block_k)
     grid = (triton.cdiv(num_tokens, block_m) * num_experts,)
     _rocm_fp32_router_gemm_kernel[grid](
         hidden_states,
@@ -143,6 +167,6 @@ def rocm_fp32_router_gemm(
         BLOCK_M=block_m,
         BLOCK_K=block_k,
         num_warps=num_warps,
-        num_stages=1,
+        num_stages=2,
     )
     return output

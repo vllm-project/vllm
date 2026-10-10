@@ -21,6 +21,8 @@ SHAPES = [
     (6144, 256),
 ]
 MAX_TOKENS = 32
+BF16W_SHAPE = (7168, 896)
+BF16W_MAX_TOKENS = 9
 ATOL = 5e-4
 RTOL = 0.0
 
@@ -45,23 +47,40 @@ def _reference(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.linear(x.float(), weight)
 
 
+def _reference_cases() -> list[tuple[int, int, torch.dtype, int]]:
+    cases = [
+        (hidden_size, num_experts, torch.float32, num_tokens)
+        for hidden_size, num_experts in SHAPES
+        for num_tokens in range(MAX_TOKENS + 1)
+    ]
+    # bf16 router weight, fp32 logits: (7168, 896) only, and only through 9 tokens.
+    cases += [
+        (*BF16W_SHAPE, torch.bfloat16, num_tokens)
+        for num_tokens in range(BF16W_MAX_TOKENS + 1)
+    ]
+    return cases
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
-@pytest.mark.parametrize("num_tokens", range(MAX_TOKENS + 1))
+@pytest.mark.parametrize(
+    ("hidden_size", "num_experts", "weight_dtype", "num_tokens"),
+    _reference_cases(),
+)
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_matches_reference(
     num_tokens: int,
     hidden_size: int,
     num_experts: int,
+    weight_dtype: torch.dtype,
     dtype: torch.dtype,
 ) -> None:
     torch.manual_seed(41 + num_tokens + hidden_size + num_experts)
     device = torch.device("cuda")
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-    weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
+    weight = torch.randn(num_experts, hidden_size, dtype=weight_dtype, device=device)
 
     output = rocm_fp32_router_gemm(x, weight)
-    expected = _reference(x, weight)
+    expected = _reference(x, weight.float())
 
     assert output.shape == (num_tokens, num_experts)
     assert output.dtype == torch.float32
@@ -126,6 +145,15 @@ def test_rocm_fp32_router_gemm_rejects_invalid_inputs() -> None:
     with pytest.raises(ValueError, match="bfloat16 or float32"):
         rocm_fp32_router_gemm(x.to(torch.float16), weight)
 
+    bf16_weight = torch.randn(896, 7168, dtype=torch.bfloat16, device=device)
+    with pytest.raises(ValueError, match="num_tokens"):
+        rocm_fp32_router_gemm(
+            torch.randn(
+                BF16W_MAX_TOKENS + 1, 7168, dtype=torch.bfloat16, device=device
+            ),
+            bf16_weight,
+        )
+
 
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_cuda_graph_observes_input_mutation() -> None:
@@ -164,23 +192,36 @@ def test_rocm_fp32_router_gemm_cuda_graph_observes_input_mutation() -> None:
     assert not torch.equal(first_output, second_output)
 
 
-@pytest.mark.parametrize("num_tokens", [4, 32, 33])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(
+    ("hidden_size", "num_experts", "weight_dtype", "num_tokens"),
+    [
+        *[(6144, 128, torch.float32, n) for n in (4, 32, 33)],
+        # 9 is the last token count that takes the bf16-weight kernel; 10 and
+        # above must take the torch.mm / F.linear fallback.
+        *[(7168, 896, torch.bfloat16, n) for n in (1, 8, 9, 10, 32, 33)],
+    ],
+)
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_custom_op_dispatch(
-    num_tokens: int, dtype: torch.dtype
+    num_tokens: int,
+    hidden_size: int,
+    num_experts: int,
+    weight_dtype: torch.dtype,
+    dtype: torch.dtype,
 ) -> None:
     torch.manual_seed(3100 + num_tokens)
     device = torch.device("cuda")
-    hidden_size, num_experts = 6144, 128
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-    weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
+    weight = torch.randn(num_experts, hidden_size, dtype=weight_dtype, device=device)
 
     output = torch.ops.vllm.fp32_router_gemm_dispatch(x, weight, False)
     direct_output = fp32_router_gemm_dispatch_impl(x, weight, False)
 
     torch.testing.assert_close(output, direct_output, atol=ATOL, rtol=RTOL)
-    torch.testing.assert_close(output, _reference(x, weight), atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(
+        output, _reference(x, weight.float()), atol=ATOL, rtol=RTOL
+    )
 
 
 @torch.inference_mode()
