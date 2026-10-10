@@ -228,3 +228,63 @@ def compute_acceptance_len(
         if n_drafts <= 0:
             return 1
     return 1 + (n_accepted_toks / n_drafts)
+
+
+def check_spec_decode_matches_reference(
+    vllm_runner,
+    sampling_config: SamplingParams,
+    prompts: list[Messages],
+    *,
+    target_model: str | None,
+    target_engine_kwargs: dict[str, Any],
+    spec_model: str,
+    spec_engine_kwargs: dict[str, Any],
+    prompts_required_matches: int,
+    gsm8k_spec_accuracy_threshold: float,
+    # A threshold <= 0 skips the target engine's GSM8K check.
+    gsm8k_target_accuracy_threshold: float = 0.0,
+    expected_target_model: str | None = None,
+) -> None:
+    """Check that a speculative engine reproduces a target engine's outputs.
+
+    The speculative engine runs first. If `target_model` is None (speculators
+    checkpoints), the target model it resolves from `spec_model` must equal
+    `expected_target_model`.
+    """
+    with vllm_runner(spec_model, **spec_engine_kwargs) as spec_runner:
+        vllm_config = spec_runner.llm.llm_engine.vllm_config
+        spec_config = vllm_config.speculative_config
+        assert spec_config is not None
+        assert vllm_config.scheduler_config.async_scheduling
+        assert spec_config.num_speculative_tokens > 0, (
+            spec_config.num_speculative_tokens
+        )
+        if target_model is None:
+            assert spec_config.model == spec_model, (spec_config.model, spec_model)
+            target_model = vllm_config.model_config.model
+            assert target_model == expected_target_model, (
+                target_model,
+                expected_target_model,
+            )
+        evaluate_llm_for_gsm8k(
+            spec_runner.llm, expected_accuracy_threshold=gsm8k_spec_accuracy_threshold
+        )
+        spec_outputs = spec_runner.llm.chat(prompts, sampling_config)
+
+    with vllm_runner(target_model, **target_engine_kwargs) as target_runner:
+        evaluate_llm_for_gsm8k(
+            target_runner.llm,
+            expected_accuracy_threshold=gsm8k_target_accuracy_threshold,
+        )
+        target_outputs = target_runner.llm.chat(prompts, sampling_config)
+
+    context = f"{spec_config.method} target={target_model}, draft={spec_config.model}"
+    attention_config = target_engine_kwargs.get("attention_config")
+    if attention_config is not None:
+        context += f", backend={attention_config['backend']}"
+    assert_request_outputs_match(
+        target_outputs,
+        spec_outputs,
+        required_matches=prompts_required_matches,
+        context=context,
+    )
