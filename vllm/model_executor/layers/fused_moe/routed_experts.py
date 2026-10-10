@@ -986,12 +986,20 @@ class RoutedExperts(PluggableLayer):
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
-            is_fused = loaded_weight.dim() == 3
+            expert_key = qual_name.partition("experts.")[2].partition(".")[0]
+            named_expert = (
+                mapping_by_expert.get(expert_key)
+                if qual_name.count("experts.") == 1
+                else None
+            )
+            # Encoded per-expert [N, K / block_size, bytes_per_block] weights
+            # have the same rank as fused [E, N, K] weights. An explicit expert
+            # name identifies the per-expert layout without treating N as E.
+            is_fused = loaded_weight.dim() == 3 and named_expert is None
             # Fused tensors and ambiguous names keep the full mapping.
             candidates = expert_mapping
             if not is_fused and qual_name.count("experts.") == 1:
-                expert_key = qual_name.partition("experts.")[2].partition(".")[0]
-                candidates = mapping_by_expert.get(expert_key, expert_mapping)
+                candidates = named_expert or expert_mapping
 
             matched = False
             for param_name, weight_name, expert_id, shard_id in candidates:
