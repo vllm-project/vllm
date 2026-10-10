@@ -276,7 +276,14 @@ class TestCSALinearGrouping:
         neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        groups = get_kv_cache_groups(config, _make_csa_linear_specs())
+        config.cache_config.mamba_cache_mode = "align"
+        specs = {
+            name: replace(spec, mamba_cache_mode="align")
+            if isinstance(spec, MambaSpec)
+            else spec
+            for name, spec in _make_csa_linear_specs().items()
+        }
+        groups = get_kv_cache_groups(config, specs)
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=BYTES_PER_BLOCK * 64
         )

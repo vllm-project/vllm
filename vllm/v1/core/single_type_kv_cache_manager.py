@@ -1466,6 +1466,9 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
+        assert self.mamba_cache_mode == "align" or not self.enable_caching, (
+            "Mamba prefix caching requires mamba_cache_mode='align'"
+        )
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         self.has_prefill_checkpoint_blocks = (
             self.mamba_cache_mode == "align"

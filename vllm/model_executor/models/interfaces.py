@@ -1118,8 +1118,6 @@ class SupportsMambaPrefixCaching(Protocol):
     This is currently experimental.
     """
 
-    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
-
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
         """Return copy functions for the model's Mamba states."""
@@ -1133,24 +1131,6 @@ class SupportsMambaPrefixCaching(Protocol):
         """Map legacy copy functions to each requested Mamba backend."""
         copy_funcs = cls.get_mamba_state_copy_func()
         return {mamba_type: copy_funcs for mamba_type in mamba_types}
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: type[object],
-) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
-
-
-@overload
-def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
-
-
-def supports_mamba_prefix_caching(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
-    return getattr(model, "supports_mamba_prefix_caching", False)
 
 
 @runtime_checkable

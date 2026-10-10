@@ -2032,10 +2032,6 @@ class ModelConfig:
         return self._model_info.has_inner_state
 
     @property
-    def supports_mamba_prefix_caching(self) -> bool:
-        return self._model_info.supports_mamba_prefix_caching
-
-    @property
     def supports_replayssm(self) -> bool:
         return self._model_info.supports_replayssm
 

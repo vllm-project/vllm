@@ -812,10 +812,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # - It will read the initial states for every sequence,
             #   that has "has_initial_states_p" == True,
             #   from "cache_indices", using "state_indices_tensor_p".
-            # - It updates the "conv_state" cache in positions pointed
-            #   to by "state_indices_tensor_p".
-            #   In particular, it will always write the state at the
-            #   sequence end.
+            # - It writes the state at the sequence end to the "conv_state"
+            #   cache in positions pointed to by "state_indices_tensor_p".
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see

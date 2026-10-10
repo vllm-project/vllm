@@ -911,10 +911,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
                         LoRA and scheduler settings
             prefix: Optional prefix for parameter names
 
-        Raises:
-            AssertionError: If prefix caching is enabled
-                (not supported by Mamba)
-
         """
         config = vllm_config.model_config.hf_config
 

@@ -631,6 +631,8 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         block_size=BLOCK_SIZE,
     )
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    # mamba_cache_mode "none" only runs without prefix caching.
+    vllm_config.cache_config.enable_prefix_caching = False
 
     kv_cache_config = make_kv_cache_config(
         block_size=BLOCK_SIZE,
