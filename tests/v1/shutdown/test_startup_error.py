@@ -56,6 +56,11 @@ def test_async_llm_startup_error(
     Test profiling (forward()) and load weights failures.
     AsyncLLM always uses an MP client.
     """
+    if current_platform.is_rocm() and tensor_parallel_size > 1:
+        pytest.skip(
+            reason="EngineCore can hang at exit after a TP>1 startup failure "
+            "on ROCm, see https://github.com/vllm-project/vllm/issues/60121"
+        )
     if current_platform.device_count() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
