@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -256,6 +257,12 @@ pub struct ChatCompletionRequest {
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
     pub repetition_detection: Option<RepetitionDetectionParams>,
+
+    /// Number of tokens to batch into each streamed chunk. Raises the server's
+    /// `--stream-interval` for this request. Values below the server setting
+    /// are clamped up to it. The first and last chunks are always sent
+    /// immediately. Ignored for non-streaming requests.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 impl Default for ChatCompletionRequest {
@@ -323,6 +330,7 @@ impl Default for ChatCompletionRequest {
             ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
+            stream_interval: None,
         }
     }
 }

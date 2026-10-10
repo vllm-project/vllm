@@ -23,6 +23,7 @@ from vllm.utils.flashinfer import (
 from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import (
     check_moonep_system_support,
+    deep_ep_v2_unavailable_reason,
     has_deep_ep,
     has_deep_ep_v2,
     has_mori,
@@ -1104,10 +1105,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
-        assert has_deep_ep_v2(), (
-            "DeepEP v2 (ElasticBuffer) not available. Requires DeepEP >= 2.0 "
-            "(https://github.com/deepseek-ai/DeepEP) and NCCL >= 2.30.4."
-        )
+        assert has_deep_ep_v2(), deep_ep_v2_unavailable_reason()
         super().__init__(cpu_group, tcp_store_group)
         self._device_group = device_group
         self.handle_cache = Cache()

@@ -120,8 +120,8 @@ fn request_output_with_logprobs_and_kv(
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
         finish_reason,
         stop_reason,
-        kv_transfer_params,
-        ec_transfer_params,
+        kv_transfer_params: kv_transfer_params.map(Box::new),
+        ec_transfer_params: ec_transfer_params.map(Box::new),
         ..Default::default()
     }
 }
@@ -542,7 +542,7 @@ impl ChatRenderer for FakeChatBackend {
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
             media_order: None,
-            effective_template_kwargs: Default::default(),
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
 }
@@ -615,7 +615,7 @@ fn qwen_multimodal_model_info_with_limits(
 async fn test_models_with_engine_outputs_and_backend_inner(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
-    expected_prompt_token_ids: Option<Vec<u32>>,
+    check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
@@ -630,12 +630,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
-                if let Some(expected_prompt_token_ids) = expected_prompt_token_ids {
-                    assert_eq!(
-                        request.prompt_token_ids.as_deref(),
-                        Some(expected_prompt_token_ids.as_slice())
-                    );
-                }
+                check_request(&request);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, output_specs),
@@ -667,7 +662,8 @@ async fn test_models_with_engine_outputs_and_backend(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
-    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, None, backend).await
+    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, |_| {}, backend)
+        .await
 }
 
 async fn test_chat_with_engine_outputs(
@@ -1440,6 +1436,8 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
     assert!(json[0].get("mm_features").is_none());
+    assert!(json[0].get("reasoning_ended").is_none());
+    assert!(json[0].get("reasoning_parser_kwargs").is_none());
 }
 
 #[tokio::test]
@@ -1479,7 +1477,8 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "messages": [{"role": "user", "content": "hello"}],
                         "max_completion_tokens": 8,
                         "bad_words": ["blocked"],
-                        "vllm_xargs": {"custom": 1}
+                        "vllm_xargs": {"custom": 1},
+                        "chat_template_kwargs": {"enable_thinking": false}
                     })
                     .to_string(),
                 ))
@@ -1502,11 +1501,27 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         json!(["blocked"])
     );
     assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+    assert_eq!(
+        render_json["reasoning_parser_kwargs"],
+        json!({"chat_template_kwargs": {"enable_thinking": false}})
+    );
 
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-render-generate-round-trip",
         default_stream_output_specs(),
-        Some(token_ids),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(token_ids.as_slice())
+            );
+            assert_eq!(
+                request
+                    .reasoning_parser_kwargs
+                    .as_ref()
+                    .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
+                Some(&json!(false))
+            );
+        },
         Arc::new(FakeChatBackend::new()),
     )
     .await;

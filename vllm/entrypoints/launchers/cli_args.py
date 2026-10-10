@@ -17,12 +17,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicDisabledThinkingEffortOption,
 )
-from vllm.entrypoints.chat_utils import (
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser

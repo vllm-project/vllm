@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
+from vllm.config import CacheConfig, VllmConfig, replace
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -19,8 +20,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
+    """Normalize cache config for hashing"""
+    if cache_config.mamba_block_size is None and cache_config.kv_cache_layout is None:
+        return cache_config
+    normalized = replace(cache_config, mamba_block_size=None)
+    assert normalized.kv_cache_layout is None
+    return normalized
+
+
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
-    config_hash = runner.vllm_config.compute_hash(include_version=False)
+    vllm_config: VllmConfig = runner.vllm_config
+    cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
+    if cache_config is not vllm_config.cache_config:
+        vllm_config = replace(vllm_config, cache_config=cache_config)
+    config_hash = vllm_config.compute_hash(include_version=False)
     return hashlib.sha256(config_hash.encode()).hexdigest()
 
 
