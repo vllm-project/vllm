@@ -208,6 +208,17 @@ def get_model_structural_tag(
     tools = get_structural_tag_tools(model, tools, tool_choice)
     if not tools:
         return None
+    if (
+        isinstance(tool_choice, ToolChoiceAllowed)
+        and model not in _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS
+    ):
+        # The model is only shown function tools, so only they can be allowed.
+        function_refs = [
+            ref for ref in tool_choice.tools if ref.get("type") == "function"
+        ]
+        if not function_refs:
+            return None
+        tool_choice = tool_choice.model_copy(update={"tools": function_refs})
     tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None

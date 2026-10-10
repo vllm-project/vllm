@@ -199,7 +199,7 @@ def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
             parameter="tool_choice",
         )
     raise VLLMValidationError(
-        "Tool choice 'function' not found in 'tools' parameter.",
+        f"Tool choice '{tool_name}' not found in 'tools' parameter.",
         parameter="tool_choice",
     )
 
@@ -735,6 +735,23 @@ class ResponsesRequest(OpenAIBaseModel):
             resolved = _resolve_named_tool_choice(tool_name, tools)
             if resolved != tool_name:
                 data["tool_choice"] = {**tool_choice, "name": resolved}
+        elif (
+            isinstance(tool_choice, dict)
+            and tool_choice.get("type") == "allowed_tools"
+            and isinstance(tool_choice.get("tools"), list)
+            and tools is not None
+        ):
+            data["tool_choice"] = {
+                **tool_choice,
+                "tools": [
+                    {**ref, "name": _resolve_named_tool_choice(ref["name"], tools)}
+                    if isinstance(ref, dict)
+                    and ref.get("type") == "function"
+                    and isinstance(ref.get("name"), str)
+                    else ref
+                    for ref in tool_choice["tools"]
+                ],
+            }
 
         return data
 

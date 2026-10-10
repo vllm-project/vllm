@@ -7,7 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceAllowed, ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 from xgrammar import Grammar, StructuralTag
 from xgrammar.structural_tag import (
@@ -404,6 +404,7 @@ class DelegatingParser(Parser):
         is_auto_tool_choice = enable_auto_tools and (
             request.tool_choice == "auto"
             or request.tool_choice is None
+            or isinstance(request.tool_choice, ToolChoiceAllowed)
             or (
                 not supports_required_and_named
                 and (is_named_tool_choice or is_required_tool_choice)
@@ -503,14 +504,21 @@ class DelegatingParser(Parser):
             or request.tool_choice == "required"
             or isinstance(
                 request.tool_choice,
-                (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction),
+                (
+                    ChatCompletionNamedToolChoiceParam,
+                    ToolChoiceFunction,
+                    ToolChoiceAllowed,
+                ),
             )
         )
         if not need_tool_calling:
             return request
 
         structured_outputs = request.extract_structured_outputs()
-        is_auto = request.tool_choice == "auto"
+        is_auto = (
+            request.tool_choice == "auto"
+            or getattr(request.tool_choice, "mode", None) == "auto"
+        )
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
         if (
@@ -556,7 +564,12 @@ class DelegatingParser(Parser):
                 # The "auto" tag allows plain text in response.
                 # Use tag "required" here to ensure structured-output branch
                 # remains meaningful.
-                tag_request = request.model_copy(update={"tool_choice": "required"})
+                required = (
+                    request.tool_choice.model_copy(update={"mode": "required"})
+                    if isinstance(request.tool_choice, ToolChoiceAllowed)
+                    else "required"
+                )
+                tag_request = request.model_copy(update={"tool_choice": required})
             tools_structural_tag = tool_parser.get_structural_tag(
                 tag_request,
                 reasoning=False,
