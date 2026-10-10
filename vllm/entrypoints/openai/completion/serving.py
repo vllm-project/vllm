@@ -127,6 +127,23 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request: CompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        if self.synthetic_output:
+            if request.use_beam_search:
+                return self.create_error_response(
+                    "Beam search is unsupported with synthetic acceptance"
+                )
+            if request.extract_structured_outputs() is not None:
+                return self.create_error_response(
+                    "Structured output is unsupported with synthetic acceptance"
+                )
+            if request.logprobs is not None or request.logprob_token_ids:
+                return self.create_error_response(
+                    "API logprobs are unsupported with synthetic acceptance"
+                )
+            if request.echo:
+                return self.create_error_response(
+                    "Prompt echo is unsupported with synthetic acceptance"
+                )
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"

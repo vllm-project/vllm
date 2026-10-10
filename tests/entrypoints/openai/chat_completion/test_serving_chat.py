@@ -643,6 +643,7 @@ def _build_minimal_metrics_serving_chat(
     serving = OpenAIServingChat.__new__(OpenAIServingChat)
     serving.response_role = "assistant"
     serving.parser_cls = None
+    serving.synthetic_output = False
     serving.enable_auto_tools = False
     serving._include_reasoning_tokens_details = False
     serving.enable_prompt_tokens_details = False
@@ -713,6 +714,87 @@ async def _collect_metrics_stream_chunks(
         if payload != "[DONE]":
             chunks.append(json.loads(payload))
     return chunks
+
+
+@pytest.mark.asyncio
+async def test_synthetic_stream_skips_output_parser():
+    class UnexpectedParser:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Synthetic output must not be parsed")
+
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving.synthetic_output = True
+    serving.parser_cls = UnexpectedParser
+    request_output = _make_metrics_request_output(token_ids=(100,))
+    request_output.outputs[0].text = "synthetic "
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        stream=True,
+    )
+    chunks = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    assert [
+        choice["delta"]["content"]
+        for chunk in chunks
+        for choice in chunk["choices"]
+        if choice["delta"].get("content")
+    ] == ["synthetic "]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_options", "expected_error"),
+    [
+        ({"use_beam_search": True}, "Beam search"),
+        ({"response_format": {"type": "json_object"}}, "Structured output"),
+        ({"logprobs": True}, "Chat logprobs"),
+        ({"echo": True}, "Prompt echo"),
+        (
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+            "Required and named tool calls",
+        ),
+    ],
+)
+async def test_synthetic_chat_rejects_incompatible_requests(
+    request_options: dict[str, Any], expected_error: str
+):
+    serving = OpenAIServingChat.__new__(OpenAIServingChat)
+    serving.synthetic_output = True
+    serving.has_kv_connector = False
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test"}],
+        **request_options,
+    )
+
+    response = await serving.create_chat_completion(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert expected_error in response.error.message
 
 
 def test_build_per_request_timing_metrics_valid_timestamps():

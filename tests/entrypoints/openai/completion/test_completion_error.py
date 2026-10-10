@@ -778,6 +778,23 @@ def test_json_schema_response_format_missing_schema():
         )
 
 
+@pytest.mark.asyncio
+async def test_synthetic_completion_rejects_beam_search():
+    serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
+    serving.synthetic_output = True
+    serving.has_kv_connector = False
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        use_beam_search=True,
+    )
+
+    response = await serving.create_completion(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert "Beam search" in response.error.message
+
+
 @pytest.mark.parametrize("format_value", [None, {}])
 def test_structural_tag_response_format_invalid(format_value):
     """Malformed structural tags should be rejected during request validation."""

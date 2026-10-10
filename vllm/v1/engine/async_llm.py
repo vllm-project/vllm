@@ -175,6 +175,11 @@ class AsyncLLM(EngineClient):
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
             admission_stats=self.admission_stats,
+            synthetic_output=(
+                self.vllm_config.speculative_config is not None
+                and self.vllm_config.speculative_config.rejection_sample_method
+                == "synthetic"
+            ),
         )
 
         # EngineCore (starts the engine in background process).

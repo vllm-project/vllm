@@ -298,12 +298,41 @@ class OpenAIServingChat(GenerateBaseServing):
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        if self.synthetic_output:
+            if type(self) is not OpenAIServingChat:
+                return self.create_error_response(
+                    "Synthetic acceptance output is only supported by the OpenAI "
+                    "Chat Completions and Completions endpoints"
+                )
+            if request.use_beam_search:
+                return self.create_error_response(
+                    "Beam search is unsupported with synthetic acceptance"
+                )
+            if request.extract_structured_outputs() is not None:
+                return self.create_error_response(
+                    "Structured output is unsupported with synthetic acceptance"
+                )
+            if request.tool_choice == "required" or isinstance(
+                request.tool_choice, ChatCompletionNamedToolChoiceParam
+            ):
+                return self.create_error_response(
+                    "Required and named tool calls are unsupported with "
+                    "synthetic acceptance"
+                )
+            if request.logprobs:
+                return self.create_error_response(
+                    "Chat logprobs are unsupported with synthetic acceptance"
+                )
+            if request.echo:
+                return self.create_error_response(
+                    "Prompt echo is unsupported with synthetic acceptance"
+                )
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
         parser: Parser | None = None
-        if self.parser_cls is not None:
+        if self.parser_cls is not None and not self.synthetic_output:
             parser = self._make_parser(request, tokenizer, chat_template_kwargs)
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
@@ -499,7 +528,7 @@ class OpenAIServingChat(GenerateBaseServing):
         previous_texts = [""] * num_choices
 
         try:
-            if self.parser_cls is not None:
+            if self.parser_cls is not None and not self.synthetic_output:
                 if tokenizer is None:
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
