@@ -102,7 +102,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         # full buffer before a real batch has populated it, so zero would make
         # every padding row scatter into request slot 0.
         self.sample_idx_mapping = torch.full(
-            (max_num_sampled_tokens,), -1, dtype=torch.int32, device=device
+            (max_num_sampled_tokens,), -1, dtype=torch.int64, device=device
         )
         # [0, 1, ..., N-1, 0, 1, ..., N-1, ...] -> the per-token column index into
         # draft_logits[req, step, :].
@@ -355,7 +355,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -432,7 +432,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 temperature,
                 seeds,
                 self.block_tables.input_block_tables[gid],
-                self.block_tables.kernel_block_sizes[gid],
+                self.block_tables.block_sizes[gid],
                 self.block_tables.cp_rank,
                 self.dcp_size,
                 self.block_tables.cp_interleave,
@@ -446,8 +446,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
 
         batch_sync, num_batch_tokens = (
-            self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)
-            if dp_sync is not None
+            self._build_uniform_batch_dp_sync(
+                dp_sync_state, num_reqs, self.num_query_per_req
+            )
+            if dp_sync_state is not None
             else (None, num_query_tokens)
         )
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
@@ -459,7 +461,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=batch_sync,
+            dp_sync_state=batch_sync,
         )
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (

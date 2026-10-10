@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
+    BoundaryPut,
     ChunkedTokenDatabase,
     KeyMetadata,
     LBHNCStoreLayout,
@@ -43,6 +44,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+    _partial_tail_non_mamba_puts,
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
@@ -942,6 +946,15 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
 
 
+def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
+    """Add the tail's non-Mamba puts as the scheduler does before the worker."""
+    req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
+    req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
+        thread.coord, req, [db.block_size for db in thread.token_databases]
+    )
+    return req
+
+
 def _make_partial_tail_send_thread(
     store,
     *,
@@ -954,6 +967,8 @@ def _make_partial_tail_send_thread(
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        use_eagle=False,
+        eagle_proof_margin_by_group={},
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -987,8 +1002,63 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
         block_ids=(block_ids, [1]),
         block_hashes=[b"a0", b"a1", b"a2"],
         can_save=True,
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_puts=[(1, 7, 12)],
+        num_prompt_tokens=13,
+        completed_token_len=13,
     )
+
+
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_partial_tail_ignores_handoff_off_prompt_boundary(use_eagle):
+    """A Mamba hand-off away from the prompt checkpoint (a shared-prefix
+    junction) gets no attention tail; only its own Mamba put remains."""
+    store = MagicMock()
+    thread = _make_partial_tail_send_thread(store)
+    thread.coord.use_eagle = use_eagle
+    thread.coord.eagle_proof_margin_by_group = {0: 4} if use_eagle else {}
+    req = _make_partial_tail_req([1, 2, 3])
+    req.num_prompt_tokens = 17 if use_eagle else 13
+    req.boundary_puts = [(1, 7, 8)]
+
+    assert _resolve_partial_tail(thread, req).boundary_puts == [(1, 7, 8)]
+
+
+def test_eagle_attention_proof_published_after_checkpoint_handoff():
+    store = MagicMock()
+    stored = set()
+    store.batch_is_exist.side_effect = lambda keys: [int(k in stored) for k in keys]
+
+    def put(keys, *args):
+        stored.update(keys)
+        return [256] * len(keys)
+
+    store.batch_put_from_multi_buffers.side_effect = put
+    thread = _make_partial_tail_send_thread(store)
+    thread.coord.use_eagle = True
+    thread.coord.eagle_proof_margin_by_group = {0: 4}
+    metadata = _make_partial_tail_req([1, 2, 3])
+    metadata.num_prompt_tokens = 13
+    metadata.completed_token_len = 8
+    metadata.boundary_puts = [(1, 7, 8)]
+
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, metadata)
+    )
+    mamba_key = thread.token_databases[1].key_for(b"a1")
+    attention_key = thread.token_databases[0].key_for(b"a2")
+    assert mamba_key in stored
+    assert attention_key not in stored
+
+    metadata.completed_token_len = 13
+    metadata.boundary_puts = None
+    metadata.publish_partial_tail = True
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, metadata)
+    )
+    assert attention_key in stored
+    keys, addrs, *_ = store.batch_put_from_multi_buffers.call_args.args
+    assert addrs[keys.index(attention_key)] == [0x1000 + 3 * 256]
+    assert mamba_key not in keys
 
 
 def test_partial_tail_offload_skips_null_source_blocks():
@@ -997,7 +1067,9 @@ def test_partial_tail_offload_skips_null_source_blocks():
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_partial_tail_send_thread(store)
 
-    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([0, 2, 3]))
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, _make_partial_tail_req([0, 2, 3]))
+    )
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -1131,9 +1203,11 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         block_hashes=[b"a0", b"a1", b"a2"],
         can_save=True,
         # The scheduler accepted group 1 and omitted group 2 at boundary 12.
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_puts=[(1, 7, 12)],
+        num_prompt_tokens=13,
+        completed_token_len=13,
     )
-    assert thread._maybe_offload_boundary_states(req)
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
     keys, addrs, _sizes, _replicate_config = (
         store.batch_put_from_multi_buffers.call_args.args
@@ -1156,7 +1230,9 @@ def test_partial_tail_offload_replaces_stale_group_ids_after_filtering():
         supports_group_ids=True,
     )
 
-    assert thread._maybe_offload_boundary_states(_make_partial_tail_req([1, 2, 3]))
+    assert thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
+    )
 
     keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
@@ -1190,13 +1266,17 @@ def test_partial_tail_put_failure_activates_pressure_gate():
     store.batch_put_from_multi_buffers.return_value = [256, -200, 256]
     thread = _make_partial_tail_send_thread(store)
 
-    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    _run_store_req(
+        thread, _resolve_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
+    )
 
     assert thread._store_pressure_active is True
     assert thread._skip_store_requests == {"req-a"}
     assert thread._saved_offset.get("req-a", 0) == 0
 
-    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    _run_store_req(
+        thread, _resolve_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
+    )
     assert store.batch_put_from_multi_buffers.call_count == 1
 
 
@@ -1277,9 +1357,9 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
         block_ids=([1, 2, 3], [5]),
         block_hashes=hs,
         can_save=True,
-        boundary_state_offloads=[(1, 7, 32)],
+        boundary_puts=[(1, 7, 32)],
     )
-    assert thread._maybe_offload_boundary_states(req)
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     # boundary 32 is block-aligned for the mamba group (block 16): one key,
@@ -1289,7 +1369,9 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
     assert addrs == [[0x2000 + 7 * 256]]
 
 
-def test_mixed_snapshot_and_sub_block_offloads():
+@pytest.mark.parametrize("saved_tokens", [0, 32])
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):
     """A retention snapshot and the prompt-end sub-block CoW tail can arrive
     in one hand-off; the sub-block path covers FA gap blocks but reads the
     mamba boundary only from the CoW block, never positionally."""
@@ -1297,37 +1379,148 @@ def test_mixed_snapshot_and_sub_block_offloads():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_partial_tail_send_thread(store)
+    thread.coord.use_eagle = use_eagle
+    thread.coord.eagle_proof_margin_by_group = {0: 4} if use_eagle else {}
+    thread._saved_offset["req-a"] = saved_tokens
 
-    hs = [bytes([i + 1]) * 4 for i in range(11)]  # 11 hash units = 44 tokens
+    hs = [bytes([i + 1]) * 4 for i in range(12)]
     req = ReqMeta(
         req_id="req-a",
         token_len_chunk=0,
-        block_ids=([1, 2, 3], [0, 0, 0]),
+        block_ids=(list(range(1, 14)), [0, 0, 0]),
         block_hashes=hs,
         can_save=True,
-        boundary_state_offloads=[(1, 9, 32), (1, 7, 44)],
+        boundary_puts=[(1, 9, 32), (1, 7, 44)],
+        num_prompt_tokens=49 if use_eagle else 45,
+        completed_token_len=49 if use_eagle else 45,
     )
-    assert thread._maybe_offload_boundary_states(req)
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
 
     keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     db_full, db_mamba = thread.token_databases
+    proof_end = 48 if use_eagle else 44
     assert keys == [
+        # The tail reads only the LCM gap, even when normal saves lag.
+        *[db_full.key_for(BlockHash(hs[i])) for i in range(8, proof_end // 4)],
         # Aligned snapshot: boundary 32 from the handed-off block 9.
         db_mamba.key_for(BlockHash(hs[7])),
-        # Sub-block boundary 44: FA gap blocks ending at 4, 8, 12.
-        db_full.key_for(BlockHash(hs[0])),
-        db_full.key_for(BlockHash(hs[1])),
-        db_full.key_for(BlockHash(hs[2])),
         # Mamba boundary block from the CoW hand-off (block 7).
         db_mamba.key_for(BlockHash(hs[10])),
     ]
     assert addrs == [
+        *[[0x1000 + (i + 1) * 256] for i in range(8, proof_end // 4)],
         [0x2000 + 9 * 256],
-        [0x1000 + 1 * 256],
-        [0x1000 + 2 * 256],
-        [0x1000 + 3 * 256],
         [0x2000 + 7 * 256],
     ]
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
+    """Under DCP2 the attention block spans the LCM (16) and Mamba blocks are
+    half that. The prompt-completing save writes one attention block and one
+    Mamba key: the boundary state from the CoW block, never the interior
+    Mamba blocks."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    coord = SimpleNamespace(
+        enable_partial_hash_hits=True,
+        hash_block_size=4,
+        lcm_block_size=16,
+        mamba_group_ids={1},
+        use_eagle=False,
+        eagle_proof_margin_by_group={},
+    )
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0), block_size=16, hash_block_size=4
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=8,
+        hash_block_size=4,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([256])
+    thread = _make_store_sending_thread(
+        store, coord=coord, token_databases=[db_full, db_mamba], tp_rank=tp_rank
+    )
+    # Mamba is replicated across two ranks, which split its keys by block.
+    thread.group_put_steps = [1, 2]
+
+    hs = [bytes([i + 1]) * 4 for i in range(11)]
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], list(range(20, 26))),
+        block_hashes=hs,
+        can_save=True,
+        boundary_puts=[(1, 7, 44)],
+        num_prompt_tokens=45,
+        completed_token_len=45,
+        publish_partial_tail=True,
+    )
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
+    assert req.boundary_puts == [(0, 3, 44), (1, 7, 44)]
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    # Mamba block cdiv(44, 8) - 1 = 5 belongs to put_step_rank 5 % 2 = 1,
+    # which is tp_rank 0 for group 1.
+    mamba_puts = [db_mamba.key_for(BlockHash(hs[10]))] if tp_rank == 0 else []
+    assert keys == [db_full.key_for(BlockHash(hs[10])), *mamba_puts]
+    assert addrs == [[0x1000 + 3 * 256], *([[0x2000 + 7 * 256]] * len(mamba_puts))]
+
+
+def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
+    """A junction hand-off (``--enable-mamba-shared-prefix-checkpoint``) below
+    the prompt checkpoint stores its Mamba state under the junction hash and
+    no attention tail."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    coord = SimpleNamespace(
+        enable_partial_hash_hits=True,
+        hash_block_size=4,
+        lcm_block_size=16,
+        mamba_group_ids={1},
+        use_eagle=True,
+        eagle_proof_margin_by_group={0: 4},
+    )
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0), block_size=4, hash_block_size=4
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([256])
+    db_mamba = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=16,
+        hash_block_size=4,
+    )
+    db_mamba.set_kv_caches_base_addr([0x2000])
+    db_mamba.set_block_len([256])
+    thread = _make_store_sending_thread(
+        store, coord=coord, token_databases=[db_full, db_mamba]
+    )
+
+    hs = [bytes([i + 1]) * 4 for i in range(18)]
+    # 75-token prompt (checkpoint 68), chunk cut at the junction 40.
+    req = ReqMeta(
+        req_id="req-b",
+        token_len_chunk=0,
+        block_ids=(list(range(1, 11)), [20, 21, 22]),
+        block_hashes=hs,
+        can_save=True,
+        boundary_puts=[(1, 7, 40)],
+        num_prompt_tokens=75,
+        completed_token_len=40,
+    )
+    assert thread._maybe_offload_boundary_states(_resolve_partial_tail(thread, req))
+    assert req.boundary_puts == [(1, 7, 40)]
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [db_mamba.key_for(BlockHash(hs[9]))]
+    assert addrs == [[0x2000 + 7 * 256]]
 
 
 def test_snapshot_offload_skips_null_handoff_block():
@@ -1338,13 +1531,16 @@ def test_snapshot_offload_skips_null_handoff_block():
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
     assert thread._maybe_offload_boundary_states(
-        ReqMeta(
-            req_id="req-a",
-            token_len_chunk=0,
-            block_ids=([1, 2, 3], [5]),
-            block_hashes=hs,
-            can_save=True,
-            boundary_state_offloads=[(1, NULL_BLOCK_ID, 32)],
+        _resolve_partial_tail(
+            thread,
+            ReqMeta(
+                req_id="req-a",
+                token_len_chunk=0,
+                block_ids=([1, 2, 3], [5]),
+                block_hashes=hs,
+                can_save=True,
+                boundary_puts=[(1, NULL_BLOCK_ID, 32)],
+            ),
         )
     )
     store.batch_is_exist.assert_not_called()
@@ -1398,6 +1594,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
             [True, False],
         ),
     )
+    coord.store_mask = MagicMock(side_effect=coord.store_mask)
 
     db_full = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
@@ -1427,6 +1624,8 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
             block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
             can_save=True,
+            num_prompt_tokens=33,
+            prefill_end_tokens=64,
         ),
     )
 
@@ -1436,6 +1635,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
 
     assert full_hashes == [b"a2".hex(), b"a3".hex()]
     assert masked_hashes == [b"a2".hex()]
+    coord.store_mask.assert_called_once_with(64, 32, num_prompt_tokens=64)
 
 
 def test_store_sending_thread_prepares_missing_chunks_once_per_group():
@@ -3580,6 +3780,139 @@ def _make_bare_worker(
     return worker
 
 
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("prefix_match_unit", [None, 8])
+@pytest.mark.parametrize("dcp_world_size,mamba_block_size", [(1, 32), (8, 16)])
+def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
+    use_eagle, prefix_match_unit, dcp_world_size, mamba_block_size
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+        coordinator as mooncake_coordinator,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+        MooncakeStoreScheduler,
+    )
+
+    groups = [
+        KVCacheGroupSpec(
+            ["full"],
+            FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+            is_eagle_group=use_eagle,
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=mamba_block_size,
+                shapes=(1, 1),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    ]
+    config = SimpleNamespace(
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both", kv_connector_extra_config={}
+        ),
+        kv_events_config=None,
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=prefix_match_unit,
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_world_size, world_size=dcp_world_size
+        ),
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "scheduler.LookupKeyClient"
+    ):
+        scheduler = MooncakeStoreScheduler(
+            config,
+            KVCacheConfig(
+                num_blocks=128,
+                kv_cache_tensors=[],
+                kv_cache_groups=groups,
+                # The hit alignment the engine core resolves for this config.
+                cache_hit_alignment_tokens=prefix_match_unit or 16,
+            ),
+        )
+    assert scheduler.enable_partial_hash_hits
+    hash_block_size = prefix_match_unit or 16
+    assert scheduler._hash_block_size == hash_block_size
+    coordinator = mooncake_coordinator.MooncakeStoreCoordinator(
+        groups,
+        scheduler_block_size=math.lcm(16 * dcp_world_size, mamba_block_size),
+        hash_block_size=hash_block_size,
+        enable_partial_hash_hits=True,
+    )
+    hashes = [BlockHash(bytes([i]) * 16) for i in range(512 // hash_block_size)]
+    pool = mooncake_coordinator.ExternalCachedBlockPool(
+        hash_block_size=hash_block_size,
+        exists={(group, bytes(h)) for group in range(2) for h in hashes},
+    )
+    _, hit = coordinator.find_longest_cache_hit(hashes, 511, pool)
+    assert hit == 512 - hash_block_size
+
+
+@pytest.mark.parametrize("alignment, expected", [(8, True), (32, False), (None, False)])
+def test_scheduler_follows_core_hit_alignment(alignment, expected):
+    """The store takes partial hits from core's resolved alignment, not from its
+    own groups: these Mamba specs alone would allow them, but core may still
+    keep hits on the block (e.g. for a sliding-window group it never sees)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
+        MooncakeStoreScheduler,
+    )
+
+    groups = [
+        KVCacheGroupSpec(
+            ["full"],
+            FullAttentionSpec(
+                block_size=32, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=32,
+                shapes=(1, 1),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    ]
+    config = SimpleNamespace(
+        speculative_config=None,
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both", kv_connector_extra_config={}
+        ),
+        kv_events_config=None,
+        cache_config=SimpleNamespace(
+            block_size=32, enable_prefix_caching=True, prefix_match_unit=8
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "scheduler.LookupKeyClient"
+    ):
+        scheduler = MooncakeStoreScheduler(
+            config,
+            KVCacheConfig(
+                num_blocks=128,
+                kv_cache_tensors=[],
+                kv_cache_groups=groups,
+                cache_hit_alignment_tokens=alignment,
+            ),
+        )
+
+    assert scheduler.enable_partial_hash_hits is expected
+    assert scheduler._store_coord.enable_partial_hash_hits is expected
+
+
 def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
     worker = _make_bare_worker()
     worker.tp_size = 4
@@ -3873,6 +4206,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
         worker._kv_cache_groups,
         scheduler_block_size=16,
         hash_block_size=4,
+        enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
@@ -3946,6 +4280,7 @@ def test_lookup_plan_resolves_group_tail_keys_from_existing_hashes():
         scheduler_block_size=16,
         hash_block_size=4,
         use_eagle=True,
+        enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
     hashes = [BlockHash(f"h{i}".encode()) for i in range(6)]
@@ -4015,6 +4350,7 @@ def test_lookup_plan_recovers_tail_key_after_multi_chunk_convergence():
         worker._kv_cache_groups,
         scheduler_block_size=16,
         hash_block_size=4,
+        enable_partial_hash_hits=True,
     )
     _refresh_group_tp_replication_factors(worker)
     hashes = [BlockHash(f"h{i}".encode()) for i in range(12)]

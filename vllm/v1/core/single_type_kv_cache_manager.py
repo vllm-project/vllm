@@ -7,9 +7,9 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
-from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
@@ -27,7 +27,6 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
-    KpoolTailSpec,
     KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
@@ -44,8 +43,6 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
-
-logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -1299,10 +1296,6 @@ class CircularBufferManager(FullAttentionManager):
         return 0
 
 
-class KpoolTailManager(CircularBufferManager):
-    """One-block circular scratch manager for ``KpoolTailSpec``."""
-
-
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
@@ -2280,7 +2273,11 @@ class HiSparseSourceManager(FullAttentionManager):
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
-            metrics_collector=None,
+            metrics_collector=(
+                KVCacheMetricsCollector(device_pool.metrics_collector.sample_rate)
+                if device_pool.metrics_collector is not None
+                else None
+            ),
             medium=MEDIUM_CPU,
             event_owner=device_pool,
         )
@@ -2686,11 +2683,6 @@ def register_all_kvcache_specs(vllm_config):
         SlidingWindowMLASpec,
         SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
-    )
-    KVCacheSpecRegistry.register(
-        KpoolTailSpec,
-        KpoolTailManager,
-        uniform_type_base_spec=KpoolTailSpec,
     )
 
     KVCacheSpecRegistry.register(
