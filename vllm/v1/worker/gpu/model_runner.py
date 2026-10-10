@@ -471,6 +471,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
                 "enable_trace_replay": self.model_config.enable_trace_replay,
                 "return_sampling_mask": self.model_config.return_sampling_mask,
+                "prompt_embeds_state": self.model_state.prompt_embeds_state,
                 "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
