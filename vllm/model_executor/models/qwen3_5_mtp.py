@@ -90,9 +90,16 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
         # Ref: https://github.com/vllm-project/vllm/pull/38650
         # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
+        # Quark and compressed-tensors ship mtp.fc dense and omit it from
+        # exclude/ignore, so fc loads empty and the drafter emits token 0 at
+        # every step.
         fc_quant = (
             None
-            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            if (
+                quant_config
+                and quant_config.get_name()
+                in ("modelopt_fp4", "quark", "compressed-tensors")
+            )
             else quant_config
         )
         self.fc = ColumnParallelLinear(
