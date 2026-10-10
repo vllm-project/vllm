@@ -34,7 +34,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import LazyTransferJob, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -109,11 +109,21 @@ def make_job(
 ) -> TransferJob:
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
+    if is_promotion:
+        chunk_ids_list = list(chunk_ids)
+        return LazyTransferJob(
+            job_id=job_id,
+            _keys=keys,
+            _chunk_ids=None,
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda k, ctx: (list(k), chunk_ids_list),
+        )
     return TransferJob(
         job_id=job_id,
-        keys=keys,
-        chunk_ids=np.array(chunk_ids, dtype=np.int64),
-        is_promotion=is_promotion,
+        _keys=keys,
+        _chunk_ids=np.array(chunk_ids, dtype=np.int64),
+        is_promotion=False,
         req_context=_CTX,
     )
 
@@ -210,6 +220,12 @@ def fs_tier_with_events(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_fs_tier_is_lazy(fs_tier):
+    """FileSystemTierManager reports supports_lazy_promotion_allocation=True."""
+    tier, _ = fs_tier
+    assert tier.supports_lazy_promotion_allocation()
 
 
 def test_lookup_empty_tier(fs_tier):
@@ -968,3 +984,261 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         assert torch.allclose(reader_tensor[1], expected)
     finally:
         reader.shutdown()
+
+
+class TestFSPromotion:
+    """Test Lazy promotion. FS tier is lazy by default."""
+
+    def test_submit_load_rejects_eager_transfer_job(self, fs_tier):
+        """submit_load must raise AssertionError for a non-lazy TransferJob."""
+        tier, _ = fs_tier
+        eager_job = TransferJob(
+            job_id=1,
+            _keys=[key(1)],
+            _chunk_ids=np.array([0], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+        )
+        with pytest.raises(AssertionError):
+            tier.submit_load(eager_job)
+
+    def test_promotion_allocation_failure(self, fs_tier):
+        """primary_alloc_fn returning None → lazy_success=False, job fails."""
+        tier, _ = fs_tier
+        job = LazyTransferJob(
+            job_id=42,
+            _keys=[key(1), key(2)],
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda keys, ctx: None,
+        )
+        tier.submit_load(job)
+        results = drain(tier)
+
+        # Assert that the job degenerated to an empty job
+        assert job.lazy_success is False
+        assert len(job.keys) == 0
+        assert len(job.chunk_ids) == 0
+
+        assert len(results) == 1
+        result = results[0]
+        assert result.job_id == 42
+        assert result.success
+        assert result.successful_keys is None
+
+    def test_materialize_called_in_worker_thread(self, fs_tier):
+        """materialize() is deferred to a worker thread, not the scheduler thread.
+
+        Checks:
+        - job.is_materialized() is False immediately after submit_load() returns
+          (the scheduler thread has not yet called materialize()).
+        - job.is_materialized() is True after the worker finishes (drain()).
+        - primary_alloc_fn ran on a thread other than the scheduler thread.
+        """
+        tier, _ = fs_tier
+        # Pre-store a file so the load can succeed
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        drain(tier)
+
+        main_thread_id = threading.current_thread().ident
+        alloc_thread_ids: list[int] = []
+        # Gate that keeps the worker blocked inside alloc_fn until we've
+        # finished asserting is_materialized() == False.
+        check_done = threading.Event()
+
+        def tracking_alloc_fn(keys, ctx):
+            ident = threading.current_thread().ident
+            assert ident is not None
+            alloc_thread_ids.append(ident)
+            check_done.wait()  # hold until the scheduler thread has checked
+            return (list(keys), np.array([0], dtype=np.int64))
+
+        job = LazyTransferJob(
+            job_id=99,
+            _keys=[key(1)],
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=tracking_alloc_fn,
+        )
+
+        # Not yet materialized before submit
+        assert not job.is_materialized(), (
+            "job must not be materialized before submit_load()"
+        )
+
+        tier.submit_load(job)
+
+        # Worker is blocked in alloc_fn waiting for check_done; guaranteed not
+        # materialized yet.
+        assert not job.is_materialized(), (
+            "job must not be materialized synchronously on the scheduler thread"
+        )
+
+        # Unblock the worker, then wait for it to finish
+        check_done.set()
+        drain(tier)
+
+        # After the worker finishes, materialize() has been called
+        assert job.is_materialized(), (
+            "job must be materialized after the worker thread completes"
+        )
+        assert len(alloc_thread_ids) == 1, "alloc_fn must be called exactly once"
+        assert alloc_thread_ids[0] != main_thread_id, (
+            "alloc_fn must run on a worker thread, not the scheduler thread"
+        )
+
+    def test_promotion_primary_key_availability(self, fs_tier):
+        """primary_alloc_fn controls which subset of requested keys are loaded from FS.
+
+        Three sub-cases exercised in sequence, each using its own non-overlapping
+        primary chunk slots so that writes from one sub-case do not pollute another:
+          - None cached:  alloc returns all 4 keys → all 4 loaded (slots 0-3).
+          - Half cached:  alloc returns 2 keys     → only those 2 loaded (slots 4-5).
+          - All cached:   alloc returns 0 keys     → no FS reads, job still succeeds.
+        """
+        tier, _ = fs_tier
+        all_keys = [key(1), key(2), key(3), key(4)]
+
+        # Store all four files on disk so every sub-case can request any key.
+        tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
+        drain(tier)
+
+        # None cached
+        job = LazyTransferJob(
+            job_id=10,
+            _keys=all_keys,
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int64),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [0, 1, 2, 3]
+
+        # Half cached
+        uncached = all_keys[2:]
+        job = LazyTransferJob(
+            job_id=11,
+            _keys=all_keys,
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda req_keys, ctx: (
+                list(uncached),
+                np.array([4, 5], dtype=np.int64),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert set(job.keys) == set(uncached)
+        assert list(job.chunk_ids) == [4, 5]
+
+        # All cached
+        job = LazyTransferJob(
+            job_id=12,
+            _keys=all_keys,
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda req_keys, ctx: ([], []),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert len(list(job.keys)) == 0
+        assert len(list(job.chunk_ids)) == 0
+
+    def test_promotion_fs_file_availability(self, fs_tier):
+        """FS file availability determines promotion success and partial-success
+        reporting.
+
+        Three sub-cases, each using its own keys and non-overlapping chunk slots:
+          - All files present:  full success, successful_keys is None.
+          - Half files present: partial failure, successful_keys holds the loaded half.
+          - No files present:   immediate failure, successful_keys is None.
+        """
+        tier, _ = fs_tier
+
+        # All files present → full success
+        all_keys = [key(1), key(2), key(3), key(4)]
+        tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
+        drain(tier)
+
+        job = LazyTransferJob(
+            job_id=20,
+            _keys=all_keys,
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int64),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is True
+        assert result.successful_keys is None  # all loaded; no partial set reported
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [0, 1, 2, 3]
+
+        # Half files deleted; partial failure
+        # Delete files for key(3) and key(4); key(1) and key(2) remain on disk.
+        for k in all_keys[2:]:
+            path = tier.file_mapper.get_file_name(k)
+            if os.path.exists(path):
+                os.remove(path)
+
+        job = LazyTransferJob(
+            job_id=21,
+            _keys=all_keys,
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([4, 5, 6, 7], dtype=np.int64),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is False
+        assert result.successful_keys is not None
+        assert set(result.successful_keys) == {key(1), key(2)}
+        # job.keys reflects the full originally-requested set, not just what loaded
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [4, 5, 6, 7]
+
+        # All files deleted → nothing loaded
+        for k in all_keys[:2]:
+            path = tier.file_mapper.get_file_name(k)
+            if os.path.exists(path):
+                os.remove(path)
+
+        job = LazyTransferJob(
+            job_id=22,
+            _keys=all_keys,
+            _chunk_ids=np.array([], dtype=np.int64),
+            is_promotion=True,
+            req_context=_CTX,
+            primary_alloc_fn=lambda req_keys, ctx: (
+                list(req_keys),
+                np.array([0, 1, 2, 3], dtype=np.int64),
+            ),
+        )
+        tier.submit_load(job)
+        result = drain(tier)[0]
+        assert result.success is False
+        assert result.successful_keys is None  # nothing loaded before the first failure
+        # job.keys still reflects the full originally-requested set
+        assert set(job.keys) == set(all_keys)
+        assert list(job.chunk_ids) == [0, 1, 2, 3]

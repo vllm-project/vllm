@@ -264,8 +264,8 @@ class FakeParent:
         self._next_job_id += 1
         return TransferJob(
             job_id=job_id,
-            keys=keys_list,
-            chunk_ids=chunk_ids,
+            _keys=keys_list,
+            _chunk_ids=chunk_ids,
             is_promotion=False,
             req_context=ctx,
         )

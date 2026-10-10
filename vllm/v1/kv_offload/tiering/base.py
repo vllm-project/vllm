@@ -4,7 +4,7 @@
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -64,16 +64,81 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
 
 
+PrimaryAllocFn = Callable[
+    [Collection[OffloadKey], ReqContext], tuple[list[OffloadKey], list[int]] | None
+]
+
+
 @dataclass
 class TransferJob:
-    """Metadata for an in-flight async transfer job."""
+    """Metadata for an in-flight async transfer job.
+
+    Secondary tiers can choose to lazily allocate the CPU cache blocks.
+    The *materialize* functions are utilities to realize lazy allocation.
+    """
 
     job_id: JobId
-    keys: Collection[OffloadKey]
-    chunk_ids: np.ndarray
+    _keys: Collection[OffloadKey]
+    _chunk_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
     submit_time: float = field(default_factory=time.monotonic)
+
+    @property
+    def keys(self) -> Collection[OffloadKey]:
+        return self._keys
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        return self._chunk_ids
+
+    def is_materialized(self) -> bool:
+        return True
+
+
+@dataclass
+class LazyTransferJob(TransferJob):
+    # State; Was lazy allocation successful?
+    lazy_success: bool | None = None
+    # Keys / chunk_ids after allocation
+    _lazy_keys: Collection[OffloadKey] | None = None
+    _lazy_chunk_ids: np.ndarray | None = None
+    # Allocator fn
+    primary_alloc_fn: PrimaryAllocFn = field(kw_only=True)
+
+    def __post_init__(self):
+        assert self.is_promotion is not None, (
+            "Lazy allocation jobs need an allocation function"
+        )
+
+    def is_materialized(self) -> bool:
+        return self._lazy_keys is not None and self._lazy_chunk_ids is not None
+
+    @property
+    def keys(self) -> Collection[OffloadKey]:
+        assert self.is_materialized(), "Cannot access keys before materialization"
+        assert self._lazy_keys is not None
+        return self._lazy_keys
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        assert self.is_materialized(), "Cannot access chunk_ids before materialization"
+        assert self._lazy_chunk_ids is not None
+        return self._lazy_chunk_ids
+
+    def materialize(self):
+        if self.is_materialized():
+            return
+        assert self.primary_alloc_fn is not None
+        alloc = self.primary_alloc_fn(self._keys, self.req_context)
+        if alloc is None:
+            # This is technically a transfer job with 0 keys now.
+            self._lazy_keys = []
+            self._lazy_chunk_ids = np.array([])
+            self.lazy_success = False
+            return
+        self.lazy_success = True
+        self._lazy_keys, self._lazy_chunk_ids = alloc
 
 
 @dataclass
@@ -269,6 +334,10 @@ class SecondaryTierManager(ABC):
 
         """
         pass
+
+    def supports_lazy_promotion_allocation(self) -> bool:
+        """Return true iff the supports/requests deferring of CPU block allocation."""
+        return False
 
     def has_pending_work(self) -> bool:
         """Whether this tier needs the engine to keep stepping.
