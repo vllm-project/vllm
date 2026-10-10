@@ -11,6 +11,7 @@ import pytest
 import torch
 from transformers import PreTrainedConfig
 
+import vllm.envs as envs
 from vllm.config import PoolerConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.seqwise.methods import (
@@ -269,6 +270,23 @@ class TestMeanPool:
         assert out.dtype == torch.float32
         expected = torch.tensor([[2.0, 3.0]], dtype=torch.float32)
         assert torch.allclose(out, expected, atol=1e-2)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
+    @pytest.mark.parametrize(
+        "dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"]
+    )
+    def test_batch_invariant_under_the_flag(self, monkeypatch, dtype):
+        monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+        torch.manual_seed(0)
+        seqs = [
+            torch.randn(24 + (i * 7) % 41, 768, device="cuda", dtype=dtype)
+            for i in range(64)
+        ]
+        lens = [s.shape[0] for s in seqs]
+        batched = MeanPool()(torch.cat(seqs), _make_metadata(lens))
+        for i in (0, 31, 63):
+            alone = MeanPool()(seqs[i], _make_metadata([lens[i]]))
+            torch.testing.assert_close(batched[i], alone[0], rtol=0, atol=0)
 
 
 # ---------------------------------------------------------------------------
