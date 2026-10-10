@@ -371,6 +371,13 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
+    def check_health_gpu(self) -> None:
+        # Every rank must reply: PP stages other than the output rank fail
+        # independently.
+        self.collective_rpc(
+            "check_health_gpu", timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+        )
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
         return self.collective_rpc(

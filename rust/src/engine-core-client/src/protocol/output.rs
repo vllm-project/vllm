@@ -228,6 +228,37 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
+    /// Readiness progress published by engine-core. Broadcast on its own and
+    /// also stamped onto request batches.
+    #[serde(default)]
+    ready_progress_seq: Option<u64>,
+    #[serde(default)]
+    ready_state: Option<EngineCoreReadyState>,
+    /// Utility call the engine is executing, if any.
+    #[serde(default)]
+    ready_operation: Option<String>,
+}
+
+/// Engine-core readiness state.
+///
+/// Original Python definition: `EngineCoreReadyState` in
+/// `vllm/v1/engine/__init__.py`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum EngineCoreReadyState {
+    Idle = 0,
+    Busy = 1,
+    Sleeping = 2,
+}
+
+/// Readiness progress broadcast by an engine to every frontend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadinessOutput {
+    pub engine_index: u32,
+    pub timestamp: f64,
+    pub progress_seq: u64,
+    pub state: EngineCoreReadyState,
+    pub operation: Option<String>,
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -270,6 +301,7 @@ pub enum EngineCoreOutputs {
     RequestBatch(RequestBatchOutputs),
     Utility(UtilityCallOutput),
     DpControl(DpControlOutput),
+    Readiness(ReadinessOutput),
 }
 
 impl From<RequestBatchOutputs> for EngineCoreOutputs {
@@ -287,6 +319,12 @@ impl From<UtilityCallOutput> for EngineCoreOutputs {
 impl From<DpControlOutput> for EngineCoreOutputs {
     fn from(output: DpControlOutput) -> Self {
         Self::DpControl(output)
+    }
+}
+
+impl From<ReadinessOutput> for EngineCoreOutputs {
+    fn from(output: ReadinessOutput) -> Self {
+        Self::Readiness(output)
     }
 }
 
@@ -311,6 +349,24 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
         let has_request_payload = !value.outputs.is_empty()
             || value.scheduler_stats.is_some()
             || value.finished_requests.is_some();
+
+        // Readiness fields are only meaningful on their own; other payloads
+        // carrying them are classified by that payload.
+        if !has_request_payload
+            && value.utility_output.is_none()
+            && value.wave_complete.is_none()
+            && value.start_wave.is_none()
+            && let (Some(progress_seq), Some(state)) = (value.ready_progress_seq, value.ready_state)
+        {
+            return Ok(ReadinessOutput {
+                engine_index: value.engine_index,
+                timestamp: value.timestamp,
+                progress_seq,
+                state,
+                operation: value.ready_operation,
+            }
+            .into());
+        }
 
         match (
             has_request_payload,
@@ -383,6 +439,14 @@ impl From<EngineCoreOutputs> for WireEngineCoreOutputs {
                     ..Default::default()
                 }
             }
+            EngineCoreOutputs::Readiness(readiness) => Self {
+                engine_index: readiness.engine_index,
+                timestamp: readiness.timestamp,
+                ready_progress_seq: Some(readiness.progress_seq),
+                ready_state: Some(readiness.state),
+                ready_operation: readiness.operation,
+                ..Default::default()
+            },
         }
     }
 }

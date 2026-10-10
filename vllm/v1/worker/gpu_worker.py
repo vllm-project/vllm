@@ -1403,6 +1403,15 @@ class Worker(WorkerBase):
             randomize_inputs=self.randomize_dummy_inputs,
         )
 
+    def check_health_gpu(self) -> None:
+        """Readiness probe: a dummy forward pass that leaves loaded LoRA
+        adapters intact and has completed on the device when this returns."""
+        keep_loaded_loras = getattr(self.model_runner, "keep_loaded_loras", None)
+        with keep_loaded_loras() if keep_loaded_loras else nullcontext():
+            self.execute_dummy_batch()
+        if torch.accelerator.is_available():
+            torch.accelerator.synchronize()
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 

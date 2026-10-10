@@ -30,7 +30,8 @@ use crate::protocol::multimodal::{
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
-    RequestBatchOutputs, UtilityCallOutput, decode_engine_core_outputs,
+    EngineCoreReadyState, ReadinessOutput, RequestBatchOutputs, UtilityCallOutput,
+    decode_engine_core_outputs,
 };
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
@@ -2754,6 +2755,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
     let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
+    let readiness_outputs_hex = lines.next().expect("missing readiness outputs fixture line");
+    let stamped_outputs_hex = lines.next().expect("missing stamped outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2888,6 +2891,28 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         )
     "#]]
     .assert_debug_eq(&decoded_outputs);
+
+    let readiness_frames = [bytes::Bytes::from(
+        hex::decode(readiness_outputs_hex).unwrap(),
+    )];
+    assert_eq!(
+        decode_engine_core_outputs(&readiness_frames).unwrap(),
+        EngineCoreOutputs::Readiness(ReadinessOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            progress_seq: 7,
+            state: EngineCoreReadyState::Busy,
+            operation: Some("collective_rpc:update_weights".to_string()),
+        })
+    );
+    // Readiness stamped onto a request batch does not change the batch.
+    let stamped_frames = [bytes::Bytes::from(
+        hex::decode(stamped_outputs_hex).unwrap(),
+    )];
+    assert_eq!(
+        decode_engine_core_outputs(&stamped_frames).unwrap(),
+        decoded_outputs
+    );
 
     let decode_frames = |line: &str| {
         line.split_whitespace()

@@ -126,6 +126,11 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def check_health_gpu(self) -> None:
+        """Readiness probe for `/ready`: run a dummy forward pass and wait for
+        it to complete on the device."""
+        raise NotImplementedError
+
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
         ``torch.accelerator`` must override with their own wait."""

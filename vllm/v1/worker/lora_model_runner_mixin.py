@@ -23,6 +23,8 @@ logger = init_logger(__name__)
 
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
+    _keep_loaded_loras = False
+
     lora_config: LoRAConfig | None
     get_model: Callable[[], nn.Module]
 
@@ -266,17 +268,30 @@ class LoRAModelRunnerMixin:
             mapping_type: Which LoRA mapping to build (language or encoder).
 
         """
+        keep_loaded = self._keep_loaded_loras
         with (
-            self.maybe_setup_dummy_loras(lora_config, remove_lora),
+            self.maybe_setup_dummy_loras(
+                None if keep_loaded else lora_config, remove_lora
+            ),
             self.maybe_select_dummy_loras(
                 lora_config,
                 num_scheduled_tokens,
                 mapping_type,
                 num_sampled_tokens,
-                num_active_loras,
+                0 if keep_loaded else num_active_loras,
             ),
         ):
             yield
+
+    @contextmanager
+    def keep_loaded_loras(self):
+        """Run dummy batches without adding dummy LoRAs or removing the
+        loaded adapters."""
+        self._keep_loaded_loras = True
+        try:
+            yield
+        finally:
+            self._keep_loaded_loras = False
 
     def maybe_remove_all_loras(self, lora_config: LoRAConfig | None):
         if lora_config is None:
