@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.pinned_memory import empty_pinned
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
@@ -814,14 +815,13 @@ class CPUOffloadingWorker(OffloadingWorker):
                 cpu_tensor = mmap_region.create_next_worker_view(cpu_page_size_bytes)
             else:
                 t0 = time.monotonic()
-                cpu_tensor = torch.zeros(
-                    (num_cpu_chunks, cpu_page_size_bytes),
-                    dtype=torch.int8,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                )
+                shape = (num_cpu_chunks, cpu_page_size_bytes)
+                if pin_memory:
+                    cpu_tensor = empty_pinned(shape, torch.int8).zero_()
+                else:
+                    cpu_tensor = torch.zeros(shape, dtype=torch.int8, device="cpu")
                 logger.debug(
-                    "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
+                    "Pinned CPU tensor %d×%d (%.2f GB): %.3f s",
                     num_cpu_chunks,
                     cpu_page_size_bytes,
                     num_cpu_chunks * cpu_page_size_bytes / 1e9,

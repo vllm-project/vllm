@@ -698,3 +698,45 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
                 torch.testing.assert_close(gpu_tensor[block_id].cpu(), expected)
     finally:
         worker.shutdown()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="exact pinning is CUDA/ROCm only"
+)
+def test_private_cpu_tier_pins_its_exact_size(default_vllm_config) -> None:
+    # Without a shared region (always the case on ROCm) each KV tensor gets
+    # a private pinned CPU tensor. 2 x 33 MiB through torch's caching host
+    # allocator would pin 2 x 64 MiB.
+    page_size_bytes = 1 << 20
+    num_cpu_chunks = 33
+    tensors = [
+        CanonicalKVCacheTensor(
+            tensor=torch.zeros(
+                (4, page_size_bytes), dtype=torch.int8, device=DEVICES[0]
+            ),
+            page_size_bytes=page_size_bytes,
+        )
+        for _ in range(2)
+    ]
+    kv_caches = CanonicalKVCaches(
+        tensors=tensors,
+        group_data_refs=[
+            [
+                CanonicalKVCacheRef(tensor_idx=i, page_size_bytes=page_size_bytes)
+                for i in range(2)
+            ]
+        ],
+    )
+    before = torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+
+    worker = CPUOffloadingWorker(
+        kv_caches=kv_caches,
+        blocks_per_chunk=1,
+        num_cpu_chunks=num_cpu_chunks,
+        mmap_region=None,
+    )
+    try:
+        cached = torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+        assert cached - before < num_cpu_chunks * page_size_bytes
+    finally:
+        worker.shutdown()
