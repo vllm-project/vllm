@@ -32,7 +32,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.compilation.wrapper import compile_model_with_stock_torch
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
@@ -44,6 +44,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
+)
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    refresh_quantized_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
@@ -556,6 +559,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not isinstance(speculator, DraftModelSpeculator):
             return None
         return speculator.model
+
+    def reset_lora_state(self) -> None:
+        super().reset_lora_state()
+        # Called whenever the target's weights are replaced (reload, weight
+        # transfer), so draft weights derived from them must follow.
+        draft_model = self.get_draft_model()
+        if draft_model is not None:
+            with set_current_vllm_config(self.vllm_config):
+                refresh_quantized_lm_heads(draft_model)
 
     def reload_weights(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
