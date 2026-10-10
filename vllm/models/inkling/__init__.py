@@ -25,9 +25,14 @@ __all__ = [
 ]
 
 
+def _use_amd_kernels() -> bool:
+    # XPU lacks CuTe/FA4 and Lamport; reuse the portable ROCm path.
+    return current_platform.is_rocm() or current_platform.is_xpu()
+
+
 def __getattr__(name: str):
     if name == "InklingMTP":
-        if current_platform.is_rocm():
+        if _use_amd_kernels():
             from .amd import mtp as amd_mtp
 
             return amd_mtp.InklingMTP
@@ -37,7 +42,7 @@ def __getattr__(name: str):
         return nvidia_mtp.InklingMTP
 
     if name in __all__:
-        if current_platform.is_rocm():
+        if _use_amd_kernels():
             from .amd import model as amd_model
 
             return getattr(amd_model, name)
