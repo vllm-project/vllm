@@ -164,6 +164,22 @@ def _aiter_mla_non_causal_asm_kernels() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
+def _triton_compiles_aiter_gluon_mla() -> bool:
+    """Whether this Triton can compile AITER's small-head Gluon MLA kernel.
+
+    ``aiter/ops/triton/gluon/mla_gluon.py`` calls ``PaddedSharedLayout`` with
+    ``cga_layout``. Triton 3.6 names that parameter ``block_bases`` and raises
+    ``TypeError``, so the kernel never compiles. Triton releases after 3.6
+    accept ``cga_layout``.
+    """
+    try:
+        from triton.experimental.gluon import language as gl
+    except ImportError:
+        return False
+    return "cga_layout" in getattr(gl.PaddedSharedLayout, "__dataclass_fields__", {})
+
+
+@functools.lru_cache(maxsize=1)
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
 
@@ -172,12 +188,16 @@ def _gluon_mla_decode_supported() -> bool:
     (``mla_gluon requires gfx950``). Restrict Gluon decode to gfx950; other
     archs use the asm persistent decode, which ``get_mla_padded_q`` makes
     correct for any 1..15 heads.
+
+    gfx950 is not sufficient. The ROCm vLLM image pairs it with Triton 3.6,
+    which cannot compile the kernel (see ``_triton_compiles_aiter_gluon_mla``);
+    those shapes take the padded asm decode instead.
     """
     try:
         from vllm.platforms.rocm import on_gfx950
     except Exception:  # noqa: BLE001
         return False
-    return on_gfx950()
+    return bool(on_gfx950()) and _triton_compiles_aiter_gluon_mla()
 
 
 # Past 2 GiB, mla_gluon swaps its masked buffer_load for an unmasked
