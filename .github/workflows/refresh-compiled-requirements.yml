@@ -1,0 +1,165 @@
+name: Refresh compiled requirements
+
+on:
+  schedule:
+    # Monday 07:00 UTC. Review the artifact and open the PR manually.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-compiled-requirements
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    if: github.repository == 'vllm-project/vllm' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.12"
+          enable-cache: false
+      - name: Upgrade compiled requirement locks
+        run: >-
+          uv run --no-project --with pyyaml --python 3.12
+          python tools/refresh_compiled_requirements.py
+      - name: Prepare review artifact
+        env:
+          BASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/compiled-requirements"
+          git diff --binary --no-ext-diff --no-textconv "${BASE_SHA}" \
+            > "${RUNNER_TEMP}/compiled-requirements/requirements.patch"
+          printf '%s\n' "${BASE_SHA}" \
+            > "${RUNNER_TEMP}/compiled-requirements/base-sha.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: artifact
+        with:
+          name: compiled-requirements
+          path: ${{ runner.temp }}/compiled-requirements/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Link review artifact
+        env:
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+          BASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          {
+            echo 'Publishing is disabled. Review the patch and open a PR manually.'
+            printf '\n[Download patch and base SHA](%s)\n' "${ARTIFACT_URL}"
+            printf '\nBase commit: `%s`\n' "${BASE_SHA}"
+            echo 'Apply requirements.patch to that commit with git apply --index.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  publish:
+    # Enable only after reviewing weekly artifacts and configuring the App.
+    if: ${{ false }}
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: compiled-requirements
+          path: ${{ runner.temp }}/compiled-requirements
+      - name: Validate and commit lockfile patch
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch="${RUNNER_TEMP}/compiled-requirements/requirements.patch"
+          test -f "${patch}"
+          test ! -L "${patch}"
+          if [ ! -s "${patch}" ]; then
+            echo "Compiled requirements are already current."
+            exit 0
+          fi
+
+          # Apply only to the index: artifact contents never become executable files.
+          git apply --cached --check -- "${patch}"
+          git apply --cached -- "${patch}"
+          git diff --cached --raw --no-renames -z > "${RUNNER_TEMP}/lock-changes"
+          while IFS= read -r -d '' metadata && IFS= read -r -d '' file; do
+            read -r old_mode new_mode _old_oid _new_oid status <<< "${metadata}"
+            if [[ "${old_mode}" != :100644 || "${new_mode}" != 100644 || "${status}" != M ]]; then
+              echo "Only modifications to regular lockfiles are allowed." >&2
+              exit 1
+            fi
+            case "${file}" in
+              requirements/docs.txt|requirements/test/cpu.txt|requirements/test/cuda.txt|requirements/test/rocm.txt|requirements/test/xpu.txt) ;;
+              *) echo "Unexpected path in lockfile patch: ${file}" >&2; exit 1 ;;
+            esac
+          done < "${RUNNER_TEMP}/lock-changes"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config core.hooksPath /dev/null
+          git checkout -b requirements/refresh-compiled
+          git commit -m "Refresh compiled requirement locks"
+          echo 'changed=true' >> "${GITHUB_OUTPUT}"
+      - name: Create publisher token
+        if: steps.validate.outputs.changed == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.REQUIREMENTS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.REQUIREMENTS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: vllm
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Open one pull request
+        if: steps.validate.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          branch="requirements/refresh-compiled"
+
+          # Replace only the branch tip observed here, including an absent branch.
+          expected="$(git ls-remote --heads origin "refs/heads/${branch}" | cut -f1)"
+          git push --force-with-lease="refs/heads/${branch}:${expected}" \
+            origin "HEAD:refs/heads/${branch}"
+
+          existing="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "${branch}" --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "${existing}" ]; then
+            echo "Updated PR #${existing}."
+            exit 0
+          fi
+          cat > "${RUNNER_TEMP}/requirements-pr.md" <<'EOF'
+          ## Summary
+          - Regenerates requirements/test/{cuda,cpu,rocm,xpu}.txt and requirements/docs.txt with the pre-commit uv pip compile commands plus --upgrade.
+          - Only regular-file modifications to these five locks passed publisher validation.
+
+          ## Test plan
+          - [ ] Review dependency changes before merging.
+          - [ ] CI pre-commit pip-compile hooks leave these locks unchanged.
+          EOF
+          gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base main \
+            --head "${branch}" \
+            --label dependencies \
+            --title "Refresh compiled requirement locks" \
+            --body-file "${RUNNER_TEMP}/requirements-pr.md"
