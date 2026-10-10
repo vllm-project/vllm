@@ -25,6 +25,10 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# The config file option, in both spellings accepted by argparse:
+# `--config <path>` and `--config=<path>`.
+_CONFIG_ARG_PATTERN = re.compile(r"^--config(=.*|$)")
+
 
 def human_readable_int(value: str) -> int:
     """Parse human-readable integers like '1k', '2M', etc.
@@ -321,7 +325,7 @@ class FlexibleArgumentParser(ArgumentParser):
             if (
                 len(args) > 1
                 and args[1].startswith("-")
-                and not any(re.match(r"^--config(=.+|$)", arg) for arg in args)
+                and not any(_CONFIG_ARG_PATTERN.match(arg) for arg in args)
                 and any(
                     re.match(r"^--served[-_]model[-_]name(=.+|$)", arg) for arg in args
                 )
@@ -330,6 +334,20 @@ class FlexibleArgumentParser(ArgumentParser):
                     "`model` should be provided as the first positional argument when "
                     "using `vllm serve`. i.e. `vllm serve <model> --<arg> <value>`."
                 )
+
+        # Normalize `--config=<path>` to `--config <path>` so that config file
+        # expansion works with both the spaced and the `=` syntax. argparse
+        # treats the two forms as equivalent, but the config pre-processing
+        # below (and `_pull_args_from_config`) recognizes `--config` only as a
+        # standalone token. The served-model-name check above uses the same
+        # pattern, so both sites agree on what counts as a config argument.
+        normalized_args = list[str]()
+        for arg in args:
+            if _CONFIG_ARG_PATTERN.match(arg) and "=" in arg:
+                normalized_args.extend(arg.split("=", 1))
+            else:
+                normalized_args.append(arg)
+        args = normalized_args
 
         if "--config" in args:
             args = self._pull_args_from_config(args)
