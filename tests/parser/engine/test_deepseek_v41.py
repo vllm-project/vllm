@@ -12,7 +12,13 @@ from tests.parser.engine.replay_harness import (
     collect_output,
     replay_streaming,
 )
-from vllm.parser.deepseek_v41 import deepseek_v41_config
+from vllm.parser.deepseek_v4 import DSML_THINK_END
+from vllm.parser.deepseek_v41 import (
+    DSML_INVOKE_END,
+    DSML_PARAM_CLOSE,
+    DSML_TOOL_END,
+    deepseek_v41_config,
+)
 from vllm.parser.parser_manager import ParserManager
 
 CALLS = (
@@ -146,3 +152,29 @@ def test_python_argument_conversion_and_partial_values():
         "bare": 7,
         "text": "  a<b",
     }
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize(
+    "stray",
+    [DSML_PARAM_CLOSE, DSML_INVOKE_END, DSML_TOOL_END],
+    ids=["param_close", "invoke_end", "tool_end"],
+)
+def test_orphan_structural_closer_is_absorbed(thinking, stray):
+    """A stray spaced-DSML closer in plain content must not reach the
+    client (long-context degeneration emits these with no open call)."""
+    text = ("Plan." + DSML_THINK_END if thinking else "") + "All done." + stray
+    tokenizer, tokens = tokenizer_for(text, False)
+    parser = parser_for(tokenizer, {"thinking": thinking})
+    output = collect_output(
+        replay_streaming(
+            parser,
+            tokens,
+            chunk_size=1,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+            prompt_token_ids=[50 if thinking else 51],
+        )
+    )
+    assert output.content == "All done."
+    assert "DSML" not in output.content
