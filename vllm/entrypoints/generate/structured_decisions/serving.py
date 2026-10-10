@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-from collections.abc import Mapping
 from typing import Any
 
 from fastapi import Request
@@ -12,11 +11,6 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
 
 from .protocol import (
     DecisionUsage,
@@ -74,18 +68,9 @@ class ServingStructuredDecisions(BaseServing):
         super().__init__(
             models=models, model_config=model_config, request_logger=request_logger
         )
+        self.engine_client = strategy.context.engine_client
         self.strategy = strategy
         self.limits = strategy.limits()
-
-    async def _get_trace_headers(
-        self, headers: Mapping[str, str]
-    ) -> Mapping[str, str] | None:
-        if not contains_trace_headers(headers):
-            return None
-        if not await self.strategy.context.engine_client.is_tracing_enabled():
-            log_tracing_disabled_warning()
-            return None
-        return extract_trace_headers(headers)
 
     async def create_decision(
         self,
