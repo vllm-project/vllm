@@ -586,8 +586,17 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         block_table_stride: int
         block_size: int
 
+    # token_to_req_indices/is_valid_token are read with scalar loads only, so
+    # the divisibility hint buys nothing; serving slices them at arbitrary
+    # token offsets, and specializing on their alignment would JIT a new
+    # variant per parity at serving time.
     @staticmethod
-    @triton.jit
+    @triton.jit(
+        do_not_specialize_on_alignment=[
+            "token_to_req_indices_ptr",
+            "is_valid_token_ptr",
+        ]
+    )
     def kernel(
         global_topk_indices_ptr,
         global_topk_indices_stride: tl.constexpr,
@@ -643,13 +652,14 @@ class ComputeGlobalTopkIndicesAndLensKernel(
         self,
         *,
         topk_width: int,
+        topk_indices_stride: int,
         block_size: int,
         block_table_block_size: int,
         max_model_len: int,
     ) -> CompileKey:
         return self.CompileKey(
             global_topk_indices_stride=topk_width,
-            topk_indices_stride=topk_width,
+            topk_indices_stride=topk_indices_stride,
             topk=topk_width,
             block_table_stride=(max_model_len + block_table_block_size - 1)
             // block_table_block_size,
@@ -676,14 +686,20 @@ class ComputeGlobalTopkIndicesAndLensKernel(
             ),
         )
         trace_dispatch = self._trace_dispatch(self.dispatch)
+        # C4 rows are full-width slices of the `index_topk`-wide buffer, so the
+        # row stride equals the width. C128A prefill rows are views into the
+        # `c128a_max_compressed`-wide persistent buffer while their logical
+        # width follows the batch (`active_topk_width`), so stride > width.
         c4_keys = trace_dispatch(
             topk_width=index_topk if 4 in compress_ratios else (),
+            topk_indices_stride=index_topk if 4 in compress_ratios else (),
             block_size=max(1, cache_block_size // 4),
             block_table_block_size=cache_block_size,
             max_model_len=vllm_config.model_config.max_model_len,
         )
         c128a_keys = trace_dispatch(
             topk_width=active_c128a_topk_widths if 128 in compress_ratios else (),
+            topk_indices_stride=(max_c128a_topk if 128 in compress_ratios else ()),
             block_size=max(1, cache_block_size // 128),
             block_table_block_size=cache_block_size,
             max_model_len=vllm_config.model_config.max_model_len,
