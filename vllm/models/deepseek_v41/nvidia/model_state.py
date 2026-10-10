@@ -366,6 +366,9 @@ class DeepseekV41ModelState(DefaultModelState):
                 )
             assert model_specific_attn_metadata is None
             model_specific_attn_metadata = ReplayAttnMetadata(replay_start)
+        self._observe_swa_groups(
+            attn_groups, block_tables, kv_cache_config, replay_start
+        )
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
@@ -389,6 +392,69 @@ class DeepseekV41ModelState(DefaultModelState):
                 replay_start,
             )
         return attn_metadata
+
+    def _observe_swa_groups(
+        self,
+        attn_groups: list[list[Any]],
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        replay_start: torch.Tensor | None,
+    ) -> None:
+        """Give the batched sliding-window metadata this step's group tables.
+
+        The sliding-window caches sit in one KV cache group per layer, and their
+        metadata differs only in the group's paged block table, so one set of
+        window rows serves them all (see ``deepseek_v41.swa_metadata``). The
+        builders are handed the state directly: each engine owns its own rows,
+        and per-ubatch builders would need rows of their own.
+        """
+        from vllm.models.deepseek_v41.swa_metadata import SWAWindowMetadata
+        from vllm.v1.kv_cache_interface import (
+            SlidingWindowMLASpec,
+            UniformTypeKVCacheSpecs,
+        )
+
+        group_of_layer: dict[str, tuple[int, torch.Tensor]] = {}
+        builders: list[tuple[Any, int]] = []
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            spec = group.kv_cache_spec
+            inner = (
+                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+            )
+            if not isinstance(inner, SlidingWindowMLASpec):
+                continue
+            # One batch, one set of rows: a micro-batched builder cannot share them.
+            if any(len(g.metadata_builders) != 1 for g in attn_groups[gid]):
+                return
+            slot = len({s for s, _ in group_of_layer.values()})
+            for attn_group in attn_groups[gid]:
+                for layer_name in attn_group.layer_names:
+                    group_of_layer[layer_name] = (slot, block_tables[gid])
+                builders.append((attn_group.metadata_builders[0], slot))
+        if not group_of_layer:
+            return
+
+        state = getattr(self, "_swa_window_state", None)
+        num_groups = len({slot for slot, _ in group_of_layer.values()})
+        if state is None or state.num_groups != num_groups:
+            scheduler = self.vllm_config.scheduler_config
+            state = SWAWindowMetadata(
+                device=self.device,
+                num_groups=num_groups,
+                # Decodes carry 1 + drafts slots, so this bounds their rows.
+                decode_rows=(
+                    scheduler.max_num_seqs
+                    * (1 + self.vllm_config.num_speculative_tokens)
+                ),
+                prefill_rows=scheduler.max_num_batched_tokens,
+                window_size=self.vllm_config.model_config.get_sliding_window(),
+                index_width=self.vllm_config.model_config.get_sliding_window(),
+            )
+            self._swa_window_state = state
+        state.observe(group_of_layer, replay_start)
+        for builder, slot in builders:
+            builder._swa_window_state = state
+            builder._swa_window_slot = slot
 
     def _warm_up_replay_kernels(
         self, input_batch: InputBatch, slot_mappings: torch.Tensor
