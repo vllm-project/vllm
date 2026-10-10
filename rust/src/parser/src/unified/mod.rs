@@ -5,23 +5,25 @@
 
 mod combined;
 mod gemma4;
+mod hf;
 mod hy;
 mod inkling;
 mod kimi_k3;
 
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
+pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
 use thiserror::Error;
 use thiserror_ext::Macro;
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::reasoning::ReasoningError;
-use crate::tool::{
-    StructuralTagBuilder, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
-};
+use crate::tool::{Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput};
+use crate::utils::SpecialToken;
 
 /// Result alias for unified parser operations.
 pub type Result<T> = std::result::Result<T, UnifiedParserError>;
@@ -32,7 +34,11 @@ pub enum UnifiedParserEvent {
     /// Normal assistant-visible text.
     Text(String),
     /// Reasoning text hidden from the normal content stream.
-    Reasoning(String),
+    ///
+    /// Carries the attributions of the generated tokens that produced it, so
+    /// downstream consumers can count reasoning tokens exactly. Marker spans
+    /// are dropped by the parsers, keeping marker tokens out of any count.
+    Reasoning(DecodedText),
     /// A tool-call update extracted from visible assistant text.
     ToolCall(ToolCallDelta),
 }
@@ -58,15 +64,18 @@ impl UnifiedParserOutput {
     }
 
     /// Append one reasoning text event if `delta` is non-empty.
-    pub fn push_reasoning(&mut self, delta: impl AsRef<str> + Into<String>) {
-        if delta.as_ref().is_empty() {
+    ///
+    /// A piece with empty text but non-empty attributions (zero-width tokens
+    /// only) is still kept: the tokens count as reasoning.
+    pub fn push_reasoning(&mut self, delta: DecodedText) {
+        if delta.is_empty() {
             return;
         }
         if let Some(UnifiedParserEvent::Reasoning(last_text)) = self.events.last_mut() {
-            last_text.push_str(delta.as_ref());
+            last_text.append(delta);
             return;
         }
-        self.events.push(UnifiedParserEvent::Reasoning(delta.into()));
+        self.events.push(UnifiedParserEvent::Reasoning(delta));
     }
 
     /// Append one tool-call event.
@@ -98,6 +107,8 @@ impl UnifiedParserOutput {
 
 #[cfg(test)]
 mod tests {
+    use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
+
     use super::{UnifiedParserEvent, UnifiedParserOutput};
     use crate::tool::ToolCallDelta;
 
@@ -107,8 +118,8 @@ mod tests {
         output.push_text("hello");
         output.push_text(" ");
         output.push_text("world");
-        output.push_reasoning("think");
-        output.push_reasoning("ing");
+        output.push_reasoning(DecodedText::unattributed("think"));
+        output.push_reasoning(DecodedText::unattributed("ing"));
         output.push_call(ToolCallDelta {
             tool_index: 0,
             name: Some("lookup".to_string()),
@@ -120,7 +131,7 @@ mod tests {
             output.events,
             vec![
                 UnifiedParserEvent::Text("hello world".to_string()),
-                UnifiedParserEvent::Reasoning("thinking".to_string()),
+                UnifiedParserEvent::Reasoning(DecodedText::unattributed("thinking")),
                 UnifiedParserEvent::ToolCall(ToolCallDelta {
                     tool_index: 0,
                     name: Some("lookup".to_string()),
@@ -139,11 +150,11 @@ mod tests {
         let mut other = UnifiedParserOutput::default();
         other.push_text(" ");
         other.push_text("world");
-        other.push_reasoning("think");
+        other.push_reasoning(DecodedText::unattributed("think"));
         output.append(other);
 
         let mut after_reasoning = UnifiedParserOutput::default();
-        after_reasoning.push_reasoning("ing");
+        after_reasoning.push_reasoning(DecodedText::unattributed("ing"));
         after_reasoning.push_text("!");
         output.append(after_reasoning);
 
@@ -151,9 +162,65 @@ mod tests {
             output.events,
             vec![
                 UnifiedParserEvent::Text("hello world".to_string()),
-                UnifiedParserEvent::Reasoning("thinking".to_string()),
+                UnifiedParserEvent::Reasoning(DecodedText::unattributed("thinking")),
                 UnifiedParserEvent::Text("!".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn unified_parser_output_reasoning_coalescing_rebases_attributions() {
+        let mut output = UnifiedParserOutput::default();
+        output.push_reasoning(DecodedText {
+            text: "think".to_string(),
+            attributions: [TokenAttribution {
+                token_id: 1,
+                anchor: TokenAnchor::Visible { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        });
+        output.push_reasoning(DecodedText {
+            text: "ing".to_string(),
+            attributions: [TokenAttribution {
+                token_id: 2,
+                anchor: TokenAnchor::Visible { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        });
+        // A zero-width-token-only piece is kept: the tokens count as reasoning.
+        output.push_reasoning(DecodedText {
+            text: String::new(),
+            attributions: [TokenAttribution {
+                token_id: 3,
+                anchor: TokenAnchor::ZeroWidth { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        });
+
+        assert_eq!(
+            output.events,
+            vec![UnifiedParserEvent::Reasoning(DecodedText {
+                text: "thinking".to_string(),
+                attributions: [
+                    TokenAttribution {
+                        token_id: 1,
+                        anchor: TokenAnchor::Visible { byte_offset: 0 },
+                    },
+                    TokenAttribution {
+                        token_id: 2,
+                        anchor: TokenAnchor::Visible { byte_offset: 5 },
+                    },
+                    TokenAttribution {
+                        token_id: 3,
+                        anchor: TokenAnchor::ZeroWidth { byte_offset: 8 },
+                    },
+                ]
+                .into_iter()
+                .collect(),
+            })]
         );
     }
 }
@@ -175,9 +242,12 @@ pub trait UnifiedParser: Send {
         false
     }
 
-    /// Return the xgrammar structural-tag builder used for strict tool calling.
-    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        None
+    /// Build the request output grammar after prompt-based initialization.
+    fn build_output_grammar(
+        &self,
+        _ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
+        Ok(None)
     }
 
     /// Return the parser-provided ID for a tool call by index, if the model emitted one.
@@ -186,7 +256,7 @@ pub trait UnifiedParser: Send {
     }
 
     /// Feed one decoded text delta into the parser, appending committed output into `output`.
-    fn parse_into(&mut self, delta: &str, output: &mut UnifiedParserOutput) -> Result<()>;
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()>;
 
     /// Flush any buffered parser state at end of stream.
     fn finish(&mut self) -> Result<UnifiedParserOutput> {
@@ -203,8 +273,13 @@ pub trait UnifiedParser: Send {
 #[derive(Debug, Error, Macro)]
 #[thiserror_ext(macro(path = "crate::unified", mangle))]
 pub enum UnifiedParserError {
-    #[error("combined parser is constructed from split parser instances")]
-    CombinedParserConstructor,
+    /// The parser is built from inputs other than tools and a tokenizer, so
+    /// [`UnifiedParser::create`] cannot construct it.
+    #[error("the `{parser}` unified parser is built from {built_from}, not by name")]
+    NoNamedConstructor {
+        parser: &'static str,
+        built_from: &'static str,
+    },
     #[error("tokenizer is missing unified parser token `{token}`")]
     MissingToken { token: String },
     #[error("unified parser parsing failed: {message}")]
@@ -219,5 +294,13 @@ pub enum UnifiedParserError {
 fn token_id(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<u32> {
     tokenizer.token_to_id(token).ok_or_else(|| UnifiedParserError::MissingToken {
         token: token.to_string(),
+    })
+}
+
+/// Resolves `token` to a [`SpecialToken`], or an error if it's not found.
+fn special_token(tokenizer: &dyn vllm_tokenizer::Tokenizer, token: &str) -> Result<SpecialToken> {
+    Ok(SpecialToken {
+        id: token_id(tokenizer, token)?,
+        text: token.to_string(),
     })
 }

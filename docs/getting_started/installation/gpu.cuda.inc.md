@@ -43,7 +43,7 @@ As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch releas
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 export CUDA_VERSION=130 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
+uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl" --extra-index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}"
 ```
 
 #### Install the latest code
@@ -111,24 +111,27 @@ This command will do the following:
 If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and install it without re-running the full pip install:
 
     ```bash
-    ./build_rust.sh          # release build
-    ./build_rust.sh --debug  # faster build for development
+    ./tools/build_rust.sh          # release build
+    ./tools/build_rust.sh --debug  # faster build for development
     ```
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
-In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
+Wheels are published an hour or two after a commit lands on `main`. If the wheel for
+your merge-base with upstream `main` is not available yet, the installer uses the
+nearest older commit that has one, searching up to 20 commits back. It stops with an
+error if compiled sources or build configuration (`csrc/`, `cmake/`, `CMakeLists.txt`,
+`pyproject.toml`, `vllm/_custom_ops.py`) changed between that commit and your
+merge-base, and warns if `rust/` or `setup.py` did. This is a source-level check, not
+a guarantee of binary compatibility.
 
-```bash
-export VLLM_PRECOMPILED_WHEEL_COMMIT=nightly
-export VLLM_USE_PRECOMPILED=1
-uv pip install --editable .
-```
+Setting `VLLM_PRECOMPILED_WHEEL_LOCATION` or a full SHA in
+`VLLM_PRECOMPILED_WHEEL_COMMIT` skips this search and check.
 
 There are more environment variables to control the behavior of Python-only build:
 
 - `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
-- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
+- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit to download the pre-compiled wheel from. Must be a full 40-character SHA.
 - `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu130`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
@@ -140,13 +143,8 @@ You can find more information about vLLM's wheels in [Install the latest code](#
 #### Full build (with compilation) {#full-build}
 
 !!! note "Compiler requirement"
-    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
-    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
-    ```bash
-    sudo apt-get install -y gcc-11 g++-11
-    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
-        --slave /usr/bin/g++ g++ /usr/bin/g++-11
-    ```
+    Building from source requires GCC/G++ ≥ 13 ([#58158](https://github.com/vllm-project/vllm/issues/58158)).
+    Ubuntu 24.04, the base of the default vLLM image, ships GCC 13 by default.
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
@@ -183,7 +181,7 @@ To build vLLM using an existing PyTorch installation:
 # install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-python use_existing_torch.py
+python tools/use_existing_torch.py
 uv pip install -r requirements/build/cuda.txt
 uv pip install --no-build-isolation -e .
 ```
@@ -425,12 +423,7 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
 #### [Preview] Building vLLM's Docker Image from Source for NVIDIA Rubin GPU Architecture
 
-At this time, the Rubin preview is available only to NVIDIA engineers and
-partners with access to NVIDIA's internal prerequisites. Set
-`INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path. It requires a
-`requirements/rubin-prerelease.txt` file containing pointers to NVIDIA's
-internal prerelease packages, plus NVIDIA-internal CUDA 13.4 or CUDA 13.5
-development images for `BUILD_BASE_IMAGE` and `FINAL_BASE_IMAGE`.
+Set `INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path.
 
 Triton must currently be installed from source for Rubin compatibility.
 Specify its repository with `TRITON_INSTALL_FROM_SOURCE_REPO`; an empty
@@ -444,61 +437,65 @@ BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
-Use `ARCH=arm64` on VR200 or `ARCH=amd64` on R100:
+Set `BUILD_NIXL=true` to build NIXL from source. NIXL's release wheels do not
+include the NIXL EP extension for the PyTorch nightly used by the Rubin build.
+The build uses the NIXL version pinned in `requirements/kv_connectors.txt` and
+replaces the NIXL packages installed from the KV-connector requirements.
 
-??? console "CUDA 13.4 command"
+For `FINAL_BASE_IMAGE`, use the public, multi-arch
+`nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or
+newer, the first NCCL release with Rubin (SM107) support.
+For `BUILD_BASE_IMAGE`, use:
+
+- `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
+- `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
+
+??? console "ARM64/AArch64 build command"
 
     ```bash
-    ARCH=arm64
     docker buildx build --progress=plain --load \
       --file docker/Dockerfile \
       --target vllm-openai \
-      --platform "linux/${ARCH}" \
-      --tag "vllm/vllm-rubin-openai:prerelease-cu134-${ARCH}" \
+      --platform "linux/arm64" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu134-public-arm64" \
       --build-arg max_jobs="$(nproc)" \
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
-      --build-arg CUDA_VERSION=13.4.1 \
-      --build-arg BUILD_BASE_IMAGE="<cuda-13.4-manylinux-devel-image-${ARCH}>" \
-      --build-arg FINAL_BASE_IMAGE="<cuda-13.4-ubuntu24.04-devel-image-${ARCH}>" \
+      --build-arg CUDA_VERSION=13.4 \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
 
-??? console "CUDA 13.5 command"
+??? console "x86_64 build command"
 
     ```bash
-    ARCH=arm64
     docker buildx build --progress=plain --load \
       --file docker/Dockerfile \
       --target vllm-openai \
-      --platform "linux/${ARCH}" \
-      --tag "vllm/vllm-rubin-openai:prerelease-cu135-${ARCH}" \
+      --platform "linux/amd64" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu134-public-amd64" \
       --build-arg max_jobs="$(nproc)" \
       --build-arg nvcc_threads=2 \
       --build-arg RUN_WHEEL_CHECK=false \
       --build-arg INSTALL_RUBIN_PRERELEASE=true \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
-      --build-arg CUDA_VERSION=13.5.0 \
-      --build-arg BUILD_BASE_IMAGE="<cuda-13.5-manylinux-devel-image-${ARCH}>" \
-      --build-arg FINAL_BASE_IMAGE="<cuda-13.5-ubuntu24.04-devel-image-${ARCH}>" \
+      --build-arg CUDA_VERSION=13.4 \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
+      --build-arg FINAL_BASE_IMAGE="nvidia/cuda:13.4.1-base-ubuntu24.04" \
+      --build-arg NCCL_VERSION=2.32.3 \
       .
     ```
-
-CUDA 13.5 compiled-mode qualification passed with NVIDIA driver versions
-615.62.03 and 620.05. Driver 610.47.04 failed the tested compiled CUDA 13.5
-kernel. Validate the exact driver version on the target system.
 
 !!! note
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
     cannot inspect the host GPU. R100 and VR200 report compute capability 10.7,
     for which the generic `10.0` target provides family-compatible kernels.
-    The Ubuntu `devel` final image is also required: the corresponding `base`
-    image lacks the CUDA runtime/JIT package closure used by vLLM and the
-    prerelease PyTorch wheel.
 
     `RUN_WHEEL_CHECK=false` disables only the PyPI publication-size guard for
     this private staging image.

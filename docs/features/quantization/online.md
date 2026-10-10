@@ -99,6 +99,53 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+### Re-quantizing layers to a different precision
+
+An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
+
+vLLM uses the checkpoint method to load and dequantize the checkpoint weight, and then applies the online quantization method. This requires the checkpoint
+method to implement weight dequantization, unsupported source and target
+combinations raise an error.
+
+Currently supported combinations are:
+
+| Checkpoint layer | Online target | Requirements |
+| ---------------- | ------------- | ------------ |
+| Serialized ModelOpt MXFP8 linear | any | Target-specific hardware requirements |
+
+For example, serialized ModelOpt MXFP8 linears can be converted to
+per-channel-weight/per-token-activation FP8 at load time:
+
+```bash
+vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
+  --linear-backend auto \
+  --quantization-config.linear fp8_per_channel
+```
+
+!!! info
+
+    This is only available for linear layers at the moment.
+    
+    Checkpoint-exclusion policy is not enforced by online quantization/re-quantization. Only exclusion through `--quantization-config.targets`/`--quantization-config.ignore` is enforced. 
+
+### Online quantization on unquantized layers from partially-quantized checkpoints
+
+Online quantization can be used on already quantized checkpoints independently of their original `quant_method` (`modelopt`, `compressed-tensors`, `quark`, etc.), for layers that are left unquantized in the original checkpoint.
+
+The checkpoint `quant_method` remains responsible for its quantized layers, while the selected unquantized layers use the requested online method.
+
+For example:
+
+```bash
+vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
+  --quantization-config.linear mxfp8
+```
+
+adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
+
+!!! info
+    `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
+
 ### Separate Schemes for Dense and MoE Layers
 
 You can apply different quantization schemes to dense linear layers and MoE expert layers via the `linear` and `moe` fields. Each accepts either a full spec dict, or a bare string naming an online shorthand (e.g. `"fp8_per_block"`) or weight format (e.g. `"fp8_per_block_static"`); fields not set fall back to the shorthand defaults.

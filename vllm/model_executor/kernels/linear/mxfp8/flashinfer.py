@@ -4,10 +4,18 @@
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
     swizzle_mxfp8_scale,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.utils import flashinfer as vllm_flashinfer
@@ -16,8 +24,24 @@ from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutedsl
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
+def _check_mm_mxfp8_shape(weight_shape: tuple[int, int]) -> tuple[bool, str | None]:
+    N, K = weight_shape
+    if K < 128:
+        return False, f"mm_mxfp8 requires K >= 128, got K={K}."
+    if K % MXFP8_BLOCK_SIZE != 0:
+        return (
+            False,
+            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}.",
+        )
+    if N < 128:
+        return False, f"mm_mxfp8 requires N >= 128, got N={N}."
+    return True, None
+
+
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A8 GEMM via FlashInfer CUTLASS (SM100+)."""
+
+    supports_pre_processed_weights = True
 
     @classmethod
     def is_supported(
@@ -33,7 +57,20 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        can_implement, reason = _check_mm_mxfp8_shape(c.weight_shape)
+        if not can_implement:
+            return False, reason
+        N, _ = c.weight_shape
+        if current_platform.is_device_capability_family(120) and N % 32 != 0:
+            return (
+                False,
+                f"mm_mxfp8 on SM12x requires N to be divisible by 32, got N={N}.",
+            )
         return True, None
+
+    def input_quant_key(self) -> QuantKey:
+        # Activations use FlashInfer's F8_128x4 swizzled scale layout.
+        return kMxfp8Dynamic
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]
@@ -51,33 +88,23 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale
-        out_dtype = x.dtype
         N, K = weight.shape
 
-        input_shape = x.shape
-        input_2d = x.view(-1, K)
-        min_dim = 128
-
-        assert min_dim <= K, (
-            f"mm_mxfp8 requires K >= {min_dim}, got K={K}. "
-            f"in_features is too small for mm_mxfp8."
-        )
-        assert K % MXFP8_BLOCK_SIZE == 0, (
-            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}."
-        )
-        assert min_dim <= N, (
-            f"mm_mxfp8 requires N >= {min_dim}, got N={N}. "
-            f"out_features is too small for mm_mxfp8."
-        )
-
-        input_mxfp8, input_scale = mxfp8_e4m3_quantize(
-            input_2d, is_sf_swizzled_layout=True
-        )
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            input_mxfp8, input_scale = qa.data, qa.scale
+            out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
+        else:
+            assert isinstance(x, torch.Tensor)
+            out_dtype, input_shape = x.dtype, x.shape
+            input_mxfp8, input_scale = mxfp8_e4m3_quantize(
+                x.view(-1, K), is_sf_swizzled_layout=True
+            )
 
         if not weight.is_contiguous():
             weight = weight.contiguous()
@@ -101,6 +128,8 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A8 GEMM via FlashInfer CuTe-DSL (SM100/SM103)."""
 
+    supports_pre_processed_weights = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -116,7 +145,11 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
-        return True, None
+        return _check_mm_mxfp8_shape(c.weight_shape)
+
+    def input_quant_key(self) -> QuantKey:
+        # Activations use FlashInfer's F8_128x4 swizzled scale layout.
+        return kMxfp8Dynamic
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]
@@ -135,33 +168,23 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weight = layer.weight  # [K, N], column-major
         weight_scale = layer.weight_scale
-        out_dtype = x.dtype
         K, N = weight.shape
 
-        input_shape = x.shape
-        input_2d = x.view(-1, K)
-        min_dim = 128
-
-        assert min_dim <= K, (
-            f"mm_mxfp8 requires K >= {min_dim}, got K={K}. "
-            f"in_features is too small for mm_mxfp8."
-        )
-        assert K % MXFP8_BLOCK_SIZE == 0, (
-            f"mm_mxfp8 requires K to be divisible by {MXFP8_BLOCK_SIZE}, got K={K}."
-        )
-        assert min_dim <= N, (
-            f"mm_mxfp8 requires N >= {min_dim}, got N={N}. "
-            f"out_features is too small for mm_mxfp8."
-        )
-
-        input_mxfp8, input_scale = mxfp8_e4m3_quantize(
-            input_2d, is_sf_swizzled_layout=True
-        )
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            input_mxfp8, input_scale = qa.data, qa.scale
+            out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
+        else:
+            assert isinstance(x, torch.Tensor)
+            out_dtype, input_shape = x.dtype, x.shape
+            input_mxfp8, input_scale = mxfp8_e4m3_quantize(
+                x.view(-1, K), is_sf_swizzled_layout=True
+            )
 
         output = vllm_flashinfer.mm_mxfp8(
             input_mxfp8,

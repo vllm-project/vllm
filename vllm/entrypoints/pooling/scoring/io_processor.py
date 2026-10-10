@@ -7,6 +7,7 @@ from typing import Any, TypeAlias, cast
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
+from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
@@ -46,6 +47,8 @@ from .utils import (
     truncate_text_to_tokens,
     validate_score_input,
 )
+
+logger = init_logger(__name__)
 
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
@@ -188,6 +191,27 @@ class ScoringIOProcessor(PoolingIOProcessor):
         scoring_data = self.valid_inputs(data_1, data_2)
         return scoring_data
 
+    def _pair_error_output(
+        self,
+        output_1: PoolingRequestOutput,
+        output_2: PoolingRequestOutput,
+    ) -> PoolingRequestOutput | None:
+        failed = output_1 if output_1.error is not None else output_2
+        if failed.error is None:
+            return None
+
+        padding = [self.pad_token_id] if self.pad_token_id is not None else []
+        return PoolingRequestOutput(
+            request_id=f"{output_1.request_id}_{output_2.request_id}",
+            outputs=failed.outputs,
+            prompt_token_ids=(
+                output_1.prompt_token_ids + padding + output_2.prompt_token_ids
+            ),
+            num_cached_tokens=(output_1.num_cached_tokens + output_2.num_cached_tokens),
+            finished=failed.finished,
+            error=failed.error,
+        )
+
 
 class BiEncoderIOProcessor(ScoringIOProcessor):
     name = "bi-encoder"
@@ -307,6 +331,10 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
         final_res_batch: list[PoolingRequestOutput] = []
         for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            if error_output := self._pair_error_output(emb_1, emb_2):
+                final_res_batch.append(error_output)
+                continue
+
             pair_score = F.cosine_similarity(
                 emb_1.outputs.data.float(), emb_2.outputs.data.float(), dim=0
             )
@@ -349,6 +377,10 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
 
         # Compute MaxSim scores
         for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            if error_output := self._pair_error_output(emb_1, emb_2):
+                final_res_batch.append(error_output)
+                continue
+
             # emb_1.outputs.data: [query_len, dim]
             # emb_2.outputs.data: [doc_len, dim]
             q_emb = emb_1.outputs.data
@@ -424,6 +456,24 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.supports_score_template = supports_score_template(model)
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
+
+        if (
+            getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
+            and self.chat_template is None
+        ):
+            suggested_template = (
+                "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+                if self.model_config.is_multimodal_model
+                else "examples/pooling/score/template/qwen3_reranker.jinja"
+            )
+            logger.warning(
+                "Serving an original Qwen3 reranker (%s) without a "
+                "--chat-template. The model was trained with a specific prompt "
+                "template; running without it may produce inaccurate relevance "
+                "scores. Consider specifying `--chat-template %s`.",
+                self.model_config.model,
+                suggested_template,
+            )
 
     #######################################
     # online APIs
@@ -600,7 +650,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             model_config,
         )
 
-        # Apply truncation before defining closures
+        # Limit the query and document separately before composing them.
         if max_tokens_per_query > 0 and isinstance(prompt_1, str):
             prompt_1 = truncate_text_to_tokens(
                 prompt_1, tokenizer, max_tokens_per_query
@@ -645,16 +695,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
                     # `llm as reranker` defaults to not using separating token.
-                    if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
-                        query_ids = tokenizer.encode(prompt_1, add_special_tokens=False)
-                        doc_ids = tokenizer.encode(prompt_2, add_special_tokens=False)
-                        doc_ids = doc_ids[:max_tokens_per_doc]
-                        input_ids = query_ids + doc_ids
-                        full_prompt = tokenizer.decode(input_ids)
-                        prompt_inputs = {"input_ids": input_ids}
-                    else:
-                        full_prompt = prompt_1 + prompt_2
-                        prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
+                    full_prompt = prompt_1 + prompt_2
+                    prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
         # FIXME: For now, we only apply a template when one is explicitly provided.
@@ -845,7 +887,14 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
+        max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
+            pooling_params=ctx.pooling_params
+        )
         scoring_data = ctx.scoring_data
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         queries = self.ensure_str(scoring_data.data_1)
@@ -887,6 +936,10 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         final_res_batch: list[PoolingRequestOutput] = []
 
         for i in range(len(outputs)):
+            if outputs[i].error is not None:
+                final_res_batch.append(outputs[i])
+                continue
+
             embeds = outputs[i].outputs.data.float()
 
             # The JinaForRanking model concatenates docs first, then query.

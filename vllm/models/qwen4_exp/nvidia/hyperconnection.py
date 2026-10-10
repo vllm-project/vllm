@@ -25,16 +25,19 @@ Typical usage inside a transformer decoder layer::
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.platforms import current_platform
 
 from ..common.hyperconnection import (
     GroupedGemmaRMSNorm,
     HyperConnectionConfig,
 )
+from .ops.cute_dsl.hc_down_silu import MAX_FUSED_M, hc_down_silu
 from .ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -52,14 +55,15 @@ class GatedResidual(nn.Module):
 
     ``combine_and_mix()`` runs the pre pipeline (grouped GemmaRMSNorm -> merged
     low-rank down+inject GEMM -> silu -> up GEMM -> sigmoid -> gated mean
-    over the HC streams). When passed a pending block output and an injection,
-    it fuses their residual combine with the RMSNorm. Final mixers use
-    ``use_combine=False`` and do not produce a new injection.
+    over the HC streams). When passed a pending block output, it fuses its
+    residual combine with the RMSNorm. A missing injection selects unit-weight
+    combine. Final mixers use ``use_combine=False`` and do not produce a new
+    injection.
 
     Weights: the norm owns the grouped GemmaRMSNorm affine; the projections
-    are vLLM Linear modules (merged replicated linear for down+inject), so
-    GEMM dispatch (e.g. the low-latency skinny GEMM) applies through the
-    standard quant_method mechanism.
+    are vLLM Linear modules (merged replicated linear for down+inject).
+    Eligible down+inject projections use the fused SiLU GEMM; other projections
+    use their Linear module's GEMM dispatch.
     """
 
     def __init__(
@@ -104,6 +108,12 @@ class GatedResidual(nn.Module):
                 return_bias=False,
                 disable_tp=True,
             )
+            weight = self.input_mix_weight_down_block_inject.weight
+            self._use_hc_down_silu = (
+                weight.shape[1] % 8 == 0
+                and weight.dtype == torch.bfloat16
+                and current_platform.has_device_capability(90)
+            )
         else:
             self.input_mix_weight_down = ReplicatedLinear(
                 self.hyper_hidden_size,
@@ -124,6 +134,30 @@ class GatedResidual(nn.Module):
             return_bias=False,
         )
 
+    def _down_and_inject(
+        self, xn: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Down projection + SiLU; also returns injection logits if combined."""
+        if not self.use_combine:
+            return hc_silu(self.input_mix_weight_down(xn), self.hc_count), None
+
+        use_fused = (
+            self._use_hc_down_silu
+            and not envs.VLLM_BATCH_INVARIANT
+            and 1 <= xn.shape[0] <= MAX_FUSED_M
+        )
+        if use_fused:
+            return hc_down_silu(
+                xn,
+                self.input_mix_weight_down_block_inject.weight,
+                self.lora_rank,
+                self.hc_count,
+            )
+        down_and_injection = self.input_mix_weight_down_block_inject(xn)
+        split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
+        lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+        return hc_silu(lora, self.hc_count), injection
+
     def mix(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -134,16 +168,7 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        if self.use_combine:
-            # produce injection logits for combine
-            split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
-            down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        else:
-            lora = self.input_mix_weight_down(xn)
-            injection = None
-
-        lora = hc_silu(lora, self.hc_count)
+        lora, injection = self._down_and_inject(xn)
         gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
@@ -153,13 +178,14 @@ class GatedResidual(nn.Module):
         self,
         hidden_states: torch.Tensor,
         prev_block_output: torch.Tensor,
-        prev_injection: torch.Tensor,
+        prev_injection: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Consume a pending combine, then prepare the next block input.
 
         ``hidden_states`` is the multi-stream state from before the pending
         block's mix. Its combine with ``block_output`` is fused with this
-        module's input RMSNorm.
+        module's input RMSNorm. A missing injection applies the block output
+        to every stream with unit weight.
         """
         hidden_states, xn = hc_combine_norm(
             hidden_states,
@@ -170,16 +196,7 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
-        if self.use_combine:
-            # produce injection logits for combine
-            split_sizes = [self.lora_rank, self.hc_count, self.pad_size]
-            down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
-        else:
-            lora = self.input_mix_weight_down(xn)
-            injection = None
-
-        lora = hc_silu(lora, self.hc_count)
+        lora, injection = self._down_and_inject(xn)
         gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
@@ -189,7 +206,7 @@ class GatedResidual(nn.Module):
         self,
         hidden_states: torch.Tensor,
         block_output: torch.Tensor,
-        injection: torch.Tensor,
+        injection: torch.Tensor | None,
     ) -> torch.Tensor:
         return hc_combine(hidden_states, block_output, injection, self.hc_count)
 

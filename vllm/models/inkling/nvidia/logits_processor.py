@@ -37,6 +37,7 @@ class InklingLogitsProcessor(LogitsProcessor):
         soft_cap: Optional logit soft cap (``None`` for the served checkpoint).
         logits_mup_width_multiplier: muP width divisor for the final logits;
             ``None`` or ``0`` disables it.
+
     """
 
     def __init__(

@@ -11,6 +11,7 @@ import torch
 
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.utils import (
     MetadataItem,
@@ -137,7 +138,7 @@ def test_completion_request_batched(server: RemoteOpenAIServer, model_name: str)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat_request(server: RemoteOpenAIServer, model_name: str):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
@@ -524,7 +525,7 @@ async def test_invocations_chat_request(server: RemoteOpenAIServer):
 
 @pytest.mark.asyncio
 async def test_invocations_conversation_chat_request(server: RemoteOpenAIServer):
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",

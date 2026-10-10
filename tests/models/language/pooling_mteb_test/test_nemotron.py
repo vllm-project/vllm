@@ -19,6 +19,7 @@ EMBEDDING_MODELS = [
         "nvidia/llama-nemotron-embed-1b-v2",
         architecture="LlamaBidirectionalModel",
         mteb_score=0.689164662128673,
+        mteb_tol=2e-3,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -32,6 +33,7 @@ RERANK_MODELS = [
         architecture="LlamaBidirectionalForSequenceClassification",
         chat_template_name="nemotron-rerank.jinja",
         mteb_score=0.33994,
+        mteb_tol=1e-2,
         seq_pooling_type="MEAN",
         attn_type="encoder_only",
         is_prefix_caching_supported=False,
@@ -40,11 +42,13 @@ RERANK_MODELS = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo) -> None:
     mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info)

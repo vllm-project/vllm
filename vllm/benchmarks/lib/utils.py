@@ -9,6 +9,17 @@ from contextlib import contextmanager
 from typing import Any
 
 
+def redact_sensitive_namespace(
+    args: argparse.Namespace, fields: tuple[str, ...]
+) -> argparse.Namespace:
+    """Return a copy of CLI arguments with selected values redacted."""
+    redacted_args = argparse.Namespace(**vars(args))
+    for field in fields:
+        if getattr(redacted_args, field, None) is not None:
+            setattr(redacted_args, field, "***")
+    return redacted_args
+
+
 def extract_field(
     args: argparse.Namespace, extra_info: dict[str, Any], field_name: str
 ) -> str:
@@ -25,9 +36,7 @@ def extract_field(
 
 
 def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
-    """
-    Check if the benchmark is run with torch.compile
-    """
+    """Check if the benchmark is run with torch.compile."""
     return not (
         extract_field(args, extra_info, "compilation_config.mode") == "0"
         or "eager" in getattr(args, "output_json", "")
@@ -38,8 +47,7 @@ def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
 def convert_to_pytorch_benchmark_format(
     args: argparse.Namespace, metrics: dict[str, list], extra_info: dict[str, Any]
 ) -> list:
-    """
-    Save the benchmark results in the format used by PyTorch OSS benchmark with
+    """Save the benchmark results in the format used by PyTorch OSS benchmark with
     on metric per record
     https://github.com/pytorch/pytorch/wiki/How-to-integrate-with-PyTorch-OSS-benchmark-database
     """

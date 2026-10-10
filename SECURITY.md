@@ -8,6 +8,16 @@ Please report security issues privately using [the vulnerability submission form
 
 Reports will then be triaged by the [vulnerability management team](https://docs.vllm.ai/en/latest/contributing/vulnerability_management.html).
 
+## Reporter credit
+
+Credit for a vulnerability is given only to the first reporter. Subsequent
+reports of the same issue are not credited, including independent
+rediscoveries.
+
+We do not credit every submitter. The volume of duplicate and AI-generated
+reports would otherwise create unsustainable workload for the vulnerability
+management team.
+
 ## Threat model
 
 Please see the [Security Guide in the vLLM documentation](https://docs.vllm.ai/en/latest/usage/security.html) for more information on vLLM's security assumptions and recommendations.
@@ -42,6 +52,13 @@ When a security report is accepted, the fix process depends on the severity:
 * **MODERATE and LOW severity**: Fixes are developed and submitted as public pull requests. These issues do not require embargo since they do not enable arbitrary code execution or significant data breach, and public visibility accelerates community review and adoption of the fix.
 
 The vulnerability management team reserves the right to adjust the disclosure approach on a case-by-case basis, taking into account factors such as active exploitation, unusual attack surface, or coordination requirements with downstream vendors.
+
+## CVE assignment and advisory publication
+
+After a security advisory has been accepted:
+
+* A CVE is requested when a patch for the advisory is merged.
+* The advisory is published when the fix lands in a vLLM release.
 
 ## Prenotification policy
 

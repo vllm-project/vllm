@@ -7,5 +7,3 @@
 # DeepSeek-V4-Pro-NVFP4.yaml
 DeepSeek-V4-Flash-NVFP4.yaml
 Qwen3-30B-A3B-NVFP4-quark.yaml
-Qwen-1.5-MOE-W-MXFP4-A-MXFP6.yaml
-Qwen-1.5-MOE-W-MXFP6-A-MXFP6.yaml

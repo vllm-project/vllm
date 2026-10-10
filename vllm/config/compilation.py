@@ -77,6 +77,13 @@ class CUDAGraphMode(enum.Enum):
     def requires_piecewise_compilation(self) -> bool:
         return self.has_mode(CUDAGraphMode.PIECEWISE)
 
+    def without_piecewise(self) -> "CUDAGraphMode":
+        if self == CUDAGraphMode.PIECEWISE:
+            return CUDAGraphMode.NONE
+        if self == CUDAGraphMode.FULL_AND_PIECEWISE:
+            return CUDAGraphMode.FULL_DECODE_ONLY
+        return self
+
     def max_cudagraph_mode(self) -> "CUDAGraphMode":
         return CUDAGraphMode(max(self.value)) if self.separate_routine() else self
 
@@ -126,12 +133,6 @@ class PassConfig:
     """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool = None  # type: ignore[assignment]
-    """Enable sequence parallelism. Requires TP>1. Automatically disabled
-    if the model's hidden_size is too small for SP to be beneficial
-    (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool = None  # type: ignore[assignment]
-    """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
@@ -147,15 +148,15 @@ class PassConfig:
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
     fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
-    """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
+    """Fuse QK RMSNorm + RoPE/MRoPE + KV cache update into an AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
-    for layers that support it. Auto-enabled at O1+ on ROCm for models
-    with QK-norm (e.g. Qwen3-MoE)."""
+    for layers that support it. Auto-enabled at O2+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
-    Also applies to the fused QK-Norm+RoPE+KVCache pass.
+    Also applies to the fused QK-Norm+RoPE/MRoPE+KVCache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -176,21 +177,13 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
-    sp_min_token_num: int | None = None
-    """The minimum number of tokens above which vllm should use
-    sequence parallelism. Specified as an integer token count.
-    Unspecified will fallback to default values which are compute
-    capability and world size dependent."""
-
     # TODO(luka) better pass enabling system.
 
     def flashinfer_max_size(self, world_size: int) -> int | None:
-        """
-        Returns the max communication size in bytes for flashinfer
+        """Returns the max communication size in bytes for flashinfer
         allreduce fusion for the given world size. Returns None if world size
         is not supported by configs as it's not supported by flashinfer.
         """
-
         MiB = 1024 * 1024
         FI_SUPPORTED_WORLD_SIZES = [2, 4, 8, 16]
         if world_size not in FI_SUPPORTED_WORLD_SIZES:
@@ -216,20 +209,16 @@ class PassConfig:
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
     def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
+        """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-
         return hash_factors(get_hash_factors(self, set()))
 
     @field_validator(
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
-        "enable_sp",
-        "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
@@ -310,8 +299,7 @@ class PassConfig:
             self.fuse_rope_kvcache_cat_mla = False
 
     def log_enabled_passes(self) -> None:
-        """
-        Log the enabled custom fusion passes.
+        """Log the enabled custom fusion passes.
         This is called at the end of VLLMConfig post_init,
         after all defaults are finalized.
         TODO also log the compile ranges for which this is enabled.
@@ -384,10 +372,7 @@ class DynamicShapesConfig:
     """
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash for DynamicShapesConfig
-        """
-
+        """Provide a hash for DynamicShapesConfig."""
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, set())
@@ -570,6 +555,24 @@ class CompilationConfig:
     Positive value overrides auto-inference and applies to all budget levels.
     If we limit the video count per prompt to `0`, it will also be set to `0`
     (i.e., fall back to image-only mode)."""
+
+    cudagraph_decoder_replay: bool = True
+    """Run the decoder replay layers of YOCO models (e.g. DeepSeek-V4.1) in CUDA
+    graphs of their own, and trim them in PIECEWISE graph steps. Requires
+    breakable PIECEWISE graphs; off under LoRA, prompt embeddings and non-first
+    PP ranks."""
+
+    decoder_replay_cudagraph_capture_sizes: list[int] = field(default_factory=list)
+    """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1), at
+    most max_num_batched_tokens. If empty: multiples of sliding_window up to
+    min(max_cudagraph_capture_size, max_num_seqs * sliding_window), coarser past
+    16 * sliding_window. Larger replay batches run eagerly."""
+
+    decoder_replay_trim_threshold: int = Field(default=768, ge=0)
+    """For YOCO models (e.g. DeepSeek-V4.1), PIECEWISE graphs with at least this
+    many padded tokens trim the decoder replay batch; must exceed the replay
+    window (128), below which nothing trims. Independent of the replay graph
+    capture sizes; eager steps still trim."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None
@@ -768,9 +771,11 @@ class CompilationConfig:
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
-        "vllm::qwen4_exp_compute_ple_ngram_ids",
+        # Qwen4Exp's AMD backend still uses these splitting ops.
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",
+        # The fused prepare calls this op instead of the one above.
+        "vllm::qwen4_exp_qsa_prepare_with_output",
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
         "vllm::qwen_gdn_attention_core_fused_norm_packed",
@@ -783,8 +788,7 @@ class CompilationConfig:
     ]
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
@@ -849,8 +853,7 @@ class CompilationConfig:
     @field_validator("mode", mode="before")
     @classmethod
     def validate_mode_before(cls, value: Any) -> Any:
-        """
-        Enable parsing the `mode` field from string mode names.
+        """Enable parsing the `mode` field from string mode names.
         Accepts both integers (0-3) and string names, like NONE, STOCK_TORCH_COMPILE,
         DYNAMO_TRACE_ONCE, VLLM_COMPILE.
         """
@@ -987,10 +990,16 @@ class CompilationConfig:
             # (fixme @boyuan) combo kernel does not support cpu yet.
             and not current_platform.is_cpu()
         ):
+            from torch._inductor import config as inductor_config
+
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
+
+            deterministic = self.inductor_compile_config.get(
+                "deterministic", getattr(inductor_config, "deterministic", False)
+            )
+            self.inductor_compile_config["benchmark_combo_kernel"] = not deterministic
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
@@ -1036,6 +1045,11 @@ class CompilationConfig:
                 f"Invalid backend for piecewise compilation: {self.backend}"
             )
 
+        if any(s <= 0 for s in self.decoder_replay_cudagraph_capture_sizes):
+            raise ValueError(
+                "All decoder_replay_cudagraph_capture_sizes must be positive"
+            )
+
         # Validate encoder CUDA graph configuration
         if (
             self.cudagraph_mm_encoder
@@ -1072,15 +1086,17 @@ class CompilationConfig:
         prefix: str = "",
         is_encoder: bool = False,
     ) -> str | Callable:
-        """
-        Initialize the backend for the compilation config from a vllm config.
+        """Initialize the backend for the compilation config from a vllm config.
+
         Arguments:
             vllm_config: The vllm config to initialize the backend from.
             prefix: Cache directory prefix for this compiled module.
             is_encoder: Whether this module is used in an encoder (as
                 opposed to a text backbone).
+
         Returns:
             The backend for the compilation config.
+
         """
         if self.mode is None:
             raise ValueError(
@@ -1115,7 +1131,6 @@ class CompilationConfig:
         configs are set. This includes:
         - initialize compile_sizes
         """
-
         computed_compile_sizes: list[int] = []
         if self.compile_sizes is not None:
             # de-duplicate the sizes provided by the config
@@ -1217,25 +1232,6 @@ class CompilationConfig:
                     self.cudagraph_mode = CUDAGraphMode.FULL
                 self.splitting_ops = []
 
-        if (
-            not self.use_inductor_graph_partition
-            and (self.pass_config.enable_sp or self.pass_config.fuse_gemm_comms)
-            and self.splitting_ops
-        ):
-            logger.warning_once(
-                "Sequence parallelism requires full-graph compilation when "
-                "use_inductor_graph_partition is off. Setting splitting_ops "
-                "to an empty list to preserve SP and async TP."
-            )
-            self.splitting_ops = []
-            if self.cudagraph_mode.has_piecewise_cudagraphs():
-                logger.warning_once(
-                    "Sequence parallelism is incompatible with piecewise "
-                    "cudagraph when use_inductor_graph_partition is off. "
-                    "Setting cudagraph_mode to FULL."
-                )
-                self.cudagraph_mode = CUDAGraphMode.FULL
-
         # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
         if (
             all2all_backend == "deepep_high_throughput"
@@ -1314,13 +1310,11 @@ class CompilationConfig:
         return self.backend == "inductor" and self.mode != CompilationMode.NONE
 
     def custom_op_log_check(self):
-        """
-        This method logs the enabled/disabled custom ops and checks that the
+        """This method logs the enabled/disabled custom ops and checks that the
         passed custom_ops field only contains relevant ops.
         It is called at the end of set_current_vllm_config,
         after the custom ops have been instantiated.
         """
-
         if len(self.enabled_custom_ops) + len(self.disabled_custom_ops) == 0:
             logger.debug("No custom ops found in model.")
             return
@@ -1378,10 +1372,10 @@ class CompilationConfig:
         min_cg_attn_backend: str | None,
         uniform_decode_query_len: int = 1,
         use_v2_model_runner: bool = False,
-        tensor_parallel_size: int = 1,
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
+        piecewise_capture_available: bool = True,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1464,6 +1458,20 @@ class CompilationConfig:
                 cudagraph_mode = CUDAGraphMode.NONE
             logger.warning(msg)
 
+        if (
+            not piecewise_capture_available
+            and cudagraph_mode.requires_piecewise_compilation()
+        ):
+            fallback_mode = cudagraph_mode.without_piecewise()
+            logger.warning_once(
+                "Cudagraph mode %s requires piecewise capture, but the loaded "
+                "model provides neither a compiled submodule nor breakable CUDA "
+                "graphs. Overriding to %s.",
+                cudagraph_mode,
+                fallback_mode,
+            )
+            cudagraph_mode = fallback_mode
+
         # double check that we can support full cudagraph if they are requested
         # even after automatic downgrades
         if (
@@ -1490,10 +1498,7 @@ class CompilationConfig:
             and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and uniform_decode_query_len > 1
         ):
-            self.adjust_cudagraph_sizes_for_spec_decode(
-                uniform_decode_query_len,
-                tensor_parallel_size,
-            )
+            self.adjust_cudagraph_sizes_for_spec_decode(uniform_decode_query_len)
 
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
@@ -1522,25 +1527,8 @@ class CompilationConfig:
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
 
-    def adjust_cudagraph_sizes_for_spec_decode(
-        self, uniform_decode_query_len: int, tensor_parallel_size: int
-    ):
+    def adjust_cudagraph_sizes_for_spec_decode(self, uniform_decode_query_len: int):
         multiple_of = uniform_decode_query_len
-        if tensor_parallel_size > 1 and self.pass_config.enable_sp:
-            multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
-            if (
-                multiple_of % uniform_decode_query_len != 0
-                or multiple_of % tensor_parallel_size != 0
-            ):
-                raise ValueError(
-                    f"Can't determine cudagraph shapes that are both a "
-                    f"multiple of {uniform_decode_query_len} "
-                    f"(num_speculative_tokens + 1) required by spec-decode "
-                    f"and {tensor_parallel_size} (tensor_parallel_size) "
-                    f"required by sequence parallelism please adjust "
-                    f"num_speculative_tokens or disable sequence parallelism"
-                )
-
         if not self.cudagraph_capture_sizes or multiple_of <= 1:
             return
 
@@ -1560,7 +1548,7 @@ class CompilationConfig:
         if len(rounded_sizes) == 0:
             raise ValueError(
                 f"No valid cudagraph sizes after rounding to multiple of {multiple_of} "
-                f"(num_speculative_tokens + 1 or tp if sequence parallelism is enabled)"
+                f"(num_speculative_tokens + 1)"
                 f" please adjust num_speculative_tokens ({uniform_decode_query_len - 1}"
                 f") or max_cudagraph_capture_size ({self.max_cudagraph_capture_size})"
                 f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"

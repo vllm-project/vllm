@@ -34,8 +34,7 @@ P = ParamSpec("P")
 
 
 class QkNormRopePattern:
-    """
-    Match the unfused sequence in attention blocks and replace with the fused op.
+    """Match the unfused sequence in attention blocks and replace with the fused op.
 
     Unfused (conceptually):
       q, k, v = split(qkv, [qsz, kvsz, kvsz], -1)

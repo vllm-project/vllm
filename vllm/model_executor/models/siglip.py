@@ -16,7 +16,7 @@ from transformers import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -73,12 +74,11 @@ from .vision import (
 
 
 class SiglipImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -127,13 +127,15 @@ class SiglipProcessingInfo(BaseProcessingInfo):
 
         pooler_config = self.ctx.model_config.pooler_config
         assert pooler_config is not None
+        pooling_type = pooler_config.seq_pooling_type
+        assert pooling_type is not None
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
+            _get_vision_feature_select_strategy(pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -157,20 +159,16 @@ class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -397,7 +395,7 @@ class SiglipAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -470,13 +468,13 @@ class SiglipEncoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm1 = LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -576,7 +574,7 @@ class SiglipTextTransformer(nn.Module):
             attn_cls=EncoderOnlyAttention,
         )
 
-        self.final_layer_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.final_layer_norm = LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.head = nn.Linear(embed_dim, config.projection_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -619,7 +617,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self.attention = torch.nn.MultiheadAttention(
             config.hidden_size, config.num_attention_heads, batch_first=True
         )
-        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config=config,
             quant_config=quant_config,
@@ -688,8 +686,9 @@ class SiglipVisionTransformer(nn.Module):
         if require_post_norm is None:
             require_post_norm = len(self.encoder.layers) == num_hidden_layers
 
+        self.post_layernorm: LayerNorm | None
         if require_post_norm:
-            self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+            self.post_layernorm = LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
 
@@ -776,8 +775,9 @@ class SiglipVisionTransformer(nn.Module):
         """Apply the post layer norm and head if they are enabled,
         given the last hidden states tensor.
 
-        args:
+        Args:
             encoder_outputs: The last hidden states from the visual encoder.
+
         """
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)
@@ -1021,9 +1021,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
-            feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.seq_pooling_type
-            )
+            pooling_type = self.pooler_config.seq_pooling_type
+            assert pooling_type is not None
+            feature_select_strategy = _get_vision_feature_select_strategy(pooling_type)
 
         pooled_output = self.vision_model(
             pixel_values=pixel_values,

@@ -44,7 +44,6 @@ class MyType:
 
 def test_encode_decode(monkeypatch: pytest.MonkeyPatch):
     """Test encode/decode loop with zero-copy tensors."""
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -251,7 +250,6 @@ def test_custom_class_serialization_allowed_with_pickle(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that serializing a custom class succeeds when allow_pickle=True."""
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
         encoder = MsgpackEncoder()

@@ -60,6 +60,7 @@ def check_ray_rdt_version() -> None:
 
     Raises:
         ValueError: the installed Ray predates ``RDT_MIN_RAY_VERSION``.
+
     """
     import importlib.metadata
 
@@ -75,6 +76,16 @@ def check_ray_rdt_version() -> None:
             f"set_target_for_ref) needs at least 2.55. Found {current}. "
             f"Run `pip install -U 'ray>={required}'`."
         )
+
+
+def register_nixl_memory(tensor: torch.Tensor) -> None:
+    """Register a tensor with Ray using the platform's NIXL package."""
+    from vllm.distributed.nixl_utils import alias_nixl_for_ray
+
+    alias_nixl_for_ray()
+    from ray.experimental import register_nixl_memory as ray_register_nixl_memory
+
+    ray_register_nixl_memory(tensor)
 
 
 def assign_producer_indices(
@@ -152,6 +163,7 @@ class RdtRouter:
             ValueError: ``workers_per_replica`` does not divide
                 ``num_consumers``, so the deployments are not uniform and two
                 workers of one deployment would share a block index.
+
         """
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
@@ -253,6 +265,7 @@ class RdtRouter:
         Raises:
             ValueError: an owner set is empty or out of range, or a class index
                 does not resolve.
+
         """
         for c, row in enumerate(self._owner_sets):
             if not row:

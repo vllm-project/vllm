@@ -1,7 +1,7 @@
 group: CPU
 depends_on: []
 steps:
-- label: CPU-Kernel Tests
+- label: CPU-Kernel Tests Shard %N
   key: cpu-kernel-tests
   depends_on: []
   device: intel_cpu
@@ -16,13 +16,19 @@ steps:
   - tests/kernels/attention/test_amx_mla.py
   - vllm/v1/attention/backends/mla/amx_mla.py
   - vllm/model_executor/layers/attention/mla_attention.py
+  - tests/kernels/test_deepseek_v4_cpu_kernels.py
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/moe/test_cpu_quant_fused_moe.py
   - tests/kernels/moe/test_zen_cpu_int8_moe.py
+  - tests/test_zentorch_version_pin.py
   - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
   - tests/kernels/test_onednn.py
+  - tests/kernels/test_cpu_fused_sampling.py
   - tests/kernels/test_awq_int4_to_int8.py
   - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
+  - tests/kernels/quantization/test_zen_da8w4.py
+  - vllm/model_executor/kernels/linear/mixed_precision/zentorch.py
+  - vllm/model_executor/layers/fused_moe/experts/zentorch_moe.py
   - tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
   - tests/kernels/mamba/test_cpu_short_conv.py
   - tests/kernels/mamba/test_causal_conv1d.py
@@ -33,20 +39,72 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
-      pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
-      pytest -x -v -s tests/v1/attention/test_group_head_counts.py
-      pytest -x -v -s tests/kernels/attention/test_amx_mla.py
-      pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
-      pytest -x -v -s tests/kernels/moe/test_cpu_quant_fused_moe.py
-      pytest -x -v -s tests/kernels/moe/test_zen_cpu_int8_moe.py
-      pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
-      pytest -x -v -s tests/kernels/test_onednn.py
-      pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py
-      pytest -x -v -s tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
-      pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
-      pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
-      pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
-      pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+      pytest -x -v -s --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB \
+      tests/kernels/attention/test_cpu_attn.py \
+      tests/v1/attention/test_group_head_counts.py \
+      tests/kernels/attention/test_amx_mla.py \
+      tests/kernels/test_deepseek_v4_cpu_kernels.py \
+      tests/kernels/moe/test_cpu_fused_moe.py \
+      tests/kernels/moe/test_cpu_quant_fused_moe.py \
+      tests/kernels/moe/test_zen_cpu_int8_moe.py \
+      tests/test_zentorch_version_pin.py \
+      tests/kernels/mamba/test_cpu_short_conv.py \
+      tests/kernels/test_onednn.py \
+      tests/kernels/test_cpu_fused_sampling.py \
+      tests/kernels/test_awq_int4_to_int8.py \
+      tests/kernels/quantization/test_cpu_fp8_scaled_mm.py \
+      tests/kernels/quantization/test_zen_da8w4.py \
+      tests/kernels/mamba/cpu/test_cpu_gdn_ops.py \
+      tests/kernels/mamba/test_causal_conv1d.py \
+      tests/kernels/mamba/test_mamba_ssm.py \
+      tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+  parallelism: 2
+
+# Speculative decoding under a CPU platform. The unit tests already pass on
+# CPU but no CPU job runs them; the e2e tests gate the engine path itself,
+# which unit tests cannot reach.
+- label: CPU-Spec Decode Tests
+  key: cpu-spec-decode-tests
+  depends_on: []
+  soft_fail: true
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/cpu/
+  - vllm/v1/worker/cpu_model_runner.py
+  - vllm/v1/worker/gpu/spec_decode/
+  - vllm/v1/attention/backends/cpu_attn.py
+  - vllm/config/speculative.py
+  - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
+  - vllm/model_executor/models/llama_eagle3.py
+  - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
+  - vllm/model_executor/layers/mamba/ops/cpu/
+  - tests/v1/e2e/test_cpu_spec_decode.py
+  - tests/v1/spec_decode/
+  - tests/v1/worker/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      pytest -x -v -s \
+      tests/v1/worker/test_gpu_target_dependent_ar_speculator.py \
+      tests/v1/worker/test_gpu_extract_hidden_states_speculator.py \
+      tests/v1/worker/test_gpu_batch_ordering.py \
+      tests/v1/worker/test_gpu_rejection_sampler_chunking.py \
+      tests/v1/worker/test_eagle3_aux_hidden_states_pp.py \
+      tests/v1/worker/test_spec_decode_embed_sharing_pp.py \
+      tests/v1/spec_decode/test_adaptive_verification.py \
+      tests/v1/spec_decode/test_dflash2.py \
+      tests/v1/spec_decode/test_dflash_causality.py \
+      tests/v1/spec_decode/test_eagle_draft_attn_metadata.py \
+      tests/v1/spec_decode/test_draft_attention_backend_override.py \
+      tests/v1/spec_decode/test_draft_moe_backend_override.py \
+      tests/v1/spec_decode/test_ngram.py \
+      tests/v1/spec_decode/test_llm_base_proposer_sampling.py
+      unset VLLM_CPU_CI_ENV
+      pytest -x -v -s tests/v1/e2e/test_cpu_spec_decode.py"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
@@ -174,3 +232,57 @@ steps:
     "$$BUILDKITE_PARALLEL_JOB"
     "$REGISTRY/$REPO:$BUILDKITE_COMMIT-arm64-cpu"
   parallelism: 3
+
+- label: ":docker: Build Zen CPU image"
+  key: zen-cpu-image-build
+  # Reuse the shared `<repo>:<commit>-cpu` image that image-build-cpu publishes
+  # to public ECR, so Dockerfile.zen just layers on top instead of recompiling
+  # vLLM from source. If the pull fails, the build script still falls back to
+  # building the CPU base from source.
+  depends_on:
+    - image-build-cpu
+  soft_fail: true
+  agents:
+    queue: amd-cpu
+  source_file_dependencies:
+    - .buildkite/hardware_tests/cpu.yaml
+    - .buildkite/image_build/image_build_zen_cpu.sh
+    - docker/Dockerfile.zen
+    - docker/Dockerfile.cpu
+    - requirements/cpu.txt
+    - requirements/build/cpu.txt
+    - requirements/test/cpu.txt
+    - cmake/cpu_extension.cmake
+    - vllm/model_executor/layers/utils.py
+    - vllm/model_executor/kernels/linear/zentorch_utils.py
+    - vllm/model_executor/kernels/linear/scaled_mm/zentorch.py
+    - vllm/model_executor/kernels/linear/mixed_precision/zentorch.py
+    - vllm/platforms/cpu.py
+    - vllm/platforms/zen_cpu.py
+    - vllm/platforms/__init__.py
+    - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+    - tests/test_zen_cpu_platform_detection.py
+    - tests/kernels/moe/test_zen_cpu_fused_moe.py
+    - tests/kernels/moe/test_zen_cpu_int8_moe.py
+    - vllm/v1/attention/backends/zentorch_sdpa.py
+    - tests/test_zentorch_version_pin.py
+    - vllm/v1/attention/backends/mla/prefill/zen_cpu_sdpa.py
+    - vllm/model_executor/layers/fused_moe/experts/zentorch_moe.py
+    - tests/kernels/quantization/test_zen_da8w4.py
+  commands:
+    - .buildkite/image_build/image_build_zen_cpu.sh "$REGISTRY" "$REPO" "$BUILDKITE_COMMIT"
+  env:
+    DOCKER_BUILDKIT: "1"
+    # Install zentorch directly (if-branch in Dockerfile.zen) instead of
+    # `uv pip install "vllm[zen]"`, which forces uv to re-resolve vLLM's full
+    # dependency closure and chokes on its transitive triton-cpu URL dependency.
+    # Keep this pin in sync with the `zen` extra in setup.py.
+    ZENTORCH_VERSION: "2.13.0.1"
+  retry:
+    automatic:
+      - exit_status: 1  # Transient Docker/BuildKit failure
+        limit: 1
+      - exit_status: -1  # Agent was lost
+        limit: 2
+      - exit_status: -10  # Agent was lost
+        limit: 2

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EPD Correctness Test
+"""EPD Correctness Test.
 
 Tests that EPD (Encoder-Prefill-Decode) disaggregation produces the same
 outputs as a baseline single instance.
@@ -26,12 +25,34 @@ import argparse
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import openai
 import requests
 
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.utils import encode_image_url
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+
+class EncoderGraphTestWorkerExtension:
+    """Expose encoder replay evidence through the existing test RPC endpoint."""
+
+    model_runner: "MMEncoderModelRunner"
+
+    def encoder_graph_stats(self):
+        from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+        runner = self.model_runner
+        assert isinstance(runner, MMEncoderModelRunner)
+        manager = runner.model_state.encoder_runner.cudagraph_manager
+        if manager is None:
+            return {"is_captured": False, "graph_hits": 0, "graph_misses": 0}
+        return {"is_captured": manager.is_captured(), **manager.get_cumulative_stats()}
+
 
 MAX_OUTPUT_LEN = 256
 
@@ -103,6 +124,7 @@ def check_vllm_server(url: str, timeout=5, retries=10) -> bool:
 
     Returns:
         True if the server is ready, False otherwise
+
     """
     for attempt in range(retries):
         try:
@@ -137,18 +159,22 @@ def run_chat_completion(
 
     Returns:
         Generated text content
+
     """
-    client = openai.OpenAI(api_key="EMPTY", base_url=base_url)
+    with openai.OpenAI(
+        api_key="EMPTY", base_url=base_url, timeout=120, max_retries=0
+    ) as client:
+        completion = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            seed=42,
+        )
 
-    completion = client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=0.0,
-        seed=42,
-    )
-
-    return completion.choices[0].message.content
+    content = completion.choices[0].message.content
+    assert content, "Expected a nonempty completion"
+    return content
 
 
 def main():
@@ -198,7 +224,19 @@ def main():
         help="Skip the two-image multimodal prompt",
     )
 
+    parser.add_argument(
+        "--mm_smoke_test",
+        action="store_true",
+        help="Use three short, fixed-answer image cases, including duplicate images",
+    )
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--repeat", type=int, default=1)
+
     args = parser.parse_args()
+    if args.concurrency < 1 or args.repeat < 1:
+        parser.error("--concurrency and --repeat must be positive")
+    if args.mm_smoke_test and (not args.use_mm_prompts or args.skip_two_image_prompt):
+        parser.error("--mm_smoke_test requires all multimodal prompts")
 
     print(f"Service URL: {args.service_url}")
     print(f"Model: {args.model_name}")
@@ -235,27 +273,76 @@ def main():
         test_prompts = SAMPLE_PROMPTS_TEXT
         print("Using text-only prompts for quick testing")
 
+    if args.mm_smoke_test:
+        image = SAMPLE_PROMPTS_MM[0]["messages"][0]["content"][0]
+        image_pair = SAMPLE_PROMPTS_MM[1]["messages"][0]["content"][:2]
+        cases = [
+            (
+                "Single image",
+                [image],
+                "What word is on the red road sign? Reply with only that word "
+                "in uppercase.",
+                "STOP",
+            ),
+            (
+                "Two different images",
+                image_pair,
+                "Do these pictures contain both flowers and birds? "
+                "Reply with only YES or NO.",
+                "YES",
+            ),
+            (
+                "Same image twice",
+                [image, image],
+                "Read the red road sign in each image, in image order. Reply "
+                "with only the two uppercase words separated by a comma and a space.",
+                "STOP, STOP",
+            ),
+        ]
+        test_prompts = [
+            {
+                "description": description,
+                "expected": expected,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [*images, {"type": "text", "text": question}],
+                    }
+                ],
+            }
+            for description, images, question, expected in cases
+        ]
+
     # Run completions
     service_url = f"{args.service_url}/v1"
     output_strs = {}
 
-    for i, prompt_data in enumerate(test_prompts):
-        print(
-            f"\nRunning prompt {i + 1}/{len(test_prompts)}: "
-            f"{prompt_data['description']}"
-        )
-
-        output_str = run_chat_completion(
+    def complete(prompt_data):
+        output = run_chat_completion(
             base_url=service_url,
             model_name=args.model_name,
             messages=prompt_data["messages"],
-            max_tokens=MAX_OUTPUT_LEN,
+            max_tokens=16 if args.mm_smoke_test else MAX_OUTPUT_LEN,
         )
+        if args.mm_smoke_test:
+            output = output.strip()
+            assert output == prompt_data["expected"], (
+                f"{prompt_data['description']}: expected {prompt_data['expected']!r}, "
+                f"got {output!r}"
+            )
+        return output
 
-        # Use description as key for comparison
-        key = prompt_data["description"]
-        output_strs[key] = output_str
-        print(f"Output: {output_str}")
+    # Each round includes concurrent requests sharing image hashes; later rounds
+    # exercise reuse after previous requests have finished.
+    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+        for repeat in range(args.repeat):
+            outputs = executor.map(complete, test_prompts)
+            for prompt_data, output_str in zip(test_prompts, outputs):
+                key = prompt_data["description"]
+                if args.repeat > 1:
+                    key = f"{key} (round {repeat + 1})"
+                output_strs[key] = output_str
+                print(f"{key}: {output_str}")
 
     if args.mode in ("baseline", "baseline_pd"):
         # Baseline mode: Save outputs

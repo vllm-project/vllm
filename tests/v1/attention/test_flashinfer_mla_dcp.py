@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import MethodType
 from unittest.mock import MagicMock
 
 import pytest
@@ -61,6 +62,7 @@ def test_flashinfer_mla_forward_uses_gathered_head_count(monkeypatch):
     attn_metadata.max_seq_len = 1
     attn_metadata.decode.block_table = torch.zeros(2, 1, dtype=torch.int32)
     attn_metadata.decode.seq_lens = torch.ones(2, dtype=torch.int32)
+    attn_metadata.decode.max_query_len = 1
 
     query = torch.ones(2, 24, 576, dtype=torch.bfloat16)
     kv_cache = torch.ones(1, 128, 576, dtype=torch.bfloat16)
@@ -100,6 +102,9 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
     impl.dcp_world_size = 8
     impl.dcp_rank = 3
     impl.cp_kv_cache_interleave_size = 1
+    impl._flattened_decode_metadata = MethodType(
+        flashinfer_mla.FlashInferMLAImpl._flattened_decode_metadata, impl
+    )
 
     num_reqs, query_len = 2, 3
     num_tokens = num_reqs * query_len
@@ -114,6 +119,11 @@ def test_flashinfer_mla_forward_uses_native_dcp_api(monkeypatch, causal):
     attn_metadata.decode.block_table = block_table
     attn_metadata.decode.seq_lens = seq_lens
     attn_metadata.decode.dcp_tot_seq_lens = global_causal_seq_lens
+    attn_metadata.decode.max_query_len = query_len
+    attn_metadata.decode.query_start_loc = torch.arange(
+        0, num_tokens + 1, query_len, dtype=torch.int32
+    )
+    attn_metadata.decode.query_len = 0
 
     query = torch.ones(num_tokens, 24, 576, dtype=torch.bfloat16)
     kv_cache = torch.ones(2, 128, 576, dtype=torch.bfloat16)

@@ -7,6 +7,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import Qwen3NextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -18,7 +19,10 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
@@ -55,7 +59,6 @@ from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
@@ -141,17 +144,30 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        shared_expert_group_size = get_quark_ocp_mx_group_size(
-            quant_config,
-            f"{prefix}.shared_expert.down_proj",
-        )
-        self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
-            config.shared_expert_intermediate_size,
-            self.tp_size,
-            shared_expert_group_size,
-            parallel_config.enable_expert_parallel,
-            self.is_sequence_parallel,
-        )
+        # Resolve shared-expert fusion first (when enabled, TP alignment constraint no
+        # longer applies)
+        self.is_fused_shared_expert_enabled = False
+        if config.shared_expert_intermediate_size > 0:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config,
+                prefix,
+                shared_expert_name="shared_expert",
+            )
+
+        if self.is_fused_shared_expert_enabled:
+            self.replicate_shared_expert = False
+        else:
+            shared_expert_group_size = get_quark_ocp_mx_group_size(
+                quant_config,
+                f"{prefix}.shared_expert.down_proj",
+            )
+            self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
+                config.shared_expert_intermediate_size,
+                self.tp_size,
+                shared_expert_group_size,
+                parallel_config.enable_expert_parallel,
+                self.is_sequence_parallel,
+            )
         if self.tp_size > config.num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -167,11 +183,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -182,17 +196,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.shared_expert_gate",
         )
-
-        self.is_fused_shared_expert_enabled = False
-        if (
-            config.shared_expert_intermediate_size > 0
-            and not self.replicate_shared_expert
-        ):
-            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config,
-                prefix,
-                shared_expert_name="shared_expert",
-            )
 
         if (
             self.is_fused_shared_expert_enabled
@@ -229,6 +232,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=1 if self.shared_expert is None else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_expert",
             shared_expert_gate=self.shared_expert_gate
             if self.shared_expert is None
             else None,
@@ -376,7 +380,7 @@ class Qwen3NextAttention(nn.Module):
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
-            and current_platform.is_cuda()
+            and (current_platform.is_cuda() or current_platform.is_xpu())
             and supports_dtype
             and (text_only or supports_mrope)
         )
@@ -754,6 +758,9 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):
+    model: Qwen3NextModel
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -822,14 +829,8 @@ class Qwen3NextForCausalLM(
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3Next currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()

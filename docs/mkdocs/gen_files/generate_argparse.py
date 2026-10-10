@@ -98,8 +98,7 @@ mock_if_no_torch("torch", PydanticMagicMock(name="torch", nn=mock_nn))
 # Mock torch.library.infer_schema for vllm.ir.ops.IrOpInplaceOverload.__init__
 # We need to return the corresponding number of inputs, as IR infra will assert it
 def get_outputs(native_fn: Callable) -> str:
-    """
-    Extract output schema from function's return type annotation,
+    """Extract output schema from function's return type annotation,
     e.g. 'Tensor' or 'Tensor, Tensor'.
     """
     import typing
@@ -178,6 +177,7 @@ BenchmarkMMProcessorSubcommand = auto_mock(
 LaunchSubcommandBase = auto_mock("vllm.entrypoints.cli.launch", "LaunchSubcommandBase")
 launch_description = auto_mock("vllm.entrypoints.cli.launch", "DESCRIPTION")
 RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
+PreloadSubcommand = auto_mock("vllm.entrypoints.cli.preload", "PreloadSubcommand")
 sweep_subcommands = auto_mock("vllm.benchmarks.sweep.cli", "SUBCOMMANDS")
 openai_cli_args = auto_mock("vllm.entrypoints.launchers", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.launchers", "run_batch")
@@ -249,11 +249,12 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     """Create a parser for the given class with markdown formatting.
 
     Args:
-        cls: The class to create a parser for
+        add_cli_args: The `add_cli_args` classmethod to build the parser from.
         **kwargs: Additional keyword arguments to pass to `cls.add_cli_args`.
 
     Returns:
         FlexibleArgumentParser: A parser with markdown formatting for the class.
+
     """
     try:
         parser = FlexibleArgumentParser(add_json_tip=False)
@@ -330,6 +331,7 @@ pages = {
     "cli/chat.md": (create_parser(ChatCommand.add_cli_args), False),
     "cli/complete.md": (create_parser(CompleteCommand.add_cli_args), False),
     "cli/run-batch.md": (create_parser(run_batch.make_arg_parser), True),
+    "cli/preload.md": (create_parser(PreloadSubcommand.add_cli_args), True),
     "cli/launch/render.md": (create_parser(RenderSubcommand.add_cli_args), True),
     "cli/bench/latency.md": (create_parser(bench_latency.add_cli_args), True),
     # URL kept as `mm_processor` for back-compat; command name is `mm-processor`

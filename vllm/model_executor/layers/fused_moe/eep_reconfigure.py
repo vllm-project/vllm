@@ -60,6 +60,8 @@ def _make_eep_experts(
 def make_eep_staged_quant_method(
     module: "MoERunner",
     moe_config: FusedMoEConfig,
+    *,
+    all2all_manager: Any,
 ) -> FusedMoEMethodBase | None:
     quant_method = module._quant_method
     if not quant_method.supports_internal_mk:
@@ -93,7 +95,7 @@ def make_eep_staged_quant_method(
         routing_tables=None,
         allow_new_interface=True,
         use_monolithic=quant_method.is_monolithic,
-        eep_stage=True,
+        all2all_manager=all2all_manager,
     )
     assert prepare_finalize is not None
     assert isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeModular)

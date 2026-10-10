@@ -30,7 +30,7 @@ remove_docker_container
 docker pull "$IMAGE"
 
 # Run the image
-docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
+docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" -e TERM=xterm-256color -e PY_COLORS=1 -e FORCE_COLOR=1 -e CLICOLOR_FORCE=1 --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
 
 print_packages() {
   docker exec "$CONTAINER_NAME" bash -c "
@@ -43,6 +43,7 @@ kernel_tests() {
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/kernels/test_onednn.py
+    pytest -x -v -s tests/kernels/test_cpu_fused_sampling.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
     pytest -x -v -s tests/kernels/core/test_cpu_activation.py
     pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
@@ -112,7 +113,9 @@ print_packages
 export CONTAINER_NAME
 export -f kernel_tests model_tests serving_tests
 case "$SHARD_ID" in
-  0) timeout 30m bash -c kernel_tests ;;
+  # The kernel shard contains several large parametrized suites and can exceed
+  # 30 minutes on otherwise healthy Arm runners.
+  0) timeout 60m bash -c kernel_tests ;;
   1) timeout 30m bash -c model_tests ;;
   2) timeout 30m bash -c serving_tests ;;
 esac

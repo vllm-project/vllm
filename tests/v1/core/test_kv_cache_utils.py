@@ -3,8 +3,12 @@
 import copy
 import hashlib
 import importlib
+import mmap
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,7 +16,14 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+import vllm.v1.hisparse.runtime as hisparse_runtime_module
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
+from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -23,7 +34,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
@@ -40,13 +51,23 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
     is_kv_cache_spec_uniform,
+    kv_cache_groups_tp_replicas,
     make_block_hash_with_group_id,
     tensor_data,
+    to_event_extra_keys,
+)
+from vllm.v1.hisparse.layout import (
+    create_hisparse_layout,
+    get_hisparse_kv_cache_groups,
+    get_hisparse_steady_state_concurrency,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -58,16 +79,335 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    SparseCacheRole,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
     is_full_attention_spec,
     iter_layer_specs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize("gpu_block_size", [32, 64])
+@pytest.mark.parametrize("shared_host_pool", [False, True])
+def test_hisparse_hma_uses_resolved_gpu_block_size(
+    monkeypatch, gpu_block_size, shared_host_pool
+):
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=gpu_block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=gpu_block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128),
+            max_model_len=gpu_block_size,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2 if shared_host_pool else 1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2 if shared_host_pool else 1,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
+    )
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, get_hisparse_kv_cache_groups(config, specs), available_memory=2**30
+    )
+    assert cache_config.num_blocks == 7
+    assert cache_config.hisparse_host_num_blocks is not None
+    assert cache_config.hisparse_host_num_blocks > 7
+
+    host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
+    assert cache_config.hisparse_shared_host_pool is shared_host_pool
+    host_page = host_group.kv_cache_spec.page_size_bytes
+    alignment = mmap.PAGESIZE if shared_host_pool else 1
+    expected_host_stride = (host_page + alignment - 1) // alignment * alignment
+    assert cache_config.hisparse_host_block_stride == expected_host_stride
+    assert cache_config.hisparse_host_num_blocks == 2**30 // expected_host_stride
+    assert host_group.host_resident
+    assert not any(group.host_resident for group in [indexer_group, *auxiliary_groups])
+    host_layers = set(host_group.layer_names)
+    for tensor in cache_config.kv_cache_tensors:
+        assert all(
+            (name in host_layers) == tensor.host_resident for name in tensor.layers
+        )
+    host_tensor = next(t for t in cache_config.kv_cache_tensors if t.host_resident)
+    host_spec = host_group.kv_cache_spec.kv_cache_specs[host_tensor.layers[0]]
+    assert host_tensor.block_stride == host_spec.page_size_bytes
+    assert host_tensor.layer_stride == (
+        host_spec.page_size_bytes * cache_config.hisparse_host_num_blocks
+    )
+    assert host_group.kv_cache_spec.block_size == gpu_block_size
+    assert indexer_group.kv_cache_spec.block_size == gpu_block_size
+    host_specs = host_group.kv_cache_spec.kv_cache_specs
+    gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
+    assert set(host_specs) == {"model.layers.0.self_attn"}
+    assert set(gpu_indexer_specs) == {"model.layers.0.self_attn.indexer"}
+    assert indexer_group.kv_cache_spec.prefix_cacheable
+    assert host_group.enable_kv_transfer
+    auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
+    assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
+    assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
+    assert all(
+        spec.block_size == gpu_block_size
+        for spec in auxiliary_specs
+        if isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec))
+    )
+    scheduler_block_size, hash_block_size = kv_cache_utils.resolve_kv_cache_block_sizes(
+        cache_config,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                block_size=16,
+                enable_prefix_caching=True,
+                prefix_match_unit=None,
+            ),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+            kv_transfer_config=object(),
+        ),
+    )
+    assert scheduler_block_size == hash_block_size == gpu_block_size
+
+
+def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
+    """Running requests pin only their resident tail; the newest still needs its
+    full in-flight window to be admitted."""
+    block_size = 16
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=10 * block_size),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=10 * block_size,
+    )
+    attn_spec = FullAttentionSpec(
+        block_size=block_size, num_kv_heads=1, head_size=64, dtype=torch.float16
+    )
+    page_size = attn_spec.page_size_bytes
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], attn_spec, host_resident=True),
+            KVCacheGroupSpec(["indexer"], attn_spec),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(block_size=block_size, page_size=page_size),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(
+                    block_size=block_size, page_size=page_size, blocks_per_request=4
+                ),
+            ),
+        ],
+        hisparse_host_num_blocks=100,
+    )
+
+    # Admission takes indexer 10 + resident 10 + hot 4 = 24 blocks and steady
+    # state 16, so 3 fit (2 x 16 + 24 <= 64) but not 4 (3 x 16 + 24 > 64).
+    assert get_hisparse_steady_state_concurrency(config, kv_cache_config) == 3.5
+    # The worst-case bound charges all 10 resident pages.
+    assert get_max_concurrency_for_kv_cache_config(
+        config, kv_cache_config
+    ) == pytest.approx(64 / 24)
+
+
+@pytest.mark.parametrize("extra_blocks,ok", [(1, False), (2, True)])
+def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
+    """Every page needs a host block, so one max_model_len request must fit."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    specs = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128), max_model_len=64 * 4
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1, world_size=1),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+    host_page = specs["model.layers.0.self_attn"].page_size_bytes
+    host_budget = (4 + extra_blocks) * host_page
+    groups = get_hisparse_kv_cache_groups(config, specs)
+
+    if ok:
+        layout = create_hisparse_layout(config, groups, host_budget=host_budget)
+        assert layout.host_num_blocks == 4 + extra_blocks
+    else:
+        with pytest.raises(ValueError, match="increase host_pool_gib"):
+            create_hisparse_layout(config, groups, host_budget=host_budget)
+
+
+@pytest.mark.parametrize(
+    "max_model_len,num_gpu_blocks,ok",
+    [
+        (8192, 160, False),
+        (8192, 1000, True),
+        (32768, 656, False),
+        (32768, 657, True),
+        (-1, 657, True),
+    ],
+)
+def test_hisparse_pool_must_fit_max_model_len(
+    monkeypatch, max_model_len, num_gpu_blocks, ok
+):
+    """Each resident group takes its own blocks from HiSparse's shared GPU pool,
+    so a pool that fits only the indexer pages must be rejected at startup.
+    Resident pages are capped at the in-flight window: at 32768 tokens with 2048
+    in flight, one request needs 512 indexer + 4 x 32 resident + 16 hot blocks,
+    plus the null block. Auto-fit (-1) must pick a length that passes the same
+    check."""
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.setattr(kv_cache_utils, "get_hisparse_host_pool_bytes", lambda _: 2**30)
+    specs: dict[str, KVCacheSpec] = {}
+    for i in range(4):
+        specs[f"model.layers.{i}.self_attn"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        )
+        specs[f"model.layers.{i}.self_attn.indexer"] = MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    config.scheduler_config.max_num_batched_tokens = 2048
+    # Async scheduling doubles the in-flight window, and with it the bound.
+    config.scheduler_config.async_scheduling = False
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    config.cache_config.num_gpu_blocks_override = num_gpu_blocks
+    config.cache_config.kv_cache_layout = "BLHNC"
+    # Workers report the resident/hot caches HiSparse derives.
+    specs |= {
+        name: group.kv_cache_spec
+        for group in get_hisparse_kv_cache_groups(config, specs) or []
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for name in group.layer_names
+    }
+
+    if ok:
+        kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+    else:
+        with pytest.raises(ValueError, match="max seq len"):
+            kv_cache_utils.get_kv_cache_configs(config, [specs], [2**34])
+
+
+def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
+    """Workers report HiSparse's resident/hot caches, which lay out their own raw
+    backing; KV cache layout resolution must skip them."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    specs: dict[str, KVCacheSpec] = {
+        "model.layers.0.self_attn": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_index_group_leader=True,
+        ),
+        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+    }
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 128
+    reported = specs | {
+        name: group.kv_cache_spec
+        for group in get_hisparse_kv_cache_groups(config, specs) or []
+        if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+        for name in group.layer_names
+    }
+    assert len(reported) > len(specs)
+
+    layouts = []
+    for worker_specs in (specs, reported):
+        config.cache_config.kv_cache_layout = None
+        layouts.append(
+            resolve_kv_cache_layout(
+                config, [["BLHNC", "LBNHC"]], list(worker_specs.values())
+            )
+        )
+    assert layouts[0] == layouts[1]
+
+
+def test_hisparse_rejects_deepseek_v4():
+    full_specs = {
+        "model.layers.0.attn": MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            model_version="deepseek_v4",
+        )
+    }
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+
+    with pytest.raises(ValueError, match="does not support DeepSeek V4"):
+        get_hisparse_kv_cache_groups(config, full_specs)
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +458,44 @@ def make_request(
     )
 
 
+@pytest.mark.parametrize("dcp", [1, 4])
+def test_effective_attention_block_size_matches_events(dcp):
+    from vllm.distributed.kv_events import BlockStored
+    from vllm.v1.engine.core import EngineCore
+
+    config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attention"], new_kv_cache_spec()),
+        ],
+    )
+    manager = KVCacheManager(
+        generate_scheduler_kv_cache_config([config]),
+        max_model_len=256,
+        scheduler_block_size=16 * dcp,
+        hash_block_size=16 * dcp,
+        dcp_world_size=dcp,
+        enable_kv_cache_events=True,
+    )
+    core = EngineCore.__new__(EngineCore)
+    core.vllm_config = SimpleNamespace(cache_config=CacheConfig(block_size=16))
+    core.scheduler = SimpleNamespace(kv_cache_manager=manager)
+    core._initialize_effective_attention_block_size()
+    block_size = core.vllm_config.cache_config.effective_attention_block_size
+    assert block_size == 16 * dcp
+
+    request = make_request(
+        "block-size", list(range(64)), block_size=16 * dcp, hash_fn=sha256
+    )
+    assert manager.allocate_slots(request, 64) is not None
+    assert [
+        event.block_size
+        for event in manager.take_events()
+        if isinstance(event, BlockStored)
+    ] == [block_size]
+
+
 def new_kv_cache_spec(
     block_size=16,
     num_kv_heads=2,
@@ -162,6 +540,45 @@ def test_kv_cache_config_selects_only_transferable_groups():
         first_blocks,
         third_blocks,
     )
+
+
+def test_kv_cache_config_selects_prefix_cacheable_groups():
+    """Prefix stores exclude scratch state without changing transfer groups."""
+    full_group = KVCacheGroupSpec(["full"], new_kv_cache_spec())
+    qsa_group = KVCacheGroupSpec(
+        ["qsa"],
+        CircularBufferSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=0,
+            dtype=torch.float16,
+        ),
+    )
+    disabled_group = KVCacheGroupSpec(
+        ["disabled"], new_kv_cache_spec(), enable_kv_transfer=False
+    )
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[full_group, qsa_group, disabled_group],
+    )
+    assert config.transfer_group_ids == (0, 1)
+    assert config.select_transfer_block_ids(([1], [2], [3])) == ([1], [2])
+    assert config.prefix_cacheable_group_ids == (0,)
+    assert config.prefix_cacheable_groups == (full_group,)
+
+
+def test_kv_cache_blocks_selects_requested_groups():
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(1)],
+            [KVCacheBlock(2)],
+            [KVCacheBlock(3)],
+        )
+    )
+
+    assert blocks.get_block_ids(group_ids=(0, 2)) == ([1], [3])
 
 
 def new_sliding_window_spec(
@@ -547,6 +964,24 @@ def test_free_kv_cache_block_queue_popleft_n():
         assert block.next_free_block is None
 
 
+@pytest.mark.parametrize("num_blocks", [1, 2, 16])
+def test_free_kv_cache_block_queue_popleft_n_drain_and_refill(num_blocks):
+    """Draining a batch must leave the sentinels ready for reuse."""
+    blocks = [KVCacheBlock(block_id=i) for i in range(num_blocks)]
+    queue = FreeKVCacheBlockQueue(blocks)
+
+    assert queue.popleft_n(num_blocks) == blocks
+    assert queue.num_free_blocks == 0
+    assert queue.fake_free_list_head.next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is queue.fake_free_list_head
+    assert all(b.prev_free_block is None and b.next_free_block is None for b in blocks)
+    assert queue.popleft_n(0) == []
+
+    queue.append_n(blocks)
+    assert queue.popleft_n(num_blocks) == blocks
+    assert queue.num_free_blocks == 0
+
+
 def test_free_kv_cache_block_queue_get_all_free_blocks():
     # Create a list of KVCacheBlock objects
     blocks = [KVCacheBlock(block_id=i) for i in range(5)]
@@ -584,12 +1019,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == (("hash1", 0),)
+    assert extra_keys == (("mm", "hash1", 0),)
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == (("hash1", -3),)
+    assert extra_keys == (("mm", "hash1", -3),)
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -599,7 +1034,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == (("hash1", 0), ("hash2", 10))
+    assert extra_keys == (("mm", "hash1", 0), ("mm", "hash2", 10))
     assert next_mm_idx == 2
 
 
@@ -627,9 +1062,9 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # salt is added for the first token
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 1, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 10, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
 
     # no salt added for other tokens
     extra_keys, _ = generate_block_hash_extra_keys(request, 1, 2, 0)
@@ -650,7 +1085,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == (("hash1", 0), "salt")
+    assert extra_keys == (("mm", "hash1", 0), ("cache_salt", "salt"))
     assert next_mm_idx == 1
 
 
@@ -668,13 +1103,13 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
     expected_embeds = prompt_embeds[0:5]
     expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
-    assert extra_keys == (expected_hash,)
+    assert extra_keys == (("prompt_embeds", expected_hash),)
 
     # Test with prompt embeds for the second block
     extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
     expected_embeds = prompt_embeds[5:10]
     expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
-    assert extra_keys == (expected_hash,)
+    assert extra_keys == (("prompt_embeds", expected_hash),)
 
 
 def test_generate_block_hash_extra_keys_prompt_embeds_cached(monkeypatch):
@@ -738,11 +1173,78 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == ("test_lora_adapter",)
+    assert extra_keys == (("lora", "test_lora_adapter", "/path/to/lora"),)
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
     assert extra_keys is None
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lora_name_and_cache_salt_block_hashes_do_not_collide(hash_fn):
+    """A cache_salt equal to a LoRA name must not share that LoRA's blocks."""
+    lora_request = LoRARequest(
+        lora_name="foo", lora_int_id=1, lora_path="/path/to/lora"
+    )
+    lora_req = Request(
+        request_id="lora",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        lora_request=lora_request,
+        block_hasher=get_request_block_hasher(3, hash_fn),
+    )
+    salted_req = make_request("salted", [0, 1, 2], hash_fn=hash_fn, cache_salt="foo")
+
+    assert lora_req.block_hashes[0] != salted_req.block_hashes[0]
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_lora_path_change_changes_block_hashes(hash_fn):
+    """Re-pointing a LoRA name at another adapter must not reuse its blocks."""
+
+    def make_lora_request(lora_path: str) -> Request:
+        return Request(
+            request_id=lora_path,
+            prompt_token_ids=[0, 1, 2],
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            lora_request=LoRARequest(
+                lora_name="foo", lora_int_id=1, lora_path=lora_path
+            ),
+            block_hasher=get_request_block_hasher(3, hash_fn),
+        )
+
+    first = make_lora_request("/path/to/lora_a")
+    second = make_lora_request("/path/to/lora_b")
+
+    assert first.block_hashes[0] != second.block_hashes[0]
+
+
+def test_to_event_extra_keys_keeps_untagged_event_format():
+    """KV events keep publishing the extra-key shapes consumers already parse."""
+    request = make_request(
+        "0",
+        list(range(10)),
+        mm_positions=[PlaceholderRange(offset=2, length=3)],
+        mm_hashes=["hash1"],
+        cache_salt="salt",
+    )
+    request.lora_request = LoRARequest(
+        lora_name="adapter", lora_int_id=1, lora_path="/path/to/lora"
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+
+    assert extra_keys == (
+        ("lora", "adapter", "/path/to/lora"),
+        ("mm", "hash1", 2),
+        ("cache_salt", "salt"),
+    )
+    event_keys = ("adapter", ("hash1", 2), "salt")
+    assert to_event_extra_keys([extra_keys, None]) == [event_keys, None]
+    assert to_event_extra_keys([]) is None
+    assert to_event_extra_keys(None) is None
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -775,9 +1277,42 @@ def test_request_block_hasher(hash_fn):
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
     assert block_hashes[0] == hash_fn(
-        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("mm", "hash1", 0),))
     )
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
+    assert block_hashes[1] == hash_fn(
+        (block_hashes[0], (3, 4, 5), (("mm", "hash2", 0),))
+    )
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_block_hasher_incremental_append_with_multiple_mm_features(hash_fn):
+    mm_positions = [
+        PlaceholderRange(offset=4, length=2),
+        PlaceholderRange(offset=6, length=1),
+    ]
+    incremental = make_request(
+        request_id="incremental",
+        prompt_token_ids=list(range(7)),
+        block_size=4,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+    incremental.append_output_token_ids(7)
+    fresh = make_request(
+        request_id="fresh",
+        prompt_token_ids=list(range(8)),
+        block_size=4,
+        hash_fn=hash_fn,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+
+    expected_second_hash = hash_fn(
+        (incremental.block_hashes[0], (4, 5, 6, 7), (("mm", "A", 0), ("mm", "B", 2)))
+    )
+    assert incremental.block_hashes[1] == expected_second_hash
+    assert incremental.block_hashes == fresh.block_hashes
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -830,10 +1365,24 @@ def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
     return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
 
 
+def test_metrics_empty_distinguishes_no_queries_from_no_hits():
+    """`hit_rate` alone cannot tell the two apart; `empty` can.
+
+    Both an unobserved window and a genuine all-miss window report a hit
+    rate of 0.0, so anything surfacing that number to a human has to check
+    `empty` first - which is what the prefix-cache log line does.
+    """
+    metrics = CachingMetrics(max_recent_requests=5)
+    assert metrics.empty
+    assert metrics.hit_rate == 0.0
+
+    metrics.observe(_stats(1, 20, 0))
+    assert not metrics.empty
+    assert metrics.hit_rate == 0.0
+
+
 def test_metrics():
-    """
-    Test the prefix caching metrics.
-    """
+    """Test the prefix caching metrics."""
     metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
@@ -863,9 +1412,7 @@ def test_metrics():
 
 
 def test_metrics_empty_stats():
-    """
-    Test the prefix caching metrics with empty stats.
-    """
+    """Test the prefix caching metrics with empty stats."""
     metrics = CachingMetrics(max_recent_requests=5)
     metrics.observe(_stats(0, 0, 0))
     metrics.observe(_stats(1, 20, 9))
@@ -1318,19 +1865,162 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
-def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
-    dcp = 8
-    full = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+@pytest.mark.parametrize("sliding_window", [None, 256])
+@pytest.mark.parametrize("disable_hybrid", [False, True])
+@pytest.mark.parametrize("pcp_size", [1, 4])
+def test_dcp_target_allocates_replicated_draft_independently(
+    monkeypatch, sliding_window, disable_hybrid, pcp_size
+):
+    """A draft must retain all positions even when the target shards them."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hybrid
+    config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = None
+    draft_args = dict(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
     )
-    mla = new_mla_spec()
-    mamba = new_mamba_spec()
-    uniform_mla = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": mla})
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mla, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(uniform_mla, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mamba, dcp) == 1
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, 1) == 1
+    draft = (
+        FullAttentionSpec(**draft_args)
+        if sliding_window is None
+        else SlidingWindowSpec(**draft_args, sliding_window=sliding_window)
+    )
+    specs = {"target": new_mla_spec(), "draft": draft}
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs.values())
+    assert layout == KVCacheLayout.BLHNC
+    groups = get_kv_cache_groups(config, specs)
+    assert [group.layer_names for group in groups] == [["target"], ["draft"]]
+    widths = [g.kv_cache_spec.max_num_blocks_per_req(config, 1024) for g in groups]
+    assert widths == [16, 64]
+
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=16 * 1024 * 1024
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([cache_config])
+    assert get_max_concurrency_for_kv_cache_config(config, cache_config) > 0
+    assert get_max_concurrency_for_kv_cache_config(config, cache_config) == (
+        get_max_concurrency_for_kv_cache_config(config, scheduler_config)
+    )
+    manager = KVCacheManager(
+        scheduler_config,
+        max_model_len=1024,
+        hash_block_size=16,
+        scheduler_block_size=64,
+        dcp_world_size=4,
+        pcp_world_size=pcp_size,
+        enable_caching=True,
+    )
+    assert manager.coordinator.group_block_sizes == (64, 16)
+    request = make_request("replicated-draft", [1] * 65, block_size=16, hash_fn=sha256)
+    blocks = manager.allocate_slots(request, 65)
+    assert blocks is not None
+    assert [len(group) for group in blocks.blocks] == [2, 5]
+    manager.cache_blocks(request, 64)
+    cached_request = make_request(
+        "cached-draft", [1] * 65, block_size=16, hash_fn=sha256
+    )
+    cached_blocks, num_cached, _ = manager.get_computed_blocks(cached_request)
+    assert num_cached == 64
+    assert [len(group) for group in cached_blocks.blocks] == [1, 4]
+
+
+def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
+    """A replicated kpool tail ring is per-request state, not a draft group."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.cache_config.kv_cache_layout = None
+    tail = CircularBufferSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+    )
+    layout = resolve_kv_cache_layout(config, [["LBHNC"]], [new_mla_spec(), tail])
+    assert layout == KVCacheLayout.LBHNC
+
+
+@pytest.mark.parametrize("use_mla", [False, True])
+def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    draft = replace(
+        new_mla_spec() if use_mla else new_kv_cache_spec(),
+        block_size=16,
+        dcp_sharded=False,
+    )
+    merged = type(draft).merge([draft, draft])
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"draft": merged})
+    assert wrapped is not None and not wrapped.dcp_sharded
+    assert merged.max_num_blocks_per_req(config, 1024) == 64
+    assert merged.max_memory_usage_bytes(config) == 64 * draft.page_size_bytes
+    assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
+    with pytest.raises(AssertionError):
+        type(draft).merge([draft, replace(draft, dcp_sharded=True)])
+
+
+@pytest.mark.parametrize("with_draft", [False, True])
+@pytest.mark.parametrize("indexer_alignment", [None, 512])
+def test_sparse_mla_preserves_physical_row_addressing(with_draft, indexer_alignment):
+    from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.parallel_config.decode_context_parallel_size = 4
+    common = dict(block_size=64, num_kv_heads=1, dtype=torch.uint8)
+    specs = {
+        "target": MLAAttentionSpec(
+            **common,
+            head_size=576,
+            state_content_bytes=656,
+            block_stride_alignment=656,
+            cache_dtype_str="fp8_ds_mla",
+            is_index_group_leader=True,
+        ),
+        "indexer": MLAAttentionSpec(
+            **common,
+            head_size=132,
+            cache_role=SparseCacheRole.INDEXER,
+            block_stride_alignment=indexer_alignment,
+        ),
+        "draft": SlidingWindowSpec(
+            block_size=64,
+            num_kv_heads=64,
+            head_size=64,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+            dcp_sharded=False,
+        ),
+    }
+    if not with_draft:
+        del specs["draft"]
+    groups = get_kv_cache_groups(config, specs)
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=8 * 1024 * 1024
+    )
+    caches = allocate_kv_cache(
+        cache_config, torch.device("cpu"), KVCacheLayout.BLHNC, [64] * len(groups)
+    )
+    cache = caches["target"].squeeze(1)
+    if indexer_alignment is not None:
+        assert caches["indexer"].stride(0) % indexer_alignment == 0
+    rows, stride_rows = flat_kv_row_view(cache, 64)
+    cache[1, 0].fill_(7)
+    torch.testing.assert_close(rows[stride_rows], cache[1, 0])
+    assert torch.all(rows[stride_rows] == 7)
 
 
 @pytest.mark.parametrize(
@@ -1455,6 +2145,28 @@ def test_is_kv_cache_spec_uniform():
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
     }
     assert not is_kv_cache_spec_uniform(kv_cache_spec)
+
+    script = """
+import sys
+
+from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+from vllm.v1.kv_cache_interface import KVCacheSpec
+
+if sys.flags.optimize < 1:
+    raise RuntimeError("subprocess is not running with optimization enabled")
+specs = {
+    "a": KVCacheSpec(block_size=1),
+    "b": KVCacheSpec(block_size=2),
+}
+if is_kv_cache_spec_uniform(specs):
+    raise RuntimeError("different specs were treated as uniform")
+"""
+    subprocess.run(
+        [sys.executable, "-O", "-c", script],
+        cwd=Path(__file__).resolve().parents[3],
+        check=True,
+        timeout=60,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1643,7 +2355,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
 
 def test_allocate_with_lookahead():
-    """Verify that lookahead tokens correctly affect block allocation"""
+    """Verify that lookahead tokens correctly affect block allocation."""
     block_size = 4
     config = KVCacheConfig(
         num_blocks=10,
@@ -2191,38 +2903,85 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
-def test_mixed_precision_kv_cache_with_uniform_type_specs():
-    fp8_spec = new_kv_cache_spec(dtype=torch.float8_e4m3fn)
-    bf16_spec = new_kv_cache_spec(dtype=torch.bfloat16)
-    worker_config = KVCacheConfig(
-        num_blocks=10,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["fp8_layer"],
-                UniformTypeKVCacheSpecs(
-                    block_size=16, kv_cache_specs={"fp8_layer": fp8_spec}
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["bf16_layer"],
-                UniformTypeKVCacheSpecs(
-                    block_size=16, kv_cache_specs={"bf16_layer": bf16_spec}
-                ),
-            ),
-        ],
+def test_packed_groups_glm5_like_hybrid():
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
+    kpool, block_size = 4, 1024
+    kv_cache_spec: dict[str, KVCacheSpec] = {}
+    for i in range(11):
+        kv_cache_spec[f"layers.{i}.attn"] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            block_stride_alignment=32 * 576 * 2,
+        )
+        kv_cache_spec[f"layers.{i}.indexer"] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            tokens_per_state=kpool,
+            block_stride_alignment=64 * 132,
+        )
+        kv_cache_spec[f"layers.{i}.tail"] = CircularBufferSpec(
+            block_size=kpool,
+            num_kv_heads=2,
+            head_size=128,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+        )
+    for i in range(34):
+        kv_cache_spec[f"layers.{i}.kda"] = MambaSpec(
+            shapes=((3, 6144), (16, 128, 128)),
+            dtypes=(torch.bfloat16, torch.float32),
+            block_size=block_size,
+        )
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
+    attn = [
+        g
+        for g in groups
+        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and isinstance(g.kv_cache_spec.first_spec, MLAAttentionSpec)
+    ]
+    rings = [
+        g
+        for g in groups
+        if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and isinstance(g.kv_cache_spec.first_spec, CircularBufferSpec)
+    ]
+    mamba = [
+        g
+        for g in groups
+        if isinstance(
+            getattr(g.kv_cache_spec, "first_spec", g.kv_cache_spec), MambaSpec
+        )
+    ]
+    assert len(attn) == 1 and len(attn[0].layer_names) == 22
+    assert len(rings) == 1 and len(rings[0].layer_names) == 11
+    # 11 * (1.18 MB MLA + 34 KB indexer) per block fits 12 fp32-SSM KDA states.
+    assert len(mamba) == 3
+    assert sum(len(g.layer_names) for g in mamba) == 34
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * 1024**3
     )
-    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+    strides = {t.block_stride for t in kv_cache_config.kv_cache_tensors}
+    assert len(strides) == 1
+    (block_stride,) = strides
+    # Blocks sit a whole number of 32-row MLA pages and 64-state indexer pages
+    # apart so both caches can be re-paged for their kernels.
+    assert block_stride % (32 * 576 * 2) == 0
+    assert block_stride % (64 * 132) == 0
 
-    assert worker_config.needs_kv_cache_zeroing
-    assert scheduler_config.needs_kv_cache_zeroing
 
-
-def new_mla_spec(cache_dtype_str=None, block_size=16):
+def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
     # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
@@ -2233,6 +2992,7 @@ def new_swa_mla_spec(head_size=576, sliding_window=128, model_version=None):
     return SlidingWindowMLASpec(
         block_size=16,
         num_kv_heads=1,
+        max_tp_shards=1,
         head_size=head_size,
         dtype=torch.float32,
         sliding_window=sliding_window,
@@ -2453,6 +3213,45 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     assert "attention compute is unchanged" in caplog_vllm.text
 
 
+def test_hidden_states_with_tp_scales_page_size():
+    """When TP shrinks KV pages below the hidden-state per-token cost,
+    get_kv_cache_groups must scale up target block sizes so that the
+    common page accommodates the unsharded hidden states."""
+    # Simulate TP=4 sharding a model with 8 KV heads → 2 per rank.
+    # KV page = block_size(16) * num_kv_heads(2) * head_size(64) * dtype(2)
+    #         = 16 * 2 * 64 * 2 = 4096 bytes.
+    kv_spec = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    # Hidden-state per-token cost = num_hidden_states(6) * hidden_size(512)
+    #   * dtype(2) = 6144 bytes, which exceeds the 4096-byte KV page.
+    hs_spec = HiddenStateCacheSpec(
+        block_size=16,
+        num_kv_heads=6,
+        head_size=512,
+        dtype=torch.bfloat16,
+    )
+    specs = {
+        "target.0.attn": kv_spec,
+        "target.1.attn": kv_spec,
+        "cache_only_layers.48": hs_spec,
+    }
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    # The hidden-state layer should be present and no assertion should fire.
+    all_layers = {name for g in groups for name in g.layer_names}
+    assert "cache_only_layers.48" in all_layers
+
+    # The target group block sizes must have been scaled up.
+    for g in groups:
+        if "cache_only_layers.48" not in g.layer_names:
+            assert g.kv_cache_spec.block_size > kv_spec.block_size
+
+
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
     assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
 
@@ -2659,7 +3458,7 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (block1_embeds_hash,),
+            (("prompt_embeds", block1_embeds_hash),),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -2671,7 +3470,7 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (block2_embeds_hash,),
+            (("prompt_embeds", block2_embeds_hash),),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -2708,7 +3507,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (("hash1", 0), block1_embeds_hash),
+            (("mm", "hash1", 0), ("prompt_embeds", block1_embeds_hash)),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -2720,7 +3519,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (("hash2", 0), block2_embeds_hash),
+            (("mm", "hash2", 0), ("prompt_embeds", block2_embeds_hash)),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -2940,6 +3739,8 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
+    kv_cache_spec["draft_layer_1"] = replace(before_spec_1, dcp_sharded=False)
+    kv_cache_spec["draft_layer_2"] = replace(before_spec_2, dcp_sharded=False)
     kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec(block_size=64)
     expected_spec_2 = new_kv_cache_spec(
@@ -2948,6 +3749,7 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["layer_1"] == expected_spec_1
     assert kv_cache_spec["layer_2"] == expected_spec_2
     assert kv_cache_spec["layer_2"].page_size_bytes == 64 * 1024
+    assert kv_cache_spec["draft_layer_2"] == replace(expected_spec_2, dcp_sharded=False)
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_spec()
@@ -2996,6 +3798,11 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_2": new_chunked_local_attention_spec(attention_chunk_size=512),
     }
 
+    with pytest.raises(ValueError):
+        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    # Replicated Mamba state still requires the hybrid cache manager.
+    kv_cache_spec = {"attention": new_kv_cache_spec(), "mamba": new_mamba_spec()}
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
@@ -3090,8 +3897,7 @@ def test_unify_kv_cache_spec_page_size_mamba():
 
 
 def test_hma_not_disabled_when_kv_events_enabled():
-    """
-    Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
+    """Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
 
     This test guards against that regression by verifying that a VllmConfig
     with kv_events_config set still resolves disable_hybrid_kv_cache_manager
@@ -3187,6 +3993,7 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
     block_size = 16
     max_model_len = 512  # needs 512 / 16 = 32 blocks
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = new_kv_cache_spec(block_size=block_size)
 
     # 32 blocks -> only 31 usable after the null block: one short -> reject.
@@ -3232,6 +4039,7 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     block_size = 16
     max_model_len = 512  # needs 512 / 16 = 32 blocks
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = new_kv_cache_spec(block_size=block_size)
 
     # 32 blocks -> only 31 usable after the null block: one short -> reject.
@@ -3283,6 +4091,22 @@ def test_iter_layer_specs_returns_group_members():
     assert list(iter_layer_specs(wrapped)) == [full, mla]
 
 
+def test_wrapped_mamba_group_requires_block_zeroing():
+    mamba = MambaSpec(
+        block_size=4,
+        shapes=((4, 1),),
+        dtypes=(torch.float32,),
+    )
+    wrapped = UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs={"mamba": mamba})
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], wrapped)],
+    )
+
+    assert config.needs_kv_cache_zeroing
+
+
 def _spec_decode_grouping_config(method="dspark", model_type=None):
     """Grouping config with an EAGLE-family speculative method enabled."""
     return SimpleNamespace(
@@ -3305,9 +4129,10 @@ def _hybrid_specs_with_draft(draft: bool, draft_shares_target_spec: bool = False
     """A K3-shaped hybrid: MLA full attention + Mamba, optionally plus a
     DSpark-style draft MLA layer marked non_causal_multi_token_decode.
 
-    The target's fp8 KV dtype is what keeps the draft in its own bucket, as it
-    does on Kimi-K3 (target `--kv-cache-dtype fp8_e4m3`, draft `auto`). Pass
-    draft_shares_target_spec to collapse them into one group instead.
+    The target's fp8 KV dtype is one difference from the draft on Kimi-K3
+    (target `--kv-cache-dtype fp8_e4m3`, draft `auto`). Pass
+    draft_shares_target_spec to match that dtype while retaining the draft
+    marker as a group boundary.
     """
     target_dtype = None if draft_shares_target_spec else "fp8_e4m3"
     specs = {
@@ -3363,9 +4188,9 @@ def test_draft_group_not_annotated_without_spec_decode():
 
 
 def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
+    # No group carries the draft marker, so consumers fall back to
+    # conservative behavior that silently breaks reuse for Mamba groups.
+    # That must at least be visible.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
     )
@@ -3374,7 +4199,20 @@ def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     assert "no KV cache group could be identified as the draft model's" in (
         caplog_vllm.text
     )
-    assert "Mamba groups" in caplog_vllm.text
+
+
+def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
+    # Pure-attention models degrade gracefully under the consumers'
+    # conservative fallback (a one-block hit drop at most), so the warning
+    # stays silent to avoid noise on every unannotated EAGLE deployment.
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+    }
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
@@ -3402,12 +4240,16 @@ def _deepseek_v4_specs(model_version="deepseek_v4"):
     }
 
 
-def test_deepseek_v4_draft_group_annotated_on_packed_path():
+@pytest.mark.parametrize(
+    ("method", "model_type"),
+    [("mtp", "deepseek_v4"), ("dspark", "deepseek_v4"), ("dspark", "deepseek_v41")],
+)
+def test_deepseek_v4_draft_group_annotated_on_packed_path(method, model_type):
     # DeepseekV4's MTP block reuses the target's decoder layer, so its spec
     # carries no draft marker and only the positional rule can find it. This
     # pins the pre-existing behaviour that the unified annotator must preserve.
     groups = get_kv_cache_groups(
-        _spec_decode_grouping_config(method="mtp", model_type="deepseek_v4"),
+        _spec_decode_grouping_config(method=method, model_type=model_type),
         _deepseek_v4_specs(model_version=None),
     )
 
@@ -3416,13 +4258,187 @@ def test_deepseek_v4_draft_group_annotated_on_packed_path():
     assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
 
 
-def test_deepseek_v4_annotation_requires_model_type():
-    # The positional rule is only sound for DeepseekV4, where the draft layer
-    # is known to be registered last. Without that model gate nothing may be
-    # flagged, however the grouping happens to fall out.
+def test_trailing_layer_fallback_applies_to_any_mtp_model():
+    # The positional rule is sound for every MTP drafter, not just DeepseekV4:
+    # MTP blocks reuse the target's decoder layer (no spec marker) and always
+    # register after every target layer. The model_type must not gate it.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(method="mtp", model_type="other"),
         _deepseek_v4_specs(),
     )
 
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
+
+
+def _qwen3_5_hybrid_specs(with_mtp_layer: bool):
+    """Qwen3.5-shaped hybrid: repeating [GDN x3, full-attn x1] blocks, with
+    the MTP drafter's full-attn layer (spec-identical to the target's)
+    registered last."""
+    specs = {}
+    idx = 0
+    for _ in range(2):
+        for _ in range(3):
+            specs[f"model.layers.{idx}.linear_attn"] = new_mamba_spec(
+                mamba_cache_mode="align"
+            )
+            idx += 1
+        specs[f"model.layers.{idx}.self_attn.attn"] = new_kv_cache_spec()
+        idx += 1
+    if with_mtp_layer:
+        specs["mtp.layers.0.self_attn.attn"] = new_kv_cache_spec()
+    return specs
+
+
+def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
+    # A hybrid mamba + full-attention model with an MTP drafter that is
+    # spec-indistinguishable from the target reaches the general multi-group
+    # path. The trailing-layer rule must locate the draft group there so the
+    # Mamba groups are not swept up by the flag-all consumer fallback.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp", model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "mtp.layers.0.self_attn.attn" in flagged[0].layer_names
+    for group in groups:
+        if any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "dspark"])
+def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm, method):
+    # Other drafters are not covered by the trailing-layer rule, so an
+    # unidentifiable hybrid draft must still warn.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method=method, model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
     assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" in caplog_vllm.text
+
+
+def test_trailing_layer_fallback_requires_exact_partition():
+    # If the groups do not partition the layers exactly (e.g. a caller that
+    # dropped or duplicated layers), the positional rule is meaningless and
+    # must not fire.
+    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
+
+    specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
+    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
+    groups = get_kv_cache_groups(config, specs)
+    for g in groups:
+        g.is_eagle_group = False
+    # Remove one layer from its group: no longer an exact partition.
+    trimmed = [
+        KVCacheGroupSpec(
+            [n for n in g.layer_names if n != "model.layers.0.linear_attn"],
+            g.kv_cache_spec,
+        )
+        for g in groups
+    ]
+    _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
+
+    assert not any(g.is_eagle_group for g in trimmed)
+
+
+_GQA_SPEC = FullAttentionSpec(
+    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32
+)
+_GQA_SWA_SPEC = SlidingWindowSpec(
+    block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32, sliding_window=128
+)
+
+
+@pytest.mark.parametrize(
+    "specs,expected",
+    [
+        pytest.param({"l.0": new_mla_spec(), "l.1": new_mla_spec()}, 4, id="mla"),
+        pytest.param(
+            {
+                "l.0": new_mla_spec(),
+                "l.1": new_mla_spec(),
+                "s.0": new_swa_mla_spec(),
+                "s.1": new_swa_mla_spec(),
+            },
+            4,
+            id="mla-and-swa-mla",
+        ),
+        pytest.param({"l.0": _GQA_SPEC, "l.1": _GQA_SPEC}, 1, id="gqa"),
+        pytest.param(
+            {"l.0": new_mla_spec(), "l.1": _GQA_SPEC},
+            1,
+            id="mla-and-gqa-uniform-group",
+        ),
+        pytest.param(
+            {
+                "l.0": new_mla_spec(),
+                "l.1": new_mla_spec(),
+                "s.0": _GQA_SWA_SPEC,
+                "s.1": _GQA_SWA_SPEC,
+            },
+            1,
+            id="mla-and-gqa-swa",
+        ),
+    ],
+)
+def test_kv_tp_replicas(monkeypatch, specs, expected):
+    """Resolved per layer before scheduler flattening hides mixed groups."""
+    from vllm.config import ParallelConfig
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "device_count", lambda: 4)
+    parallel_config = ParallelConfig(tensor_parallel_size=4)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=16), parallel_config=parallel_config
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    mem = sum(s.page_size_bytes for s in specs.values()) * 10
+    configs = get_kv_cache_configs(vllm_config, [specs], [mem])
+    assert configs[0].kv_tp_replicas == expected
+    scheduler = generate_scheduler_kv_cache_config(configs)
+    assert scheduler.kv_tp_replicas == expected
+
+
+@pytest.mark.parametrize(
+    "specs,tp_size,dcp_size,expected",
+    [
+        pytest.param([new_mla_spec()], 8, 1, 8, id="mla"),
+        pytest.param([new_mla_spec()], 8, 2, 1, id="mla-dcp"),
+        pytest.param(
+            [replace(new_mla_spec(), max_tp_shards=None)], 8, 1, 1, id="mla-unset"
+        ),
+        pytest.param([replace(_GQA_SPEC, max_tp_shards=2)], 8, 1, 4, id="gqa-partial"),
+        pytest.param([replace(_GQA_SPEC, max_tp_shards=8)], 4, 1, 1, id="gqa-sharded"),
+        pytest.param(
+            [new_mla_spec(), replace(_GQA_SWA_SPEC, max_tp_shards=4)],
+            8,
+            1,
+            2,
+            id="mla-and-gqa-partial",
+        ),
+        pytest.param(
+            [
+                HiddenStateCacheSpec(
+                    block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32
+                )
+            ],
+            8,
+            1,
+            1,
+            id="hidden-state",
+        ),
+    ],
+)
+def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
+    """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
+    groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
+    assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected

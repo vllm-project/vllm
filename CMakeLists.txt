@@ -46,7 +46,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13" "3.14")
+set(PYTHON_SUPPORTED_VERSIONS "3.11" "3.12" "3.13" "3.14")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1250;gfx1030;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1153;gfx1200;gfx1201")
@@ -134,40 +134,34 @@ endif()
 #
 # spinloop extension (pure CXX; must stay above the non-CUDA device branch so
 # CPU builds define the target before the early return)
-# This extension requires SABI 3.11 since it relies on Py_buffer support. Loading
-# failure is handled gracefully on vLLM side for lower Python versions.
-# Skip the target entirely on Python < 3.11 so the build doesn't break.
+# This extension requires SABI 3.11 since it relies on Py_buffer support.
 #
-if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
-  set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
-  set(SPINLOOP_COMPILE_FLAGS "")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-    list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
-  endif()
-  define_extension_target(
-    spinloop
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES ${VLLM_SPINLOOP_EXT_SRC}
-    COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
-    USE_SABI 3.11
-    WITH_SOABI)
+set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
+set(SPINLOOP_COMPILE_FLAGS "")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
 endif()
+define_extension_target(
+  spinloop
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_SPINLOOP_EXT_SRC}
+  COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
+  USE_SABI 3.11
+  WITH_SOABI)
 
 #
 # fs_io extension (pure CXX; must stay above the non-CUDA device branch
 # so CPU builds define the target before the early return).
 # GIL-releasing filesystem helpers for FileSystemTierManager.
 #
-if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
-  define_extension_target(
-    fs_io_C
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES csrc/fs_io.cpp
-    USE_SABI 3.11
-    WITH_SOABI)
-endif()
+define_extension_target(
+  fs_io_C
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES csrc/fs_io.cpp
+  USE_SABI 3.11
+  WITH_SOABI)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -436,7 +430,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
-    "csrc/libtorch_stable/permute_cols.cu"
     "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
     "csrc/libtorch_stable/pos_encoding_kernels.cu"
     "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu"
@@ -477,6 +470,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/hisparse_kernels.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_kv_gather.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_q_gather.cu")
@@ -590,9 +584,30 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       endif()
     endif()
 
+    # The fused MiniMax-M3 KV insert quantizes NVFP4 with SM100-family-only
+    # cvt instructions, so its SM10x/11x code is built for the family targets.
+    set(MINIMAX_M3_FUSED_SRC
+      "csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu")
+    list(REMOVE_ITEM VLLM_STABLE_EXT_SRC "${MINIMAX_M3_FUSED_SRC}")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(MINIMAX_M3_FUSED_ARCHS
+        "10.0f;10.7f;11.0f" "${CUDA_ARCHS}")
+    else()
+      cuda_archs_loose_intersection(MINIMAX_M3_FUSED_ARCHS
+        "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+    endif()
+    foreach(_ARCH ${CUDA_ARCHS})
+      if(_ARCH VERSION_LESS 10.0 OR _ARCH VERSION_GREATER_EQUAL 12.0)
+        list(APPEND MINIMAX_M3_FUSED_ARCHS "${_ARCH}")
+      endif()
+    endforeach()
+    set_gencode_flags_for_srcs(
+      SRCS "${MINIMAX_M3_FUSED_SRC}"
+      CUDA_ARCHS "${MINIMAX_M3_FUSED_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${MINIMAX_M3_FUSED_SRC}")
 
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
@@ -773,22 +788,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building fp32_router_gemm as no compatible archs found "
                    "(requires SM90+ and CUDA >= 12.0).")
-  endif()
-
-  # Only build AllSpark kernels if we are building for at least some compatible archs.
-  cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
-  if (ALLSPARK_ARCHS)
-    set(ALLSPARK_SRCS
-       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_repack.cu"
-       "csrc/libtorch_stable/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${ALLSPARK_SRCS}"
-      CUDA_ARCHS "${ALLSPARK_ARCHS}")
-    list(APPEND VLLM_STABLE_EXT_SRC "${ALLSPARK_SRCS}")
-    message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
-  else()
-    message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures")
   endif()
 
   #
@@ -1122,7 +1121,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     cuda_archs_loose_intersection(FUSED_KDA_DECODE_ARCHS
       "9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
     cuda_archs_loose_intersection(FUSED_GDN_DECODE_ARCHS
-      "8.0;8.6;8.9;9.0a;10.0f;12.0f" "${CUDA_ARCHS}")
+      "8.0;8.6;8.9;9.0a;10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
   endif()
   if(FUSED_KDA_DECODE_ARCHS)
     set(FUSED_KDA_DECODE_SRC
@@ -1182,11 +1181,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
-  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Built for
-  # the CDNA archs the kernel supports (gfx942 / gfx950), so it is only emitted
-  # when one of those is in the arch list. A multi-arch build that includes them
-  # still emits this source for every arch in that list. The runtime gate in
-  # kda_decode.py keeps the kernel off unsupported devices.
+  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp 
+  # Built for the CDNA archs the kernel supports 
+  # (gfx942 / gfx950), so it is only emitted when one of those is in the arch 
+  # list. A multi-arch build that includes them still emits this source for 
+  # every arch in that list. The runtime gate in kda_decode.py keeps the kernel
+  # off unsupported devices. Fused prefill KDA kernels is Only measured on 
+  # gfx950, so it is only built when gfx950 is in the arch list.
   if(VLLM_GPU_LANG STREQUAL "HIP")
     set(FUSED_KDA_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
     list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx942|gfx950")
@@ -1196,6 +1197,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_DECODE_HIP_SRC}")
       message(STATUS
         "Building fused KDA decode for HIP archs: ${FUSED_KDA_DECODE_HIP_ARCHS}")
+    endif()
+
+    set(FUSED_KDA_CHUNK_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER FUSED_KDA_CHUNK_HIP_ARCHS INCLUDE REGEX "gfx950")
+    if(FUSED_KDA_CHUNK_HIP_ARCHS)
+      set(FUSED_KDA_CHUNK_HIP_SRC
+        "csrc/libtorch_stable/kimi_k3/fused_kda_chunk_kernel_rocm.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_CHUNK_HIP_SRC}")
+      message(STATUS
+        "Building fused KDA chunk for HIP archs: ${FUSED_KDA_CHUNK_HIP_ARCHS}")
     endif()
   endif()
 
@@ -1246,6 +1257,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(FUSED_KDA_DECODE_HIP_SRC)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
+    if(FUSED_KDA_CHUNK_HIP_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_CHUNK=1)
     endif()
   endif()
 
@@ -1553,9 +1568,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     include(cmake/external_projects/triton_kernels.cmake)
 endif()
 
+# DeepGEMM and DeepSelect host code uses C++20 <format>, which libstdc++
+# provides only from GCC 13 onward.
+if (VLLM_GPU_LANG STREQUAL "CUDA"
+    AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "13")
+  message(FATAL_ERROR
+    "GCC >= 13 is required to build vLLM with CUDA (found ${CMAKE_CXX_COMPILER_VERSION}). "
+    "The DeepGEMM and DeepSelect dependencies use C++20 <format> in host code, "
+    "which libstdc++ does not provide before GCC 13. "
+    "See: https://github.com/vllm-project/vllm/issues/58158")
+endif()
+
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/deepgemm.cmake)
+    include(cmake/external_projects/deepselect.cmake)
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/flashkda.cmake)

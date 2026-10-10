@@ -1,0 +1,1 @@
+NVIDIA-Nemotron-3-Nano-30B-A3B-FP8-xpu.yaml

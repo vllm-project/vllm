@@ -134,6 +134,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
         )
+        self._response_open_ids = tokenizer.encode(
+            self._response_open, add_special_tokens=False
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
 
@@ -211,6 +214,43 @@ class KimiK3ReasoningParser(ReasoningParser):
             return cached_content_ids
         return self._extract_content_ids(input_ids)
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if not self._thinking_enabled:
+            return 0
+        think_open = self._think_open_ids
+        think_close = self._think_close_ids
+        response_open = self._response_open_ids
+        first_ids = {m[0] for m in (think_open, think_close, response_open) if m}
+        n = len(token_ids)
+        count = 0
+        in_reasoning = True
+        seen_open = False
+        i = 0
+        while i < n:
+            head = token_ids[i]
+            if head in first_ids:
+                if i + len(think_open) <= n and _match_at(token_ids, i, think_open):
+                    in_reasoning = True
+                    seen_open = True
+                    i += len(think_open)
+                    continue
+                if i + len(think_close) <= n and _match_at(token_ids, i, think_close):
+                    in_reasoning = False
+                    i += len(think_close)
+                    continue
+                if (
+                    not seen_open
+                    and i + len(response_open) <= n
+                    and _match_at(token_ids, i, response_open)
+                ):
+                    in_reasoning = False
+                    i += len(response_open)
+                    continue
+            if in_reasoning:
+                count += 1
+            i += 1
+        return count
+
     def _strip_content_wrapper(self, text: str) -> str:
         """Strip ``<|open|>response<|sep|>…<|close|>response<|sep|>`` wrapper and
         ``<|close|>message<|sep|>`` from *text*.
@@ -256,11 +296,13 @@ class KimiK3ReasoningParser(ReasoningParser):
     ) -> tuple[str | None, str | None]:
         """Split full text into ``(reasoning, rest)`` for the non-streaming path.
 
-        Handles three shapes:
-          * no think channel at all   -> ``(None, model_output)`` (all content)
+        Handles four shapes:
+          * response opener without think markers -> no think channel; all content
           * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
           * open marker absent but a   close marker exists (gen-prefix consumed
             the open) -> reasoning starts at offset 0
+          * neither marker present     -> truncated reasoning after a consumed
+            generation prefix
         ``rest`` is whatever follows the close marker, fed on to the tool parser.
         """
         if not self._thinking_enabled:
@@ -270,11 +312,14 @@ class KimiK3ReasoningParser(ReasoningParser):
         # reasoning content begins right after think-open (or at start if the
         # open marker was already consumed as a generation prefix)
         content_start = m_open.end() if m_open is not None else 0
-        # if there is no think channel at all, everything is content
-        if m_open is None and self._think_close_re.search(model_output) is None:
-            return None, self._content_after_reasoning(model_output, request)
 
         m_close = self._think_close_re.search(model_output, content_start)
+        if (
+            m_open is None
+            and m_close is None
+            and self._response_open_re.search(model_output) is not None
+        ):
+            return None, self._content_after_reasoning(model_output, request)
         if m_close is not None:
             reasoning = model_output[content_start : m_close.start()]
             rest = model_output[m_close.end() :]

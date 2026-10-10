@@ -3,26 +3,42 @@
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
 from collections.abc import Sequence
-from typing import cast
+from dataclasses import replace
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    eagle_proof_margin,
+    resolve_dcp_kv_cache_spec,
+)
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SingleTypeKVCacheManager,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+class StoreSpecGroup(NamedTuple):
+    spec: KVCacheSpec
+    group_ids: list[int]
+    manager_cls: type[SingleTypeKVCacheManager]
+    use_eagle: bool
 
 
 class ExternalCachedBlockPool:
@@ -73,10 +89,16 @@ class MooncakeStoreCoordinator:
         hash_block_size: int,
         use_eagle: bool = False,
         retention_interval: int | None = None,
-        dcp_world_size: int = 1,
+        enable_partial_hash_hits: bool = False,
     ) -> None:
+        # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
+        # to divide groups that participate in prefix caching. Non-shareable
+        # scratch groups (e.g. GLM-5.3-Flash's kpool tail) are skipped by
+        # _verify_and_split_kv_cache_groups and never probed for hits.
         assert all(
-            g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_groups
+            g.kv_cache_spec.block_size % hash_block_size == 0
+            for g in kv_cache_groups
+            if g.kv_cache_spec.prefix_cacheable
         ), "block_size must be divisible by hash_block_size"
         assert scheduler_block_size % hash_block_size == 0, (
             f"scheduler_block_size ({scheduler_block_size}) must be a multiple of "
@@ -85,6 +107,7 @@ class MooncakeStoreCoordinator:
         assert all(
             scheduler_block_size % g.kv_cache_spec.block_size == 0
             for g in kv_cache_groups
+            if g.kv_cache_spec.prefix_cacheable
         ), "scheduler_block_size must be a multiple of each group's block_size"
         self.kv_cache_groups = kv_cache_groups
         self.mamba_group_ids = {
@@ -94,13 +117,50 @@ class MooncakeStoreCoordinator:
         }
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
-        self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_groups, hash_block_size, dcp_world_size
-        )
+        # Core's decision: whether hits land on the hash unit, below the block.
+        self.enable_partial_hash_hits = enable_partial_hash_hits
         self.use_eagle = use_eagle
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
+
+    @classmethod
+    def from_kv_cache_config(
+        cls,
+        kv_cache_config: KVCacheConfig,
+        vllm_config: "VllmConfig",
+        scheduler_block_size: int,
+        hash_block_size: int,
+    ) -> "MooncakeStoreCoordinator":
+        """Build the coordinator the connector's scheduler and workers share.
+
+        Specs are DCP-resolved, so a block spans the tokens of one block-table
+        entry. Partial hits follow core's hit alignment, which checks every KV
+        cache group and its manager, not only the groups the store transfers;
+        unset (a config the engine core did not resolve) keeps hits on the
+        block.
+        """
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        spec_config = vllm_config.speculative_config
+        alignment = kv_cache_config.cache_hit_alignment_tokens
+        return cls(
+            [
+                replace(
+                    group,
+                    kv_cache_spec=resolve_dcp_kv_cache_spec(
+                        group.kv_cache_spec, dcp_world_size
+                    ),
+                )
+                for group in kv_cache_config.prefix_cacheable_groups
+            ],
+            scheduler_block_size,
+            hash_block_size,
+            use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            retention_interval=kv_cache_config.prefix_cache_retention_interval,
+            enable_partial_hash_hits=(
+                alignment is not None and alignment < scheduler_block_size
+            ),
+        )
 
     def align_lookup_length(self, length: int) -> int:
         alignment = (
@@ -114,8 +174,14 @@ class MooncakeStoreCoordinator:
         """Mirrors KVCacheCoordinator.verify_and_split_kv_cache_groups but
         dispatches via spec_manager_map (we don't allocate managers).
         """
-        attention_groups: list[SpecGroup] = []
+        attention_groups: list[StoreSpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
+            # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail): per-request scratch, never shareable, so they must
+            # not participate in hit lookup. Mirrors core's
+            # KVCacheCoordinator.verify_and_split_kv_cache_groups.
+            if not g.kv_cache_spec.prefix_cacheable:
+                continue
             spec = _unwrap_spec(g.kv_cache_spec)
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None, (
@@ -130,7 +196,7 @@ class MooncakeStoreCoordinator:
                     break
             else:
                 attention_groups.append(
-                    SpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
@@ -144,6 +210,17 @@ class MooncakeStoreCoordinator:
         # group sharing the spec.
         self.eagle_group_ids = {
             gid for g in attention_groups if g.use_eagle for gid in g.group_ids
+        }
+        self.eagle_proof_margin_by_group = {
+            gid: eagle_proof_margin(
+                group.spec.block_size,
+                self.hash_block_size,
+                self.enable_partial_hash_hits
+                and group.manager_cls.supports_fine_grained_hash_lookup,
+            )
+            for group in attention_groups
+            if group.use_eagle and not isinstance(group.spec, MambaSpec)
+            for gid in group.group_ids
         }
 
     def find_longest_cache_hit(
@@ -286,6 +363,10 @@ class MooncakeStoreCoordinator:
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 reachable_boundaries=reachable_boundaries,
+                # ``spec`` is already DCP-resolved (worker.py applies
+                # resolve_dcp_kv_cache_spec) and ``end_chunk`` is indexed in
+                # that scaled block size, so the mask must not scale again.
+                dcp_world_size=1,
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk
@@ -368,14 +449,16 @@ class MooncakeStoreCoordinator:
                 # never drops a block, so a widened bound would match past the
                 # attention-verified hit and resume from speculative state (#43559).
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and spec.block_size > self.hash_block_size
-                        else spec.block_size
+                    eagle_margin = eagle_proof_margin(
+                        spec.block_size,
+                        self.hash_block_size,
+                        self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup,
                     )
-                    _max_length = min(curr_hit_length + eagle_margin, max_length)
+                    _max_length = min(
+                        curr_hit_length + eagle_margin,
+                        len(block_hashes) * self.hash_block_size,
+                    )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,  # type: ignore[arg-type]
                     max_length=_max_length,
@@ -423,20 +506,3 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
-
-
-def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec],
-    hash_block_size: int,
-    dcp_world_size: int = 1,
-) -> bool:
-    """Match core's DCP-aware Mamba partial-hit condition."""
-    return any(
-        isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and (
-            (dcp_world_size == 1 and spec.block_size > hash_block_size)
-            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
-        )
-        for g in kv_cache_groups
-    )

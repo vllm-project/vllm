@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -25,10 +26,11 @@ use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
+mod output_channel;
 mod state;
 mod stream;
 
-pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
+pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
@@ -53,16 +55,15 @@ pub enum TransportMode {
         local_output_address: Option<String>,
     },
 
-    /// The Python supervisor has already chosen the frontend transport
-    /// addresses, and the Rust process only needs to bind them and wait for
-    /// engine registration frames.
+    /// The Python supervisor has already bound the frontend transport
+    /// listeners. Rust adopts them and waits for engine registration frames.
+    /// `EngineCoreClient::connect` consumes each descriptor exactly once;
+    /// copied integer values do not create additional descriptor ownership.
     Bootstrapped {
-        /// Input ROUTER socket address that engines will connect to for
-        /// requests.
-        input_address: String,
-        /// Output PULL socket address that engines will connect to for
-        /// responses.
-        output_address: String,
+        /// Raw input ROUTER listener descriptor inherited from the supervisor.
+        input_listener_fd: i32,
+        /// Raw output PULL listener descriptor inherited from the supervisor.
+        output_listener_fd: i32,
         /// First data-parallel engine rank expected to register on this
         /// transport.
         engine_start_index: u32,
@@ -155,6 +156,11 @@ pub struct EngineCoreClientConfig {
     pub model_name: String,
     /// Frontend client index stamped onto every request.
     pub client_index: u32,
+    /// Whether the connected engines record stats, i.e. were not started with
+    /// `--disable-log-stats`. When `false`, engines emit neither
+    /// `SchedulerStats` nor request lifecycle events, so frontend metrics
+    /// derived from them are not exported.
+    pub engine_stats_enabled: bool,
 }
 
 impl EngineCoreClientConfig {
@@ -173,6 +179,7 @@ impl EngineCoreClientConfig {
             coordinator_mode: None,
             model_name: String::new(),
             client_index: 0,
+            engine_stats_enabled: true,
         }
     }
 
@@ -190,6 +197,12 @@ impl EngineCoreClientConfig {
     /// Override the client index stamped onto every outgoing request.
     pub fn with_client_index(mut self, client_index: u32) -> Self {
         self.client_index = client_index;
+        self
+    }
+
+    /// Set whether the connected engines record stats.
+    pub fn with_engine_stats_enabled(mut self, engine_stats_enabled: bool) -> Self {
+        self.engine_stats_enabled = engine_stats_enabled;
         self
     }
 
@@ -271,6 +284,9 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    /// Whether a profiling session is awaiting an explicit stop. Held across each
+    /// start/stop utility call so a stale stop reply cannot clear a newer session.
+    profile_active: Mutex<bool>,
 
     /// Runtime used to send messages to the engine and drive all background tasks.
     runtime: BackgroundShutdownRuntime,
@@ -321,8 +337,8 @@ impl EngineCoreClient {
             }
 
             TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 ready_timeout,
@@ -333,8 +349,8 @@ impl EngineCoreClient {
                 }
 
                 transport::connect_bootstrapped(
-                    input_address,
-                    output_address,
+                    *input_listener_fd,
+                    *output_listener_fd,
                     *engine_start_index,
                     *engine_count,
                     *ready_timeout,
@@ -361,6 +377,7 @@ impl EngineCoreClient {
             connected.input_send,
             runtime.handle().clone(),
             config.model_name.clone(),
+            config.engine_stats_enabled,
             &engines,
         ));
         let output_task = AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
@@ -418,6 +435,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            profile_active: Mutex::new(false),
             runtime,
             output_task,
             dispatcher_task,
@@ -510,6 +528,15 @@ impl EngineCoreClient {
         self.engines.iter().map(|engine| engine.ready_response.num_gpu_blocks).sum()
     }
 
+    /// Return the effective attention block size if all engines report the same value.
+    pub fn effective_attention_block_size(&self) -> Option<u64> {
+        let size = self.ready_response().effective_attention_block_size?;
+        self.engines
+            .iter()
+            .all(|engine| engine.ready_response.effective_attention_block_size == Some(size))
+            .then_some(size)
+    }
+
     /// Return the minimum engine-reported `max_model_len` across all engines.
     ///
     /// This is the auto-fitted value after KV cache profiling and may differ
@@ -535,6 +562,11 @@ impl EngineCoreClient {
     /// labeling.
     pub fn model_name(&self) -> &str {
         self.inner.model_name()
+    }
+
+    /// Return whether the connected engines record stats.
+    pub fn engine_stats_enabled(&self) -> bool {
+        self.config.engine_stats_enabled
     }
 
     /// Return whether the client still considers the engine healthy.
@@ -584,6 +616,12 @@ fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
 impl EngineCoreClient {
     /// Add a new request to the engine and return a per-request raw output
     /// stream.
+    ///
+    /// With `sampling_params.stream_interval` above one, outputs after the
+    /// first are delivered to the stream in batches of at least that many new
+    /// tokens, and the terminal output is delivered immediately together with
+    /// any held-back outputs. The stream still yields every raw output in
+    /// order; batching only reduces how often the consuming task is woken.
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
@@ -598,8 +636,15 @@ impl EngineCoreClient {
         let request_id = req.request_id.clone();
         let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
         let data_parallel_rank = req.data_parallel_rank;
-        let (engine_id, rx) =
-            self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
+        let stream_interval = (req.sampling_params.as_ref())
+            .and_then(|params| params.stream_interval)
+            .unwrap_or(NonZeroU32::MIN);
+        let (engine_id, rx) = self.inner.register_request(
+            request_id.clone(),
+            lora_name,
+            data_parallel_rank,
+            stream_interval,
+        )?;
 
         // Construct the output stream first before actually sending the request to the engine.
         // This ensures that cancelling the future will properly clean up the request registration
@@ -902,11 +947,20 @@ impl EngineCoreClient {
         Ok(())
     }
 
-    /// Wake the engine from sleep, optionally limiting the wake-up to specific
-    /// tags.
-    pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<()> {
-        self.call_utility::<(), _>("wake_up", (tags,)).await?;
+    /// Release KV cache memory while keeping model weights resident.
+    pub async fn release_kv_cache_memory(&self) -> Result<()> {
+        self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
         Ok(())
+    }
+
+    /// Wake the engine from sleep, optionally limiting the wake-up to specific
+    /// tags, and return whether every engine is fully awake.
+    pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("wake_up", (tags,))
+            .await?
+            .into_iter()
+            .all(|fully_awake| fully_awake))
     }
 
     /// Pause the scheduler so generation can be halted
@@ -927,14 +981,38 @@ impl EngineCoreClient {
     }
 
     /// Start profiling the engine.
-    pub async fn start_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
-        self.call_utility::<(), _>("profile", (true, profile_prefix)).await?;
+    pub async fn start_profile(
+        &self,
+        profile_prefix: Option<&str>,
+        delay_iterations: Option<u64>,
+        max_iterations: Option<u64>,
+    ) -> Result<()> {
+        let mut active = self.profile_active.lock().await;
+        if *active {
+            return Err(Error::ProfileAlreadyActive);
+        }
+
+        // A cancelled start may still reach the engine, so only a reported
+        // failure clears the session; otherwise a stop is needed.
+        *active = true;
+        if let Err(error) = self
+            .call_utility::<(), _>(
+                "profile",
+                (true, profile_prefix, delay_iterations, max_iterations),
+            )
+            .await
+        {
+            *active = false;
+            return Err(error);
+        }
         Ok(())
     }
 
     /// Stop profiling the engine.
     pub async fn stop_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
+        let mut active = self.profile_active.lock().await;
         self.call_utility::<(), _>("profile", (false, profile_prefix)).await?;
+        *active = false;
         Ok(())
     }
 

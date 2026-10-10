@@ -257,7 +257,7 @@ class TestCudagraphDispatcher:
     def test_get_capture_descs_empty_when_not_initialized(self):
         """Test that get_capture_descs returns empty list when keys not initialized."""
         comp_config = CompilationConfig(
-            cudagraph_mode="FULL",
+            cudagraph_mode=CUDAGraphMode.FULL,
             mode=CompilationMode.NONE,
             cudagraph_capture_sizes=[1, 8],
         )
@@ -376,7 +376,6 @@ def _run_and_monitor_call(
     wrapper, input_tensor, runtime_mode, batch_descriptor, vllm_config
 ):
     """Helper to run a single call and monitor the action."""
-
     with (
         patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_graph_context,
         patch.object(wrapper, "runnable", wraps=wrapper.runnable) as mock_runnable,
@@ -420,7 +419,7 @@ def _run_and_monitor_call(
 def test_capture_replay_bypass_logic():
     comp_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
-        cudagraph_mode="FULL",
+        cudagraph_mode=CUDAGraphMode.FULL,
         cudagraph_capture_sizes=[1, 2],
     )
     vllm_config = _create_vllm_config(comp_config)
@@ -490,7 +489,7 @@ def test_nested_wrappers():
     """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
     comp_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
-        cudagraph_mode="FULL",
+        cudagraph_mode=CUDAGraphMode.FULL,
         cudagraph_capture_sizes=[1],
     )
     vllm_config = _create_vllm_config(comp_config)

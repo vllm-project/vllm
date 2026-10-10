@@ -22,10 +22,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 
@@ -39,7 +41,10 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "fp8_per_block_dynamic": kFp8Dynamic128Sym,
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
+    "nvfp4_per_token": kNvfp4DynamicToken,
     "int8_per_channel_static": kInt8StaticChannelSym,
+    # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
+    "int4_per_group_32": kInt4Static32,
 }
 
 
@@ -225,6 +230,10 @@ ONLINE_QUANT_SHORTHAND_NAMES: tuple[str, ...] = (
     "online",
 )
 
+# These names are also checkpoint quantization methods. Their online configs
+# are resolved only when checkpoint quantization metadata is absent.
+_DEFERRED_ONLINE_SHORTHANDS = frozenset(("mxfp4", "mxfp8"))
+
 
 def resolve_quantization_config(
     quantization: str | None,
@@ -239,17 +248,25 @@ def resolve_quantization_config(
     take precedence over the shorthand.
     """
     if quantization is not None and quantization not in ONLINE_QUANT_SHORTHAND_NAMES:
-        if quantization_config is not None:
-            raise ValueError(
-                f"quantization_config is only supported when quantization is "
-                f"one of {sorted(ONLINE_QUANT_SHORTHAND_NAMES)}, "
-                f"got quantization={quantization!r}"
-            )
-        return None
+        # Pre-quantized checkpoints can be composed with online quantization
+        # for layers that the base quant_method leaves unquantized. The
+        # checkpoint quant_method remains the primary quantization method; composition
+        # is performed after its config has been loaded.
+        if quantization_config is None:
+            return None
+
+        # `quantization_config` may hold both:
+        # 1. Base quantization method activation key override,
+        # 2. online quantization config to apply on top of the base quant_method.
+        if isinstance(quantization_config, dict):
+            return QuantizationConfigArgs(**quantization_config)
+        return quantization_config
 
     base = _ONLINE_SHORTHANDS.get(quantization) if quantization else None
 
     if quantization_config is None:
+        if quantization in _DEFERRED_ONLINE_SHORTHANDS:
+            return None
         return base
 
     if isinstance(quantization_config, dict):

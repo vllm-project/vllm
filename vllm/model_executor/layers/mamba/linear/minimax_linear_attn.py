@@ -336,18 +336,8 @@ def linear_attention(
     self._forward(hidden_states=hidden_states, output=output, positions=positions)
 
 
-def linear_attention_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    positions: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="linear_attention",
     op_func=linear_attention,
     mutates_args=["output"],
-    fake_impl=linear_attention_fake,
 )

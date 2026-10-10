@@ -3,12 +3,12 @@
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/configuration_kimi_vl.py
 
 from transformers import DeepseekV2Config
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 
 
-class KimiVLConfig(PretrainedConfig):
+class KimiVLConfig(PreTrainedConfig):
     model_type = "kimi_vl"
 
     def __init__(
@@ -30,7 +30,7 @@ class KimiVLConfig(PretrainedConfig):
             text_config = DeepseekV2Config()
         elif isinstance(text_config, dict):
             text_config = DeepseekV2Config(**text_config)
-        self.text_config = text_config
+        self.text_config: DeepseekV2Config = text_config
 
         self.ignore_index = ignore_index
         self.media_placeholder_token_id = media_placeholder_token_id

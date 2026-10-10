@@ -3,24 +3,28 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
+    ToolStrictLevel,
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
+use vllm_text::backend::hf::HfOverrides;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How the HTTP server obtains its listening socket.
+/// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
     /// Bind a fresh TCP listener on the given host/port.
@@ -54,6 +58,11 @@ pub struct ApiServerOptions {
     pub enable_prompt_tokens_details: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// When `true`, register the scale-out `/inference/v1/generate` route.
+    pub enable_scale_out: bool,
+    /// Idle interval after which streaming SSE responses send a keep-alive
+    /// comment. `None` disables keep-alive comments.
+    pub sse_keep_alive_interval: Option<Duration>,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
@@ -157,6 +166,48 @@ impl TlsConfig {
     }
 }
 
+/// One LoRA adapter to load before the server accepts traffic.
+///
+/// Mirrors `LoRAModulePath` in vllm/entrypoints/openai/models/protocol.py,
+/// which is also the JSON shape the Python supervisor forwards in
+/// `--args-json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoraModulePath {
+    /// Public model id the adapter is served under.
+    pub name: String,
+    /// Local path or Hugging Face repo id of the adapter.
+    pub path: String,
+    /// Base model reported as `parent` in `/v1/models`; defaults to the
+    /// primary served model name.
+    #[serde(default)]
+    pub base_model_name: Option<String>,
+    #[serde(default)]
+    pub is_3d_lora_weight: bool,
+}
+
+impl FromStr for LoraModulePath {
+    type Err = String;
+
+    /// Accept the two CLI forms Python's `LoRAParserAction` accepts:
+    /// `name=path`, or a JSON object with the struct's fields.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if !value.trim_start().starts_with('{') {
+            let (name, path) = value
+                .split_once('=')
+                .filter(|(name, path)| !name.is_empty() && !path.is_empty())
+                .ok_or_else(|| format!("expected `name=path`, got `{value}`"))?;
+            return Ok(Self {
+                name: name.to_string(),
+                path: path.to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            });
+        }
+        serde_json::from_str(value)
+            .map_err(|e| format!("expected `name=path` or a JSON object: {e}"))
+    }
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -167,6 +218,10 @@ pub struct Config {
     pub coordinator_mode: CoordinatorMode,
     /// Backend model identifier used for engine-core loading.
     pub model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    pub revision: Option<String>,
+    /// JSON Merge Patch applied to the model config before backend initialization.
+    pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
     /// Model name(s) exposed to clients via the OpenAI API. When non-empty,
@@ -175,10 +230,14 @@ pub struct Config {
     pub served_model_name: Vec<String>,
     /// HTTP listener setup.
     pub listener_mode: HttpListenerMode,
+    /// gRPC listener setup. When `None`, no gRPC server is started.
+    pub grpc_listener_mode: Option<HttpListenerMode>,
     /// Tool-call parser selection.
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
     pub reasoning_parser: ParserSelection,
+    /// Server-side floor for tool-call structural tags.
+    pub tool_strict_level: ToolStrictLevel,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
@@ -192,11 +251,18 @@ pub struct Config {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// LoRA adapters loaded at startup, in order. Startup fails if any of
+    /// them cannot be loaded.
+    pub lora_modules: Vec<LoraModulePath>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
+    /// Minimum number of newly generated tokens batched into each streamed
+    /// output after the first one. Requests can raise it with their own
+    /// `stream_interval`.
+    pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
@@ -209,13 +275,15 @@ pub struct Config {
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
-    /// cache usage).
+    /// cache usage). Engines also stop recording stats, so metrics derived from
+    /// engine-reported scheduler stats and request lifecycle events are not
+    /// exported.
     pub disable_log_stats: bool,
-    /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
-    /// started.
-    pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
+    /// Whether the caller manages the engine process and shuts it down when
+    /// the shutdown token is cancelled. Enables the gRPC `Control.Shutdown` RPC.
+    pub manages_engine: bool,
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,
@@ -289,4 +357,67 @@ impl fmt::Debug for RedactedApiKeys<'_> {
 
 fn fmt_redacted_api_keys(api_keys: &[String], f: &mut fmt::Formatter<'_>) -> fmt::Result {
     fmt::Debug::fmt(&RedactedApiKeys(api_keys), f)
+}
+
+#[cfg(test)]
+mod lora_module_path_tests {
+    use super::LoraModulePath;
+
+    #[test]
+    fn parses_name_equals_path() {
+        let module: LoraModulePath = "alice=charent/self_cognition_Alice".parse().unwrap();
+        assert_eq!(
+            module,
+            LoraModulePath {
+                name: "alice".to_string(),
+                path: "charent/self_cognition_Alice".to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_json_object() {
+        let module: LoraModulePath =
+            r#"{"name": "alice", "path": "/adapters/alice", "base_model_name": "base", "is_3d_lora_weight": true}"#
+                .parse()
+                .unwrap();
+        assert_eq!(
+            module,
+            LoraModulePath {
+                name: "alice".to_string(),
+                path: "/adapters/alice".to_string(),
+                base_model_name: Some("base".to_string()),
+                is_3d_lora_weight: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_name_equals_path_with_comma() {
+        let module: LoraModulePath = "alice=/adapters/a,b".parse().unwrap();
+        assert_eq!(module.name, "alice");
+        assert_eq!(module.path, "/adapters/a,b");
+    }
+
+    #[test]
+    fn json_object_optional_fields_default() {
+        let module: LoraModulePath = r#"{"name": "a", "path": "org/a"}"#.parse().unwrap();
+        assert_eq!(module.base_model_name, None);
+        assert!(!module.is_3d_lora_weight);
+    }
+
+    #[test]
+    fn rejects_empty_name_or_path() {
+        assert!("=org/a".parse::<LoraModulePath>().is_err());
+        assert!("a=".parse::<LoraModulePath>().is_err());
+    }
+
+    #[test]
+    fn rejects_bare_path_and_bad_json() {
+        assert!("org/a".parse::<LoraModulePath>().is_err());
+        assert!(r#"{"name": "a"}"#.parse::<LoraModulePath>().is_err());
+        assert!(r#"[{"name": "a", "path": "org/a"}]"#.parse::<LoraModulePath>().is_err());
+    }
 }

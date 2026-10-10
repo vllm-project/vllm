@@ -168,8 +168,7 @@ async def test_max_tokens_with_tool_choice_required(
 @pytest.mark.asyncio
 async def test_named_tool_use(client: openai.AsyncOpenAI):
     def get_weather(latitude: float, longitude: float) -> str:
-        """
-        Mock function to simulate getting weather data.
+        """Mock function to simulate getting weather data.
         In a real application, this would call an external weather API.
         """
         return f"Current temperature at ({latitude}, {longitude}) is 20°C."
@@ -341,12 +340,12 @@ async def test_function_calling_with_streaming_types(
     # response.created
     # -> response.in_progress
     # -> response.output_item.added
-    # -> response.reasoning_part.added
+    # -> response.content_part.added
     # -> response.reasoning_text.delta
     # ....
     # -> response.reasoning_text.delta
     # -> response.reasoning_text.done
-    # -> response.reasoning_part.done
+    # -> response.content_part.done
     # -> response.output_item.done
     # -> response.output_item.added
     # -> response.content_part.added
@@ -369,12 +368,12 @@ async def test_function_calling_with_streaming_types(
     # response.created
     # -> response.in_progress
     # -> response.output_item.added
-    # -> response.reasoning_part.added
+    # -> response.content_part.added
     # -> response.reasoning_text.delta
     # ....
     # -> response.reasoning_text.delta
     # -> response.reasoning_text.done
-    # -> response.reasoning_part.done
+    # -> response.content_part.done
     # -> response.output_item.done
     # -> response.output_item.added
     # -> response.content_part.added
@@ -425,7 +424,6 @@ async def test_function_calling_with_streaming_types(
         "response.output_text.done": "response.output_text.delta",
         "response.content_part.done": "response.content_part.added",
         "response.reasoning_text.done": "response.reasoning_text.delta",
-        "response.reasoning_part.done": "response.reasoning_part.added",
         "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
     }
 

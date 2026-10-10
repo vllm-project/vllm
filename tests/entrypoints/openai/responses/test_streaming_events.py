@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+from openai.types.responses import ResponseFunctionWebSearch, ResponseStreamEvent
+from openai_harmony import Message, Role
+from pydantic import TypeAdapter
+
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -8,9 +13,70 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    StreamingState,
     _StateType,
+    emit_browser_tool_events,
+    emit_reasoning_delta_events,
+    emit_reasoning_done_events,
     split_delta,
 )
+
+
+def test_browser_find_uses_responses_action_type():
+    """Both streaming output items must use the Responses find action type."""
+    message = (
+        Message.from_role_and_content(
+            Role.ASSISTANT, '{"pattern": "vLLM", "cursor": 42}'
+        )
+        .with_channel("analysis")
+        .with_recipient("browser.find")
+    )
+
+    events = emit_browser_tool_events(message, StreamingState())
+
+    added, done = events[0], events[-1]
+    assert added.type == "response.output_item.added"
+    assert done.type == "response.output_item.done"
+    for event in (added, done):
+        assert isinstance(event.item, ResponseFunctionWebSearch)
+        assert event.item.action.type == "find_in_page"
+        assert event.item.action.pattern == "vLLM"
+        assert event.item.action.url == "cursor:42"
+
+
+@pytest.mark.parametrize("harmony", [False, True], ids=["simple", "harmony"])
+def test_reasoning_content_parts_use_sdk_events(harmony):
+    text = "Let me think."
+    if harmony:
+        state = StreamingState()
+        events = emit_reasoning_delta_events(text, state)
+        events.extend(emit_reasoning_done_events(text, state))
+    else:
+        processor = SimpleStreamingEventProcessor()
+        events = _run_through_processor(processor, DeltaMessage(reasoning=text))
+        events.extend(processor.close_current())
+
+    assert [event.type for event in events] == [
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.reasoning_text.delta",
+        "response.reasoning_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+    ]
+    added, part_added, delta, text_done, part_done, done = events
+    assert part_added.part.type == part_done.part.type == "reasoning_text"
+    assert part_added.part.text == ""
+    assert delta.delta == text_done.text == part_done.part.text == text
+    assert done.item.content[0].text == text
+    assert done.item.id == added.item.id
+    for event in events[1:-1]:
+        assert event.item_id == added.item.id
+        assert event.content_index == part_added.content_index
+    validator = TypeAdapter(ResponseStreamEvent)
+    for event in events:
+        assert event.output_index == added.output_index
+        validator.validate_python(event.model_dump())
 
 
 def _make_tool_call(

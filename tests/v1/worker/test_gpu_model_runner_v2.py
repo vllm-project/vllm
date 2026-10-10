@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -15,8 +18,47 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
+
+
+def test_non_last_pp_rank_uses_global_batch_for_sample_feedback():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.is_last_pp_rank = False
+    local_batch = object()
+    global_batch = SimpleNamespace(idx_mapping=object())
+    runner.pcp_manager = SimpleNamespace(
+        global_batch=global_batch,
+        restore_for_sampling=Mock(),
+    )
+    runner.pp_handler = SimpleNamespace(receive=Mock(return_value=False))
+    runner.postprocess_num_computed_tokens = Mock()
+    runner.model_state = SimpleNamespace(postprocess_state=Mock())
+    runner.kv_connector = SimpleNamespace(post_forward=Mock(return_value=None))
+    runner.eplb = SimpleNamespace(step=Mock())
+    runner.execute_model_state = ExecuteModelState(
+        input_batch=local_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=None,
+        aux_hidden_states=None,
+        dp_sync_state=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        cudagraph_stats=None,
+        num_spec_tokens_to_schedule=0,
+    )
+
+    runner.sample_tokens(None)
+
+    runner.pp_handler.receive.assert_called_once_with(global_batch)
+    runner.postprocess_num_computed_tokens.assert_called_once_with(global_batch)
+    runner.model_state.postprocess_state.assert_called_once_with(
+        global_batch.idx_mapping, 0
+    )
+    runner.pcp_manager.restore_for_sampling.assert_not_called()
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -36,6 +78,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
         get_additional_cg_support=lambda: (),
         num_new_sampled_tokens_per_step=1,
@@ -83,7 +126,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     monkeypatch.setattr(
         model_runner_module,
         "init_attn_backend",
-        lambda *args: ([], attn_cg_support, [8, 262144]),
+        lambda *args, **kwargs: ([], attn_cg_support, [8, 262144]),
     )
     monkeypatch.setattr(
         model_runner_module,
@@ -123,7 +166,6 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     expected: int,
 ):
     """Mamba/GDN block-table rows index global positions, unlike DCP KV."""
-
     max_model_len = 1_048_576
     attention_block_size = 1_536
     mamba_block_size = 16
@@ -196,7 +238,6 @@ def test_append_block_ids_rejects_write_past_row_capacity():
 
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
-    block_tables.blocks_per_kv_block = [1]
     block_tables.block_tables = [_BlockTable()]
     block_tables.num_blocks = SimpleNamespace(
         np=torch.tensor([[0, 3]], dtype=torch.int32)
@@ -213,3 +254,115 @@ def test_append_block_ids_rejects_write_past_row_capacity():
         )
 
     assert block_tables.num_blocks.np[0, 1] == 3
+
+
+def _make_capture_runner(captured: bool) -> GPUModelRunner:
+    """Minimal V2 runner for capture_model: fakes everything except the
+    cudagraph_manager's needs_capture decision."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False, capture_inner_cudagraphs=lambda *args: None
+    )
+    runner.cudagraph_manager = SimpleNamespace(
+        needs_capture=lambda: captured,
+        capture=lambda *args, **kwargs: None,
+    )
+    runner.lora_config = None
+    runner.maybe_setup_dummy_loras = lambda _cfg: contextlib.nullcontext()
+    runner.speculator = None
+    runner.adaptive_verification = None
+    runner.model = None
+    runner.input_buffers = None
+    runner.pcp_manager = None
+    runner.intermediate_tensors = None
+    runner.block_tables = None
+    runner.attn_groups = None
+    runner.kv_cache_config = None
+    runner.use_aux_hidden_state_outputs = False
+    runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
+    return runner
+
+
+def test_capture_model_locks_workspace_after_capture(monkeypatch):
+    """A workspace resize after capture frees the buffer the captured graphs
+    baked in, so capture_model must lock the workspace before returning
+    (https://github.com/vllm-project/vllm/issues/55336)."""
+    runner = _make_capture_runner(captured=True)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    lock_calls = []
+    monkeypatch.setattr(
+        model_runner_module, "lock_workspace", lambda: lock_calls.append("lock")
+    )
+
+    runner.capture_model()
+
+    assert lock_calls == ["lock"]
+
+
+def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
+    """With no graphs to capture (e.g. enforce_eager) there is nothing baked
+    into the workspace, so the early return must not lock it."""
+    runner = _make_capture_runner(captured=False)
+    lock_calls = []
+    monkeypatch.setattr(
+        model_runner_module, "lock_workspace", lambda: lock_calls.append("lock")
+    )
+
+    assert runner.capture_model() == 0
+    assert lock_calls == []
+
+
+def test_capture_model_profile_only_skips_lock(monkeypatch):
+    """The memory-profiling capture pass runs before kernel warmup and the
+    real capture; locking there would stop the warmup from growing the
+    workspace to its scheduler-realistic size."""
+    runner = _make_capture_runner(captured=True)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    lock_calls = []
+    monkeypatch.setattr(
+        model_runner_module, "lock_workspace", lambda: lock_calls.append("lock")
+    )
+
+    runner.capture_model(profile_only=True)
+
+    assert lock_calls == []
+
+
+@pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
+def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
+    """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
+    hidden_states = torch.zeros(4, 8)
+    buffer = torch.arange(16 * 8, dtype=torch.float32).view(16, 8)
+    if target_buffer == "absent":
+        model = SimpleNamespace()
+    else:
+        returned = buffer if target_buffer == "tensor" else None
+        model = SimpleNamespace(get_mtp_target_hidden_states=lambda: returned)
+
+    out = get_drafter_hidden_states(model, hidden_states)
+
+    if target_buffer == "tensor":
+        assert torch.equal(out, buffer[:4])
+    else:
+        assert out is hidden_states
+
+
+def test_async_copy_to_np_does_not_alias_reused_buffer():
+    buffer = torch.zeros(4, dtype=torch.int64)
+
+    snapshot = async_copy_to_np(buffer)
+    buffer.fill_(1)
+
+    assert snapshot.tolist() == [0, 0, 0, 0]

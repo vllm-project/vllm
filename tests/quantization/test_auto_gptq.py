@@ -23,12 +23,16 @@ from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQLinearMethod,
     AutoGPTQMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+    is_layer_gptq_quantized,
+    override_config,
+)
 from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
 
 MODELS = [
-    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+    "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
 ]
 
 
@@ -70,6 +74,67 @@ def test_auto_gptq_config_get_name():
     assert AutoGPTQConfig.get_name() == "auto_gptq"
 
 
+def test_auto_gptq_quantizes_every_layer_when_the_module_list_is_unknown():
+    """An empty module list means the safetensors metadata could not be read,
+    not that the checkpoint holds no quantized layer."""
+    assert is_layer_gptq_quantized(
+        prefix="model.layers.0.mlp.down_proj",
+        quantized_layers=[],
+    )
+    assert not is_layer_gptq_quantized(
+        prefix="model.layers.0.mlp.down_proj",
+        quantized_layers=["self_attn.q_proj"],
+    )
+
+
+@pytest.mark.parametrize(
+    "dynamic",
+    [
+        {},
+        {r"+:model\.layers\.0\..*": {"desc_act": True}},
+        {
+            r"+:model\.layers\.0\..*": {
+                "desc_act": True,
+                "group_size": 32,
+            }
+        },
+    ],
+)
+def test_auto_gptq_rejects_group_activation_order(dynamic):
+    desc_act = not dynamic
+    with pytest.raises(ValueError, match="group activation ordering"):
+        AutoGPTQConfig(4, 128, desc_act, True, False, dynamic, {})
+
+
+def test_auto_gptq_normalizes_channelwise_activation_order():
+    config = AutoGPTQConfig(4, -1, True, True, False, {}, {})
+    assert not config.desc_act
+
+    config = AutoGPTQConfig(
+        4,
+        128,
+        False,
+        True,
+        False,
+        {r"+:model\.layers\.0\..*": {"desc_act": True, "group_size": -1}},
+        {},
+    )
+    override_config(config, "model.layers.0.self_attn.q_proj")
+    assert config.group_size == -1
+    assert not config.desc_act
+
+    with pytest.raises(ValueError, match="group activation ordering"):
+        AutoGPTQConfig(
+            4,
+            -1,
+            True,
+            True,
+            False,
+            {r"+:model\.layers\.0\..*": {"group_size": 128}},
+            {},
+        )
+
+
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
@@ -84,7 +149,6 @@ def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
         hidden_size=8,
         intermediate_size_per_partition=4,
         params_dtype=torch.float16,
-        intermediate_size_full=4,
         weight_loader=lambda *args, **kwargs: None,
     )
 
@@ -98,6 +162,7 @@ def test_routed_experts_loads_per_expert_biases():
     class Loader:
         quant_config = None
         quant_method = object()
+        _fused_shared_expert_quantizer = None
         moe_config = SimpleNamespace(
             is_act_and_mul=True,
             tp_rank=0,
@@ -122,7 +187,7 @@ def test_routed_experts_loads_per_expert_biases():
         ("w1", torch.tensor([1.0, 2.0, 3.0, 4.0])),
         ("w3", torch.tensor([5.0, 6.0, 7.0, 8.0])),
     ):
-        assert RoutedExperts.weight_loader(
+        assert RoutedExperts.weight_loader(  # type: ignore[call-overload]
             loader,
             w13_bias,
             loaded,
@@ -132,7 +197,7 @@ def test_routed_experts_loads_per_expert_biases():
             return_success=True,
         )
 
-    assert RoutedExperts.weight_loader(
+    assert RoutedExperts.weight_loader(  # type: ignore[call-overload]
         loader,
         w2_bias,
         torch.tensor([9.0, 10.0, 11.0, 12.0]),
