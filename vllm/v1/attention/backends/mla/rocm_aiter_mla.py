@@ -2016,10 +2016,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         #
         # Exact, not approximate: after kv_b_proj gqa_ratio is 1, so q, k and v
         # all carry num_heads heads and attention is independent per head.
-        # Padding all three identically makes padded head j a duplicate of real
-        # head j % num_heads, so the real heads [0:num_heads] are bit-identical
-        # to the unpadded result. Same argument as the decode path; only the
-        # target width differs.
+        # Padding all three identically makes every padded head a duplicate of
+        # a real head, so the real heads are bit-identical to the unpadded
+        # result. get_mla_padded_q repeat_interleaves when the target is a
+        # multiple of num_heads (real heads at stride target // num_heads) and
+        # tiles otherwise (real heads [0:num_heads]). Same argument as the
+        # decode path; only the target width differs.
         _real_nhead = self.num_heads
         nhead = AiterMLAHelper.get_fp8_prefill_num_heads(_real_nhead)
         _pad = nhead != _real_nhead
@@ -2107,7 +2109,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
 
         if _pad:
-            out.view(total_q, _real_nhead, v_head_dim).copy_(out_3d[:, :_real_nhead, :])
+            real_out = (
+                out_3d[:, :: nhead // _real_nhead, :]
+                if nhead % _real_nhead == 0
+                else out_3d[:, :_real_nhead, :]
+            )
+            out.view(total_q, _real_nhead, v_head_dim).copy_(real_out)
 
     def forward_mha(
         self,
