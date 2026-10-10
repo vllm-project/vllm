@@ -13,6 +13,10 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## Resetting the prefix cache
+
+Call `LLM.reset_prefix_cache()` to clear cached prefixes. By default, it returns `False` if requests still hold KV cache blocks. When KV cache events are enabled, a successful local cache reset queues `AllBlocksCleared` for publication immediately, without waiting for another inference request.
+
 ## Hybrid Mamba models
 
 Under `--mamba-cache-mode align`, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-shared-prefix-checkpoint` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.

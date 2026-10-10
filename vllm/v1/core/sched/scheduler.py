@@ -2366,22 +2366,7 @@ class Scheduler(SchedulerInterface):
                     else scheduler_ec_connector_stats
                 )
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
-
-        # collect KV cache events from connector
-        if self.connector is not None:
-            connector_events = self.connector.take_events()
-            if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
-
-        # publish collected KV cache events
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
-            self.kv_event_publisher.publish(batch)
+        self._publish_kv_cache_events()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -2421,6 +2406,20 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _publish_kv_cache_events(self) -> None:
+        events = self.kv_cache_manager.take_events()
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+
+        if events:
+            batch = KVEventBatch(ts=time.time(), events=events)
+            self.kv_event_publisher.publish(batch)
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
@@ -2864,7 +2863,8 @@ class Scheduler(SchedulerInterface):
             # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
 
-        reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        local_reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        reset_successful = local_reset_successful
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
@@ -2878,6 +2878,10 @@ class Scheduler(SchedulerInterface):
 
         if reset_successful and self.aux_output_connector is not None:
             self.aux_output_connector.reset()
+
+        if local_reset_successful:
+            # An idle or sleeping engine may not produce another model output.
+            self._publish_kv_cache_events()
 
         return reset_successful
 

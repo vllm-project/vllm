@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
+    KVEventsConfig,
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
@@ -24,6 +25,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.kv_events import AllBlocksCleared, BlockStored, EventPublisher
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -1723,6 +1725,99 @@ def test_aux_output_reset_follows_kv_reset_result(reset_successful: bool):
 
     assert scheduler.reset_prefix_cache() is reset_successful
     assert scheduler.aux_output_connector.reset.call_count == int(reset_successful)
+
+
+@pytest.mark.parametrize("enable_events", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_reset_prefix_cache_publishes_events_while_idle(
+    enable_events, async_scheduling
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        async_scheduling=async_scheduling,
+        kv_events_config=KVEventsConfig(
+            enable_kv_cache_events=enable_events, publisher="null"
+        ),
+    )
+    publisher = scheduler.kv_event_publisher = Mock(spec=EventPublisher)
+    (request,) = create_requests(num_requests=1, num_tokens=32, max_tokens=1)
+    scheduler.add_request(request)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1]],
+        ),
+    )
+    assert not scheduler.has_unfinished_requests()
+    publisher.reset_mock()
+
+    assert scheduler.reset_prefix_cache()
+    if enable_events:
+        publisher.publish.assert_called_once()
+        assert publisher.publish.call_args.args[0].events == [AllBlocksCleared()]
+    else:
+        publisher.publish.assert_not_called()
+
+    publisher.reset_mock()
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[]),
+    )
+    publisher.publish.assert_not_called()
+
+
+@pytest.mark.parametrize("connector_reset_successful", [False, True])
+def test_reset_prefix_cache_publishes_events_after_preemption(
+    connector_reset_successful,
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(0, False),
+        kv_events_config=KVEventsConfig(enable_kv_cache_events=True, publisher="null"),
+    )
+    publisher = scheduler.kv_event_publisher = Mock(spec=EventPublisher)
+    scheduler.connector.reset_cache = Mock(return_value=connector_reset_successful)
+    (request,) = create_requests(num_requests=1, num_tokens=32)
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    assert (
+        scheduler.reset_prefix_cache(reset_running_requests=True, reset_connector=True)
+        is connector_reset_successful
+    )
+    publisher.publish.assert_called_once()
+    events = publisher.publish.call_args.args[0].events
+    assert [type(event) for event in events] == [BlockStored, AllBlocksCleared]
+    assert events[0].token_ids == request.prompt_token_ids
+    assert scheduler.kv_cache_manager.take_events() == []
+
+
+def test_failed_reset_prefix_cache_preserves_pending_events():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        kv_events_config=KVEventsConfig(enable_kv_cache_events=True, publisher="null"),
+    )
+    publisher = scheduler.kv_event_publisher = Mock(spec=EventPublisher)
+    (request,) = create_requests(num_requests=1, num_tokens=32, max_tokens=1)
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+
+    assert not scheduler.reset_prefix_cache()
+    publisher.publish.assert_not_called()
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1]],
+        ),
+    )
+    publisher.publish.assert_called_once()
+    events = publisher.publish.call_args.args[0].events
+    assert [type(event) for event in events] == [BlockStored]
+    assert events[0].token_ids == request.prompt_token_ids
 
 
 def test_kv_cache_release_after_keep_pause_preserves_requests():
