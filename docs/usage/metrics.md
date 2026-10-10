@@ -115,7 +115,7 @@ Each family key overrides a group of related histograms:
 | `request_tokens` | `vllm:request_prompt_tokens`, `vllm:request_generation_tokens`, `vllm:request_max_num_generation_tokens`, `vllm:request_params_max_tokens`, `vllm:request_prefill_kv_computed_tokens` |
 | `kv_cache_residency` | `vllm:kv_block_lifetime_seconds`, `vllm:kv_block_idle_before_evict_seconds`, `vllm:kv_block_reuse_gap_seconds` |
 
-Bucket values must be positive, finite, and strictly increasing; unknown
+Bucket values must be non-negative, finite, and strictly increasing; unknown
 family keys are rejected at startup. Families you do not list keep their
 default boundaries. The `request_tokens` defaults normally scale with
 `--max-model-len`; an override replaces that computed list. The
