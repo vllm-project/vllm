@@ -772,27 +772,27 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         self.workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             (q_concat_shape, torch.bfloat16)
         ]
-        # The bf16 prefill buffers below scale with max_model_len and are only
-        # read by the separate prefill/decode path.
-        if (
-            kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
-            and not self.fp8_use_mixed_batch
-        ):
-            assert vllm_config.model_config is not None
-            prefill_workspace_size = get_prefill_workspace_size(
-                vllm_config.model_config.max_model_len
-            )
-            shard_rows = prefill_workspace_size
-            if self.pcp_dcp_kv_gather:
-                # PCP+DCP upconverts this rank's KV shard, then all-gathers the
-                # shards into a workspace of the full prefill size.
-                shard_rows //= parallel_config.decode_context_parallel_size
-            self.prefill_workspace_shape = (shard_rows, head_size)
-            self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
-            if self.pcp_dcp_kv_gather:
-                self.workspace_specs.append(
-                    ((prefill_workspace_size, head_size), torch.bfloat16)
+        if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
+            # The bf16 prefill KV buffers scale with max_model_len and are only
+            # read by the separate prefill/decode path.
+            if not self.fp8_use_mixed_batch:
+                assert vllm_config.model_config is not None
+                prefill_workspace_size = get_prefill_workspace_size(
+                    vllm_config.model_config.max_model_len
                 )
+                shard_rows = prefill_workspace_size
+                if self.pcp_dcp_kv_gather:
+                    # PCP+DCP upconverts this rank's KV shard, then all-gathers
+                    # the shards into a workspace of the full prefill size.
+                    shard_rows //= parallel_config.decode_context_parallel_size
+                self.prefill_workspace_shape = (shard_rows, head_size)
+                self.workspace_specs.append(
+                    (self.prefill_workspace_shape, torch.bfloat16)
+                )
+                if self.pcp_dcp_kv_gather:
+                    self.workspace_specs.append(
+                        ((prefill_workspace_size, head_size), torch.bfloat16)
+                    )
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:
                 prefill_query_heads *= parallel_config.tensor_parallel_size

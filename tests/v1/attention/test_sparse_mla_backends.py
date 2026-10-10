@@ -3655,9 +3655,10 @@ def test_fp8_mixed_batch_requires_few_heads_without_hisparse_or_kv_gather(
 def test_fp8_mixed_batch_path_reserves_no_prefill_workspace(
     dist_init, monkeypatch, num_heads, use_hisparse, pcp_size, dcp_size
 ):
-    """The bf16 prefill buffers scale with max_model_len and are only read by
-    the separate prefill/decode path; reserving them on the mixed-batch path
-    takes GiBs off the KV cache budget at long context for nothing."""
+    """The bf16 prefill KV buffer scales with max_model_len and is only read by
+    the separate prefill/decode path; reserving it on the mixed-batch path takes
+    GiBs off the KV cache budget at long context for nothing. The buffers sized
+    by max_num_batched_tokens stay on both paths."""
     head_size = 576
     vllm_config = _build_sparse_dcp_vllm_config(num_heads, dcp_size)
     vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
@@ -3698,10 +3699,11 @@ def test_fp8_mixed_batch_path_reserves_no_prefill_workspace(
     max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     q_concat = ((max_tokens, num_heads, head_size), torch.bfloat16)
     prefill_rows = get_prefill_workspace_size(vllm_config.model_config.max_model_len)
+    assert specs[0] == q_concat
     if mixed_batch:
-        assert specs == (q_concat,)
+        assert len(specs) == 4
+        assert all(shape[0] == max_tokens for shape, _ in specs)
     else:
-        assert specs[0] == q_concat
         assert ((prefill_rows, head_size), torch.bfloat16) in specs
         assert len(specs) == (6 if pcp_size > 1 else 5)
     assert impl.fp8_use_mixed_batch is mixed_batch
