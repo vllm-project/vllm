@@ -51,8 +51,7 @@ def selective_scan_ref(
     prev_state=None,
     final_state_out=None,
 ):
-    """
-    u: r(B D L)
+    """u: r(B D L)
     delta: r(B D L)
     A: c(D N) or r(D N)
     B: c(D N) or r(B N L) or r(B N 2L) or r(B G N L) or (B G N L)
@@ -135,7 +134,7 @@ def selective_scan_opcheck_fn(
     cu_chunk_seqlen=None,
     last_chunk_indices=None,
 ):
-    """if return_last_state is True, returns (out, last_state)
+    """If return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate).
     """
     if u.stride(-1) != 1:

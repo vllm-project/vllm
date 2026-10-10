@@ -4,11 +4,13 @@
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -40,9 +42,7 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Route through humming's compressed-tensors nvfp4 loader (same path as
-        # the MoE oracle); the native group_tensor schema mishandles a scalar
-        # global scale.
+        # Reuse the CT loader for packed FP4 weights and tensor scales.
         quant_config = {
             "quant_method": "compressed-tensors",
             "format": "nvfp4-pack-quantized",
@@ -60,7 +60,16 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight_global_scale = torch.nn.Parameter(
             1.0 / layer.weight_global_scale, requires_grad=False
         )
-        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
+        input_quant_key = None
+        if hasattr(layer, "input_global_scale"):
+            layer.input_scale_2 = torch.nn.Parameter(
+                layer.input_global_scale.reshape(-1), requires_grad=False
+            )
+            input_quant_key = kNvfp4Dynamic
+        input_schema = quant_key_to_input_schema(input_quant_key)
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer, quant_config, input_schema=input_schema
+        )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
@@ -73,6 +82,7 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         return apply_humming_linear(
             layer,
             x,
+            skip_bias_add=bias is None,
             layer_config=self.layer_config,
             compute_config=self.compute_config,
             locks=self.locks,

@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
@@ -26,7 +26,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> None:
         self.lora_a_stacked = torch.zeros(
             (
@@ -113,7 +113,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
+        model_config: PreTrainedConfig | None = None,
     ) -> bool:
         # Accept both the in-tree and any OOT class, because layers built on top of
         # `VocabParallelEmbedding` (e.g. by the Transformers modelling backend) use the

@@ -14,7 +14,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.v1.kv_offload.cpu.host_register import host_unregister
 
 logger = init_logger(__name__)
 
@@ -69,8 +69,7 @@ def _get_populate_write_fn(
 
 
 class SharedOffloadRegion:
-    """
-    Single mmap-backed memory region shared across all workers for a
+    """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
     to open the file with O_EXCL becomes the creator and calls ftruncate;
     the rest open the existing file and wait until it reaches the expected
@@ -264,6 +263,7 @@ class SharedOffloadRegion:
 
         Args:
             tensor_page_size: Bytes per chunk for this tensor.
+
         """
         assert self.rank is not None
         new_offset = self._worker_offset + tensor_page_size
@@ -313,6 +313,7 @@ class SharedOffloadRegion:
 
         Args:
             tensor_page_size: Canonical bytes per chunk for this tensor.
+
         """
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
@@ -342,20 +343,11 @@ class SharedOffloadRegion:
 
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
-            if current_platform.is_cuda_alike():
-                base_ptr = self._base.data_ptr()
-                addresses = self.pinned_addresses or [base_ptr]
-                for address in reversed(addresses):
-                    result = torch.cuda.cudart().cudaHostUnregister(address)
-                    if result.value != 0:
-                        logger.warning(
-                            "cudaHostUnregister failed for rank=%d, "
-                            "address=%#x (code=%d)",
-                            self.rank,
-                            address,
-                            result.value,
-                        )
-                self.pinned_addresses.clear()
+            base_ptr = self._base.data_ptr()
+            addresses = self.pinned_addresses or [base_ptr]
+            for address in reversed(addresses):
+                host_unregister(address)
+            self.pinned_addresses.clear()
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts

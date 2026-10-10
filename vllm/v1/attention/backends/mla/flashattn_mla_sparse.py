@@ -24,9 +24,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
+from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
@@ -40,8 +42,12 @@ class FlashAttnMLASparseBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64]
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [MultipleOf(64)]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return align_blocks_to_rows(spec)
 
     @staticmethod
     def get_name() -> str:
@@ -130,6 +136,20 @@ class FlashAttnMLASparseMetadataBuilder(
         )
         threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
         self._init_reorder_batch_threshold(threshold, supports_spec_as_decode=True)
+        self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
+
+    def update_draft_decode_metadata(self, metadata: SparseMLACommonMetadata) -> None:
+        num_tokens = metadata.num_decode_tokens
+        if num_tokens == 0:
+            return
+        # Everything else is a view of runner buffers; the per-token request
+        # map is a builder buffer that build() filled for the captured batch.
+        compute_token_to_req_indices(
+            metadata.query_start_loc,
+            metadata.req_id_per_token,
+            num_tokens,
+            num_tokens,
+        )
 
 
 class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
@@ -178,6 +198,11 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         assert self.topk_indices_buffer is not None, (
             "Indexer or topk_indices_buffer required for sparse MLA"
         )
+        self.cu_seqlens_q_buffer = torch.arange(
+            self.topk_indices_buffer.shape[0] + 1,
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        )
         self.supports_quant_query_input = False
 
     def forward_mqa(
@@ -202,10 +227,11 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             outputs = []
             if num_decode_tokens:
                 physical_topk, valid_counts = (
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=True,
                     )
                 )
@@ -269,15 +295,27 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-        topk_indices, valid_counts = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            BLOCK_STRIDE_ROWS=block_stride_rows,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
-        )
+        if (
+            index_group is not None
+            and index_group.num_layers > 1
+            and attn_metadata.num_decode_tokens == num_actual_toks
+        ):
+            topk_indices, valid_counts = self._convert_logical_to_physical_topk(
+                topk_indices,
+                attn_metadata,
+                block_stride_rows=block_stride_rows,
+                return_valid_counts=True,
+            )
+        else:
+            topk_indices, valid_counts = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
         return (
             self._run_mqa_kernel(
                 q_nope,
@@ -306,11 +344,17 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
             kv_cache if cache_is_flat else flat_kv_row_view(kv_cache, block_size)[0]
         )
 
-        cu_seqlens_q = torch.arange(
-            0, q_rope.shape[0] + 1, dtype=torch.int32, device=q_rope.device
-        )
-        k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
+        cu_seqlens_q = self.cu_seqlens_q_buffer[: q_rope.shape[0] + 1]
         v_cache = kv_rows[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1)
+        if self.qk_rope_head_dim == 0:
+            # FA3's QV path requires the 64-wide Q/K specialization. For NoPE
+            # MLA, zero Q preserves QV-only attention scores while providing a
+            # valid TMA shape.
+            _FA3_QV_HEAD_DIM = 64
+            q_rope = q_nope.new_zeros(*q_nope.shape[:-1], _FA3_QV_HEAD_DIM)
+            k_cache = v_cache[..., :_FA3_QV_HEAD_DIM]
+        else:
+            k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
 
         out = flash_attn_varlen_func(
             q=q_rope,

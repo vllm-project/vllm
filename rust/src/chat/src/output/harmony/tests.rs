@@ -58,6 +58,7 @@ fn finished() -> Finished {
         finish_reason: FinishReason::stop_eos(),
         kv_transfer_params: None,
         ec_transfer_params: None,
+        sampling_mask: None,
     }
 }
 
@@ -98,6 +99,7 @@ fn request_with_tools() -> ChatRequest {
             "required": ["city"]
         }),
         strict: None,
+        defer_loading: None,
     }];
     ChatRequest {
         tool_context: ResolvedToolContext::new(&[], tools, Some(ChatToolChoice::Auto), true)

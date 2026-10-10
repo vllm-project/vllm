@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
@@ -17,17 +18,14 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
 
+from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
-from .ops.ple import ple_conv, ple_gate
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):
@@ -146,7 +144,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
         """Dequantize PLE lookup output."""
-
         return self.ple_embedding.ngram_embedding.dequantize(
             embeddings,
             output_dtype,
@@ -293,10 +290,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     token_indices=token_indices_d,
                 )
 
-            query_start_loc = metadata.non_spec_query_start_loc
+            query_start_loc = metadata.query_start_loc_p
             if query_start_loc is None:
                 raise ValueError("query_start_loc is required for prefill short-conv")
-            query_start_loc = query_start_loc[-num_prefills - 1 :] - num_decode_tokens
             has_initial_states = metadata.has_initial_states_p
             if has_initial_states is None:
                 raise ValueError(

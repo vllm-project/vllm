@@ -10,6 +10,7 @@ with a static scale file.
 Example:
     python benchmarks/kernels/benchmark_vit_aiter_fp8_attn.py \
         --seq-lens 2304 4096 8192 16384 --head-dim 72
+
 """
 
 from types import SimpleNamespace

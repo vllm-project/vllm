@@ -17,6 +17,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
+    ReasoningParserKwargs,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
@@ -57,9 +58,7 @@ class ServingRender(BaseServing):
         self.tool_server = tool_server
 
         self._merge_inline_system = (
-            AnthropicServingMessages._detect_merge_inline_system(
-                online_renderer.chat_template
-            )
+            AnthropicServingMessages._should_merge_inline_system(online_renderer)
         )
 
         self._placeholder_metadata_parser: MultiModalDataParser | None = None
@@ -126,36 +125,32 @@ class ServingRender(BaseServing):
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
-        assistant_tokens_mask: list[int] | None = engine_input.get(  # type: ignore[assignment]
-            "assistant_tokens_mask"
-        )
-        if assistant_tokens_mask is not None and len(assistant_tokens_mask) != len(
-            token_ids
-        ):
-            logger.warning(
-                "assistant_tokens_mask length (%d) != token_ids length (%d); "
-                "this can happen with multimodal inputs where "
-                "placeholder expansion changes the token count. "
-                "The mask may be positionally misaligned.",
-                len(assistant_tokens_mask),
-                len(token_ids),
+        # Resolve here what OpenAIServingChat passes to the engine:
+        # `_grammar_from_parser` (set by `adjust_request`) is not serialized.
+        reasoning_parser_kwargs = self._reasoning_parser_kwargs(request)
+        parser = None
+        if reasoning_parser_kwargs is not None:
+            assert self.online_renderer.parser is not None
+            parser = self.online_renderer.parser(
+                self.online_renderer.renderer.get_tokenizer(),
+                request.tools,
+                chat_template_kwargs=reasoning_parser_kwargs.chat_template_kwargs,
+                model_config=self.model_config,
             )
-            if len(assistant_tokens_mask) < len(token_ids):
-                assistant_tokens_mask.extend(
-                    [0] * (len(token_ids) - len(assistant_tokens_mask))
-                )
-            else:
-                assistant_tokens_mask = assistant_tokens_mask[: len(token_ids)]
+        reasoning_ended = request.resolve_reasoning_ended(parser, token_ids)
 
         request_id = f"chatcmpl-{random_uuid()}"
 
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
-            assistant_tokens_mask=assistant_tokens_mask,
-            features=self._extract_mm_features(engine_input),
+            features=self._extract_mm_features(
+                engine_input, include_mm_kwargs=request.return_mm_kwargs
+            ),
             sampling_params=params,
             model=request.model,
+            reasoning_ended=reasoning_ended,
+            reasoning_parser_kwargs=reasoning_parser_kwargs,
             stream=bool(request.stream),
             stream_options=(request.stream_options if request.stream else None),
             cache_salt=request.cache_salt,
@@ -176,6 +171,7 @@ class ServingRender(BaseServing):
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request, merge_inline_system=self._merge_inline_system
         )
+        chat_req.return_mm_kwargs = request.return_mm_kwargs
         return await self.render_chat_request(chat_req)
 
     async def render_completion_request(
@@ -224,7 +220,9 @@ class ServingRender(BaseServing):
                 GenerateRequest(
                     request_id=request_id,
                     token_ids=token_ids,
-                    features=self._extract_mm_features(engine_input),
+                    features=self._extract_mm_features(
+                        engine_input, include_mm_kwargs=request.return_mm_kwargs
+                    ),
                     sampling_params=params,
                     model=request.model,
                     stream=bool(request.stream),
@@ -284,15 +282,30 @@ class ServingRender(BaseServing):
         return GenerateRequest(
             request_id=request.request_id,
             token_ids=list(token_ids),
-            features=self._extract_mm_features(engine_input),
+            features=self._extract_mm_features(
+                engine_input, include_mm_kwargs=request.return_mm_kwargs
+            ),
             sampling_params=params,
             model=request.model,
+            reasoning_parser_kwargs=self._reasoning_parser_kwargs(request),
             stream=bool(request.stream),
             cache_salt=request.cache_salt,
             priority=request.priority,
             kv_transfer_params=request.kv_transfer_params,
             ec_transfer_params=request.ec_transfer_params,
             token_offsets=engine_input.get("prompt_token_offsets"),
+        )
+
+    def _reasoning_parser_kwargs(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ReasoningParserKwargs | None:
+        parser_cls = self.online_renderer.parser
+        if parser_cls is None or parser_cls.reasoning_parser_cls is None:
+            return None
+        return ReasoningParserKwargs(
+            chat_template_kwargs=self.online_renderer.effective_chat_template_kwargs(
+                request
+            )
         )
 
     def _placeholder_metadata_fields(self, modality: str) -> set[str]:
@@ -322,8 +335,11 @@ class ServingRender(BaseServing):
     def _extract_mm_features(
         self,
         engine_input: EngineInput,
+        *,
+        include_mm_kwargs: bool = True,
     ) -> MultiModalFeatures | None:
         return extract_mm_features(
             engine_input,
             metadata_fields_for=self._placeholder_metadata_fields,
+            include_mm_kwargs=include_mm_kwargs,
         )

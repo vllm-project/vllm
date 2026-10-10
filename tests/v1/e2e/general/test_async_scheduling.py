@@ -111,7 +111,6 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
     """
-
     spec_config = {
         "method": "eagle3",
         "num_speculative_tokens": 2,
@@ -171,7 +170,6 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     - Async scheduling enabled (as in production)
     - Different executors and chunking settings
     """
-
     # Variant with larger speculation window
     ngram_gpu_config = {
         "method": "ngram_gpu",
@@ -207,7 +205,6 @@ def run_tests(
 ):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
-
     # Flex attention supports float32.
     attention_config = {"backend": "FLEX_ATTENTION"}
 

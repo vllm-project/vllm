@@ -18,7 +18,7 @@ from typing import cast
 import regex as re
 import torch
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
+from transformers import DeepseekV2Config, DeepseekV3Config, PreTrainedConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -47,11 +47,17 @@ from vllm.v1.attention.selector import get_attn_backend
 
 logger = init_logger(__name__)
 
-_SPARSE_LAYER_TYPES = ("sparse_attention", "sparse", "deepseek_sparse_attention")
+_SPARSE_LAYER_TYPES = (
+    "sparse_attention",
+    "sparse",
+    "indexed_attention",
+    # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
+    "deepseek_sparse_attention",
+)
 _WEIGHT_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 
-def compute_skip_topk_layers(config: PretrainedConfig) -> set[int]:
+def compute_skip_topk_layers(config: PreTrainedConfig) -> set[int]:
     """Return the backbone layers that reuse a previous layer's top-k indices.
 
     A "shared" indexer layer performs sparse attention with the indices computed
@@ -67,6 +73,7 @@ def compute_skip_topk_layers(config: PretrainedConfig) -> set[int]:
     Raises:
         ValueError: If ``indexer_types`` has the wrong length or an unknown
             entry, or if ``index_topk_freq`` is not a positive integer.
+
     """
     if not hasattr(config, "index_topk"):
         return set()
@@ -115,6 +122,7 @@ def is_skip_topk_indexer_weight(weight_name: str, skip_topk_layers: set[int]) ->
     Returns:
         True when the weight is an indexer weight of a layer that has no
         indexer module and therefore must be dropped.
+
     """
     if ".indexer." not in weight_name or not skip_topk_layers:
         return False
@@ -164,7 +172,7 @@ class Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -278,7 +286,7 @@ class HYV4MLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -557,6 +565,7 @@ class HYV4MLAAttention(nn.Module):
             The backend class to bind, or None when no sink-capable backend is
             available; the caller then loads the sink weight but disables the
             bias.
+
         """
         head_size = self.kv_lora_rank + self.qk_rope_head_dim
         dtype = torch.get_default_dtype()
@@ -755,6 +764,8 @@ class HYV4MLAAttention(nn.Module):
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        if self.is_sparse:
+            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
         out.copy_(
             self.mla_attn(
                 q,

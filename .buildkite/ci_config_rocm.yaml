@@ -21,7 +21,7 @@ run_all_patterns:
   - "requirements/test/rocm.txt"
   - "pyproject.toml"
   - "setup.py"
-  - "build_rust.sh"
+  - "tools/build_rust.sh"
   - "rust/"
   - "rust-toolchain.toml"
   - "tools/build_rust.py"

@@ -191,8 +191,7 @@ class LlamaNemotronNanoVLImageProcessor(InternVLImageProcessor):
 
 
 class LlamaNemotronNanoVLProcessor(InternVLProcessor):
-    """
-    This model doesn't define its own HF processor,
+    """This model doesn't define its own HF processor,
     so we implement our own one here.
 
     The image processor is given by:
@@ -245,20 +244,53 @@ SIGLIP_MEAN = (0.5, 0.5, 0.5)
 SIGLIP_STD = (0.5, 0.5, 0.5)
 
 
-def build_siglip_transform(input_size: int):
+def build_siglip_transform(
+    input_size: int,
+    *,
+    normalize_on_cpu: bool = True,
+):
     """Build transform for SigLIP vision encoder with normalization.
 
     Extends the base transform from nemotron_vl with SigLIP-specific normalization.
     """
-    return T.Compose(
-        [
-            build_transform(input_size=input_size),
-            T.Normalize(mean=SIGLIP_MEAN, std=SIGLIP_STD),
-        ]
-    )
+    transforms = [
+        T.Lambda(lambda img: convert_image_mode(img, "RGB")),
+        T.Resize((input_size, input_size), interpolation=T.InterpolationMode.BICUBIC),
+        T.ToTensor() if normalize_on_cpu else T.PILToTensor(),
+    ]
+    if normalize_on_cpu:
+        transforms.append(T.Normalize(mean=SIGLIP_MEAN, std=SIGLIP_STD))
+
+    return T.Compose(transforms)
 
 
 class LlamaNemotronVLEmbedImageProcessor(InternVLImageProcessor):
+    def __init__(
+        self,
+        image_size: int,
+        min_dynamic_patch: int,
+        max_dynamic_patch: int,
+        dynamic_image_size: bool,
+        use_thumbnail: bool,
+        *,
+        do_rescale: bool = True,
+        do_normalize: bool = True,
+    ) -> None:
+        if do_rescale != do_normalize:
+            raise ValueError(
+                "LlamaNemotronVLEmbedImageProcessor requires do_rescale and "
+                "do_normalize to be both enabled or both disabled."
+            )
+
+        super().__init__(
+            image_size=image_size,
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=use_thumbnail,
+        )
+        self.normalize_on_cpu = do_normalize
+
     def _images_to_pixel_values_lst(
         self,
         images: list[Image.Image],
@@ -280,15 +312,17 @@ class LlamaNemotronVLEmbedImageProcessor(InternVLImageProcessor):
                 min_num=min_num,
                 max_num=max_num,
                 use_thumbnail=self.use_thumbnail,
-                transform=build_siglip_transform(self.image_size),
+                transform=build_siglip_transform(
+                    self.image_size,
+                    normalize_on_cpu=self.normalize_on_cpu,
+                ),
             )
             for image in images
         ]
 
 
 class LlamaNemotronVLEmbedProcessor(InternVLProcessor):
-    """
-    Processor for LlamaNemotronVL embedding model.
+    """Processor for LlamaNemotronVL embedding model.
 
     Inherits from NemotronVLProcessor and specializes it for embedding tasks:
     - Uses SigLIP transform with normalization instead of base transform

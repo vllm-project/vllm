@@ -6,10 +6,12 @@ use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
+use xgrammar_structural_tag::format::Format;
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::output_grammar::{self, OutputGrammarContext, OutputGrammarError};
 use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<minimax:tool_call>";
@@ -118,6 +120,38 @@ impl ToolParser for MinimaxM2ToolParser {
 
     fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
         Some(xgrammar_structural_tag::Model::Minimax.builder())
+    }
+
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        let Some(format) =
+            output_grammar::visible_format_from_builder(self.structural_tag_builder(), ctx)?
+        else {
+            return Ok(None);
+        };
+
+        // The MiniMax builder's reasoning=false form retains the empty
+        // thinking close and separator used by its chat template. Strip that
+        // fixed prefix so the initialized reasoning parser can supply the
+        // actual reasoning phase.
+        let Format::Sequence(sequence) = format else {
+            return Err(OutputGrammarError::UnexpectedBuilderFormat { builder: "minimax" });
+        };
+        let [
+            Format::ConstString(empty_think),
+            Format::ConstString(separator),
+            visible,
+        ] = sequence.elements.as_slice()
+        else {
+            return Err(OutputGrammarError::UnexpectedBuilderFormat { builder: "minimax" });
+        };
+        if empty_think.value != "\n</think>\n\n" || separator.value != "\n\n" {
+            return Err(OutputGrammarError::UnexpectedBuilderFormat { builder: "minimax" });
+        }
+
+        Ok(Some(visible.clone()))
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

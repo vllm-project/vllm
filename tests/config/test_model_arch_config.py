@@ -10,13 +10,13 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-from transformers import PretrainedConfig
+from transformers import DiffusionGemmaConfig, PreTrainedConfig
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.config.model_arch import ModelArchitectureConfig
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 from vllm.transformers_utils.model_arch_config_convertor import (
+    MODEL_ARCH_CONFIG_CONVERTORS,
     Gemma4ModelArchConfigConvertor,
     ModelArchConfigConvertorBase,
 )
@@ -123,7 +123,7 @@ def _assert_model_config_methods(
 
 def test_head_size_falls_back_when_head_dim_is_zero():
     """Regression test for configs that materialize missing head_dim as 0."""
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         model_type="deepseek_vl_v2",
         hidden_size=1280,
         num_attention_heads=10,
@@ -138,7 +138,7 @@ def test_head_size_falls_back_when_head_dim_is_zero():
 
 
 def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
-    hf_config = PretrainedConfig(
+    hf_config = PreTrainedConfig(
         model_type="deepseek_v2",
         qk_rope_head_dim=128,
         qk_nope_head_dim=128,
@@ -174,7 +174,7 @@ def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.Monke
     ],
 )
 def test_num_experts_per_tok_aliases(attribute: str):
-    hf_config = PretrainedConfig(**{attribute: 4})
+    hf_config = PreTrainedConfig(**{attribute: 4})
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
     model_config = cast(
         ModelConfig,
@@ -189,7 +189,7 @@ def test_num_experts_per_tok_aliases(attribute: str):
 
 
 def test_num_experts_per_tok_none_is_normalized():
-    hf_config = PretrainedConfig(top_k_experts=None)
+    hf_config = PreTrainedConfig(top_k_experts=None)
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_num_experts_per_token() == 0
@@ -205,7 +205,7 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
             "modelopt_quant_config": {"quant_cfg": {}},
         }
     }
-    hf_config = PretrainedConfig(quantization_config=quantization_config)
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
 
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
@@ -316,11 +316,7 @@ def _gemma4_text_config(**overrides) -> Gemma4TextConfig:
 
 
 def test_gemma4_head_dims_vary_by_layer_type():
-    """Gemma4's full attention layers are wider than its sliding ones.
-
-    Transformers >= 5.15.0 says so in the config; this exercises the convertor
-    building the same per-layer view from the flat attributes used before that.
-    """
+    """Gemma4's full attention layers are wider than its sliding ones."""
     text_config = _gemma4_text_config(
         num_global_key_value_heads=8, attention_k_eq_v=True
     )
@@ -330,9 +326,9 @@ def test_gemma4_head_dims_vary_by_layer_type():
     assert (arch.head_size, arch.total_num_kv_heads) == (32, 8)
     assert [arch[i].head_size for i in range(6)] == [16] * 5 + [32]
     assert [arch[i].total_num_kv_heads for i in range(6)] == [4] * 5 + [8]
-    # The model files resolve each layer through the same helper, so the KV cache
-    # vLLM allocates and the projections the model builds cannot disagree.
-    assert [gemma4_layer_config(text_config, i).head_dim for i in range(6)] == [
+    # The model files read the same per-layer configs, so the KV cache vLLM
+    # allocates and the projections the model builds cannot disagree.
+    assert [text_config.per_layer_config[i].head_dim for i in range(6)] == [
         arch[i].head_size for i in range(6)
     ]
 
@@ -368,7 +364,7 @@ def test_gemma4_uniform_head_dims_are_homogeneous():
     assert arch[3] is arch
 
 
-class _HeterogeneousConfig(PretrainedConfig):
+class _HeterogeneousConfig(PreTrainedConfig):
     """A heterogeneous config with no convertor of its own.
 
     Mirrors the parts vLLM uses: per-layer configs are shallow copies with the
@@ -382,7 +378,7 @@ class _HeterogeneousConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
     @property
-    def per_layer_config(self) -> list[PretrainedConfig]:
+    def per_layer_config(self) -> list[PreTrainedConfig]:
         layers = []
         for i in range(self.num_hidden_layers):
             layer = copy(self)
@@ -496,3 +492,26 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
         conv = DeepseekV4ModelArchConfigConvertor(draft_cfg, draft_cfg)
         assert conv.get_architectures() == [draft_arch]
         assert draft_cfg.architectures == [draft_arch]
+
+
+def test_diffusion_gemma_head_dims_vary_by_layer_type():
+    """Checkpoints carry model_type `diffusion_gemma` at the top level. Under
+    the base convertor every layer reports the sliding head dim, Gemma4Config
+    skips its head-dim handling, and the full-attention KV-cache group falls to
+    FlashInfer, which cannot take a per-request causal tensor."""
+    text_config = dict(
+        num_hidden_layers=6,
+        hidden_size=64,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        head_dim=16,
+        global_head_dim=32,
+        layer_types=["sliding_attention"] * 5 + ["full_attention"],
+    )
+    hf_config = DiffusionGemmaConfig(text_config=text_config)
+
+    convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type]
+    assert convertor_cls is Gemma4ModelArchConfigConvertor
+    arch = convertor_cls(hf_config, hf_config.text_config).convert()
+
+    assert [arch[i].head_size for i in range(6)] == [16] * 5 + [32]

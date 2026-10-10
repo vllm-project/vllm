@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
@@ -44,9 +45,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
@@ -90,7 +88,6 @@ def _remap_quantized_layers(
 
 def _remap_mtp_weight_name(name: str) -> str | None:
     """Map Qwen4Exp checkpoint paths into the standalone draft model."""
-
     for checkpoint_prefix in (
         "model.language_model.",
         "language_model.",
@@ -213,7 +210,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             self.layers = nn.ModuleList(
                 Qwen4ExpDecoderLayer(
                     draft_vllm_config,
-                    layer_type="full_attention",
+                    layer_type="qwen_sparse_attention",
                     prefix=f"{prefix}.layers.{self.mtp_start_layer_idx + idx}",
                 )
                 for idx in range(self.num_mtp_layers)
@@ -250,7 +247,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
     def _iter_qsa_attentions(self):
         """Yield MTP attention modules that own a QSA indexer."""
-
         for layer in self.layers:
             attention = getattr(layer, "self_attn", None)
             if (
@@ -261,13 +257,11 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
     def set_skip_topk(self, skip: bool) -> None:
         """Select on MTP step 0 and reuse its QSA indices on later steps."""
-
         for attention in self._iter_qsa_attentions():
             attention.indexer.skip_topk = skip
 
     def compact_topk_indices(self, row_indices: torch.Tensor) -> None:
         """Keep each request's target-aligned step-0 sparse-index row."""
-
         num_rows = row_indices.numel()
         for attention in self._iter_qsa_attentions():
             buffer = attention.topk_indices_buffer
@@ -379,13 +373,6 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
-        cache_config = vllm_config.cache_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen4ExpMTP currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
-
         self.quant_config = vllm_config.quant_config
 
         super().__init__()

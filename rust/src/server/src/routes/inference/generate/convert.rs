@@ -26,10 +26,14 @@ pub(super) struct ResponseOptions {
     pub include_usage: bool,
     /// Whether the caller asked for usage on every streamed chunk.
     pub include_continuous_usage: bool,
-    /// Whether the caller requested output logprobs on generate choices.
-    pub include_logprobs: bool,
+    /// Requested output logprobs (`sampling_params.logprobs`): `None` omits
+    /// them, `Some(n)` returns `max(n, 1)` candidates per position, `Some(-1)`
+    /// all of them.
+    pub logprobs: Option<i32>,
     /// Whether the caller requested top-level prompt logprobs.
     pub include_prompt_logprobs: bool,
+    /// Whether the caller requested final prompt token metadata.
+    pub return_token_ids: bool,
 }
 
 /// Validate and lower one raw generate request into the internal
@@ -54,8 +58,9 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
+    let logprobs = request.sampling_params.inner.logprobs;
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
+    let return_token_ids = request.return_token_ids.unwrap_or(false);
     let mut sampling_params = request.sampling_params.inner;
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
@@ -79,7 +84,9 @@ pub(super) fn prepare_generate_request(
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id: ctx.session_id,
-        reasoning_parser_kwargs: None,
+        kv_hints: None,
+        reasoning_parser_kwargs: request.reasoning_parser_kwargs.unwrap_or_default(),
+        reasoning_ended: request.reasoning_ended,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
     };
@@ -91,8 +98,9 @@ pub(super) fn prepare_generate_request(
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
-            include_logprobs,
+            logprobs,
             include_prompt_logprobs,
+            return_token_ids,
         },
     })
 }
@@ -214,6 +222,54 @@ mod tests {
             prepared.text_request.sampling_params.thinking_token_budget,
             Some(64)
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_forwards_reasoning_controls() {
+        for (controls, expected) in [
+            (json!({}), (json!({"chat_template_kwargs": {}}), None)),
+            (
+                json!({
+                    "reasoning_ended": false,
+                    "reasoning_parser_kwargs": {
+                        "chat_template_kwargs": {"enable_thinking": true}
+                    }
+                }),
+                (
+                    json!({"chat_template_kwargs": {"enable_thinking": true}}),
+                    Some(false),
+                ),
+            ),
+            (
+                json!({"reasoning_ended": true, "reasoning_parser_kwargs": {}}),
+                (json!({"chat_template_kwargs": {}}), Some(true)),
+            ),
+        ] {
+            let mut body = json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "token_ids": [11, 22, 33],
+                "sampling_params": {}
+            });
+            body.as_object_mut().unwrap().extend(controls.as_object().unwrap().clone());
+            let request: GenerateRequest = serde_json::from_value(body).expect("parse request");
+
+            let prepared = prepare_generate_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare");
+
+            assert_eq!(
+                (
+                    serde_json::to_value(&prepared.text_request.reasoning_parser_kwargs).unwrap(),
+                    prepared.text_request.reasoning_ended,
+                ),
+                expected,
+                "controls: {controls}"
+            );
+        }
     }
 
     #[test]
