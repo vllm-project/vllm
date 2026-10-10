@@ -826,13 +826,13 @@ def _rocm_aiter_w8a8_gemm_impl(
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    from aiter import gemm_a8w8_CK
+    from aiter import gemm_a8w8
 
-    # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
+    # gemm_a8w8(a, b, scale_a, scale_b, bias) expects
     # a to be [M, K]
     # b to be [N, K]
     # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
-    return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
+    return gemm_a8w8(A, B, As, Bs, bias, output_dtype)
 
 
 def _rocm_aiter_w8a8_gemm_fake(
@@ -2138,7 +2138,7 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_rdna_linear_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        """RDNA4 (gfx12) analog of is_linear_enabled() (AITER Triton GEMMs)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
@@ -3955,6 +3955,14 @@ class rocm_aiter_ops:
     @staticmethod
     @functools.cache
     def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna4
+
+            if on_rdna4():
+                try:
+                    return _triton_gemm_config_is_tuned("GEMM-A8W8", N, K)
+                except (AssertionError, ImportError):
+                    return False
         return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
 
     @staticmethod
