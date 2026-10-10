@@ -1319,3 +1319,58 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
             adapter_enabled,
             block_size,
         )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_kernel_one_shot_int64_row_offset(device):
+    """Output rows whose offset (flat token * stride) exceeds int32 must be
+    written in place instead of wrapping to a negative address. Only the last
+    block of flat tokens is routed so the kernel does minimal work."""
+    torch.set_default_device(device)
+    set_random_seed(0)
+    top_k, R, K, N, block_size = 2, 16, 64, 1024, 16
+    dtype = torch.bfloat16
+    num_tokens = 2**31 // (top_k * N) + block_size
+    free, _ = current_platform.mem_get_info()
+    if free < num_tokens * (top_k * N + K) * 2 + 2**28:
+        pytest.skip("not enough free device memory")
+
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+    topk_weights = torch.ones((num_tokens, top_k), dtype=dtype)
+    token_lora_mapping = torch.zeros((num_tokens,), dtype=torch.int32)
+    lora_a = torch.rand((1, 1, R, K), dtype=dtype)
+    lora_b = torch.rand((1, 1, N, R), dtype=dtype)
+
+    num_pairs = num_tokens * top_k
+    flat_ids = torch.arange(num_pairs - block_size, num_pairs, dtype=torch.int32)
+    sorted_token_ids = flat_ids.view(1, block_size)
+    expert_ids = torch.zeros((1, 1), dtype=torch.int32)
+    num_post = torch.tensor([block_size], dtype=torch.int32)
+    lora_ids = torch.zeros((1,), dtype=torch.int32)
+    adapter_enabled = torch.ones((1,), dtype=torch.int32)
+    num_active_loras = torch.tensor([1], dtype=torch.int32, device="cpu")
+
+    output = torch.zeros((num_tokens, top_k, N), dtype=dtype)
+    _call_one_shot(
+        output,
+        hidden_states,
+        [lora_a],
+        [lora_b],
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_post,
+        token_lora_mapping,
+        R,
+        top_k,
+        lora_ids,
+        num_active_loras,
+        adapter_enabled,
+        block_size,
+    )
+    torch.accelerator.synchronize()
+
+    x = hidden_states[flat_ids.long() // top_k]
+    expected = x @ lora_a[0, 0].T @ lora_b[0, 0].T
+    actual = output.view(num_pairs, N)[flat_ids.long()]
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)

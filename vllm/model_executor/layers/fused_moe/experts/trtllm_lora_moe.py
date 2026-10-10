@@ -55,11 +55,11 @@ def _unpermute_activation_kernel(
     stride_or,
     BLOCK_I: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     col_offs = tl.program_id(1) * BLOCK_I + tl.arange(0, BLOCK_I)
     col_mask = col_offs < num_cols
 
-    idx = tl.load(idx_ptr + row)
+    idx = tl.load(idx_ptr + row).to(tl.int64)
     out_ptrs = out_ptr + row * stride_or + col_offs
     if idx >= 0:
         vals = tl.load(act_ptr + idx * stride_ar + col_offs, mask=col_mask, other=0.0)
@@ -85,7 +85,7 @@ def _finalize_lora_kernel(
     TOP_K: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    token = tl.program_id(0)
+    token = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
     mask = col < K
 
@@ -93,7 +93,7 @@ def _finalize_lora_kernel(
     acc_delta = tl.zeros((BLOCK_K,), dtype=tl.float32)
     for k in tl.static_range(TOP_K):
         eid = token * TOP_K + k
-        pidx = tl.load(idx_ptr + eid)
+        pidx = tl.load(idx_ptr + eid).to(tl.int64)
         if pidx >= 0:
             w = tl.load(weight_ptr + eid).to(tl.float32)
             base = tl.load(gemm2_ptr + pidx * stride_g0 + col, mask=mask, other=0.0).to(
