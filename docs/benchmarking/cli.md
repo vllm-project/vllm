@@ -158,6 +158,59 @@ In this example, the benchmark observes two 40 ms ITL samples. The three tokens
 in the second streamed output do not create additional ITL samples, so mean ITL
 is 40 ms. TPOT is `(180 ms - 100 ms) / (5 - 1) = 20 ms/token`.
 
+#### Goodput and SLO Attainment
+
+For generation benchmarks, `--goodput ttft:100 tpot:20 e2el:500` sets latency
+service-level objectives (SLOs). Thresholds are in milliseconds (milliseconds
+per output token for TPOT), and comparisons are inclusive. Only successful
+requests can satisfy an SLO. TPOT is treated as zero for outputs of at most one
+token, as in the existing request-goodput calculation.
+
+The console reports the passing request count and attainment percentage for
+each configured objective and for their intersection. Attainment uses **all
+attempted requests in the measured run** as its denominator, including failed
+requests. Readiness checks, warmups, and probe requests are excluded.
+
+Request goodput remains the number of successful requests satisfying **every**
+configured objective divided by benchmark duration. Output-token goodput is
+the sum of output tokens from those same requests divided by that duration.
+It counts tokens, not streamed chunks, including when speculative decoding
+bundles multiple tokens into one chunk.
+
+With `--save-result`, the standard result JSON includes these fields even
+without `--save-detailed`:
+
+| Field | Meaning |
+| --- | --- |
+| `goodput_thresholds_ms` | Configured objectives and thresholds in milliseconds (ms/token for TPOT). |
+| `attempted` | Number of measured requests, including failures. |
+| `completed`, `failed` | Existing successful and failed request counts. |
+| `slo_attainment_by_metric` | Each configured objective maps to `passed` and `attainment_pct`. |
+| `slo_passed` | Successful requests satisfying all configured objectives. |
+| `slo_attainment_pct` | `100 * slo_passed / attempted`. |
+| `request_goodput` | Existing request goodput in requests/second. |
+| `output_token_goodput` | Output tokens from requests passing all objectives, per second. |
+
+For example, if four requests are attempted, three succeed, and two satisfy
+all objectives with a total of 12 output tokens over two seconds, combined
+attainment is 50%, request goodput is 1 request/s, and output-token goodput is
+6 tokens/s. A success-only attainment percentage can be derived as
+`100 * slo_passed / completed` when `completed` is nonzero.
+
+Output-token goodput uses server-reported token counts, falling back to the
+local tokenizer when available. Retokenization can differ from the server's
+token count. If any qualifying request has neither a usable server count nor
+a local tokenizer, output-token goodput is `null` in JSON and `N/A` in the
+console. The placeholder length used by other metrics when token counts are
+missing does not contribute to this metric. A zero server count is treated as
+missing, matching the existing token-count fallback. Missing counts in requests
+that fail an objective do not affect output-token goodput.
+
+When no requests qualify, both goodput rates are zero. When there are no
+measured requests, attainment percentages are `null` (`N/A`) and counts are
+zero. Metric calculation requires a positive benchmark duration. The new
+fields are only emitted for generation benchmarks with `--goodput`.
+
 #### Results Visualization
 
 The `--plot-timeline` and `--plot-dataset-stats` can be used to generate respectively the requests completion timeline and dataset prompt and output tokens statistics, which can be useful for debugging purpose or for deeper analysis.

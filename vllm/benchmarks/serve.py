@@ -32,7 +32,7 @@ import time
 import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -357,6 +357,13 @@ class BenchmarkMetrics:
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
+    attempted: int = 0
+    slo_passed: int = 0
+    slo_attainment_pct: float | None = None
+    slo_attainment_by_metric: dict[str, dict[str, int | float | None]] = field(
+        default_factory=dict
+    )
+    output_token_goodput: float | None = None
 
 
 @dataclass
@@ -592,7 +599,11 @@ def calculate_metrics(
         A tuple of the benchmark metrics and the actual output lengths.
 
     """
+    if dur_s <= 0:
+        raise ValueError("Benchmark duration must be greater than zero.")
+
     actual_output_lens: list[int] = []
+    successful_output_lens: list[int | None] = []
     total_input = 0
     completed = 0
     good_completed = 0
@@ -605,6 +616,7 @@ def calculate_metrics(
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
+            output_len_known = output_len is not None and output_len > 0
 
             if not output_len:
                 if tokenizer is None:
@@ -620,7 +632,9 @@ def calculate_metrics(
                             outputs[i].generated_text, add_special_tokens=False
                         ).input_ids
                     )
+                    output_len_known = True
             actual_output_lens.append(output_len)
+            successful_output_lens.append(output_len if output_len_known else None)
             total_input += outputs[i].prompt_len
             tpot = 0.0
             if output_len > 1:
@@ -637,30 +651,34 @@ def calculate_metrics(
         else:
             actual_output_lens.append(0)
 
+    slo_attainment_by_metric: dict[str, dict[str, int | float | None]] = {}
+    output_token_goodput = None
     if goodput_config_dict:
-        valid_metrics = []
-        slo_values = []
+        latency_metrics = {"ttft": ttfts, "tpot": all_tpots, "e2el": e2els}
+        all_passed = [True] * completed
+        for name, threshold_ms in goodput_config_dict.items():
+            threshold_s = threshold_ms / MILLISECONDS_TO_SECONDS_CONVERSION
+            passed = [value <= threshold_s for value in latency_metrics[name]]
+            passing_count = sum(passed)
+            slo_attainment_by_metric[name] = {
+                "passed": passing_count,
+                "attainment_pct": 100.0 * passing_count / len(outputs)
+                if outputs
+                else None,
+            }
+            all_passed = [a and b for a, b in zip(all_passed, passed)]
 
-        if "ttft" in goodput_config_dict:
-            valid_metrics.append(ttfts)
-            slo_values.append(
-                goodput_config_dict["ttft"] / MILLISECONDS_TO_SECONDS_CONVERSION
+        good_completed = sum(all_passed)
+        good_output_lens = [
+            length
+            for length, passed in zip(successful_output_lens, all_passed)
+            if passed
+        ]
+        # A placeholder length must never contribute to output-token goodput.
+        if all(length is not None for length in good_output_lens):
+            output_token_goodput = (
+                sum(length for length in good_output_lens if length is not None) / dur_s
             )
-        if "tpot" in goodput_config_dict:
-            valid_metrics.append(all_tpots)
-            slo_values.append(
-                goodput_config_dict["tpot"] / MILLISECONDS_TO_SECONDS_CONVERSION
-            )
-        if "e2el" in goodput_config_dict:
-            valid_metrics.append(e2els)
-            slo_values.append(
-                goodput_config_dict["e2el"] / MILLISECONDS_TO_SECONDS_CONVERSION
-            )
-
-        for req_metric in zip(*valid_metrics):
-            is_good_req = all([s >= r for s, r in zip(slo_values, req_metric)])
-            if is_good_req:
-                good_completed += 1
 
     if completed == 0:
         warnings.warn(
@@ -778,6 +796,13 @@ def calculate_metrics(
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
         rtfx=input_audio_duration / dur_s,
+        attempted=len(outputs),
+        slo_passed=good_completed,
+        slo_attainment_pct=100.0 * good_completed / len(outputs)
+        if goodput_config_dict and outputs
+        else None,
+        slo_attainment_by_metric=slo_attainment_by_metric,
+        output_token_goodput=output_token_goodput,
     )
 
     return metrics, actual_output_lens
@@ -1201,9 +1226,42 @@ async def benchmark(
             )
         )
     if goodput_config_dict and isinstance(metrics, BenchmarkMetrics):
+        print("{:<40} {:<10}".format("Attempted requests:", metrics.attempted))
+        for name, attainment in metrics.slo_attainment_by_metric.items():
+            print(
+                "{:<40} {:<10}".format(
+                    f"{name.upper()} SLO passing requests:", attainment["passed"]
+                )
+            )
+            pct = attainment["attainment_pct"]
+            print(
+                "{:<40} {}".format(
+                    f"{name.upper()} SLO attainment (%):",
+                    f"{pct:.2f}" if pct is not None else "N/A",
+                )
+            )
+        print(
+            "{:<40} {:<10}".format("Combined SLO passing requests:", metrics.slo_passed)
+        )
+        print(
+            "{:<40} {}".format(
+                "Combined SLO attainment (%):",
+                f"{metrics.slo_attainment_pct:.2f}"
+                if metrics.slo_attainment_pct is not None
+                else "N/A",
+            )
+        )
         print(
             "{:<40} {:<10.2f}".format(
                 "Request goodput (req/s):", metrics.request_goodput
+            )
+        )
+        print(
+            "{:<40} {}".format(
+                "Output token goodput (tok/s):",
+                f"{metrics.output_token_goodput:.2f}"
+                if metrics.output_token_goodput is not None
+                else "N/A (output token counts unavailable)",
             )
         )
     if isinstance(metrics, BenchmarkMetrics):
@@ -1300,6 +1358,15 @@ async def benchmark(
             "max_concurrent_requests": metrics.max_concurrent_requests,
             "rtfx": metrics.rtfx,
         }
+        if goodput_config_dict:
+            result.update(
+                attempted=metrics.attempted,
+                goodput_thresholds_ms=dict(goodput_config_dict),
+                slo_passed=metrics.slo_passed,
+                slo_attainment_pct=metrics.slo_attainment_pct,
+                slo_attainment_by_metric=metrics.slo_attainment_by_metric,
+                output_token_goodput=metrics.output_token_goodput,
+            )
     else:
         result = {
             "duration": benchmark_duration,
@@ -1824,7 +1891,10 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "pairs, where the key is a metric name, and the value is in "
         'milliseconds. Multiple "KEY:VALUE" pairs can be provided, '
         "separated by spaces. Allowed request level metric names are "
-        '"ttft", "tpot", "e2el". For more context on the definition of '
+        '"ttft", "tpot", "e2el". Generation benchmarks also report '
+        "per-objective and combined SLO attainment over all measured requests, "
+        "and output-token goodput. Thresholds are saved in the result JSON. "
+        "For more context on the definition of "
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
     )
