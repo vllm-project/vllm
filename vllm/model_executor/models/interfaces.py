@@ -531,6 +531,10 @@ class SupportsMultiModalPruning(Protocol):
     `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
     Models supporting methods beyond EVS should override this."""
 
+    supports_image_pruning: ClassVar[bool] = False
+    """Whether this model implements image token pruning (RATE) via
+    `MultiModalConfig.image_pruning_rate`."""
+
     def recompute_mrope_positions(
         self,
         input_ids: list[int] | torch.Tensor,
