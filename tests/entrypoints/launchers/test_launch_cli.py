@@ -3,6 +3,7 @@
 """Unit tests for the `vllm launch` CLI subcommand."""
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -11,11 +12,13 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import create_autospec, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 import pytest
 
+import vllm.snapshot.engine as snapshot_engine
 import vllm.snapshot.runtime as snapshot_runtime
 import vllm.snapshot.server as snapshot_server
 from vllm.entrypoints.cli import snapshot as snapshot_cli
@@ -634,43 +637,289 @@ def test_snapshot_create_abort_rejects_surviving_process_group(
         tools.abort_create(100)
 
 
-@pytest.mark.asyncio
-async def test_snapshot_child_rejects_mismatch_before_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+@pytest.fixture
+def snapshot_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from vllm.entrypoints.launchers import launcher
     from vllm.entrypoints.launchers.api_server import entry as api_server
 
-    canaries = iter((_oracle(), _oracle((42,), " Lyon")))
+    engine = SimpleNamespace(
+        get_num_unfinished_requests=Mock(return_value=0),
+        pause_generation=AsyncMock(),
+        resume_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        collective_rpc=AsyncMock(),
+        shutdown=Mock(),
+    )
+    canary = AsyncMock(return_value=_oracle())
+    closed = Mock()
 
     @asynccontextmanager
     async def engine_context():
-        yield object()
+        try:
+            yield engine
+        finally:
+            closed()
 
-    async def next_canary(_engine: object) -> Oracle:
-        return next(canaries)
+    async def serve(*_args):
+        return asyncio.sleep(0)
 
-    async def return_none(_engine: object) -> None:
-        return None
-
-    monkeypatch.setattr(
-        api_server, "build_async_engine_client", lambda _args: engine_context()
-    )
-    monkeypatch.setattr(snapshot_server, "run_engine_canary", next_canary)
-    monkeypatch.setattr(snapshot_server, "_release_reloadable_state", return_none)
-    monkeypatch.setattr(snapshot_server, "_restore_reloadable_state", return_none)
+    builder = Mock(side_effect=lambda _args: engine_context())
+    bind = Mock(return_value=("http://127.0.0.1:8000", Mock()))
+    serving = AsyncMock(side_effect=serve)
+    monkeypatch.setattr(api_server, "build_async_engine_client", builder)
+    monkeypatch.setattr(api_server, "build_and_serve", serving)
+    monkeypatch.setattr(launcher, "bind_server_socket", bind)
+    monkeypatch.setattr(snapshot_engine, "run_engine_canary", canary)
     monkeypatch.setattr(snapshot_server, "detach_snapshot_streams", lambda: None)
-    monkeypatch.setattr(
-        snapshot_server,
-        "write_ready_atomic",
-        lambda *_args: pytest.fail("mismatched snapshot was published"),
-    )
     control = snapshot_server.ControlArgs(
         ready_file=tmp_path / "ready.json",
         release_file=tmp_path / "release.json",
         release_timeout_s=1,
     )
+    control.release_file.write_text(json.dumps({"release": True, "port": 8000}))
+    return SimpleNamespace(
+        engine=engine,
+        canary=canary,
+        control=control,
+        args=snapshot_server.parse_vllm_args(["test-model"]),
+        builder=builder,
+        bind=bind,
+        serving=serving,
+        closed=closed,
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_child_rejects_mismatch_before_publication(snapshot_child):
+    child = snapshot_child
+    child.canary.side_effect = [_oracle(), _oracle((42,), " Lyon")]
     with pytest.raises(SnapshotCanaryError, match="rehearsal changed"):
-        await snapshot_server.run_vllm_snapshot_child(control, argparse.Namespace())
+        await snapshot_server.run_vllm_snapshot_child(child.control, child.args)
+    assert not child.control.ready_file.exists()
+    child.bind.assert_not_called()
+    child.engine.shutdown.assert_called_once_with(timeout=0)
+    child.closed.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_child_waits_for_workers_and_canary_before_binding(
+    snapshot_child,
+):
+    child = snapshot_child
+    prepare_entered, prepare_done = asyncio.Event(), asyncio.Event()
+    recover_entered, recover_done = asyncio.Event(), asyncio.Event()
+    canary_entered, canary_done = asyncio.Event(), asyncio.Event()
+    preparations = recoveries = canaries = 0
+
+    async def rpc(method, **_kwargs):
+        nonlocal preparations, recoveries
+        if method == "checkpoint_prepare":
+            preparations += 1
+            if preparations == 2:
+                prepare_entered.set()
+                await prepare_done.wait()
+        elif method == "checkpoint_restore":
+            recoveries += 1
+            if recoveries == 2:
+                recover_entered.set()
+                await recover_done.wait()
+
+    async def canary(_engine):
+        nonlocal canaries
+        canaries += 1
+        if canaries == 3:
+            canary_entered.set()
+            await canary_done.wait()
+        return _oracle()
+
+    child.engine.collective_rpc.side_effect = rpc
+    child.canary.side_effect = canary
+    task = asyncio.create_task(
+        snapshot_server.run_vllm_snapshot_child(child.control, child.args)
+    )
+    try:
+        await asyncio.wait_for(prepare_entered.wait(), 1)
+        assert not child.control.ready_file.exists()
+        child.bind.assert_not_called()
+        child.control.ready_file.with_name("error.json").write_text("old activation")
+        prepare_done.set()
+        await asyncio.wait_for(recover_entered.wait(), 1)
+        assert child.control.ready_file.exists()
+        assert not child.control.ready_file.with_name("error.json").exists()
+        child.bind.assert_not_called()
+        recover_done.set()
+        await asyncio.wait_for(canary_entered.wait(), 1)
+        # Memory is awake and may have resumed scheduling. It is still private.
+        assert child.engine.wake_up.await_count == 4
+        child.bind.assert_not_called()
+        child.serving.assert_not_awaited()
+        canary_done.set()
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    child.bind.assert_called_once()
+    child.serving.assert_awaited_once()
+    child.closed.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["communicator", "reload", "canary"])
+async def test_snapshot_recovery_failure_never_binds_and_keeps_diagnostic(
+    snapshot_child, failure: str
+):
+    child = snapshot_child
+    restore_count = 0
+
+    async def rpc(method, **_kwargs):
+        nonlocal restore_count
+        if method == "checkpoint_restore":
+            restore_count += 1
+        if (
+            restore_count == 2
+            and method
+            == {
+                "communicator": "checkpoint_restore",
+                "reload": "reload_weights",
+                "canary": "unused",
+            }[failure]
+        ):
+            raise RuntimeError("injected recovery failure")
+
+    child.engine.collective_rpc.side_effect = rpc
+    if failure == "canary":
+        child.canary.side_effect = [_oracle(), _oracle(), _oracle((42,), " Lyon")]
+    # Cleanup failure must not hide the failure that made recovery unsafe.
+    child.engine.shutdown.side_effect = RuntimeError("cleanup failed")
+    with pytest.raises(RuntimeError, match="recovery failure|recovery changed"):
+        await snapshot_server.run_vllm_snapshot_child(child.control, child.args)
+    error = json.loads(child.control.ready_file.with_name("error.json").read_text())
+    assert error["phase"].startswith("recovery:")
+    assert "cleanup failed" not in error["error"]
+    child.bind.assert_not_called()
+    child.serving.assert_not_awaited()
+    child.engine.shutdown.assert_called_once_with(timeout=0)
+    child.closed.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_snapshot_recovery_deadline_or_cancellation_is_terminal(
+    snapshot_child, cancel: bool
+):
+    child = snapshot_child
+    session = snapshot_engine.SnapshotSession(child.engine, timeout_s=0.1)
+    await session.prepare()
+    entered = asyncio.Event()
+
+    async def held_canary(_engine):
+        entered.set()
+        await asyncio.Event().wait()
+
+    child.canary.side_effect = held_canary
+    recovery = asyncio.create_task(session.recover())
+    await asyncio.wait_for(entered.wait(), 1)
+    if cancel:
+        recovery.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else asyncio.TimeoutError):
+        await recovery
+    assert session.state == "failed"
+    assert session.phase == "recovery: canary"
+    rpc_count = child.engine.collective_rpc.await_count
+    with pytest.raises(RuntimeError, match="state failed"):
+        await session.recover()
+    with pytest.raises(RuntimeError, match="state failed"):
+        await session.prepare()
+    assert child.engine.collective_rpc.await_count == rpc_count
+
+
+@pytest.mark.asyncio
+async def test_snapshot_partial_sleep_failure_cannot_be_recovered(snapshot_child):
+    child = snapshot_child
+    child.engine.sleep.side_effect = RuntimeError("failure after releasing memory")
+    session = snapshot_engine.SnapshotSession(child.engine, timeout_s=1)
+    with pytest.raises(RuntimeError, match="after releasing"):
+        await session.prepare()
+    with pytest.raises(RuntimeError, match="state failed"):
+        await session.recover()
+    child.engine.wake_up.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_session_completed_operations_are_not_repeated(snapshot_child):
+    child = snapshot_child
+    session = snapshot_engine.SnapshotSession(child.engine, timeout_s=1)
+    assert await session.prepare() == await session.prepare() == _oracle()
+    assert child.engine.sleep.await_count == 2
+    await session.recover()
+    await session.recover()
+    assert child.canary.await_count == 3
+    with pytest.raises(RuntimeError, match="state ready"):
+        await session.prepare()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_memory_policy_does_not_own_private_generation(snapshot_child):
+    child = snapshot_child
+    policy = snapshot_engine.SnapshotMemoryPolicy(AsyncMock(), AsyncMock())
+    session = snapshot_engine.SnapshotSession(
+        child.engine, timeout_s=1, memory_policy=policy
+    )
+    await session.prepare()
+    await session.recover()
+    child.engine.pause_generation.assert_awaited_with(mode="wait")
+    assert child.engine.resume_generation.await_count == 2
+    assert policy.release.await_count == policy.restore.await_count == 2
+    child.engine.sleep.assert_not_awaited()
+    child.engine.wake_up.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_session_rejects_existing_requests(snapshot_child):
+    child = snapshot_child
+    child.engine.get_num_unfinished_requests.return_value = 1
+    session = snapshot_engine.SnapshotSession(child.engine, timeout_s=1)
+    with pytest.raises(RuntimeError, match="idle startup engine"):
+        await session.prepare()
+    child.canary.assert_not_awaited()
+    child.engine.sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_parser_validation_precedes_engine_creation(snapshot_child):
+    child = snapshot_child
+    child.args.enable_auto_tool_choice = True
+    child.args.tool_call_parser = "not-registered-snapshot-parser"
+    with pytest.raises(KeyError, match="invalid tool call parser"):
+        await snapshot_server.run_vllm_snapshot_child(child.control, child.args)
+    child.builder.assert_not_called()
+    child.bind.assert_not_called()
+    assert not child.control.ready_file.exists()
+
+
+def test_default_server_setup_still_validates_before_binding(monkeypatch):
+    from vllm.entrypoints.launchers import launcher
+
+    events = []
+    monkeypatch.setattr(
+        launcher, "prepare_server_args", lambda _args: events.append("validate")
+    )
+    monkeypatch.setattr(
+        launcher,
+        "bind_server_socket",
+        lambda _args, **_kwargs: events.append("bind"),
+    )
+    launcher.setup_server(argparse.Namespace(), reuse_port=False)
+    assert events == ["validate", "bind"]
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_snapshot_session_rejects_unbounded_deadline(timeout):
+    with pytest.raises(ValueError, match="positive and finite"):
+        snapshot_engine.SnapshotSession(object(), timeout_s=timeout)
 
 
 def test_snapshot_release_marker_ignores_unknown_keys(tmp_path: Path):
