@@ -250,6 +250,16 @@ class Gemma4Config(VerifyAndUpdateConfig):
             for i in range(min(arch_config.total_num_hidden_layers, len(layer_types)))
         }
 
+        hf_text_config = model_config.hf_text_config
+        if (
+            getattr(hf_text_config, "num_kv_shared_layers", 0) > 0
+            and vllm_config.speculative_config is None
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            and "DiffusionGemmaForBlockDiffusion"
+            not in getattr(model_config, "architectures", [])
+        ):
+            vllm_config.cache_config.kv_sharing_fast_prefill = True
+
         if len(set(head_dims.values())) <= 1:
             return
 
