@@ -1941,6 +1941,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
+        VLLM_ROCM_USE_AITER_MXFP8_ASM_GEMM: Controls the gfx942 MXFP8 A16W8
+            assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: Controls Triton sparse MLA (gfx950).
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
@@ -2014,6 +2016,7 @@ class rocm_aiter_ops:
     _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+    _MXFP8_ASM_GEMM = envs.VLLM_ROCM_USE_AITER_MXFP8_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
@@ -2045,6 +2048,7 @@ class rocm_aiter_ops:
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+        cls._MXFP8_ASM_GEMM = envs.VLLM_ROCM_USE_AITER_MXFP8_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -2405,6 +2409,13 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx950
 
         return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
+
+    @classmethod
+    @if_aiter_supported
+    def is_asm_mxfp8_gemm_enabled(cls) -> bool:
+        from vllm.platforms.rocm import on_gfx942
+
+        return cls._AITER_ENABLED and cls._MXFP8_ASM_GEMM and on_gfx942()
 
     @classmethod
     @if_aiter_supported

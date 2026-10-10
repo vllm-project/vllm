@@ -149,6 +149,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
+    VLLM_ROCM_USE_AITER_MXFP8_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -1353,6 +1354,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
+    ),
+    # On gfx942, run decode-sized MXFP8 linears with AITER's asm A16W8 GEMM
+    # (gemm_a16w8_mxfp8_asm) for the weight shapes AITER has tuned.
+    # Needs VLLM_ROCM_USE_AITER=1.
+    "VLLM_ROCM_USE_AITER_MXFP8_ASM_GEMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MXFP8_ASM_GEMM", "False").lower()
+        in ("true", "1")
     ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
