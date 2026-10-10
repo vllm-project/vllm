@@ -197,6 +197,7 @@ if TYPE_CHECKING:
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
+    VLLM_GAP_TOLERANT_PREFIX_REUSE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
@@ -1600,6 +1601,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V1_USE_OUTLINES_CACHE": lambda: (
         os.environ.get("VLLM_V1_USE_OUTLINES_CACHE", "0") == "1"
+    ),
+    # Whether to turn on the gap-tolerant prefix reuse for V1
+    "VLLM_GAP_TOLERANT_PREFIX_REUSE": lambda: (
+        os.environ.get("VLLM_GAP_TOLERANT_PREFIX_REUSE", "0") == "1"
     ),
     # Whether using Pathways
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(

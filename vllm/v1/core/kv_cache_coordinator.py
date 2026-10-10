@@ -319,6 +319,16 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
+    def append_pinned_computed_blocks(
+        self,
+        request_id: str,
+        blocks: tuple[Sequence[KVCacheBlock], ...],
+    ) -> None:
+        for manager, group_blocks in zip(
+            self.single_type_managers, blocks, strict=True
+        ):
+            manager.append_pinned_computed_blocks(request_id, group_blocks)
+
     def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
         """Positions a later request replaying this prompt can resume at.
 

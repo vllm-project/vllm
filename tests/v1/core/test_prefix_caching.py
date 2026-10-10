@@ -1693,6 +1693,67 @@ def make_kv_cache_config_three_types(
     )
 
 
+def test_gap_tolerant_prefix_reuse() -> None:
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 16),
+        max_model_len=256,
+        hash_block_size=block_size,
+        enable_gap_tolerant_reuse=True,
+    )
+    tokens = list(range(4 * block_size + 1))
+    stored = make_request("stored", tokens, block_size, sha256)
+    blocks = manager.allocate_slots(stored, len(tokens))
+    assert blocks is not None
+    stored_block_ids = manager.get_blocks(stored.request_id).get_block_ids()[0]
+    manager.free(stored)
+
+    manager.evict_blocks({stored_block_ids[1]})
+    request = make_request("returning", tokens, block_size, sha256)
+    prefix, num_prefix_tokens = manager.get_computed_blocks(request)
+
+    assert prefix.get_block_ids() == ([stored_block_ids[0]],)
+    assert num_prefix_tokens == block_size
+    assert (
+        manager.cap_tokens_before_gap_hit(
+            request.request_id, num_prefix_tokens, len(tokens) - num_prefix_tokens
+        )
+        == block_size
+    )
+
+    new_blocks = manager.allocate_slots(
+        request,
+        block_size,
+        num_new_computed_tokens=num_prefix_tokens,
+        new_computed_blocks=prefix,
+    )
+    assert new_blocks is not None
+    request.num_computed_tokens = 2 * block_size
+    grafted, num_grafted_tokens = manager.append_ready_gap_cache_hits(request)
+
+    assert grafted.get_block_ids() == ([stored_block_ids[2], stored_block_ids[3]],)
+    assert num_grafted_tokens == 2 * block_size
+    assert manager.get_blocks(request.request_id).get_block_ids() == (
+        [
+            stored_block_ids[0],
+            new_blocks.get_block_ids()[0][0],
+            stored_block_ids[2],
+            stored_block_ids[3],
+        ],
+    )
+    manager.free(request)
+
+    gap_block_id = new_blocks.get_block_ids()[0][0]
+    manager.evict_blocks({gap_block_id})
+    aborted = make_request("aborted", tokens, block_size, sha256)
+    manager.get_computed_blocks(aborted)
+    pinned = manager.gap_cache_hits[aborted.request_id][0].blocks.blocks[0]
+    assert all(block.ref_cnt == 1 for block in pinned)
+
+    manager.discard_gap_cache_hits(aborted.request_id)
+    assert all(block.ref_cnt == 0 for block in pinned)
+
+
 @pytest.mark.parametrize("draft_sharded", [True, False])
 def test_prefix_cache_hit_uses_per_group_dcp_geometry(draft_sharded):
     """Prefix lookup must use each group's DCP size, not the process-wide one.

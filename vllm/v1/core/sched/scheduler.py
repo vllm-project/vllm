@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -339,6 +340,7 @@ class Scheduler(SchedulerInterface):
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
+            enable_gap_tolerant_reuse=envs.VLLM_GAP_TOLERANT_PREFIX_REUSE,
             watermark=self.scheduler_config.watermark,
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
@@ -647,6 +649,11 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            grafted_blocks, num_grafted_tokens = (
+                self.kv_cache_manager.append_ready_gap_cache_hits(request)
+            )
+            request.num_computed_tokens += num_grafted_tokens
+
             if input_budget <= draft_slots:
                 break
 
@@ -698,6 +705,11 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
+            )
+            num_new_tokens = self.kv_cache_manager.cap_tokens_before_gap_hit(
+                request.request_id,
+                request.num_computed_tokens,
+                num_new_tokens,
             )
 
             # Make sure the input position does not exceed the max model len.
@@ -840,7 +852,7 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs.append(request)
             prefill_scheduled |= request.is_prefill_chunk
             request_id = request.request_id
-            req_to_new_blocks[request_id] = new_blocks
+            req_to_new_blocks[request_id] = grafted_blocks + new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
@@ -1156,6 +1168,11 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
+                    num_new_tokens = self.kv_cache_manager.cap_tokens_before_gap_hit(
+                        request_id,
+                        num_computed_tokens,
+                        num_new_tokens,
+                    )
                     assert num_new_tokens > 0
 
                     # Apply Mamba alignment before encoder caps.
@@ -1268,6 +1285,7 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                        self.kv_cache_manager.discard_gap_cache_hits(request_id)
                     break
 
                 # KVTransfer: the connector uses this info to determine

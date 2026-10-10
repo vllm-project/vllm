@@ -366,6 +366,15 @@ class SingleTypeKVCacheManager(ABC):
         if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
+    def append_pinned_computed_blocks(
+        self,
+        request_id: str,
+        blocks: Sequence[KVCacheBlock],
+    ) -> None:
+        """Append cache-hit blocks whose references are already pinned."""
+        self.req_to_blocks[request_id].extend(blocks)
+        self.num_cached_block[request_id] += len(blocks)
+
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
