@@ -172,6 +172,25 @@ def _canvas_positions(tokens, target_sizes):
     return positions.tolist(), canvas_rope_delta(positions, len(tokens))
 
 
+def test_canvas_mrope_trailing_newline_stays_inside_the_canvas():
+    """A newline right after `</image>` belongs to the canvas, not to the text.
+
+    The chat template joins content parts with ``\\n``, so an image followed by
+    text always leaves one there. The transformers reference closes a frame over
+    every marker including newlines; leaving it out pushes every later position
+    one step forward and makes `rope_delta` differ by one.
+    """
+    tokens = [_TEXT, _IM_START, _IMAGE_PAD, _IM_END, _NEWLINE, _TEXT, _TEXT]
+    positions, delta = _canvas_positions(tokens, [[4, 4]])
+
+    assert positions == [
+        [0, 1, 1, 1, 1, 3, 4],
+        [0, 0, 1, 2, 1, 3, 4],
+        [0, 0, 1, 2, 1, 3, 4],
+    ]
+    assert delta == -2
+
+
 def test_canvas_mrope_thumbnail_matches_reference():
     # <text> <image> PAD </image> <text>; 16x turns a 4x4 patch grid into 1 token.
     tokens = [_TEXT, _IM_START, _IMAGE_PAD, _IM_END, _TEXT]
