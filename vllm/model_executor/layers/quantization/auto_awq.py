@@ -12,6 +12,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -904,11 +905,15 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
 
         # num_tokens >= threshold
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
-        # Batch invariant mode requires torch.matmul path
-        # for Triton override
+        # Batch invariant mode: dequantize and call the batch-invariant matmul
+        # directly; the torch.matmul override does not reach compiled regions.
         if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
             out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
-            out = torch.matmul(reshaped_x, out)
+            out = (
+                matmul_batch_invariant(reshaped_x, out)
+                if envs.VLLM_BATCH_INVARIANT
+                else torch.matmul(reshaped_x, out)
+            )
         else:
             out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
         if bias is not None:
