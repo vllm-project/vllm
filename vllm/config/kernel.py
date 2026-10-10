@@ -383,6 +383,11 @@ class KernelConfig:
     precedence over ``linear_backend``; for example,
     ``{"nvfp4_w4a16": "humming"}``."""
 
+    unquantized_linear_backend: LinearBackend = "auto"
+    """Backend override for unquantized linear layers only, decoupled from
+    ``linear_backend`` (which also drives the quantized kernel selector).
+    "auto" (default) falls back to ``linear_backend``."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -390,7 +395,7 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
-    @field_validator("linear_backend", mode="before")
+    @field_validator("linear_backend", "unquantized_linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
         if isinstance(value, str):

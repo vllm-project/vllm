@@ -172,6 +172,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
         linear_backend = (
             config.kernel_config.linear_backend if config is not None else "auto"
         )
+        if config is not None:
+            unquantized_backend = config.kernel_config.unquantized_linear_backend
+            if unquantized_backend != "auto":
+                linear_backend = unquantized_backend
         self._gemm_impl = dispatch_unquantized_gemm(linear_backend)
 
     def create_weights(
