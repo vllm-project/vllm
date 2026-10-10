@@ -115,6 +115,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
         sp_size: int = 1,
+        max_tokens_per_rank: int | None = None,
     ):
         super().__init__()
         self.buffer = buffer
@@ -126,6 +127,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
+        # Token capacity the ElasticBuffer was created with (per EP rank).
+        self.max_tokens_per_rank = max_tokens_per_rank
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -184,7 +187,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # In do_expand=False mode, the recv buffer is the worst case
         # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
-        # (= max_num_batched_tokens) makes the experts process ~R*8192 rows even
+        # (= max_tokens_per_rank) makes the experts process ~R*8192 rows even
         # for a handful of decode tokens. Bound it to the actual DP-padded batch
         # size (uniform across ranks): max(num_tokens_across_dp).
         #
@@ -194,8 +197,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # high concurrency). Round up to a power of 2 instead: this bounds the
         # set to ~log2(max_num_batched_tokens) values (compiled once, then
         # cached) while staying small for decode (e.g. 1 token -> 1) and capped
-        # at the buffer's init capacity for prefill. With sequence parallelism,
-        # each EP rank holds a ceil(n / sp_size) shard of its DP rank's batch.
+        # at the buffer's init capacity (not necessarily a power of 2) for
+        # prefill. With sequence parallelism, each EP rank holds a
+        # ceil(n / sp_size) shard of its DP rank's batch.
         num_max_tokens_per_rank = None
         if not do_expand:
             dp_meta = get_forward_context().dp_metadata
@@ -205,6 +209,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             else:
                 n = tokens.shape[0]
             num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+            if self.max_tokens_per_rank is not None:
+                if n > self.max_tokens_per_rank:
+                    raise ValueError(
+                        f"DeepEP v2 dispatch of {n} tokens per rank exceeds the "
+                        f"ElasticBuffer capacity ({self.max_tokens_per_rank})."
+                    )
+                num_max_tokens_per_rank = min(
+                    num_max_tokens_per_rank, self.max_tokens_per_rank
+                )
 
         (
             recv_x,
