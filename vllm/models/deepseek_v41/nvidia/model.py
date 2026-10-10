@@ -14,6 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_engram_dp_size,
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -150,6 +151,33 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             image_sentinel_lo=IMAGE_SENTINEL_BASE_ID,
         )
 
+    def _pcp_routing_input_ids(
+        self, input_ids: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        moe_config = self.experts.moe_config
+        if (
+            input_ids is None
+            or moe_config.pcp_size <= 1
+            or moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            return input_ids
+        if not (moe_config.has_hash_routing or self.experts.router.bias_vl is not None):
+            return None
+        ctx = get_forward_context()
+        input_ids_key = "dsv41_pcp_routing_input_ids"
+        if input_ids_key not in ctx.additional_kwargs:
+            ctx.additional_kwargs[input_ids_key] = get_pcp_group().all_gather(
+                input_ids, dim=0
+            )
+        return ctx.additional_kwargs[input_ids_key]
+
+    def _forward_fused_moe(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return super()._forward_fused_moe(
+            hidden_states, self._pcp_routing_input_ids(input_ids)
+        )
+
     def defer_finalize(self) -> None:
         """Leave the routed top-k reduction to the next fused all-reduce + mHC.
 
@@ -182,6 +210,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
     ) -> MoEOutput:
         """``forward`` with the routed top-k reduction and all-reduce left open."""
+        input_ids = self._pcp_routing_input_ids(input_ids)
         # The runner's custom op returns tensors only, so run its body directly.
         shared_output, routed = _unpack(
             self.experts._forward_impl(

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -647,7 +647,6 @@ class MoERunner(MoERunnerInterface):
             fused_out,
         )
 
-    @contextmanager
     def _sequence_parallel_context(self):
         """Return a context manager for sequence-parallel token
         redistribution.
@@ -657,21 +656,7 @@ class MoERunner(MoERunnerInterface):
         returns a no-op context.
         """
         ctx = get_forward_context()
-        local_is_padding = ctx.is_padding
-        if (
-            local_is_padding is not None
-            and self.moe_config.pcp_size > 1
-            and not self.moe_config.moe_parallel_config.use_all2all_kernels
-        ):
-            padding_key = "pcp_moe_is_padding"
-            if padding_key not in ctx.additional_kwargs:
-                ctx.additional_kwargs[padding_key] = (
-                    get_pcp_group()
-                    .all_gather(local_is_padding.to(torch.uint8), dim=0)
-                    .bool()
-                )
-            ctx.is_padding = ctx.additional_kwargs[padding_key]
-        sp_context = (
+        return (
             ctx.dp_metadata.sp_local_sizes(
                 self.moe_config.sp_size,
                 pcp_size=self.moe_config.pcp_size,
@@ -680,11 +665,6 @@ class MoERunner(MoERunnerInterface):
             if ctx.dp_metadata
             else nullcontext()
         )
-        try:
-            with sp_context:
-                yield
-        finally:
-            ctx.is_padding = local_is_padding
 
     def _maybe_add_zero_expert_output(
         self,
@@ -823,8 +803,7 @@ class MoERunner(MoERunnerInterface):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
         # router logits to all experts.
         # NOTE: this will be removed once all kernels are migrated into the
@@ -844,22 +823,8 @@ class MoERunner(MoERunnerInterface):
         ):
             hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
             router_logits = get_pcp_group().all_gather(router_logits, dim=0)
-            if input_ids is not None:
-                uses_input_ids = (
-                    self.moe_config.has_hash_routing or self.router.bias_vl is not None
-                )
-                if uses_input_ids:
-                    ctx = get_forward_context()
-                    input_ids_key = "pcp_moe_input_ids"
-                    if input_ids_key not in ctx.additional_kwargs:
-                        ctx.additional_kwargs[input_ids_key] = (
-                            get_pcp_group().all_gather(input_ids, dim=0)
-                        )
-                    input_ids = ctx.additional_kwargs[input_ids_key]
-                else:
-                    input_ids = None
 
-        return hidden_states, router_logits, input_ids
+        return hidden_states, router_logits
 
     def _maybe_combine(
         self,
@@ -948,10 +913,9 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
-            hidden_states, router_logits, input_ids = self._maybe_dispatch(
+            hidden_states, router_logits = self._maybe_dispatch(
                 hidden_states,
                 router_logits,
-                input_ids,
             )
 
             shared_output, hidden_states = self._apply_quant_method(
