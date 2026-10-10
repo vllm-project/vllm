@@ -3056,6 +3056,10 @@ def top_k_per_row_decode(
     stride1: int,
     topk_tokens: int,
 ) -> None:
+    """Select per-row indices with a runtime width in [1, 8192].
+
+    Device shared-memory limits can further restrict the width for a given launch.
+    """
     torch.ops._C.top_k_per_row_decode(
         logits,
         next_n,
