@@ -2997,6 +2997,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert_eq!(kv_events_config.buffer_steps, 10_000);
     assert_eq!(kv_events_config.hwm, 100_000);
     assert_eq!(kv_events_config.max_queue_size, 100_000);
+    assert_eq!(
+        kv_events_config.snapshot_endpoint.as_deref(),
+        Some("tcp://127.0.0.1:5559")
+    );
+    assert_eq!(kv_events_config.snapshot_max_blocks, Some(1_000_000));
+    assert_eq!(
+        kv_events_config.snapshot_max_response_bytes,
+        Some(256 * 1024 * 1024)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

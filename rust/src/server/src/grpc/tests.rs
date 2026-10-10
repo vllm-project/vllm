@@ -2378,6 +2378,9 @@ fn kv_event_source_filters_and_exposes_zmq_publisher() {
         publisher: "null".to_string(),
         endpoint: "tcp://*:5559".to_string(),
         replay_endpoint: Some("tcp://*:5560".to_string()),
+        snapshot_endpoint: None,
+        snapshot_max_blocks: None,
+        snapshot_max_response_bytes: None,
         buffer_steps: 10_000,
         hwm: 100_000,
         max_queue_size: 100_000,
@@ -2400,6 +2403,12 @@ fn kv_event_source_filters_and_exposes_zmq_publisher() {
     assert_eq!(source.buffer_steps, 10_000);
     assert_eq!(source.hwm, 100_000);
     assert_eq!(source.max_queue_size, 100_000);
+    assert_eq!(source.snapshot_endpoint, "");
+
+    let config = ready.kv_events_config.as_mut().unwrap();
+    config.snapshot_endpoint = Some("tcp://10.0.0.2:5561".to_string());
+    let source = kv_event_source(&ready).expect("configured ZMQ event source");
+    assert_eq!(source.snapshot_endpoint, "tcp://10.0.0.2:5561");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

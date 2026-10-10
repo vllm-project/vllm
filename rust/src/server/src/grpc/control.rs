@@ -535,5 +535,6 @@ pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::
         buffer_steps: config.buffer_steps,
         hwm: config.hwm,
         max_queue_size: config.max_queue_size,
+        snapshot_endpoint: config.snapshot_endpoint.clone().unwrap_or_default(),
     })
 }

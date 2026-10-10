@@ -196,4 +196,6 @@ message KvEventSource {
   uint32 buffer_steps = 8;
   uint32 hwm = 9;
   uint32 max_queue_size = 10;
+  // Snapshot ROUTER address; empty when snapshots are off.
+  string snapshot_endpoint = 11;
 }

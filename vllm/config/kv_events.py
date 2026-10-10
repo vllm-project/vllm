@@ -47,6 +47,25 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    snapshot_endpoint: str | None = None
+    """The zmq ROUTER endpoint that serves snapshots of the current KV cache
+    state, so a consumer that starts late can catch up and then follow the live
+    stream. Setting it also adds a publisher identity to every live batch and
+    sends an empty batch every second while idle. See the KV event snapshots
+    docs for the protocol.
+    """
+
+    snapshot_max_blocks: int = 1_000_000
+    """The most block records the snapshot recorder keeps, and separately the
+    most live block references across all tiers. Going over either stops
+    snapshots until the engine restarts.
+    """
+
+    snapshot_max_response_bytes: int = 256 * 1024 * 1024
+    """The most encoded bytes in one snapshot reply. A larger snapshot stops
+    snapshots until the engine restarts.
+    """
+
     def __post_init__(self):
         if self.publisher is None:
             self.publisher = "zmq" if self.enable_kv_cache_events else "null"
