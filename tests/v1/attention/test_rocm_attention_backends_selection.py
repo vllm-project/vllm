@@ -884,6 +884,125 @@ def test_auto_selection_for_kv_connector(
     assert backend_path == expected_backend.get_path()
 
 
+def _mm_prefix_selector_config() -> AttentionSelectorConfig:
+    return AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=True,
+    )
+
+
+def test_unified_attn_declares_mm_prefix_support():
+    """ROCM_AITER_UNIFIED_ATTN supports Prefix-LM and ROCM_ATTN does not."""
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    assert RocmAiterUnifiedAttentionBackend.supports_mm_prefix() is True
+    assert RocmAttentionBackend.supports_mm_prefix() is False
+
+
+def test_unified_attn_supports_mm_prefix(mock_vllm_config, mock_get_cdna_version):
+    """ROCM_AITER_UNIFIED_ATTN can be selected with mm_prefix."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        attn_selector_config=_mm_prefix_selector_config(),
+    )
+
+    assert backend_path == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
+
+
+def test_rocm_attn_rejects_mm_prefix(mock_vllm_config, mock_get_cdna_version):
+    """Selecting ROCM_ATTN with mm_prefix is illegal."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = _mm_prefix_selector_config()
+
+    with pytest.raises(
+        ValueError, match="partial multimodal token full attention not supported"
+    ):
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_ATTN,
+            attn_selector_config=attn_selector_config,
+        )
+
+
+@pytest.mark.parametrize(
+    "aiter_found, expected_backend",
+    [
+        (True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (False, AttentionBackendEnum.TRITON_ATTN),
+    ],
+)
+def test_auto_selection_for_mm_prefix(
+    aiter_found, expected_backend, mock_vllm_config, mock_get_cdna_version
+):
+    """Auto-selection with mm_prefix and AITER enabled resolves to unified attn,
+    and to triton attn if AITER not enabled."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    with patch(
+        "vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found
+    ):
+        backend_path = RocmPlatform.get_attn_backend_cls(
+            selected_backend=None,
+            attn_selector_config=_mm_prefix_selector_config(),
+        )
+
+    assert backend_path == expected_backend.get_path()
+
+
+def test_aiter_unified_attention_metadata_builder_mm_prefix():
+    """RocmAiterUnifiedAttentionMetadataBuilder populates mm_prefix metadata."""
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import AttentionSpec
+
+    vllm_config = MagicMock()
+    vllm_config.model_config.get_num_attention_heads.return_value = 8
+    vllm_config.model_config.get_num_kv_heads.return_value = 8
+    vllm_config.model_config.get_head_size.return_value = 128
+
+    kv_cache_spec = AttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.float16,
+    )
+    builder = RocmAiterUnifiedAttentionMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["test_layer"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+    )
+
+    common = MagicMock(spec=CommonAttentionMetadata)
+    common.num_actual_tokens = 10
+    common.max_query_len = 10
+    common.query_start_loc = torch.tensor([0, 10], dtype=torch.int32)
+    common.max_seq_len = 10
+    common.seq_lens = torch.tensor([10], dtype=torch.int32)
+    common.block_table_tensor = torch.zeros((1, 1), dtype=torch.int32)
+    common.slot_mapping = torch.zeros(10, dtype=torch.int64)
+    common.causal = True
+    common.num_reqs = 1
+    common.mm_req_doc_ranges = {0: [(2, 6)]}
+
+    attn_metadata = builder.build(0, common)
+    assert attn_metadata.mm_prefix_range == {0: [(2, 6)]}
+    assert attn_metadata.mm_prefix_range_tensor is not None
+
+
 def test_unified_attn_prefers_block_contiguous_layout():
     """Unified attn prefers a block-first KV layout, hence ok with kv connectors."""
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (

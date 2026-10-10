@@ -83,8 +83,7 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        # Not implemented
-        return False
+        return True
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -276,7 +275,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        if attn_metadata.causal:
+        mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
+        if attn_metadata.causal and mm_prefix_range_tensor is None:
             self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -299,9 +299,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 output_scale=output_scale,
             )
         else:
-            # The aiter kernel is causal-only. Non-causal cross-attention
-            # (ENCODER_DECODER, e.g. Whisper) falls back to the vLLM Triton
-            # unified kernel, which shares this layout and honors the flag.
+            # The aiter kernel is causal-only and does not support mm_prefix_range.
+            # Non-causal cross-attention (ENCODER_DECODER, e.g. Whisper) and
+            # Prefix-LM attention fall back to the vLLM Triton unified kernel,
+            # which shares this layout and supports bidirectional prefix masking.
             from vllm.v1.attention.ops.triton_unified_attention import (
                 unified_attention as triton_unified_attention,
             )
@@ -327,6 +328,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 v_descale=layer._v_scale.expand(descale_shape),
                 sinks=self.sinks,
                 output_scale=output_scale,
+                mm_prefix_range=mm_prefix_range_tensor,
             )
 
         return output
