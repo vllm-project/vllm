@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -1442,10 +1443,11 @@ class DPAsyncMPClient(AsyncMPClient):
             renderer,
         )
 
-        # List of [waiting, running, kv_cache_usage] per engine.
+        # List of [waiting, running, kv_cache_usage, mean_queue_time,
+        # preempted_total] per engine.
         # Used only by DPLBAsyncMPClient subclass.
         self.lb_engines: list[list[int | float]] = [
-            [0, 0, 0.0] for _ in self.core_engines
+            [0, 0, 0.0, 0.0, 0] for _ in self.core_engines
         ]
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
@@ -1524,7 +1526,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             )
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines = self.lb_engines + [
-                                    [0, 0, 0.0]
+                                    [0, 0, 0.0, 0.0, 0]
                                     for _ in range(
                                         new_engine_count - len(self.lb_engines)
                                     )
@@ -1571,6 +1573,7 @@ class DPAsyncMPClient(AsyncMPClient):
                         count_slice = slice(ranks[0], ranks[-1] + 1)
                         sliced_counts = counts[count_slice]
                         self.lb_engines = sliced_counts
+                        self._apply_snapshot_metrics()
                         logger.debug(
                             "Received counts: %s (%s)", sliced_counts, count_slice
                         )
@@ -1599,6 +1602,9 @@ class DPAsyncMPClient(AsyncMPClient):
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
 
+    def _apply_snapshot_metrics(self) -> None:
+        """Hook for subclasses to derive LB scores from a fresh snapshot."""
+
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
@@ -1622,6 +1628,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Exact per-engine count of this client's unfinished requests.
         self.engine_inflight: Counter[EngineIdentity] = Counter()
 
+        # Result-metric LB state. Initialized before super().__init__ since
+        # the stats update task may start there.
+        self._dp_lb_result_metrics = envs.VLLM_DP_LB_RESULT_METRICS
+        num_engines = vllm_config.parallel_config.data_parallel_size
+        # Per-engine static score penalty derived from the latest snapshot
+        # (KV pressure + queue-wait + preemption signals).
+        self._static_scores: list[float] = [0.0] * num_engines
+        # EMA-smoothed mean queue wait per engine (None until first snap).
+        self._smoothed_queue_time: list[float | None] = [None] * num_engines
+        self._last_preempted_total: list[int] = [0] * num_engines
+        # Preemption deltas and time accumulated across snapshots; the rate
+        # publishes once the window reaches 100ms and the accumulators reset.
+        self._preempt_delta_acc: list[int] = [0] * num_engines
+        self._preempt_window_elapsed: float = 0.0
+        self._last_preempt_rates: list[float] = [0.0] * num_engines
+        self._last_snapshot_time: float = 0.0
+        # Slow-smoothed cross-engine queue-wait baseline (None until the
+        # first snapshot; moves at beta=0.1 per snapshot to avoid flapping).
+        self._smoothed_baseline: float | None = None
+
         super().__init__(
             vllm_config,
             executor_class,
@@ -1638,6 +1664,136 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.eng_start_index = (
             len(self.core_engines) * self.client_index
         ) // client_count
+
+    def _apply_snapshot_metrics(self) -> None:
+        """Recompute per-engine static score penalties from the latest
+        coordinator snapshot.
+
+        Runs on every snapshot refresh (~100ms); the per-request hot path
+        only reads the precomputed scores. All signals are compared across
+        engines (relative, not absolute), so globally uniform degradation
+        cancels out and only real imbalance is penalized.
+        """
+        if not self._dp_lb_result_metrics:
+            return
+        counts = self.lb_engines
+        num_engines = len(counts)
+        if num_engines == 0:
+            return
+        # Keep derived state aligned with the current engine list
+        # (elastic EP scale up/down).
+        if len(self._static_scores) != num_engines:
+            self._static_scores = (self._static_scores + [0.0] * num_engines)[
+                :num_engines
+            ]
+            self._smoothed_queue_time = (
+                self._smoothed_queue_time + [None] * num_engines
+            )[:num_engines]
+            self._last_preempted_total = (
+                self._last_preempted_total + [0] * num_engines
+            )[:num_engines]
+            self._preempt_delta_acc = (self._preempt_delta_acc + [0] * num_engines)[
+                :num_engines
+            ]
+            self._last_preempt_rates = (self._last_preempt_rates + [0.0] * num_engines)[
+                :num_engines
+            ]
+
+        now = time.monotonic()
+        elapsed = now - self._last_snapshot_time if self._last_snapshot_time else 0.0
+        self._last_snapshot_time = now
+
+        # EMA-smooth the queue-wait proxy so a single noisy snapshot can't
+        # trigger rerouting, and turn preemption counts into rates over an
+        # accumulated window (occasional preempts at low QPS stay free).
+        alpha = 0.3
+        preempt_rates = self._last_preempt_rates
+        if elapsed > 0.0:
+            self._preempt_window_elapsed += elapsed
+        for idx in range(num_engines):
+            entry = counts[idx]
+            queue_time = float(entry[3]) if len(entry) > 3 else 0.0
+            preempted_total = int(entry[4]) if len(entry) > 4 else 0
+            prev = self._smoothed_queue_time[idx]
+            self._smoothed_queue_time[idx] = (
+                queue_time
+                if prev is None
+                else alpha * queue_time + (1.0 - alpha) * prev
+            )
+            # Accumulate deltas across snapshots instead of rating each
+            # interval: storms publish rapid sub-interval snapshots, and
+            # dropping those deltas blinds the signal exactly when
+            # preemptions spike. Once the window reaches 100ms the rate
+            # publishes and the accumulator resets, so the signal also
+            # decays within ~100ms of calm.
+            self._preempt_delta_acc[idx] += max(
+                0, preempted_total - self._last_preempted_total[idx]
+            )
+            self._last_preempted_total[idx] = preempted_total
+        if self._preempt_window_elapsed >= 0.1:
+            for idx in range(num_engines):
+                preempt_rates[idx] = (
+                    self._preempt_delta_acc[idx] / self._preempt_window_elapsed
+                )
+                self._preempt_delta_acc[idx] = 0
+            self._preempt_window_elapsed = 0.0
+
+        # Cross-engine queue-wait baseline (healthy reference). With few
+        # ranks the p25 rule degenerates to the max value and would silence
+        # the signal, so use the min of the smoothed values instead. Floor
+        # at 1s to keep the ratio meaningful when the healthiest engine has
+        # an (almost) empty queue.
+        smoothed = sorted(v for v in self._smoothed_queue_time if v is not None)
+        if not smoothed:
+            return
+        if len(smoothed) < 4:
+            baseline = smoothed[0]
+        else:
+            baseline = smoothed[max(1, len(smoothed) // 4)]
+        # Slow-EMA the baseline itself (beta=0.1, ~1s memory): the min tracks
+        # the healthiest engine, so a sudden queue formation or dissolution
+        # there jumps the raw baseline and spikes or collapses every other
+        # engine's quadratic ratio term within one snapshot, flapping
+        # routing. A slow reference damps both directions; the floor keeps
+        # the ratio meaningful.
+        baseline = max(baseline, 1.0)
+        beta = 0.1
+        prev_baseline = self._smoothed_baseline
+        self._smoothed_baseline = (
+            baseline
+            if prev_baseline is None
+            else beta * baseline + (1.0 - beta) * prev_baseline
+        )
+        baseline = self._smoothed_baseline
+
+        for idx in range(num_engines):
+            waiting, running, kv_cache_usage = counts[idx][:3]
+            queue_time = self._smoothed_queue_time[idx] or 0.0
+
+            penalty = 0.0
+            if waiting:
+                # KV pressure penalty: identical to the per-request term main
+                # applies (uncapped), now derived once per snapshot.
+                penalty += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
+            result_penalty = 0.0
+            ratio = queue_time / baseline
+            if ratio > 1.2:
+                result_penalty += 20.0 * (ratio - 1.0) ** 2
+            if preempt_rates[idx] > 5.0:
+                result_penalty += 30.0 * (preempt_rates[idx] - 5.0)
+
+            # Cap only the result-metric penalties relative to the engine's
+            # own load estimate so noisy metrics can't fully dominate
+            # queue-based routing. The KV-pressure term above stays uncapped:
+            # capping it would shed less than main in extreme queue +
+            # KV-bound regimes.
+            base_est = max(
+                self.client_count * self.engine_inflight[self.core_engines[idx]],
+                waiting + running,
+            )
+            self._static_scores[idx] = penalty + min(
+                result_penalty, base_est * 0.5 + 500.0
+            )
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         if (engine := self.reqs_in_flight.get(request.request_id)) is not None:
@@ -1659,7 +1815,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.eng_start_index + i) % num_engines
-                waiting, running, kv_cache_usage = current_counts[idx]
+                waiting, running, kv_cache_usage = current_counts[idx][:3]
                 # Estimate engine load as the greater of the coordinator's
                 # latest (waiting + running) snapshot and this client's own
                 # in-flight count (scaled by the number of clients). The
@@ -1668,8 +1824,33 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 # race with routing decisions; the snapshot raises the score
                 # when other clients or stale requests load the engine.
                 inflight = self.engine_inflight[self.core_engines[idx]]
-                score: float = max(self.client_count * inflight, waiting + running)
-                if waiting:
+                raw_inflight = self.client_count * inflight
+                # Grow the in-flight term superlinearly past a small burst
+                # threshold. In-flight is the only real-time signal within a
+                # snapshot window, and a linear term lets a healthy engine's
+                # score overtake a genuinely overloaded engine's frozen
+                # snapshot score mid-burst (load inversion).
+                # Knee (10): the in-flight level below which the ~100ms
+                # coordinator snapshot is still fresh, so scoring must stay
+                # identical to main (exact round-robin preserved). It is a
+                # conservative upper bound, not a tuned optimum: it must stay
+                # low so convex shedding engages before snapshot staleness
+                # opens a hoarding window. 10 and 1.5 are empirical.
+                # Aggregation: the knee applies to raw_inflight, the burst
+                # aggregated across all API-server clients, so a single
+                # client crosses it at ~10/client_count of its own in-flight
+                # requests; equality with main holds for the aggregate only.
+                if raw_inflight > 10:
+                    inflight_score = 10.0 + (raw_inflight - 10.0) ** 1.5
+                else:
+                    inflight_score = float(raw_inflight)
+                score: float = max(inflight_score, waiting + running)
+                if self._dp_lb_result_metrics:
+                    # Static penalty from the latest snapshot: KV pressure,
+                    # queue-wait and preemption result metrics.
+                    if idx < len(self._static_scores):
+                        score += self._static_scores[idx]
+                elif waiting:
                     # Waiting requests are penalized in proportion to KV cache
                     # pressure: a queue on a KV-bound engine drains slowly, so
                     # new requests should strongly prefer other engines. With
