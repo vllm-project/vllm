@@ -641,3 +641,107 @@ def test_ptr_table_keeps_top_bit_pointers():
     table = recoverssm_ptr_table([_Ptr(p) for p in ptrs], "cpu")
     assert table.dtype == torch.int64
     assert [v & ((1 << 64) - 1) for v in table.tolist()] == ptrs
+
+
+# ---------------------------------------------- grouped commit (several KV groups)
+from vllm.model_executor.layers.mamba.gdn.recoverssm_gdn import (  # noqa: E402
+    GDNRecoverSSMGroupedCommit,
+)
+
+
+def _group_layers(nb: int, num_layers: int, seed: int):
+    g = torch.Generator(device="cuda").manual_seed(seed)
+    conv = [
+        torch.randn(nb, 8, 3 + T - 1, device="cuda", generator=g).bfloat16()
+        for _ in range(num_layers)
+    ]
+    ckpt = [
+        (torch.randn(nb, HV, V, K, device="cuda", generator=g) * 0.05).float()
+        for _ in range(num_layers)
+    ]
+    # Replay rows hold (c, k, decay); a decay in [0, 1) keeps the fold bounded.
+    replay = [
+        torch.rand(nb, HV, T, V + K + 1, device="cuda", generator=g)
+        for _ in range(num_layers)
+    ]
+    return conv, ckpt, replay
+
+
+@pytest.mark.parametrize("align", [False, True])
+def test_grouped_commit_matches_per_group_commits(align):
+    """Three KV cache groups of two GDN layers each, spec rows 0, 2, 3 of a 5-request
+    batch, every group with its own state blocks (and block table): one grouped commit
+    must leave every conv state and checkpoint bit for bit as one commit per group. A
+    second step with new state-index tensors checks that the address tables follow."""
+    num_groups, num_layers, nb, bs = 3, 2, 40, 4
+    groups = [_group_layers(nb, num_layers, seed=10 + i) for i in range(num_groups)]
+    copies = [tuple([t.clone() for t in ts] for ts in grp) for grp in groups]
+    qsl = torch.tensor([0, 4, 5, 7], dtype=torch.int32, device="cuda")  # 4, 1, 2
+    req_rows = torch.tensor([0, 2, 3], dtype=torch.int32, device="cuda")
+    acc = torch.tensor([3, 9, 1, 2, 9], dtype=torch.int32, device="cuda")
+    nc = torch.tensor([5, 0, 6, 3, 0], dtype=torch.int32, device="cuda")
+    gen = torch.Generator().manual_seed(0)
+
+    def step_inputs():
+        # Distinct blocks per group (1..nb-1; 0 is the null block).
+        bts = [
+            (torch.randperm(nb - 1, generator=gen)[:25] + 1)
+            .to(torch.int32)
+            .reshape(5, 5)
+            .to("cuda")
+            for _ in range(num_groups)
+        ]
+        if align:
+            sis = [
+                torch.stack(
+                    [bt[r, int(nc[r]) // bs] for r in req_rows.tolist()]
+                ).contiguous()
+                for bt in bts
+            ]
+        else:
+            sis = [bt[req_rows.long(), 0].contiguous() for bt in bts]
+        return sis, bts
+
+    def ctx(conv, ckpt, replay):
+        return GDNRecoverSSMCommitContext.from_tensors(
+            conv, ckpt, replay, spec_query_len=T, max_num_reqs=8
+        )
+
+    per_group = [ctx(*grp) for grp in groups]
+    grouped = GDNRecoverSSMGroupedCommit([ctx(*grp) for grp in copies], max_num_reqs=8)
+    for _ in range(2):
+        sis, bts = step_inputs()
+        kw = dict(
+            request_indices=req_rows,
+            num_computed_tokens=nc if align else None,
+            mamba_block_size=bs if align else None,
+        )
+        for c, si, bt in zip(per_group, sis, bts):
+            c.commit(acc, si, qsl, block_table=bt if align else None, **kw)
+        grouped.commit(
+            acc,
+            [si.clone() for si in sis],
+            qsl,
+            block_tables=[bt.clone() for bt in bts] if align else None,
+            **kw,
+        )
+        for grp, cpy in zip(groups, copies):
+            for ref, got in zip(grp, cpy):
+                for r, t in zip(ref, got):
+                    assert torch.equal(r, t)
+
+
+def test_grouped_commit_rejects_mismatched_groups():
+    nb = 12
+    grp = _group_layers(nb, 1, seed=0)
+    c = GDNRecoverSSMCommitContext.from_tensors(*grp, spec_query_len=T, max_num_reqs=8)
+    with pytest.raises(ValueError, match="at least two groups"):
+        GDNRecoverSSMGroupedCommit([c], max_num_reqs=8)
+    grouped = GDNRecoverSSMGroupedCommit([c, c], max_num_reqs=8)
+    qsl = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
+    acc = torch.tensor([2], dtype=torch.int32, device="cuda")
+    si = torch.tensor([3], dtype=torch.int32, device="cuda")
+    with pytest.raises(ValueError, match="one state-index tensor per group"):
+        grouped.commit(acc, [si], qsl)
+    with pytest.raises(ValueError, match="one shape, stride and dtype"):
+        grouped.commit(acc, [si, si.long()], qsl)

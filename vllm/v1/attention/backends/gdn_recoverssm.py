@@ -8,6 +8,7 @@ column, num_accepted_tokens is always 1 (the checkpoint and the compacted conv w
 already hold the accepted state), and the metadata carries what the post-sampling commit
 needs. Mirrors the Kimi-K3 KDA builder's RecoverSSM handling."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -73,6 +74,65 @@ class GDNRecoverSSMMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
             num_computed_tokens=c.num_computed_tokens,
             block_size=c.block_size,
         )
+
+
+def gdn_recoverssm_groupable(metas: Sequence["GDNRecoverSSMMetadata"]) -> bool:
+    """Whether the GDN groups of one step can commit as one: every group has spec rows
+    and the same per-request commit inputs (the groups differ only in their state
+    indices and block tables)."""
+    if len(metas) < 2:
+        return False
+    c0 = metas[0].recoverssm_commit
+    if c0 is None:
+        return False
+    for m in metas:
+        c = m.recoverssm_commit
+        if (
+            c is None
+            or m.recoverssm_context is None
+            or m.num_spec_decodes != metas[0].num_spec_decodes
+            or (c.request_indices is None) != (c0.request_indices is None)
+            or (c.block_table is None) != (c0.block_table is None)
+            or c.block_size != c0.block_size
+        ):
+            return False
+    return True
+
+
+def commit_gdn_recoverssm_groups(
+    metas: Sequence["GDNRecoverSSMMetadata"],
+    num_accepted_tokens: torch.Tensor,
+    grouped: Any,
+) -> RecoverSSMPostprocessMetadata | None:
+    """Commit the GDN groups of one step with one set of launches
+    (``GDNRecoverSSMGroupedCommit``, built over the groups' contexts in this order).
+    Returns the postprocess metadata once for all groups: the align update writes the
+    same per-request values for every group with the same block size."""
+    c0 = metas[0].recoverssm_commit
+    assert c0 is not None
+    n = metas[0].num_spec_decodes
+    commits = [m.recoverssm_commit for m in metas]
+    grouped.commit(
+        num_accepted_tokens,
+        [c.state_indices[:n, 0] for c in commits],  # type: ignore[union-attr]
+        c0.query_start_loc[: n + 1],
+        request_indices=c0.request_indices,
+        block_tables=(
+            None if c0.block_table is None else [c.block_table for c in commits]  # type: ignore[union-attr]
+        ),
+        num_computed_tokens=c0.num_computed_tokens,
+        mamba_block_size=c0.block_size,
+    )
+    if c0.block_table is None:
+        return None
+    assert c0.block_size is not None and c0.num_computed_tokens is not None
+    return RecoverSSMPostprocessMetadata(
+        num_spec_decodes=n,
+        request_indices=c0.request_indices,
+        block_table=c0.block_table,
+        num_computed_tokens=c0.num_computed_tokens,
+        block_size=c0.block_size,
+    )
 
 
 class GDNRecoverSSMMetadataBuilder(GDNAttentionMetadataBuilder):

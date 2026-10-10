@@ -13,7 +13,12 @@ are here:
   counts and the block table;
 - ``compact_conv_state_kernel``: moves the accepted suffix of an extended short-conv
   window to the front of the destination block (and writes the boundary window in align
-  mode)."""
+  mode).
+
+Both take optional per-group tables (``state_indices_addrs_ptr`` and, for the plan,
+``block_table_addrs_ptr``; ``layer_groups_ptr`` for the per-layer kernel) so that one
+launch covers the layers of several KV cache groups, each with its own state indices,
+block table and plan slice (``stride_plan_group`` apart). One group passes ``None``."""
 
 from vllm.triton_utils import tl, triton
 
@@ -22,6 +27,7 @@ from vllm.triton_utils import tl, triton
     {
         "HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None,
         "ALIGN_MODE": lambda args: args["block_table_ptr"] is not None,
+        "GROUPED": lambda args: args["state_indices_addrs_ptr"] is not None,
     }
 )
 @triton.jit
@@ -46,11 +52,28 @@ def prepare_commit_plan_kernel(
     stride_block_table_row,
     stride_block_table_col,
     stride_num_computed,
+    state_indices_addrs_ptr,
+    block_table_addrs_ptr,
+    stride_plan_group,
     SPEC_QUERY_LEN: tl.constexpr,
     HAS_REQUEST_INDICES: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    GROUPED: tl.constexpr,
 ):
     spec_idx = tl.program_id(0)
+    plan_offset = 0
+    if GROUPED:
+        # One program row per KV cache group (grid axis 1): the group's own state
+        # indices and block table, and its own slice of the plan.
+        group_idx = tl.program_id(1)
+        state_indices_ptr = tl.load(state_indices_addrs_ptr + group_idx).to(
+            tl.pointer_type(state_indices_ptr.dtype.element_ty)
+        )
+        if ALIGN_MODE:
+            block_table_ptr = tl.load(block_table_addrs_ptr + group_idx).to(
+                tl.pointer_type(block_table_ptr.dtype.element_ty)
+            )
+        plan_offset = group_idx * stride_plan_group
     source_state_idx = tl.load(state_indices_ptr + spec_idx * stride_state_indices).to(
         tl.int64
     )
@@ -101,21 +124,23 @@ def prepare_commit_plan_kernel(
             other=null_block_id,
         ).to(tl.int64)
     valid = (source_state_idx > null_block_id) & (commit_len > 0)
-    tl.store(commit_lens_ptr + spec_idx, tl.where(valid, commit_len, 0))
+    plan_idx = plan_offset + spec_idx
+    tl.store(commit_lens_ptr + plan_idx, tl.where(valid, commit_len, 0))
     tl.store(
-        final_state_indices_ptr + spec_idx,
+        final_state_indices_ptr + plan_idx,
         tl.where(valid, final_state_idx, null_block_id),
     )
     tl.store(
-        boundary_state_indices_ptr + spec_idx,
+        boundary_state_indices_ptr + plan_idx,
         tl.where(valid, boundary_state_idx, null_block_id),
     )
     tl.store(
-        boundary_recovery_lens_ptr + spec_idx,
+        boundary_recovery_lens_ptr + plan_idx,
         tl.where(valid, boundary_recovery_len, 0),
     )
 
 
+@triton.heuristics({"GROUPED": lambda args: args["layer_groups_ptr"] is not None})
 @triton.jit
 def compact_conv_state_kernel(
     conv_state_ref_ptr,
@@ -132,25 +157,38 @@ def compact_conv_state_kernel(
     conv_dim,
     conv_history_len,
     stride_state_indices,
+    layer_groups_ptr,
+    state_indices_addrs_ptr,
+    stride_plan_group,
     BLOCK_D: tl.constexpr,
     BLOCK_HISTORY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    GROUPED: tl.constexpr,
 ):
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_l = tl.program_id(2)
+    plan_idx = pid_b
+    if GROUPED:
+        # Layers of several KV cache groups: each reads its group's state indices
+        # and plan.
+        group_idx = tl.load(layer_groups_ptr + pid_l)
+        state_indices_ptr = tl.load(state_indices_addrs_ptr + group_idx).to(
+            tl.pointer_type(state_indices_ptr.dtype.element_ty)
+        )
+        plan_idx = group_idx * stride_plan_group + pid_b
     source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(
         tl.int64
     )
     if source_state_idx <= null_block_id:
         return
 
-    commit_len = tl.load(commit_lens_ptr + pid_b)
+    commit_len = tl.load(commit_lens_ptr + plan_idx)
     if commit_len == 0:
         return
-    final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
+    final_state_idx = tl.load(final_state_indices_ptr + plan_idx).to(tl.int64)
+    boundary_state_idx = tl.load(boundary_state_indices_ptr + plan_idx).to(tl.int64)
+    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + plan_idx)
 
     if final_state_idx <= null_block_id:
         return

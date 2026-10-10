@@ -330,6 +330,7 @@ def gdn_recoverssm_verify(
     return out
 
 
+@triton.heuristics({"GROUPED": lambda args: args["layer_groups_ptr"] is not None})
 @triton.jit
 def _commit_gdn_state_kernel(
     state_ref_ptr,
@@ -351,12 +352,16 @@ def _commit_gdn_state_kernel(
     stride_replay_pos,
     stride_replay_dim,
     stride_si,
+    layer_groups_ptr,
+    state_indices_addrs_ptr,
+    stride_plan_group,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     BOUNDARY: tl.constexpr,
+    GROUPED: tl.constexpr,
 ):
     # Every program runs one fold and keeps one tile live. In align mode the
     # block-boundary state (the window's first boundary_len tokens) is folded by a
@@ -367,23 +372,32 @@ def _commit_gdn_state_kernel(
     pid_lh = tl.program_id(2)
     pid_l = pid_lh // NUM_HEADS
     pid_h = pid_lh % NUM_HEADS
+    plan_idx = pid_b
+    if GROUPED:
+        # Layers of several KV cache groups: each reads its group's state indices
+        # and plan.
+        group_idx = tl.load(layer_groups_ptr + pid_l)
+        state_indices_ptr = tl.load(state_indices_addrs_ptr + group_idx).to(
+            tl.pointer_type(state_indices_ptr.dtype.element_ty)
+        )
+        plan_idx = group_idx * stride_plan_group + pid_b
     src = tl.load(state_indices_ptr + pid_b * stride_si).to(tl.int64)
     if src <= null_block_id:
         return
-    n = tl.load(commit_lens_ptr + pid_b)
+    n = tl.load(commit_lens_ptr + plan_idx)
     if n == 0:
         return
-    final_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
+    final_idx = tl.load(final_state_indices_ptr + plan_idx).to(tl.int64)
     if final_idx <= null_block_id:
         return
     dst_idx = final_idx
     if BOUNDARY:
-        dst_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
+        dst_idx = tl.load(boundary_state_indices_ptr + plan_idx).to(tl.int64)
         # A window ending exactly on the boundary keeps its final state in that
         # block: the first launch already wrote it (and may have overwritten src).
         if dst_idx <= null_block_id or dst_idx == final_idx:
             return
-        n = tl.load(boundary_recovery_lens_ptr + pid_b)
+        n = tl.load(boundary_recovery_lens_ptr + plan_idx)
     state_ptr = tl.load(state_base_addrs_ptr + pid_l).to(
         tl.pointer_type(state_ref_ptr.dtype.element_ty)
     )
@@ -559,10 +573,43 @@ class GDNRecoverSSMCommitContext:
         batch = state_indices.shape[0]
         if batch == 0:
             return
-        _require(state_indices.ndim == 1, "state indices must be one-dimensional")
-        _require(
-            batch <= self.commit_lens.shape[0], "commit batch exceeds its plan capacity"
+        self._check_inputs(
+            batch,
+            self.commit_lens.shape[0],
+            num_accepted_tokens,
+            state_indices,
+            query_start_loc,
+            request_indices,
+            block_table,
+            num_computed_tokens,
+            mamba_block_size,
         )
+        self._launch(
+            batch,
+            num_accepted_tokens,
+            state_indices,
+            query_start_loc,
+            request_indices,
+            block_table,
+            num_computed_tokens,
+            mamba_block_size,
+            commit_conv,
+        )
+
+    def _check_inputs(
+        self,
+        batch: int,
+        capacity: int,
+        num_accepted_tokens: torch.Tensor,
+        state_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        request_indices: torch.Tensor | None,
+        block_table: torch.Tensor | None,
+        num_computed_tokens: torch.Tensor | None,
+        mamba_block_size: int | None,
+    ) -> None:
+        _require(state_indices.ndim == 1, "state indices must be one-dimensional")
+        _require(batch <= capacity, "commit batch exceeds its plan capacity")
         _require(
             query_start_loc.ndim == 1 and query_start_loc.shape[0] == batch + 1,
             "commit metadata is incompatible",
@@ -604,8 +651,30 @@ class GDNRecoverSSMCommitContext:
             ),
             "commit inputs must be on the same device",
         )
+
+    def _launch(
+        self,
+        batch: int,
+        num_accepted_tokens: torch.Tensor,
+        state_indices: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        request_indices: torch.Tensor | None,
+        block_table: torch.Tensor | None,
+        num_computed_tokens: torch.Tensor | None,
+        mamba_block_size: int | None,
+        commit_conv: bool,
+        *,
+        num_groups: int = 1,
+        layer_groups: torch.Tensor | None = None,
+        state_indices_addrs: torch.Tensor | None = None,
+        block_table_addrs: torch.Tensor | None = None,
+        stride_plan_group: int = 0,
+    ) -> None:
+        # With several groups, ``state_indices`` and ``block_table`` are group 0's
+        # (they give the kernels the dtype and the strides every group shares); the
+        # kernels read each group's own tensors through the address tables.
         bt_stride = (0, 0) if block_table is None else block_table.stride()
-        prepare_commit_plan_kernel[(batch,)](
+        prepare_commit_plan_kernel[(batch, num_groups)](
             num_accepted_tokens,
             request_indices,
             state_indices,
@@ -626,6 +695,9 @@ class GDNRecoverSSMCommitContext:
             bt_stride[0],
             bt_stride[1],
             0 if num_computed_tokens is None else num_computed_tokens.stride(0),
+            state_indices_addrs,
+            block_table_addrs,
+            stride_plan_group,
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
@@ -648,6 +720,9 @@ class GDNRecoverSSMCommitContext:
                 conv_dim,
                 self.conv_history_len,
                 state_indices.stride(0),
+                layer_groups,
+                state_indices_addrs,
+                stride_plan_group,
                 BLOCK_D=256,
                 BLOCK_HISTORY=triton.next_power_of_2(self.conv_history_len),
                 ALIGN_MODE=block_table is not None,
@@ -681,6 +756,9 @@ class GDNRecoverSSMCommitContext:
             rr.stride(2),
             rr.stride(3),
             state_indices.stride(0),
+            layer_groups,
+            state_indices_addrs,
+            stride_plan_group,
         )
         grid = (triton.cdiv(V, BV), batch, num_layers * HV)
         # Final states first: a boundary state can land in the window's source
@@ -699,4 +777,149 @@ class GDNRecoverSSMCommitContext:
             )
 
 
-__all__ = ["GDNRecoverSSMCommitContext", "gdn_recoverssm_verify"]
+class GDNRecoverSSMGroupedCommit:
+    """The commit for the GDN layers of several KV cache groups, as one set of
+    launches (plan, conv, state) instead of one set per group.
+
+    The groups' layers are merged into one context. Each layer records its group, and
+    the kernels read that group's state indices (and, in align mode, block table)
+    through per-group address tables and write and read the group's own slice of the
+    plan. Everything else the commit reads is per request and the same for every group:
+    the accepted counts, the spec rows' query offsets and request mapping, and the
+    computed-token counts.
+    """
+
+    def __init__(
+        self, contexts: Sequence[GDNRecoverSSMCommitContext], *, max_num_reqs: int
+    ) -> None:
+        _require(len(contexts) > 1, "a grouped commit needs at least two groups")
+        sql = contexts[0].spec_query_len
+        _require(
+            all(c.spec_query_len == sql for c in contexts),
+            "groups need the same speculative window",
+        )
+        self.contexts = tuple(contexts)
+        self.num_groups = len(contexts)
+        self.max_num_reqs = max_num_reqs
+        # The contexts hold the conv states already in [blocks, dim, window] order.
+        self.merged = GDNRecoverSSMCommitContext.from_tensors(
+            [t for c in contexts for t in c.conv_states],
+            [t for c in contexts for t in c.checkpoints],
+            [t for c in contexts for t in c.replays],
+            spec_query_len=sql,
+            max_num_reqs=self.num_groups * max_num_reqs,
+            conv_dim_first=True,
+        )
+        dev = contexts[0].checkpoints[0].device
+        self.layer_groups = torch.tensor(
+            [g for g, c in enumerate(contexts) for _ in c.checkpoints],
+            dtype=torch.int32,
+            device=dev,
+        )
+        # Address tables of the last step's per-group tensors. The state indices and
+        # block tables usually live in persistent buffers, so the tables are rebuilt
+        # only when an address changes.
+        self._tables: dict[str, tuple[tuple[int, ...], torch.Tensor]] = {}
+
+    def _table(self, name: str, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
+        key = tuple(t.data_ptr() for t in tensors)
+        cached = self._tables.get(name)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        table = recoverssm_ptr_table(tensors, self.layer_groups.device)
+        self._tables[name] = (key, table)
+        return table
+
+    def commit(
+        self,
+        num_accepted_tokens: torch.Tensor,
+        state_indices: Sequence[torch.Tensor],
+        query_start_loc: torch.Tensor,
+        request_indices: torch.Tensor | None = None,
+        block_tables: Sequence[torch.Tensor] | None = None,
+        num_computed_tokens: torch.Tensor | None = None,
+        mamba_block_size: int | None = None,
+        commit_conv: bool = True,
+    ) -> None:
+        """Fold accepted GDN and convolution inputs into every group's checkpoints.
+        ``state_indices`` and ``block_tables`` hold one tensor per group, in the order
+        of the contexts."""
+        _require(
+            len(state_indices) == self.num_groups,
+            "need one state-index tensor per group",
+        )
+        _require(
+            block_tables is None or len(block_tables) == self.num_groups,
+            "need one block table per group",
+        )
+        ref_si = state_indices[0]
+        batch = ref_si.shape[0]
+        if batch == 0:
+            return
+        _require(
+            all(
+                t.shape == ref_si.shape
+                and t.stride() == ref_si.stride()
+                and t.dtype == ref_si.dtype
+                for t in state_indices
+            ),
+            "groups need state indices of one shape, stride and dtype",
+        )
+        ref_bt = None if block_tables is None else block_tables[0]
+        if block_tables is not None:
+            _require(
+                all(
+                    t.shape == ref_bt.shape
+                    and t.stride() == ref_bt.stride()
+                    and t.dtype == ref_bt.dtype
+                    for t in block_tables
+                ),
+                "groups need block tables of one shape, stride and dtype",
+            )
+        merged = self.merged
+        merged._check_inputs(
+            batch,
+            self.max_num_reqs,
+            num_accepted_tokens,
+            ref_si,
+            query_start_loc,
+            request_indices,
+            ref_bt,
+            num_computed_tokens,
+            mamba_block_size,
+        )
+        _require(
+            all(t.device == ref_si.device for t in state_indices)
+            and (
+                block_tables is None
+                or all(t.device == ref_si.device for t in block_tables)
+            ),
+            "commit inputs must be on the same device",
+        )
+        merged._launch(
+            batch,
+            num_accepted_tokens,
+            ref_si,
+            query_start_loc,
+            request_indices,
+            ref_bt,
+            num_computed_tokens,
+            mamba_block_size,
+            commit_conv,
+            num_groups=self.num_groups,
+            layer_groups=self.layer_groups,
+            state_indices_addrs=self._table("state_indices", state_indices),
+            block_table_addrs=(
+                None
+                if block_tables is None
+                else self._table("block_tables", block_tables)
+            ),
+            stride_plan_group=self.max_num_reqs,
+        )
+
+
+__all__ = [
+    "GDNRecoverSSMCommitContext",
+    "GDNRecoverSSMGroupedCommit",
+    "gdn_recoverssm_verify",
+]
