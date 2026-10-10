@@ -2117,6 +2117,15 @@ class ModelConfig:
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
+        # Pooling models may project hidden_size -> embedding_dim (e.g.
+        # EmbeddingGemma 2). Prefer that width over transformer hidden size so
+        # Matryoshka `dimensions` validation matches the native embedding.
+        if self.runner_type == "pooling":
+            emb_dim = getattr(self.hf_text_config, "embedding_dim", None)
+            if emb_dim is None:
+                emb_dim = getattr(self.hf_config, "embedding_dim", None)
+            if isinstance(emb_dim, int) and emb_dim > 0:
+                return emb_dim
         return self.get_hidden_size()
 
     def get_and_verify_max_len(self, max_model_len: int):

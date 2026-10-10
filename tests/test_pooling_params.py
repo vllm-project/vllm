@@ -211,3 +211,100 @@ def test_token_classify(pooling_type: str):
         with pytest.raises(VLLMValidationError):
             pooling_params = PoolingParams(task=task, **{p: True})
             pooling_params.verify(model_config)
+
+
+def test_embeddinggemma2_embedding_size_matches_native_dim():
+    """EG2 projects hidden_size(512) -> embedding_dim(768).
+
+    Matryoshka validation must use the native embedding width, not hidden size.
+    Requires a local HF cache (or network) for google/embeddinggemma-2.
+    """
+    import os
+
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    model = os.environ.get("EG2_MODEL", "google/embeddinggemma-2")
+    overrides = {
+        "is_matryoshka": True,
+        "matryoshka_dimensions": [128, 256, 512, 768],
+    }
+    try:
+        model_config = ModelConfig(
+            model,
+            runner="pooling",
+            tokenizer=model,
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            seed=0,
+            dtype="bfloat16",
+            hf_overrides=overrides,
+        )
+    except LocalEntryNotFoundError:
+        pytest.skip(f"{model} not available in local HF cache")
+    except OSError as exc:
+        pytest.skip(f"could not load {model}: {exc}")
+
+    emb_dim = getattr(model_config.hf_text_config, "embedding_dim", None)
+    hidden = model_config.get_hidden_size()
+    assert emb_dim == 768
+    assert hidden == 512
+    assert model_config.embedding_size == emb_dim
+    assert model_config.is_matryoshka
+
+    for dim in (128, 256, 512, 768):
+        PoolingParams(task="embed", dimensions=dim).verify(model_config)
+
+    with pytest.raises(VLLMValidationError):
+        PoolingParams(task="embed", dimensions=769).verify(model_config)
+    with pytest.raises(VLLMValidationError):
+        PoolingParams(task="embed", dimensions=0).verify(model_config)
+
+
+def test_pooling_embedding_dim_preferred_over_hidden_size_without_network():
+    """Unit-level: pooling runner prefers text_config.embedding_dim.
+
+    Also locks precedence: explicit embedding_size and ST Dense modules win
+    over embedding_dim, and generate runners ignore embedding_dim.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from vllm.config.model import ModelConfig
+
+    def make_fake(
+        runner_type: str,
+        *,
+        embedding_size=None,
+        text_embedding_dim=768,
+        top_embedding_dim=None,
+    ):
+        return SimpleNamespace(
+            hf_config=SimpleNamespace(
+                embedding_size=embedding_size,
+                embedding_dim=top_embedding_dim,
+            ),
+            hf_text_config=SimpleNamespace(
+                embedding_dim=text_embedding_dim,
+                hidden_size=512,
+            ),
+            runner_type=runner_type,
+            model="fake-model",
+            revision=None,
+            get_hidden_size=lambda: 512,
+        )
+
+    with patch("vllm.config.model.try_get_dense_modules", return_value=None):
+        assert ModelConfig.embedding_size.fget(make_fake("pooling")) == 768
+        assert ModelConfig.embedding_size.fget(make_fake("generate")) == 512
+        # Explicit Voyage-style override wins over embedding_dim.
+        assert (
+            ModelConfig.embedding_size.fget(make_fake("pooling", embedding_size=1024))
+            == 1024
+        )
+
+    # Sentence-Transformers Dense out_features wins over embedding_dim.
+    with patch(
+        "vllm.config.model.try_get_dense_modules",
+        return_value=[{"out_features": 3072}],
+    ):
+        assert ModelConfig.embedding_size.fget(make_fake("pooling")) == 3072
