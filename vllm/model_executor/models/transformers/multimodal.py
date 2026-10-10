@@ -122,7 +122,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         # TODO: Drop the except branch once every video processor can count, see
         # https://github.com/huggingface/transformers/issues/43329
         try:
-            mm_tokens = self._get_num_mm_tokens(video_sizes=([num_frames, side, side],))
+            mm_tokens = self._get_num_mm_tokens(
+                "video", video_sizes=([num_frames, side, side],)
+            )
         except AttributeError:
             logger.info_once(
                 "%s cannot count video tokens yet, so the Transformers modeling "
@@ -201,11 +203,12 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             f"The following attribute names were checked: {names}."
         )
 
-    def _get_num_mm_tokens(self, **sizes: Sequence[Sequence[int]]) -> Any:
+    def _get_num_mm_tokens(
+        self, modality: str, **sizes: Sequence[Sequence[int]]
+    ) -> Any:
         processor = self.get_hf_processor()
-        multimodal_config = self.ctx.model_config.get_multimodal_config()
-        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
-        return processor._get_num_multimodal_tokens(**sizes, **mm_processor_kwargs)
+        mm_kwargs = self.ctx.get_modality_mm_kwargs({}, modality)
+        return processor._get_num_multimodal_tokens(**sizes, **mm_kwargs)
 
     def get_max_image_tokens(self) -> int:
         size = self.get_image_size_with_most_features()
@@ -220,12 +223,14 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return self._get_num_video_tokens(num_frames, size)
 
     def _get_num_image_tokens(self, size: ImageSize) -> int:
-        mm_tokens = self._get_num_mm_tokens(image_sizes=([size.height, size.width],))
+        mm_tokens = self._get_num_mm_tokens(
+            "image", image_sizes=([size.height, size.width],)
+        )
         return mm_tokens["num_image_tokens"][0]
 
     def _get_num_video_tokens(self, num_frames: int, size: ImageSize) -> int:
         video_sizes = ([num_frames, size.height, size.width],)
-        mm_tokens = self._get_num_mm_tokens(video_sizes=video_sizes)
+        mm_tokens = self._get_num_mm_tokens("video", video_sizes=video_sizes)
         return mm_tokens["num_video_tokens"][0]
 
     def _get_size_candidates(
@@ -747,7 +752,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         try:
             sizes = [(image.height, image.width) for image in images]
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
-                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+                image_sizes=sizes, **self.info.ctx.get_modality_mm_kwargs({}, "image")
             )
             return list(mm_tokens["num_image_patches"])
         except (AttributeError, KeyError, TypeError):

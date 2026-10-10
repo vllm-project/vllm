@@ -1082,7 +1082,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return preprocessed_size, num_vision_tokens
 
-    def _get_image_max_pixels(self) -> int:
+    def _get_image_max_pixels(self, modality: str = "image") -> int:
         """Read max_pixels from the HF image processor config.
 
         Despite the name, ``longest_edge`` is a pixel **area** (total pixel
@@ -1090,7 +1090,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         ``smart_resize`` as the ``max_pixels`` argument, which constrains
         ``t_bar * h_bar * w_bar <= max_pixels``.
         """
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.ctx.get_modality_mm_kwargs({}, modality)
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             return int(override_max_pixels)
 
@@ -1107,7 +1107,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return self._get_longest_edge(size, "GLM4V image processor size")
 
     def _get_video_max_pixels(self) -> int:
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.ctx.get_modality_mm_kwargs({}, "video")
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             return int(override_max_pixels)
 
@@ -1121,7 +1121,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         return self._get_longest_edge(size, "GLM4V video processor size")
 
-    def get_image_size_with_most_features(self) -> ImageSize:
+    def get_image_size_with_most_features(self, modality: str = "image") -> ImageSize:
         # Use num_frames=1 for single-image budget estimation.
         # _get_vision_info defaults to num_frames=16 (video), which
         # makes smart_resize constrain 16*H*W <= max_pixels, vastly
@@ -1132,7 +1132,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             image_width=9999999,
             image_height=9999999,
             num_frames=1,
-            max_image_pixels=self._get_image_max_pixels(),
+            max_image_pixels=self._get_image_max_pixels(modality),
         )
         return max_image_size
 
@@ -1159,7 +1159,9 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         )
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self.get_image_size_with_most_features(
+            modality="video"
+        )
 
         max_video_pixels = self._get_video_max_pixels()
         num_frames_with_most_features = 1
@@ -1463,21 +1465,24 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        image_width, image_height = self.info.get_image_size_with_most_features()
+        video_width, video_height = self.info.get_image_size_with_most_features(
+            modality="video"
+        )
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
         return {
             "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
+                width=image_width,
+                height=image_height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=video_width,
+                height=video_height,
                 num_frames=target_num_frames,
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),

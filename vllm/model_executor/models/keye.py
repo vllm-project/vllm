@@ -957,6 +957,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         do_resize: bool = True,
         image_processor: BaseImageProcessor,
         mm_kwargs: Mapping[str, object],
+        modality: str | None = None,
     ) -> tuple[ImageSize, int]:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -964,7 +965,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = 1
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        mm_kwargs = self.ctx.get_modality_mm_kwargs(mm_kwargs, modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
@@ -1009,6 +1010,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
             image_height=image_height,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="image",
         )
         return num_image_tokens
 
@@ -1027,10 +1029,11 @@ class KeyeProcessingInfo(BaseProcessingInfo):
             num_frames=num_frames,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="video",
         )
         return num_video_tokens
 
-    def get_image_size_with_most_features(self) -> ImageSize:
+    def get_image_size_with_most_features(self, modality: str = "image") -> ImageSize:
         image_processor = self.get_image_processor()
 
         max_image_size, _ = self._get_vision_info(
@@ -1038,6 +1041,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
             image_height=self.get_max_image_size(),
             image_processor=image_processor,
             mm_kwargs={},
+            modality=modality,
         )
         return max_image_size
 
@@ -1054,7 +1058,9 @@ class KeyeProcessingInfo(BaseProcessingInfo):
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
         image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self.get_image_size_with_most_features(
+            modality="video"
+        )
 
         num_frames = 0
 
@@ -1091,7 +1097,9 @@ class KeyeProcessingInfo(BaseProcessingInfo):
 
     def get_max_video_tokens(self, seq_len: int) -> int:
         image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
+        target_width, target_height = self.get_image_size_with_most_features(
+            modality="video"
+        )
 
         return self.get_num_video_tokens(
             image_width=target_width,
@@ -1122,19 +1130,22 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         mm_counts: Mapping[str, int],
         mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        image_width, image_height = self.info.get_image_size_with_most_features()
+        video_width, video_height = self.info.get_image_size_with_most_features(
+            modality="video"
+        )
         target_num_frames = self.info.get_num_frames_with_most_features(seq_len)
 
         mm_data = {
             "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
+                width=image_width,
+                height=image_height,
                 num_images=mm_counts.get("image", 0),
                 overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=video_width,
+                height=video_height,
                 num_frames=target_num_frames,
                 num_videos=mm_counts.get("video", 0),
                 overrides=mm_options.get("video"),

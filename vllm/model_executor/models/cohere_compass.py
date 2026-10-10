@@ -1089,6 +1089,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
             num_frames=1,
             image_processor=image_processor,
             mm_kwargs=mm_kwargs,
+            modality="image",
         )
         return num_image_tokens
 
@@ -1116,7 +1117,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         if max_pixels is None:
             image_processor = self.get_image_processor()
 
-            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            mm_kwargs = self.ctx.get_modality_mm_kwargs({}, "image")
             size = image_processor.size
             if override_size := mm_kwargs.get("size"):
                 size = size | override_size
@@ -1183,6 +1184,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         do_resize: bool = True,
         image_processor: CohereCompassImageProcessor,
         mm_kwargs: Mapping[str, object],
+        modality: str | None = None,
     ) -> tuple[ImageSize, int]:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -1190,7 +1192,7 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
-        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        mm_kwargs = self.ctx.get_modality_mm_kwargs(mm_kwargs, modality)
         size = image_processor.size
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
