@@ -276,7 +276,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
 */
 
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename IndType,
-          typename InputType = float, ScoringFunc SF, bool ENABLE_PDL = false>
+          typename InputType = float, ScoringFunc SF>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     void topkGating(const InputType* input, const bool* finished, float* output, const int num_rows, IndType* indices,
         int* source_rows, const int k, const int start_expert, const int end_expert, const bool renormalize,
@@ -329,12 +329,10 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
     const int thread_row = warp_base_row + thread_row_in_warp;
 
-#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-    if constexpr (ENABLE_PDL) {
-        // PDL permits early launch, but logits/metadata still depend on the producer.
-        cudaGridDependencySynchronize();
-        cudaTriggerProgrammaticLaunchCompletion();
-    }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    // PDL permits early launch, but logits/metadata still depend on the producer.
+    cudaGridDependencySynchronize();
+    cudaTriggerProgrammaticLaunchCompletion();
 #endif
 
     // Threads with indices out of bounds should early exit here.
@@ -641,7 +639,7 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
         config.numAttrs = 1;
         auto err = cudaLaunchKernelEx(
             &config,
-            topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, true>,
+            topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF>,
             input, finished, output, num_rows, indices, source_row, k, start_expert,
             end_expert, renormalize, bias, routed_scaling_factor, is_padding);
         STD_TORCH_CHECK(err == cudaSuccess, "PDL topkGating launch failed: ", cudaGetErrorString(err));
