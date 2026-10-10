@@ -541,11 +541,14 @@ class CpuPlatform(Platform):
         # reconcile attention and mamba page sizes
         backend_classes = cls._find_non_ssm_backends(vllm_config)
         if not backend_classes:
+            cls._sync_block_size_config_across_pp(vllm_config, has_backend=False)
             return
 
         pre_block_size = vllm_config.cache_config.block_size
         cls._align_hybrid_block_size(vllm_config, backend_classes[0])
         cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
+
+        cls._sync_block_size_config_across_pp(vllm_config, has_backend=True)
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
