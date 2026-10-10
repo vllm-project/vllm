@@ -37,10 +37,13 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
+        """Capture graphs for the speculator."""
+
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
         ) -> Callable[[CUDAGraphMode], None]:
+            del warmup
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -59,7 +62,6 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
             )
-
             return lambda cg_mode: forward_fn(
                 num_reqs,
                 num_tokens,

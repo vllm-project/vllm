@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
+from vllm.v1.worker.gpu.spec_decode.cudagraph_utils import SpeculatorCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -202,6 +203,26 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
+        self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+        self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            self.num_speculative_steps + 1,
+        )
+
+        # PIECEWISE cudagraphs are not supported for draft decodes.
+        decode_mode = (
+            CUDAGraphMode.FULL_DECODE_ONLY
+            if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            else CUDAGraphMode.NONE
+        )
+        self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
+            self.vllm_config, self.device, decode_mode, decode_query_len=1
+        )
 
     @abstractmethod
     def load_draft_model(
