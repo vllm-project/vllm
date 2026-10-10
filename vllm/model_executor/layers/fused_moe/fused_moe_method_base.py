@@ -67,6 +67,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
+    def post_weights_reload(self, layer: "RoutedExperts") -> None:
+        if self.moe_kernel is not None:
+            self.moe_kernel.fused_experts.post_weights_reload(layer)
+
     def maybe_roundup_sizes(
         self,
         hidden_size: int,

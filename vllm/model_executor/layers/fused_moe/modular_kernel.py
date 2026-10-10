@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import publish_runtime_buffer, rebind_runtime_buffers
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
@@ -514,6 +515,30 @@ class FusedMoEExperts(ABC):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
+
+    def _publish_helper_buffer(
+        self,
+        layer: torch.nn.Module,
+        name: str,
+        tensor: torch.Tensor | None,
+        *,
+        derived: bool = False,
+    ) -> torch.Tensor | None:
+        """Publish MoE helper state through the common ownership API."""
+        return publish_runtime_buffer(
+            layer, self, name, f"_moe_{name}", tensor, derived=derived
+        )
+
+    def refresh_derived_buffers(self, layer: torch.nn.Module) -> None:  # noqa: B027
+        """Refresh weight-derived helper buffers after stable storage returns."""
+
+    def rebind_runtime_buffers(self, layer: torch.nn.Module) -> None:
+        """Rebind helper aliases to storage owned by ``layer``."""
+        rebind_runtime_buffers(layer, self)
+
+    def post_weights_reload(self, layer: torch.nn.Module) -> None:
+        self.refresh_derived_buffers(layer)
+        self.rebind_runtime_buffers(layer)
 
     @staticmethod
     def is_monolithic() -> bool:

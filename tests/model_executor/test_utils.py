@@ -2,11 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.model_executor.parameter import ModelWeightParameter, PackedvLLMParameter
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    bind_runtime_buffer,
+    publish_runtime_buffer,
+    rebind_runtime_buffers,
+    register_derived_buffer,
+    replace_parameter,
+    set_derived_buffer,
+)
 
 
 @pytest.fixture
@@ -281,3 +290,52 @@ def test_replace_parameter_attributes_from_the_layers_own_parameter(
     if param_kind != "plain":
         for public_name in ("output_dim", "input_dim", "packed_dim", "packed_factor"):
             assert getattr(layer.weight, public_name, None) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [torch.ones(3), torch.ones(2, dtype=torch.float64), torch.ones(2, device="meta")],
+)
+def test_derived_buffer_rejects_incompatible_storage(value):
+    owner = torch.nn.Module()
+    register_derived_buffer(owner, "derived")
+    stable = set_derived_buffer(owner, "derived", torch.ones(2))
+    with pytest.raises(RuntimeError, match="CUDA graph recapture"):
+        set_derived_buffer(owner, "derived", value)
+    assert owner.derived is stable
+    assert torch.equal(stable, torch.ones(2))
+
+
+def test_derived_setter_requires_semantic_registration():
+    owner = torch.nn.Module()
+    owner.register_buffer("ordinary", torch.ones(2), persistent=False)
+    with pytest.raises(KeyError, match="not registered"):
+        set_derived_buffer(owner, "ordinary", torch.zeros(2))
+    register_derived_buffer(owner, "derived")
+    with pytest.raises(KeyError, match="already registered"):
+        register_derived_buffer(owner, "derived")
+
+
+def test_runtime_binding_preserves_placeholder_and_rebinds_final_owner_storage():
+    owner = torch.nn.Module()
+    helper = SimpleNamespace()
+    publish_runtime_buffer(
+        owner, helper, "scale", "attention_scale", None, derived=True
+    )
+    assert helper.scale is None
+    assert "attention_scale" in owner._vllm_derived_buffers
+    stable = set_derived_buffer(owner, "attention_scale", torch.ones(2))
+    rebind_runtime_buffers(owner, helper)
+    assert helper.scale is stable
+    for value in (torch.zeros(2), torch.ones(2)):
+        publish_runtime_buffer(
+            owner, helper, "scale", "attention_scale", value, derived=True
+        )
+        assert helper.scale is owner.attention_scale is stable
+        assert torch.equal(stable, value)
+    assert owner.state_dict() == {}
+    del owner.attention_scale
+    with pytest.raises(RuntimeError, match="disappeared"):
+        rebind_runtime_buffers(owner, helper)
+    with pytest.raises(KeyError, match="not registered"):
+        bind_runtime_buffer(owner, helper, "scale", "missing")

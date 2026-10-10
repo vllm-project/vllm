@@ -5,16 +5,20 @@ from inspect import BoundArguments
 
 import torch
 
-__all__ = ["LayerTensors", "LayerReloadingInfo"]
+__all__ = ["LayerMetadata", "LayerTensors", "LayerReloadingInfo"]
 
-# encodes both parameters and buffers separately
+# Encodes parameters and buffers separately.
 LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
+
+# Buffer metadata can contain a ``None`` placeholder registered before a
+# derived value is first materialized.
+LayerMetadata = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor | None]]
 
 
 @dataclass
 class LayerReloadingInfo:
     # model format metadata, recorded by `record_metadata_for_reloading`
-    restore_metadata: LayerTensors
+    restore_metadata: LayerMetadata
 
     # device to materialize layers with, recorded by `record_metadata_for_reloading`
     restore_device: torch.device
@@ -33,9 +37,17 @@ class LayerReloadingInfo:
     # persistence survives `_non_persistent_buffers_set` being mutated during reload
     kernel_non_persistent_buffers: set[str] = field(default_factory=set)
 
+    # Source-dropping module transforms consume staged checkpoint tensors.
+    reload_restore_pending: bool = False
+
+    # Completion waits until child/deferred layers also have stable storage.
+    post_weights_reload_pending: bool = False
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
-            restore_metadata=self.restore_metadata, restore_device=self.restore_device
+            restore_metadata=self.restore_metadata,
+            restore_device=self.restore_device,
+            post_weights_reload_pending=self.post_weights_reload_pending,
         )
 
     def can_load(self) -> bool:
