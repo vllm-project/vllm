@@ -24,14 +24,7 @@ def _make_module(name: str = "weight") -> nn.Module:
 
 
 def test_offload_releases_blocks_before_next_module(monkeypatch):
-    """The freed accelerator blocks must be released as each module is done.
-
-    `_maybe_offload_to_cpu` rebinds `p.data` to a host view, which drops the
-    accelerator storage but leaves the block in the caching allocator. Because
-    `make_layers` hands `wrap_modules` a lazy generator, module N+1 is built
-    after N is offloaded -- so releasing once after the loop is too late to
-    stop reserved memory growing across the stack.
-    """
+    """Blocks are released per module, before the next module is built."""
     events: list[str] = []
     _setup(monkeypatch, events)
     try:
@@ -59,11 +52,7 @@ def test_offload_releases_blocks_before_next_module(monkeypatch):
 
 
 def test_no_release_when_nothing_offloaded(monkeypatch):
-    """A module that offloaded nothing freed nothing, so it must not flush.
-
-    Guards the over-correction of calling `empty_cache` unconditionally, which
-    would purge the device cache once per module during load for no gain.
-    """
+    """A module that offloaded nothing freed nothing, so it must not flush the cache."""
     events: list[str] = []
     _setup(monkeypatch, events)
     try:
