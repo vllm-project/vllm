@@ -31,10 +31,10 @@ class PlotFilterBase(ABC):
     def parse_str(cls, s: str):
         for op_key in PLOT_FILTERS:
             if op_key in s:
-                key, value = s.split(op_key)
+                key, _, value = s.partition(op_key)
                 return PLOT_FILTERS[op_key](
-                    key,
-                    value.removeprefix(op_key).strip("'").strip('"'),
+                    key.strip(),
+                    value.removeprefix(op_key).strip().strip("'").strip('"'),
                 )
         else:
             raise ValueError(
@@ -145,8 +145,10 @@ class PlotBinner:
     def parse_str(cls, s: str):
         for op_key in PLOT_BINNERS:
             if op_key in s:
-                key, value = s.split(op_key)
-                return PLOT_BINNERS[op_key](key, float(value.removeprefix(op_key)))
+                key, _, value = s.partition(op_key)
+                return PLOT_BINNERS[op_key](
+                    key.strip(), float(value.removeprefix(op_key).strip())
+                )
         else:
             raise ValueError(
                 f"Invalid operator for plot binner '{s}'. "
