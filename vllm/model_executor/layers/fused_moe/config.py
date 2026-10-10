@@ -1295,6 +1295,11 @@ class FusedMoEConfig:
     has_hash_routing: bool = False
     shared_expert_prefix: str | None = None
 
+    # Shared experts appended to the routed-expert weight tensors. Monolithic
+    # backends must explicitly opt in before consuming these slots.
+    num_fused_shared_experts: int = 0
+    fused_shared_expert_weight: float = 1.0
+
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
     # then responsible for the reduction (e.g. fusing it into the next RMSNorm).
