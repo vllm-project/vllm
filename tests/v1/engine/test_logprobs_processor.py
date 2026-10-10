@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.logprobs import FlatLogprobs, _Column, create_sample_logprobs
+from vllm.logprobs import FlatLogprobs, create_sample_logprobs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -111,11 +111,10 @@ def _engine_steps(seed: int, width: int, num_steps: int) -> list[LogprobsLists]:
 
 
 @pytest.mark.parametrize("num_logprobs,width", [(0, 1), (3, 4), (3, 6), (-1, 5)])
-def test_flat_rows_match_list_logprobs(num_logprobs, width, monkeypatch):
+def test_flat_rows_match_list_logprobs(num_logprobs, width):
     """FlatLogprobs keeps the engine rows but reads like the list path:
     same positions (first-occurrence keys, last-occurrence values, ranks),
-    same cumulative logprob, across storage blocks."""
-    monkeypatch.setattr(_Column, "BLOCK_BYTES", 64)
+    same cumulative logprob."""
     expected = _make_processor(num_logprobs)
     actual = _make_processor(num_logprobs, flat_logprobs=True)
     for step in _engine_steps(0, width, 40):

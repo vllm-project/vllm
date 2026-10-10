@@ -7,7 +7,6 @@ from vllm.logprobs import (
     FlatLogprobs,
     Logprob,
     LogprobsOnePosition,
-    _Column,
     append_logprobs_for_next_position,
     create_prompt_logprobs,
     create_sample_logprobs,
@@ -219,12 +218,11 @@ def test_flat_logprobs_access() -> None:
         assert empty.end_indices == []
 
 
-def test_flat_logprobs_reads_like_list_across_storage_changes(monkeypatch) -> None:
+def test_flat_logprobs_reads_like_list_across_storage_changes() -> None:
     """Random mixes of every append path read back like list[dict], across
-    storage blocks, mixed widths, None positions and ranks, and values that
+    buffer growth, mixed widths, None positions and ranks, and values that
     widen the int32 / float32 columns; checked before and after a rank that
     is not the engine's (0, 1..k) layout."""
-    monkeypatch.setattr(_Column, "BLOCK_BYTES", 64)
     rng = np.random.default_rng(0)
     flat = FlatLogprobs()
     expected: list[LogprobsOnePosition] = []

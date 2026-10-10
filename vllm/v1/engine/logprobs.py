@@ -28,6 +28,11 @@ logger = init_logger(__name__)
 NONES = itertools.repeat(None)
 
 
+def _row_width(num_logprobs: int, num_slots: int) -> int:
+    """Engine slots kept per position: the sampled token and the top-k."""
+    return num_slots if num_logprobs == -1 else num_logprobs + 1
+
+
 @dataclass
 class LogprobsProcessor:
     # Tokenizer for this request,
@@ -89,9 +94,7 @@ class LogprobsProcessor:
 
         token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
         tokenizer = self.tokenizer if self.detokenize_sample_logprobs else None
-        width = (
-            token_ids_lst.shape[1] if self.num_logprobs == -1 else self.num_logprobs + 1
-        )
+        width = _row_width(self.num_logprobs, token_ids_lst.shape[1])
         if tokenizer is None and isinstance(self.logprobs, FlatLogprobs):
             self.logprobs.append_rows(
                 token_ids_lst[:, :width], logprobs_lst[:, :width], ranks_lst
@@ -162,11 +165,7 @@ class LogprobsProcessor:
         num_prompt_tokens, num_logprobs = logprobs.shape
 
         if self.tokenizer is None and isinstance(self.prompt_logprobs, FlatLogprobs):
-            width = (
-                num_logprobs
-                if self.num_prompt_logprobs == -1
-                else self.num_prompt_logprobs + 1
-            )
+            width = _row_width(self.num_prompt_logprobs, num_logprobs)
             self.prompt_logprobs.append_rows(
                 token_ids[:, :width].numpy(),
                 logprobs[:, :width].numpy(),
