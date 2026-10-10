@@ -854,7 +854,7 @@ def xpu_moe_shared_fused_unsupported_reason(runner) -> str | None:
         and down.weight.dtype == torch.float8_e4m3fn
         and gu.weight_scale.numel() == 1
         and down.weight_scale.numel() == 1
-        and gate.weight.dtype == torch.float16
+        and gate.weight.dtype == moe_config.in_dtype
     ):
         return "weights are not fp8-e4m3 per-tensor"
     # Routed w13 is [E, H, 2I]; the shared linear weights are [in, out].
@@ -894,10 +894,10 @@ def _xpu_moe_shared_fused_router_unsupported_reason(
     if (
         getattr(gate, "bias", None) is not None
         or not isinstance(weight, torch.Tensor)
-        or weight.dtype != torch.float16
+        or weight.dtype != runner.moe_config.in_dtype
         or tuple(weight.shape) != (num_experts, hidden_size)
     ):
-        return "router gate is not an unquantized fp16 [E, H] linear"
+        return "router gate is not an unquantized matching fp16/bf16 [E, H] linear"
     if not router_supports(
         weight.dtype, num_experts, runner.moe_config.experts_per_token, hidden_size
     ):

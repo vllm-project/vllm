@@ -2813,12 +2813,13 @@ class VllmConfig:
         if (
             pass_config.fuse_xpu_moe_shared
             and self.model_config is not None
-            and self.model_config.dtype != torch.float16
+            and self.model_config.dtype not in (torch.float16, torch.bfloat16)
         ):
-            # The fused kernel only supports fp16 activations; disable it
+            # The fused kernel supports FP16/BF16 activations; disable it
             # here so no unused compile range is added.
             logger.warning_once(
-                "XPU MoE + shared-expert fusion requires float16 activations; "
+                "XPU MoE + shared-expert fusion requires float16 or bfloat16 "
+                "activations; "
                 "got %s. The fusion will be disabled.",
                 self.model_config.dtype,
             )

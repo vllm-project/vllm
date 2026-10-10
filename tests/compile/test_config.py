@@ -1443,7 +1443,7 @@ def test_xpu_moe_shared_fusion_disabled_off_xpu():
 
 @pytest.mark.parametrize(
     "dtype,expected_enabled",
-    [(torch.float16, True), (torch.bfloat16, False)],
+    [(torch.float16, True), (torch.bfloat16, True), (torch.float32, False)],
 )
 def test_xpu_moe_shared_fusion_compile_ranges(dtype, expected_enabled):
     with patch.object(current_platform, "is_xpu", return_value=True):

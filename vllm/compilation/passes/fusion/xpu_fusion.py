@@ -125,7 +125,7 @@ class XpuMoESharedFusionPass(VllmInductorPass):
         pc = config.parallel_config
         self.enabled = (
             hf is not None
-            and mc.dtype == torch.float16
+            and mc.dtype in (torch.float16, torch.bfloat16)
             and getattr(hf, "hidden_size", None) == 2048
             and getattr(hf, "num_experts", None) == 256
             and getattr(hf, "num_experts_per_tok", None) == 8
@@ -194,7 +194,11 @@ class XpuMoESharedFusionPass(VllmInductorPass):
         ):
             return None, "shared and routed outputs are not simply added"
         val = hidden.meta.get("val")
-        if val is None or val.dtype != torch.float16 or val.shape[-1] != 2048:
+        if (
+            val is None
+            or val.dtype not in (torch.float16, torch.bfloat16)
+            or val.shape[-1] != 2048
+        ):
             return None, "unsupported hidden states dtype/shape"
         return add, ""
 
@@ -236,12 +240,24 @@ class XpuMoESharedFusionPass(VllmInductorPass):
             return None
         w = conv.args[0]
         w_val = w.meta.get("val") if isinstance(w, fx.Node) else None
+        hidden_val = hidden.meta.get("val")
         if not (
             isinstance(w_val, torch.Tensor)
-            and w_val.dtype == torch.float16
+            and isinstance(hidden_val, torch.Tensor)
+            and w_val.dtype == hidden_val.dtype
             and tuple(w_val.shape) == (2048,)
         ):
             return None
+        for input_node in (x, residual):
+            value = (
+                input_node.meta.get("val") if isinstance(input_node, fx.Node) else None
+            )
+            if not (
+                isinstance(value, torch.Tensor)
+                and value.dtype == hidden_val.dtype
+                and value.shape == hidden_val.shape
+            ):
+                return None
         return norm, x, residual, w, eps
 
     def _rewrite_with_norm(self, graph, node, add, layer_name, m) -> None:
@@ -547,15 +563,20 @@ class XpuGatedQkvNormRopePattern:
                 ignore_types=(int, torch.SymInt),
                 argnames=argnames,
             )
+            # Different head geometries share the wildcard search topology.
+            # Keep every shape guard without treating it as a duplicate rule.
+            registration_pass = PatternMatcherPass()
             pm.register_replacement(
                 pattern,
                 replacement,
                 inputs,
                 trace_fn,
-                pm_pass,
+                registration_pass,
                 extra_check=self._check,
                 search_fn_pattern=search_fn_pattern,
             )
+            for target, entries in registration_pass.patterns.items():
+                pm_pass.patterns[target].extend(entries)
 
     def _check(self, match: pm.Match) -> bool:
         # Ints are wildcards in the search pattern; pin the geometry here.

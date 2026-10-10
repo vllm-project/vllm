@@ -151,6 +151,23 @@ def _fused_target():
         direct_register_custom_op(
             op_name="xpu_moe_shared_fused", op_func=_impl, fake_impl=_impl
         )
+    if not hasattr(torch.ops.vllm, "xpu_moe_shared_fused_resadd_norm"):
+        from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
+
+        def _norm_impl(
+            x: torch.Tensor,
+            residual: torch.Tensor,
+            norm_weight: torch.Tensor,
+            eps: float,
+            layer_name: LayerNameType,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return torch.empty_like(x), torch.empty_like(residual)
+
+        direct_register_custom_op(
+            op_name="xpu_moe_shared_fused_resadd_norm",
+            op_func=_norm_impl,
+            fake_impl=_norm_impl,
+        )
     return torch.ops.vllm.xpu_moe_shared_fused.default
 
 
@@ -176,10 +193,10 @@ def _moe_layer(g, x, layer, *, router_in=None, input_ids=None):
     return moe, shared, routed, add, out
 
 
-def _moe_graph(num_layers=2, **kw):
+def _moe_graph(num_layers=2, dtype=torch.float16, **kw):
     g = fx.Graph()
     x = g.placeholder("x")
-    x.meta["val"] = torch.empty(4, HIDDEN, dtype=torch.float16, device="meta")
+    x.meta["val"] = torch.empty(4, HIDDEN, dtype=dtype, device="meta")
     extra = []
     for i in range(num_layers):
         layer = g.placeholder(f"layer_{i}")
@@ -207,8 +224,9 @@ def fusion_pass(monkeypatch):
     return p
 
 
-def test_rewrites_every_layer(fusion_pass):
-    g, layers = _moe_graph(num_layers=2)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_rewrites_every_layer(fusion_pass, dtype):
+    g, layers = _moe_graph(num_layers=2, dtype=dtype)
     fusion_pass(g)
     assert _count(g, MOE) == 0
     assert _count(g, FUSED) == 2
@@ -217,14 +235,14 @@ def test_rewrites_every_layer(fusion_pass):
         assert src.target is FUSED
 
 
-def _norm_moe_graph(extra_normed_user=False):
+def _norm_moe_graph(extra_normed_user=False, dtype=torch.float16):
     """Graph: res' , h = fused_add_rms_norm(x, res, w.float() + 1, eps); moe(h);
     returns the graph and the node using res'."""
     g = fx.Graph()
-    val = torch.empty(4, HIDDEN, dtype=torch.float16, device="meta")
+    val = torch.empty(4, HIDDEN, dtype=dtype, device="meta")
     x, res, w, layer = (g.placeholder(n) for n in ("x", "res", "w", "layer"))
     x.meta["val"], res.meta["val"] = val, val
-    w.meta["val"] = torch.empty(HIDDEN, dtype=torch.float16, device="meta")
+    w.meta["val"] = torch.empty(HIDDEN, dtype=dtype, device="meta")
     wf = g.call_function(
         torch.ops.prims.convert_element_type.default, (w, torch.float32)
     )
@@ -245,11 +263,12 @@ def _norm_moe_graph(extra_normed_user=False):
     return g, res_user
 
 
-def test_input_norm_fused(fusion_pass):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_input_norm_fused(fusion_pass, dtype):
     if not hasattr(torch.ops.vllm, "xpu_moe_shared_fused_resadd_norm"):
         pytest.skip("needs vllm._xpu_ops")
     fusion_pass.fuse_input_norm = True
-    g, res_user = _norm_moe_graph()
+    g, res_user = _norm_moe_graph(dtype=dtype)
     fusion_pass(g)
     fused = torch.ops.vllm.xpu_moe_shared_fused_resadd_norm.default
     assert _count(g, fused) == 1
@@ -376,7 +395,7 @@ def test_non_add_combine_unchanged(fusion_pass):
 def test_wrong_dtype_unchanged(fusion_pass):
     g, _ = _moe_graph(num_layers=1)
     x = next(iter(g.nodes))
-    x.meta["val"] = torch.empty(4, HIDDEN, dtype=torch.bfloat16, device="meta")
+    x.meta["val"] = torch.empty(4, HIDDEN, dtype=torch.float32, device="meta")
     before, after = _structure_before_after(g, fusion_pass)
     assert before == after
 
@@ -401,7 +420,7 @@ def _xpu_experts(w1_scale, w2_scale):
 
 def _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w, router_w=None):
     if router_w is None:
-        router_w = torch.empty(E, HIDDEN, dtype=torch.float16, device="meta")
+        router_w = torch.empty(E, HIDDEN, dtype=gate_w.dtype, device="meta")
     parallel = SimpleNamespace(
         enable_eplb=False,
         use_ep=False,
@@ -414,7 +433,7 @@ def _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w, router_w=None):
         moe_parallel_config=parallel,
         is_lora_enabled=False,
         has_bias=False,
-        in_dtype=torch.float16,
+        in_dtype=gate_w.dtype,
         experts_per_token=8,
     )
     quant_method = SimpleNamespace(
@@ -446,7 +465,7 @@ def _stub_runner(w13, w2, s13, s2, sw13, ss13, sw2, ss2, gate_w, router_w=None):
     )
 
 
-def _base_runner():
+def _base_runner(dtype=torch.float16):
     return _stub_runner(
         _fp8(E, HIDDEN, 2 * I_LOCAL),
         _fp8(E, I_LOCAL, HIDDEN),
@@ -456,7 +475,7 @@ def _base_runner():
         torch.empty(1),
         _fp8(I_LOCAL, HIDDEN),
         torch.empty(1),
-        torch.empty(1, HIDDEN, dtype=torch.float16),
+        torch.empty(1, HIDDEN, dtype=dtype),
     )
 
 
@@ -488,8 +507,34 @@ def _set(obj, path, value):
     setattr(obj, attr, value)
 
 
-def test_base_case_supported(fake_kernel_interface):
-    assert _reason(_base_runner()) is None
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_base_case_supported(fake_kernel_interface, dtype):
+    assert _reason(_base_runner(dtype=dtype)) is None
+
+
+@pytest.mark.parametrize(
+    "path", ["gate.weight", "shared_experts._layer.expert_gate.weight"]
+)
+def test_bf16_runner_rejects_fp16_gate(fake_kernel_interface, path):
+    runner = _base_runner(dtype=torch.bfloat16)
+    old = (
+        runner.gate.weight
+        if path == "gate.weight"
+        else runner.shared_experts._layer.expert_gate.weight
+    )
+    _set(runner, path, old.to(torch.float16))
+    assert _reason(runner) is not None
+
+
+@pytest.mark.parametrize("input_name", ["x", "res", "w"])
+def test_input_norm_mixed_dtype_keeps_unfused_norm(fusion_pass, input_name):
+    graph, _ = _norm_moe_graph(dtype=torch.bfloat16)
+    value = next(node for node in graph.nodes if node.name == input_name)
+    value.meta["val"] = value.meta["val"].to(torch.float16)
+    fusion_pass.fuse_input_norm = True
+    fusion_pass(graph)
+    assert _count(graph, torch.ops.vllm_ir.fused_add_rms_norm.default) == 1
+    assert _count(graph, FUSED) == 1
 
 
 MLP = "shared_experts._layer"
@@ -893,6 +938,68 @@ def _has_op(graph, name):
         and (name in str(n.target) or (n.args and name in str(n.args[0])))
         for n in graph.nodes
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_qkv_fusion_keeps_rules_for_target_and_draft_heads(monkeypatch, dtype):
+    from torch._higher_order_ops.auto_functionalize import auto_functionalized
+    from torch._inductor.pattern_matcher import PatternMatcherPass
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    import vllm.compilation.passes.fusion.xpu_fusion as fusion_module
+    from vllm.config import DeviceConfig
+
+    if not hasattr(torch.ops._xpu_C, "qkv_split_norm_rope"):
+        pytest.skip("qkv_split_norm_rope not available")
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    matcher = PatternMatcherPass()
+    traced_rules = []
+    register = fusion_module.pm.register_replacement
+
+    def record(search, replacement, inputs, trace, *args, **kwargs):
+        result = register(search, replacement, inputs, trace, *args, **kwargs)
+        traced_rules.append((search, inputs, trace))
+        return result
+
+    monkeypatch.setattr(fusion_module.pm, "register_replacement", record)
+    with (
+        FakeTensorMode(),
+        set_current_vllm_config(config),
+        config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        for heads in (4, 8):
+            pattern = fusion_module.XpuGatedQkvNormRopePattern(
+                num_heads=heads,
+                num_kv_heads=1,
+                eps=1e-6,
+                rope=fusion_module._RopeSpec(
+                    head_dim=256,
+                    rotary_dim=64,
+                    mrope_section=[11, 11, 10],
+                    mrope_interleaved=True,
+                ),
+                mrope_positions=False,
+                dtype=dtype,
+                config=config,
+            )
+            inputs = [
+                torch.empty(5, 2 * heads * 256 + 512, dtype=dtype, device="cpu"),
+                torch.empty(5, dtype=torch.int64, device="cpu"),
+                torch.empty(256, dtype=dtype, device="cpu"),
+                torch.empty(256, dtype=dtype, device="cpu"),
+                torch.empty(4096, 64, dtype=dtype, device="cpu"),
+            ]
+            monkeypatch.setattr(pattern, "get_inputs", lambda inputs=inputs: inputs)
+            pattern.register(matcher)
+
+        for heads, (search, inputs, trace) in zip((4, 8), traced_rules[::2]):
+            graph = trace(search, inputs)
+            assert matcher.apply(graph) == 1
+            fused = next(
+                node for node in graph.graph.nodes if node.target == auto_functionalized
+            )
+            assert fused.kwargs["num_q_heads"] == heads
+            assert fused.kwargs["head_dim"] == 256
 
 
 @xpu_only

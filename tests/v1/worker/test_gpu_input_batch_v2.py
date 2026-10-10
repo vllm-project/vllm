@@ -18,6 +18,23 @@ DEVICE = current_platform.device_type
 
 
 @pytest.mark.parametrize(
+    "num_reqs,num_tokens,expected_prefills",
+    [(1, 4096, [True]), (1, 16, [False]), (1, 8, [False]), (2, 33, [False, True])],
+)
+def test_speculative_dummy_keeps_long_warmup_rows_out_of_decode(
+    num_reqs: int, num_tokens: int, expected_prefills: list[bool]
+):
+    """A long compile warmup must not index the 16 speculative state slots."""
+    buffers = InputBuffers(num_reqs, num_tokens, torch.device("cpu"))
+    batch = InputBatch.make_dummy(num_reqs, num_tokens, buffers, decode_query_len=16)
+    assert batch.is_prefilling_np.tolist() == expected_prefills
+    assert batch.has_prefill is any(expected_prefills)
+    assert batch.decode_graph_eligible is not any(expected_prefills)
+    assert (batch.num_scheduled_tokens[~batch.is_prefilling_np] <= 16).all()
+    assert (batch.prefill_len_np > 0).tolist() == expected_prefills
+
+
+@pytest.mark.parametrize(
     "num_reqs,num_tokens",
     [
         (256, 496),  # remainder 240: previously gave the last request 241 tokens
