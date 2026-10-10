@@ -279,6 +279,12 @@ def _allocate_scheduled(
     return blocks
 
 
+def _resident_block_ids(manager: KVCacheManager, request_id: str) -> list[int]:
+    """The GPU block HiSparse reads each resident page from; 0 if host-only."""
+    resident = get_hisparse_coordinator(manager).resident_managers[0]
+    return [block.block_id for block in resident.get_residency_row(request_id)]
+
+
 def test_hisparse_does_not_write_back_reprefillable_tokens():
     """Multi-module MTP re-prefills the last tokens, so they are not final."""
     manager = make_hisparse_kv_cache_manager(32, 16, num_prefill_lookahead=3)
@@ -319,7 +325,7 @@ def test_hisparse_builds_dma_row_mirrors_across_pages():
 def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     """Unresolved drafts must not leave gaps in the eager host mirror."""
     coordinator = MagicMock(host_group_id=0)
-    coordinator.take_block_table_updates.return_value = {}
+    coordinator.take_residency_updates.return_value = {}
     coordinator.build_offload_command.return_value = None
     coordinator.build_row_mirrors.return_value = ()
     scheduler = HiSparseConnectorScheduler(
@@ -332,7 +338,6 @@ def test_hisparse_async_speculation_mirrors_uncertain_position_range():
     connector.connector_scheduler = scheduler
     connector.update_state_after_alloc(request, None, 0)
     scheduler_output = SimpleNamespace(
-        block_table_updates=None,
         kv_cache_block_copies=None,
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
@@ -370,11 +375,66 @@ def test_hisparse_reports_when_context_is_fully_resident():
         hot_manager.require_hot(request.request_id)
     assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens)) is not None
     _publish_hisparse_pages(manager)
+    coordinator.take_residency_updates([request.request_id])
+    core_row = manager.get_block_ids(request.request_id)[2]
     pool = manager.block_pool
     pool.get_new_blocks(pool.get_num_free_blocks())
 
     assert not coordinator.all_context_pages_resident(scheduled)
-    assert coordinator.take_block_table_updates().keys() == {request.request_id}
+    # The block-table row stays append-only; the worker learns of the lost
+    # pages from the residency update instead.
+    assert manager.get_block_ids(request.request_id)[2] == core_row
+    resident_ids = _resident_block_ids(manager, request.request_id)
+    lost = [page for page, block_id in enumerate(resident_ids) if block_id == 0]
+    assert lost
+    update = coordinator.take_residency_updates([request.request_id])
+    assert update[request.request_id].pages == lost
+    assert update[request.request_id].block_ids[0] == [0] * len(lost)
+
+
+def test_hisparse_residency_update_sends_only_changed_pages():
+    """Losing one early page must not resend the pages after it: per-step
+    residency updates would otherwise grow with the context length."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator = get_hisparse_coordinator(manager)
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator.take_residency_updates([request.request_id])
+    pool = manager.block_pool
+    num_never_used = pool.get_num_free_blocks()
+    # Pages unpin as their host copies complete, so page 0 is reused first.
+    _publish_hisparse_pages(manager)
+    pool.get_new_blocks(num_never_used + 1)
+
+    update = coordinator.take_residency_updates([request.request_id])
+
+    assert update[request.request_id].pages == [0]
+    assert update[request.request_id].block_ids == ([0],)
+
+
+def test_hisparse_readmitted_request_resends_its_full_residency():
+    """A preempted request may resume in a worker state row holding another
+    request's residency, so its first update must cover every page again."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    coordinator = get_hisparse_coordinator(manager)
+    tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, len(tokens)) is not None
+    assert request.request_id in coordinator.take_residency_updates(
+        [request.request_id]
+    )
+    manager.free(request)
+
+    assert _allocate_scheduled(manager, request, len(tokens)) is not None
+    update = coordinator.take_residency_updates([request.request_id])
+    assert update[request.request_id].pages == [0, 1]
+    assert update[request.request_id].block_ids[0] == _resident_block_ids(
+        manager, request.request_id
+    )
 
 
 def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
@@ -416,9 +476,7 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    assert not any(block.is_null for block in resident[:2])
-    assert not resident[2].is_null
-    assert not resident[3].is_null
+    assert 0 not in _resident_block_ids(manager, resumed.request_id)
     coordinator = get_hisparse_coordinator(manager)
     assert not coordinator.build_offload_command().page_transfers
     coordinator.finish_host_import(resumed.request_id, failed=False)
@@ -666,9 +724,10 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
     pool.free_blocks(held)
     assert _allocate_scheduled(manager, first, num_new_tokens=1) is not None
     assert all(m.has_hot("first") for m in coordinator.hot_managers)
+    coordinator.take_residency_updates(["first"])
     pool.get_new_blocks(pool.get_num_free_blocks())
     assert not coordinator.all_context_pages_resident(scheduled)
-    assert "first" in coordinator.take_block_table_updates()
+    assert "first" in coordinator.take_residency_updates(["first"])
 
 
 def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
@@ -1204,11 +1263,7 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
         num_new_computed_tokens=num_computed,
         new_computed_blocks=computed,
     )
-    resident_blocks = manager.get_blocks("resumed").blocks[2]
-    assert [block.block_id for block in resident_blocks[:3]] == (
-        original_resident_ids[:3]
-    )
-    assert not any(block.is_null for block in resident_blocks[:3])
+    assert _resident_block_ids(manager, "resumed")[:3] == original_resident_ids[:3]
     assert get_hisparse_coordinator(manager).all_context_pages_resident(
         ((resumed.request_id, num_computed, len(tokens) - num_computed),)
     )
@@ -1249,17 +1304,13 @@ def test_hisparse_prefix_hit_under_pressure_adopts_surviving_copies(
         new_computed_blocks=computed,
     )
 
-    resumed_blocks = manager.get_blocks("resumed").blocks
-    assert [block.block_id for block in resumed_blocks[2][:3]] == [
+    resident_ids = _resident_block_ids(manager, "resumed")
+    assert resident_ids[:3] == [
         copy_ids[page] if page in adopted_pages else pool.null_block.block_id
         for page in range(3)
     ]
-    gpu_ids = [
-        block.block_id
-        for group in resumed_blocks[1:]
-        for block in group
-        if not block.is_null
-    ]
+    _, indexer, _, hot = manager.get_block_ids("resumed")
+    gpu_ids = [block_id for block_id in indexer + resident_ids + hot if block_id]
     assert len(gpu_ids) == len(set(gpu_ids))
 
 
@@ -1488,8 +1539,7 @@ def test_hisparse_reused_copy_is_not_adopted():
         num_new_computed_tokens=num_computed,
         new_computed_blocks=computed,
     )
-    resident_blocks = manager.get_blocks("resumed").blocks[2]
-    assert all(block.is_null for block in resident_blocks[:3])
+    assert _resident_block_ids(manager, "resumed")[:3] == [0, 0, 0]
 
 
 def test_hisparse_external_import_uses_hard_gpu_footprint():

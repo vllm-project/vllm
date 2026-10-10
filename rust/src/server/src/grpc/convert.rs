@@ -406,8 +406,8 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         num_output_tokens: finished.usage.output_token_count as u32,
         finish_reason,
         stop_reason,
-        kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
-        ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
+        kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
         num_cached_tokens: Some(finished.usage.cached_token_count as u32),
     })
 }
