@@ -121,6 +121,7 @@ class Parser:
     # Server-side floor for tool-call structural tags (--tool-strict-level).
     tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
     always_adjust_request: bool = False
+    _prompt_token_ids: list[int] | None = None
 
     def __init__(
         self,
@@ -214,7 +215,7 @@ class Parser:
 
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
         """Provide the exact rendered prompt to parsers that need prefix state."""
-        return
+        self._prompt_token_ids = list(prompt_token_ids)
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
@@ -828,6 +829,17 @@ class DelegatingParser(Parser):
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
+
+        prompt_token_ids = self._prompt_token_ids
+        if (
+            prompt_token_ids is not None
+            and self._reasoning_parser is not None
+            and not self.is_reasoning_end(prompt_token_ids)
+        ):
+            # Reasoning is still open at the end of the prompt. Mirrors the
+            # same check in ``parse_delta`` (issue #49717).
+            self._reasoning_parser.adjust_initial_state_from_prompt(prompt_token_ids)
+
         reasoning, content = self.extract_reasoning(model_output, request)
         tool_calls, content = self._extract_tool_calls(
             content=content,

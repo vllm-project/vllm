@@ -124,6 +124,7 @@ class ParserEngine(Parser):
         self._reasoning_ended: bool = not self._has_reasoning
         self._streaming_initialized: bool = False
         self._prompt_streaming_prepared: bool = False
+        self._prompt_initial_state: ParserState | None = None
 
         self._tool_slots: list[ToolCallSlot] = []
         self._deferred_content: str = ""
@@ -205,9 +206,30 @@ class ParserEngine(Parser):
             self._streaming_initialized = True
             self._reset(initial_state=initial_state)
 
+    def initial_state_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> ParserState | None:
+        """The state to start in given the prompt, or ``None`` for the
+        configured default.
+
+        Shared by the streaming and non-streaming entry points so both
+        classify a generation alike (issue #49717). Default is a no-op;
+        override in subclasses as needed.
+        """
+        return None
+
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
-        return
+        state = self.initial_state_from_prompt(prompt_token_ids)
+        # Carried across the ``_reset()`` that opens a non-streaming parse;
+        # ``_feed()`` drops it so it never reaches a later request.
+        self._prompt_initial_state = state
+        if state is None:
+            return
+        self._engine.reset(initial_state=state)
+        # Prevent a later default ``initialize_streaming()`` from clobbering
+        # this with the configured initial state.
+        self._streaming_initialized = True
 
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
@@ -216,6 +238,8 @@ class ParserEngine(Parser):
         return None
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
+        if initial_state is None:
+            initial_state = self._prompt_initial_state
         self._engine.reset(initial_state=initial_state)
         self._reasoning_ended = not self._has_reasoning
         self._tool_slots.clear()
@@ -242,6 +266,7 @@ class ParserEngine(Parser):
         delta_text: str,
         delta_token_ids: Sequence[int],
     ) -> list[SemanticEvent]:
+        self._prompt_initial_state = None
         delta_text, delta_token_ids = self._preprocess_feed(delta_text, delta_token_ids)
         return self._engine.feed(delta_text, delta_token_ids)
 
@@ -759,6 +784,9 @@ class ParserEngine(Parser):
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
+        if self._prompt_token_ids is not None:
+            # Mirrors ``parse_delta`` (issue #49717).
+            self.adjust_initial_state_from_prompt(self._prompt_token_ids)
         self._check_skip_tool_parsing(request)
         reasoning, content, tool_call_info = self._single_pass_parse(
             model_output,
