@@ -465,7 +465,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
         boundary_puts=[(1, mamba_cow_block, 12)],
     )
 
-    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
+    send._offload_handoff(_resolve_partial_tail(send, req))
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
@@ -626,7 +626,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         boundary_puts=[(1, mamba_cow_block, 8)],
     )
 
-    send._maybe_offload_boundary_states(_resolve_partial_tail(send, req))
+    send._offload_handoff(_resolve_partial_tail(send, req))
 
     # FA (block 4): full blocks ending at 4 and 8, keyed by their normal
     # block-end hashes; mamba (block 16): the partial boundary block under
@@ -717,7 +717,7 @@ def test_worker_lookup_hits_sub_block_partial_tail():
         completed_token_len=12,
         boundary_puts=[(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+    send_thread._offload_handoff(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
@@ -825,7 +825,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         completed_token_len=12,
         boundary_puts=[(1, 7, 8)],
     )
-    send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
+    send_thread._offload_handoff(_resolve_partial_tail(send_thread, req))
 
     worker.store = store
 
