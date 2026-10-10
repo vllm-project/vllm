@@ -24,21 +24,25 @@ class TestStep3ToolParser(ToolParserTests):
             no_tool_calls_output="This is a regular response without any tool calls.",
             single_tool_call_output=(
                 "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+                "function<｜tool_sep｜>"
                 '<steptml:invoke name="get_weather">'
                 '<steptml:parameter name="city">Tokyo</steptml:parameter>'
                 "</steptml:invoke><｜tool_call_end｜><｜tool_calls_end｜>"
             ),
             parallel_tool_calls_output=(
                 "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+                "function<｜tool_sep｜>"
                 '<steptml:invoke name="get_weather">'
                 '<steptml:parameter name="city">Tokyo</steptml:parameter>'
-                "</steptml:invoke><｜tool_call_end｜><｜tool_sep｜>"
-                '<｜tool_call_begin｜><steptml:invoke name="get_time">'
+                "</steptml:invoke><｜tool_call_end｜>"
+                "<｜tool_call_begin｜>function<｜tool_sep｜>"
+                '<steptml:invoke name="get_time">'
                 '<steptml:parameter name="timezone">Asia/Tokyo</steptml:parameter>'
                 "</steptml:invoke><｜tool_call_end｜><｜tool_calls_end｜>"
             ),
             various_data_types_output=(
                 "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+                "function<｜tool_sep｜>"
                 '<steptml:invoke name="test_function">'
                 '<steptml:parameter name="string_field">hello</steptml:parameter>'
                 '<steptml:parameter name="int_field">42</steptml:parameter>'
@@ -53,12 +57,14 @@ class TestStep3ToolParser(ToolParserTests):
             ),
             empty_arguments_output=(
                 "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+                "function<｜tool_sep｜>"
                 '<steptml:invoke name="refresh"></steptml:invoke>'
                 "<｜tool_call_end｜><｜tool_calls_end｜>"
             ),
             surrounding_text_output=(
                 "Let me check the weather for you.\n\n"
                 "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+                "function<｜tool_sep｜>"
                 '<steptml:invoke name="get_weather">'
                 '<steptml:parameter name="city">Tokyo</steptml:parameter>'
                 "</steptml:invoke><｜tool_call_end｜><｜tool_calls_end｜>\n\n"
@@ -66,6 +72,7 @@ class TestStep3ToolParser(ToolParserTests):
             ),
             escaped_strings_output=(
                 "<｜tool_calls_begin｜><｜tool_call_begin｜>"
+                "function<｜tool_sep｜>"
                 '<steptml:invoke name="test_function">'
                 '<steptml:parameter name="quoted">He said "hello"</steptml:parameter>'
                 '<steptml:parameter name="path">C:\\Users\\file.txt</steptml:parameter>'
@@ -88,25 +95,7 @@ class TestStep3ToolParser(ToolParserTests):
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "get_time"],
             # xfail markers
-            xfail_nonstreaming={
-                "test_single_tool_call_simple_args": (
-                    "Step3 parser non-streaming has bugs"
-                ),
-                "test_parallel_tool_calls": ("Step3 parser non-streaming has bugs"),
-                "test_various_data_types": "Step3 parser non-streaming has bugs",
-                "test_empty_arguments": "Step3 parser non-streaming has bugs",
-                "test_surrounding_text": "Step3 parser non-streaming has bugs",
-                "test_escaped_strings": "Step3 parser non-streaming has bugs",
-            },
-            xfail_streaming={
-                "test_parallel_tool_calls": (
-                    "Step3 parser has significant bugs in both streaming "
-                    "and non-streaming"
-                ),
-                "test_streaming_reconstruction": (
-                    "Step3 parser non-streaming has bugs, so streaming "
-                    "doesn't match non-streaming"
-                ),
-            },
+            xfail_nonstreaming={},
+            xfail_streaming={},
             supports_typed_arguments=False,
         )
