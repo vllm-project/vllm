@@ -73,6 +73,9 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
 
 logger = init_logger(__name__)
 
+# Max length of the SSD autotune warmup, in chunks.
+_SSD_WARMUP_MAX_CHUNKS = 32
+
 
 def _view_mtp_decode_tensor(
     tensor: torch.Tensor, decode_batch: int, spec_query_len: int
@@ -637,11 +640,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # so state_dtype must match what real inference uses.
         ssm_state_dtype = self.get_state_dtype()[1]
 
-        # SSD kernel autotune keys depend on dtype and head dimensions,
-        # not on sequence length or batch size, so a single shape suffices.
-        seqlen = chunk_size
+        # Prefill-sized warmup: the profile run has max_num_batched_tokens rows.
+        nchunks = max(
+            1, min(_SSD_WARMUP_MAX_CHUNKS, projected_states.shape[0] // chunk_size)
+        )
+        seqlen = nchunks * chunk_size
         batch = 1
-        nchunks = seqlen // chunk_size  # = 1
 
         x = torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
         dt = torch.randn(seqlen, nheads, device=device, dtype=dtype)
