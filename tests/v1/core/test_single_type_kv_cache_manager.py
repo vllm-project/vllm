@@ -22,6 +22,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     MambaManager,
     RSWAManager,
+    SinkFullAttentionManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
@@ -30,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
     RSWASpec,
+    SinkFullAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -457,6 +459,35 @@ def test_sliding_window_records_new_blocks_for_zeroing():
     assert manager.records_new_block_ids
     assert manager.take_new_block_ids() == [block.block_id for block in blocks]
     assert manager.take_new_block_ids() == []
+
+
+def test_sink_full_attention_records_new_blocks_for_zeroing():
+    block_size = 2
+    spec = SinkFullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sink_len=block_size,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=False, hash_block_size=block_size
+    )
+    manager = SinkFullAttentionManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        needs_kv_cache_zeroing=True,
+    )
+
+    blocks = manager.allocate_new_blocks(
+        "request", num_tokens=4, num_tokens_main_model=4
+    )
+
+    assert manager.records_new_block_ids
+    assert manager.take_new_block_ids() == [block.block_id for block in blocks]
 
 
 def test_chunked_local_attention_records_new_blocks_for_zeroing():
