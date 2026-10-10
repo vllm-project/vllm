@@ -35,12 +35,19 @@
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
+/vllm/entrypoints/cohere @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
-/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai/chat_completion @DarkLight1337
+/vllm/entrypoints/openai/completion @DarkLight1337
+/vllm/entrypoints/openai/models @DarkLight1337
+/vllm/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
+/vllm/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
+/vllm/entrypoints/rl @aoshen02
+/vllm/entrypoints/scale_out @noooop @DarkLight1337
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
-/vllm/entrypoints/pooling @noooop
+/vllm/entrypoints/pooling @noooop @DarkLight1337
 /vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/common @DarkLight1337
