@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
-    VLLM_USE_FLASHINFER_CAKE_SAMPLER: bool = True
+    VLLM_USE_FLASHINFER_CAKE_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -879,11 +879,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use FlashInfer's Cake radix top-k/top-p kernels (FlashInfer
     # >= 0.7.1) when every request in the batch sets 1 <= top_k <= 1024.
-    # Set to 0 to keep the Triton masking and FlashInfer sampling paths.
+    # Opt in with 1; defaults to the Triton masking and FlashInfer sampling paths.
     "VLLM_USE_FLASHINFER_CAKE_SAMPLER": lambda: (
         bool(int(os.environ["VLLM_USE_FLASHINFER_CAKE_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_CAKE_SAMPLER" in os.environ
-        else True
+        else False
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),

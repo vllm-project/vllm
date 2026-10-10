@@ -3,6 +3,7 @@
 """Compare Cake with the existing top-k/top-p paths on captured decode logits.
 
 Example:
+    VLLM_USE_FLASHINFER_CAKE_SAMPLER=1 \
     python benchmarks/kernels/benchmark_cake_sampling.py \
         --logits flash_next_logits.pt --output microbench.json
 

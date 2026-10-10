@@ -98,8 +98,9 @@ def test_sample_preserves_nonuniform_probabilities():
 
 
 @pytest.mark.parametrize("batch_size", [8, 128])
-def test_dispatch_matches_reference(batch_size):
+def test_dispatch_matches_reference(batch_size, monkeypatch):
     """Small batches take Cake, large ones Triton; both match the reference."""
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_CAKE_SAMPLER", "1")
     torch.manual_seed(3)
     logits = torch.randn(batch_size, 32000, device=DEVICE) * 3
     k, p = _params(batch_size, 20, 0.9)
@@ -112,6 +113,9 @@ def test_dispatch_matches_reference(batch_size):
 
 def test_eligibility(monkeypatch):
     logits = torch.zeros(4, 32000, device=DEVICE)
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_CAKE_SAMPLER", raising=False)
+    assert not cake_eligible(logits, 20)
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_CAKE_SAMPLER", "1")
     assert cake_eligible(logits, 20)
     assert cake_eligible(logits, 1024)
     assert not cake_eligible(logits, None)
