@@ -4,7 +4,7 @@
 Configs are found in configs/$MODEL.yaml
 
 pytest -s -v test_lm_eval_correctness.py \
-    --config-list-file=configs/models-small.txt \
+    --config-list-file=configs/models-small-rocm.txt \
     --tp-size=1
 """
 
