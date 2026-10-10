@@ -15,6 +15,9 @@ from vllm.config import ModelConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image_prune.rate import (
+    compute_retained_tokens_count as rate_retained_tokens_count,
+)
 from vllm.multimodal.processing.context import BaseProcessingInfo
 
 from ...registry import HF_EXAMPLE_MODELS
@@ -285,6 +288,43 @@ def test_processor_multi_video(
         assert video_phs[i].offset >= prev_end, (
             f"Placeholder {i} overlaps with placeholder {i - 1}"
         )
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize("image_pruning_rate", [0.5, 0.75])
+def test_processor_image_pruning_reduces_placeholders(
+    model_id: str,
+    image_pruning_rate: float,
+) -> None:
+    """RATE image pruning shrinks image placeholders to the retained count."""
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"image_pruning_rate": image_pruning_rate},
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    image = np.zeros((256, 256, 3), dtype=np.uint8)
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"image": [image]}),
+    )
+
+    grid_thw = processed["mm_kwargs"].get_data()["image_grid_thw"][0]
+    assert isinstance(grid_thw, torch.Tensor)
+    merge_length = processor.info.get_image_processor().merge_size ** 2
+    full_tokens = int(grid_thw.prod()) // merge_length
+
+    image_phs = processed["mm_placeholders"]["image"]
+    assert len(image_phs) == 1
+    expected = rate_retained_tokens_count(full_tokens, image_pruning_rate)
+    assert image_phs[0].length == expected, (
+        f"Expected {expected} placeholder tokens for pruning rate "
+        f"{image_pruning_rate}, got {image_phs[0].length}"
+    )
+    assert expected < full_tokens
 
 
 # Qwen3-VL / Qwen3.8 "Long Video Understanding" pixel budget from the

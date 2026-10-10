@@ -444,6 +444,7 @@ class ModelConfig:
     mm_encoder_fp8_scale_save_margin: InitVar[float | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
+    image_pruning_rate: InitVar[float | None] = None
     video_pruning_rate: InitVar[float | None] = None
     video_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
@@ -576,6 +577,7 @@ class ModelConfig:
         mm_encoder_fp8_scale_save_margin: float | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
+        image_pruning_rate: float | None,
         video_pruning_rate: float | None,
         video_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
@@ -849,6 +851,7 @@ class ModelConfig:
                 mm_encoder_fp8_scale_save_margin=mm_encoder_fp8_scale_save_margin,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
+                image_pruning_rate=image_pruning_rate,
                 video_pruning_rate=video_pruning_rate,
                 video_pruning_method=video_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
@@ -875,6 +878,14 @@ class ModelConfig:
                     f"Video pruning method '{pruning_spec[0]}' is not "
                     f"supported by {self._model_info.architecture} "
                     f"(supported methods: {supported_pruning})."
+                )
+
+            if self.multimodal_config.is_image_pruning_enabled() and not (
+                self._model_info.supports_image_pruning
+            ):
+                raise ValueError(
+                    f"Image pruning (--image-pruning-rate) is not supported "
+                    f"by {self._model_info.architecture}."
                 )
 
             if (
