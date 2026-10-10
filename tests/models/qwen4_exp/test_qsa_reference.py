@@ -922,6 +922,37 @@ def test_qsa_prefill_selection_correctness(
 
 
 @requires_qsa_kernels
+def test_qsa_e4m3_byte_decode_matches_every_encoding() -> None:
+    """The sub-sm_89 byte decode must equal e4m3fn * 2^-8 on every finite code.
+
+    Exact for all 254 finite codes (normal and subnormal), so a cache reads the
+    same on either side of sm_89. The two NaN codes read as +-480 (documented
+    in _e4m3_bits_to_scaled_fp16).
+    """
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import (
+        E4M3_AS_FP16_SCALE,
+        _e4m3_bits_to_scaled_fp16,
+    )
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _decode(src, dst, n: tl.constexpr):
+        offsets = tl.arange(0, n)
+        tl.store(dst + offsets, _e4m3_bits_to_scaled_fp16(tl.load(src + offsets)))
+
+    bits = torch.arange(256, device="cuda", dtype=torch.uint8)
+    decoded = torch.empty(256, device="cuda", dtype=torch.float16)
+    _decode[(1,)](bits, decoded, n=256)
+    decoded = decoded.float() * E4M3_AS_FP16_SCALE
+
+    expected = bits.view(torch.float8_e4m3fn).to(torch.float32)
+    finite = expected.isfinite()
+    assert int(finite.sum()) == 254
+    torch.testing.assert_close(decoded[finite], expected[finite], rtol=0, atol=0)
+    assert decoded[~finite].abs().eq(480).all()
+
+
+@requires_qsa_kernels
 def test_qsa_block_expansion_correctness() -> None:
     blocks = torch.tensor([[0, -1], [1, 0]], device="cuda", dtype=torch.int32)
     query_positions = torch.tensor([5, 10], device="cuda")
