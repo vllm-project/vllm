@@ -50,7 +50,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-    - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
       with:
         python-version: "3.12"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
