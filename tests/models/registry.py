@@ -1417,7 +1417,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        extras={"2.0": "nvidia/NVIDIA-Nemotron-Parse-2.0"},
+        trust_remote_code=True,
     ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
