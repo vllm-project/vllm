@@ -8,11 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
-from vllm.distributed import (
-    get_dcp_group,
-    get_pcp_group,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
@@ -1005,6 +1001,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.tp_size = parallel_config.tensor_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
@@ -1576,16 +1573,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
-            tp_size = get_tensor_model_parallel_world_size()
             row_shard_sizes = None
             if tp_prefill_row_sharding_supported(
-                self.vllm_config, self.dcp_world_size, self.use_pcp, tp_size
+                self.vllm_config, self.dcp_world_size, self.use_pcp, self.tp_size
             ):
                 row_shard_sizes = balanced_prefill_row_shard(
                     seq_lens_cpu[num_decodes:],
                     prefill_query_lens_cpu,
                     self.compress_ratio,
-                    tp_size,
+                    self.tp_size,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
