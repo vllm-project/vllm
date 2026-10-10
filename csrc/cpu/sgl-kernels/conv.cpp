@@ -208,6 +208,142 @@ struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
     }
   }
 };
+
+// Same VNNI pair layout as `_mm512_dpbf16_ps`: 32 fp16 values stored as
+// (even, odd) in each 32-bit lane, producing 16 fp32 results.
+// `cvtusepi32_epi16` keeps the raw 16-bit pattern. A signed pack would
+// saturate every negative fp16.
+inline __m512 fp16_vnni_even_ps(const __m512i v) {
+  const __m512i even = _mm512_and_si512(v, _mm512_set1_epi32(0x0000FFFF));
+  return _mm512_cvtph_ps(_mm512_cvtusepi32_epi16(even));
+}
+
+inline __m512 fp16_vnni_odd_ps(const __m512i v) {
+  const __m512i odd = _mm512_srli_epi32(v, 16);
+  return _mm512_cvtph_ps(_mm512_cvtusepi32_epi16(odd));
+}
+
+inline __m512 fp16_vnni_dot_ps(__m512 acc, const __m512i a, const __m512i b) {
+  acc = _mm512_fmadd_ps(fp16_vnni_even_ps(a), fp16_vnni_even_ps(b), acc);
+  acc = _mm512_fmadd_ps(fp16_vnni_odd_ps(a), fp16_vnni_odd_ps(b), acc);
+  return acc;
+}
+
+template <int K, int BLOCK_N, bool has_bias, bool has_silu>
+struct tinygemm_kernel<at::Half, K, BLOCK_N, has_bias, has_silu> {
+  static inline void apply(
+      const at::Half* __restrict__ A,
+      const at::Half* __restrict__ B,
+      at::Half* __restrict__ C,
+      const at::Half* __restrict__ bias,
+      const at::Half* __restrict__ conv_states,
+      bool has_initial_state,
+      int64_t M,
+      int64_t lda,
+      bool is_first_token) {
+    assert(K == 4);
+    constexpr int ROWS = K;
+    constexpr int COLS = BLOCK_N / block_size_n();
+
+    // leading dimension size for b for next block [K/2, 32, 2]
+    constexpr int ldb = block_size_n() * K;
+
+    __m512i va[ROWS * COLS];
+    __m512i vb[ROWS * COLS];
+    __m512 vc[COLS * 2];
+
+    // k: {-3, -2, -1} -> {0, 1, 2}
+    auto set_conv_states = [&](int k, int col) -> __m512i {
+      return has_initial_state ? _mm512_loadu_si512(conv_states + (k + K - 1) * lda + col * 32)
+                               : _mm512_setzero_si512();
+    };
+
+#define MM512_LOAD_A_FP16(idx)                                            \
+  ((idx) < 0 && is_first_token) ? set_conv_states((idx), col)             \
+                                : _mm512_loadu_si512(A + (idx) * lda + col * 32)
+
+#define MM512_PACK_A_FP16(ap, bp, a, b)                  \
+  do {                                                   \
+    __m512i r0 = (a);                                    \
+    __m512i r1 = (b);                                    \
+    __m512i d0 = _mm512_unpacklo_epi16(r0, r1);          \
+    __m512i d1 = _mm512_unpackhi_epi16(r0, r1);          \
+    r0 = _mm512_shuffle_i32x4(d0, d1, 0x88);             \
+    r1 = _mm512_shuffle_i32x4(d0, d1, 0xdd);             \
+    (ap) = _mm512_shuffle_i32x4(r0, r1, 0x88);           \
+    (bp) = _mm512_shuffle_i32x4(r0, r1, 0xdd);           \
+  } while (0)
+
+    auto preloada = [&](auto i) {
+      constexpr int col = i;
+      int64_t m = 0;
+      va[1 * COLS + col] = MM512_LOAD_A_FP16(m - 3);
+      va[2 * COLS + col] = MM512_LOAD_A_FP16(m - 2);
+      va[3 * COLS + col] = MM512_LOAD_A_FP16(m - 1);
+    };
+    Unroll<COLS>{}(preloada);
+
+    auto loada = [&](auto i, int64_t m) {
+      constexpr int col = i;
+      va[0 * COLS + col] = va[1 * COLS + col];
+      va[1 * COLS + col] = va[2 * COLS + col];
+      va[2 * COLS + col] = va[3 * COLS + col];
+      va[3 * COLS + col] = MM512_LOAD_A_FP16(m);
+    };
+
+    auto loadb = [&](auto i) {
+      constexpr int row = i / COLS;
+      constexpr int col = i % COLS;
+      vb[row * COLS + col] = _mm512_loadu_si512(B + col * ldb + row * 32);
+    };
+    Unroll<ROWS * COLS>{}(loadb);
+
+    auto compute = [&](auto i) {
+      constexpr int col = i;
+
+      if constexpr (has_bias) {
+        __m512i b16 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(bias + col * 32));
+        vc[col * 2 + 0] = CVT_FP16_TO_FP32(_mm512_extracti32x8_epi32(b16, 0));
+        vc[col * 2 + 1] = CVT_FP16_TO_FP32(_mm512_extracti32x8_epi32(b16, 1));
+      } else {
+        vc[col * 2 + 0] = _mm512_set1_ps(0.f);
+        vc[col * 2 + 1] = _mm512_set1_ps(0.f);
+      }
+
+      __m512i va0, va1, va2, va3;
+      MM512_PACK_A_FP16(va0, va1, va[0 * COLS + col], va[1 * COLS + col]);
+      MM512_PACK_A_FP16(va2, va3, va[2 * COLS + col], va[3 * COLS + col]);
+
+      vc[col * 2 + 0] = fp16_vnni_dot_ps(vc[col * 2 + 0], va0, vb[0 * COLS + col]);
+      vc[col * 2 + 0] = fp16_vnni_dot_ps(vc[col * 2 + 0], va2, vb[2 * COLS + col]);
+      vc[col * 2 + 1] = fp16_vnni_dot_ps(vc[col * 2 + 1], va1, vb[1 * COLS + col]);
+      vc[col * 2 + 1] = fp16_vnni_dot_ps(vc[col * 2 + 1], va3, vb[3 * COLS + col]);
+    };
+
+    using fVec = at::vec::Vectorized<float>;
+    using bVec = at::vec::Vectorized<at::Half>;
+    auto storec = [&](auto i, int64_t m) {
+      constexpr int col = i;
+      fVec x0 = fVec(vc[col * 2 + 0]);
+      fVec x1 = fVec(vc[col * 2 + 1]);
+      if constexpr (has_silu) {
+        x0 = fast_silu(x0);
+        x1 = fast_silu(x1);
+      }
+      bVec out_vec = convert_from_float_ext<at::Half>(x0, x1);
+      out_vec.store(C + m * lda + col * 32);
+    };
+
+    for (int64_t m = 0; m < M; ++m) {
+      Unroll<COLS>{}(loada, m);
+      Unroll<COLS>{}(compute);
+      Unroll<COLS>{}(storec, m);
+    }
+  }
+};
+
+#undef MM512_LOAD_A_FP16
+#undef MM512_PACK_A_FP16
 #endif
 
 #define LAUNCH_TINYGEMM_KERNEL(K, NB_SIZE)                                                   \

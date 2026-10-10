@@ -18,9 +18,20 @@ namespace {
 //   * update state (FP32) with amx-bf16 where C(FP32) += A(BF16) * B(BF16)
 //   * compile time mask out upper triangular part in decay mask and tril solve, reduce fma needed.
 
-// * convert to vnni format， expect contiguous input and output
-//     from [K/2, 2, N] FP32 to [K/2, N, 2] BF16
+// * convert to vnni format, expect contiguous input and output
+//     from [K/2, 2, N] FP32 to [K/2, N, 2] of scalar_t (BF16 or FP16)
 // * update src = src * exp(g_last)
+#if defined(CPU_CAPABILITY_AVX512)
+// Same 32-lane order as `_mm512_cvtne2ps_pbh(hi, lo)`: low 16 values from
+// `lo`, high 16 from `hi`. `vcvtps2ph` is AVX-512F.
+inline __m512i cvt_fp32_pair_to_fp16(const __m512 hi, const __m512 lo) {
+  constexpr int rounding = _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC;
+  const __m256i lo16 = _mm512_cvtps_ph(lo, rounding);
+  const __m256i hi16 = _mm512_cvtps_ph(hi, rounding);
+  return _mm512_inserti64x4(_mm512_castsi256_si512(lo16), hi16, 1);
+}
+#endif
+
 template <typename scalar_t, int K, int N>
 void pack_vnni2(scalar_t* __restrict__ dst, float* __restrict__ src, const float g_last, int ld_src, int ld_dst) {
   static_assert(K % 32 == 0);
@@ -45,8 +56,14 @@ void pack_vnni2(scalar_t* __restrict__ dst, float* __restrict__ src, const float
     __m512 v01 = _mm512_loadu_ps(src + k0 * ld_src + nb * 32 + 16);
     __m512 v10 = _mm512_loadu_ps(src + k1 * ld_src + nb * 32);
     __m512 v11 = _mm512_loadu_ps(src + k1 * ld_src + nb * 32 + 16);
-    s0 = (__m512i)_mm512_cvtne2ps_pbh(v01, v00);
-    s1 = (__m512i)_mm512_cvtne2ps_pbh(v11, v10);
+    if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
+      s0 = (__m512i)_mm512_cvtne2ps_pbh(v01, v00);
+      s1 = (__m512i)_mm512_cvtne2ps_pbh(v11, v10);
+    } else {
+      static_assert(std::is_same_v<scalar_t, at::Half>);
+      s0 = cvt_fp32_pair_to_fp16(v01, v00);
+      s1 = cvt_fp32_pair_to_fp16(v11, v10);
+    }
 
     std::tie(d0, d1) = transpose_2x32_16bit(s0, s1);
     _mm512_storeu_si512(dst + kb * ld_dst * 2 + nb * 32 * 2, d0);
@@ -1031,6 +1048,13 @@ void chunk_local_cumsum_kernel_impl(
 // beta : [B, T, Hv]
 // cu_seqlens : [num_seqs + 1]
 // chunk_indices : [NT * 2]
+// oneDNN brgemm for Half requires avx512_core_fp16 and a VNNI B layout this
+// pack was written for BF16. Half uses the unpacked GEMM instead.
+template <typename scalar_t>
+constexpr bool chunk_brgemm_enabled() {
+  return brgemm_supported() && !std::is_same_v<scalar_t, at::Half>;
+}
+
 template <typename scalar_t, int D, int CHUNK_SIZE>
 void chunk_gated_delta_rule_fwd_intra_kernel_impl(
     scalar_t* __restrict__ w,
@@ -1102,7 +1126,7 @@ void chunk_gated_delta_rule_fwd_intra_kernel_impl(
 
       // step 2: attn = key @ key^T
       const scalar_t* __restrict__ k_ptr = k + (batch_offset + mb_start) * k_strideT + h * k_strideH;
-      if constexpr (brgemm_supported()) {
+      if constexpr (chunk_brgemm_enabled<scalar_t>()) {
         pack_vnni<scalar_t>(
             /*    dst */ k_packed,
             /*    src */ k_ptr,
@@ -1161,7 +1185,7 @@ void chunk_gated_delta_rule_fwd_intra_kernel_impl(
             k_beta, k_ptr, beta_ptr, g_ptr, mb_size, k_strideT, D, Hv);
 
         //  5.b pack key
-        if constexpr (brgemm_supported()) {
+        if constexpr (chunk_brgemm_enabled<scalar_t>()) {
           pack_vnni2<scalar_t>(
               /*    dst */ k_beta_packed,
               /*    src */ k_beta,
@@ -1183,6 +1207,13 @@ void chunk_gated_delta_rule_fwd_intra_kernel_impl(
               /*     B */ k_beta_packed,
               /*     C */ k_updated);
         } else {
+          // GEMM K is padded to TILE_K. apply_beta writes only mb_size rows.
+          if (mb_size < padded_mb_size) {
+            std::fill_n(
+                k_beta + mb_size * D,
+                (padded_mb_size - mb_size) * D,
+                scalar_t(0));
+          }
           blas_gemm(
               at::native::TransposeType::NoTranspose,
               at::native::TransposeType::NoTranspose,
@@ -1208,7 +1239,7 @@ void chunk_gated_delta_rule_fwd_intra_kernel_impl(
             v_beta, v_ptr, beta_ptr, nullptr, mb_size, v_strideT, D, Hv);
 
         // 5.f pack value
-        if constexpr (brgemm_supported()) {
+        if constexpr (chunk_brgemm_enabled<scalar_t>()) {
           pack_vnni2<scalar_t>(
               /*    dst */ v_beta_packed,
               /*    src */ v_beta,
@@ -1230,6 +1261,12 @@ void chunk_gated_delta_rule_fwd_intra_kernel_impl(
               /*     B */ v_beta_packed,
               /*     C */ v_updated);
         } else {
+          if (mb_size < padded_mb_size) {
+            std::fill_n(
+                v_beta + mb_size * D,
+                (padded_mb_size - mb_size) * D,
+                scalar_t(0));
+          }
           blas_gemm(
               at::native::TransposeType::NoTranspose,
               at::native::TransposeType::NoTranspose,
@@ -1343,7 +1380,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         // attn_i = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
         const scalar_t* __restrict__ q_ptr = q + (batch_offset + mb_start) * q_strideT + h * q_strideH;
         const scalar_t* __restrict__ k_ptr = k + (batch_offset + mb_start) * k_strideT + h * k_strideH;
-        if constexpr (brgemm_supported()) {
+        if constexpr (chunk_brgemm_enabled<scalar_t>()) {
           pack_vnni<scalar_t>(
               /*    dst */ k_packed,
               /*    src */ k_ptr,
@@ -1409,7 +1446,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         const float* __restrict__ g_ptr = g + nt * (Hv * CHUNK_SIZE) + hv * (CHUNK_SIZE);
         float g_last = g_ptr[mb_size - 1];
         const scalar_t* __restrict__ w_ptr = w + (batch_offset + mb_start) * w_strideT + hv * w_strideH;
-        if constexpr (brgemm_supported()) {
+        if constexpr (chunk_brgemm_enabled<scalar_t>()) {
           pack_vnni2<scalar_t, D, D>(
               /*    dst */ s_packed,
               /*    src */ s_ptr,
@@ -1429,7 +1466,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
               /*     B */ s_packed,
               /*     C */ v_prime);
         } else {
-          // brgemm_supported()==false path: pack_vnni2 above packs the
+          // chunk_brgemm_enabled<scalar_t>()==false path: pack_vnni2 above packs the
           // *unscaled* state into its dst (for this GEMM's B operand) while
           // separately scaling src in place by exp(g_last) (consumed later,
           // at step 5.3's state accumulation). Replicate both halves in the
@@ -1465,7 +1502,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
             qg_exp, q_ptr, nullptr, g_ptr, mb_size, q_strideT, D, /*b_stride*/ 0);
 
         // step 3.b: attn_inter = qg_exp @ state
-        if constexpr (brgemm_supported()) {
+        if constexpr (chunk_brgemm_enabled<scalar_t>()) {
           at::native::cpublas::brgemm(
               /*     M */ mb_size,
               /*     N */ D,
@@ -1495,7 +1532,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         }
 
         // step 4.a: attn_inter += attn2 @ v2'
-        if constexpr (brgemm_supported()) {
+        if constexpr (chunk_brgemm_enabled<scalar_t>()) {
           pack_vnni2<scalar_t>(
               /*    dst */ v_packed,
               /*    src */ v_prime2,
@@ -1536,12 +1573,12 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         scalar_t* __restrict__ o_ptr = out + (batch_offset + mb_start) * o_strideT + hv * o_strideH;
         update_kernel<scalar_t, D>::apply(o_ptr, attn_inter, mb_size, D, o_strideT);
 
-        // brgemm_supported()==false path: step 5.2 below overwrites k_updated,
+        // chunk_brgemm_enabled<scalar_t>()==false path: step 5.2 below overwrites k_updated,
         // which aliases the same buffer as v_prime2 (both are `tmp`). Snapshot
         // v_prime2 into v_packed (otherwise brgemm-only, and free by now since
         // qg_exp was consumed at step 3.b) before that happens, so step 5.3
         // doesn't read k_updated's data under the v_prime2 name.
-        if constexpr (!brgemm_supported()) {
+        if constexpr (!chunk_brgemm_enabled<scalar_t>()) {
           std::copy(v_prime2, v_prime2 + padded_mb_size * D, v_packed);
         }
 
@@ -1554,7 +1591,7 @@ void chunk_gated_delta_rule_fwd_inter_kernel_impl(
         update_key_kernel<scalar_t, CHUNK_SIZE, D>::apply(k_updated, k_ptr, g_ptr, mb_size, k_strideT);
 
         // step 5.3 state += k' @ v2'
-        if constexpr (brgemm_supported()) {
+        if constexpr (chunk_brgemm_enabled<scalar_t>()) {
           at::native::cpublas::brgemm(
               /*     M */ D,
               /*     N */ D,
@@ -2267,11 +2304,16 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
   TORCH_CHECK(D % 32 == 0, __func__, ": expect head_dim to be multiples of 32.");
   TORCH_CHECK(Dv % 32 == 0, __func__, ": expect head_dim_v to be multiples of 32.");
   TORCH_CHECK(D == Dv, __func__, ": expect head_dim to be equal to head_dim_v.");
-  CHECK_INPUT_SHAPE_DTYPE<true>(query, {B, T, H, D}, at::kBFloat16);
-  CHECK_INPUT_SHAPE_DTYPE<true>(key, {B, T, H, D}, at::kBFloat16);
-  CHECK_INPUT_SHAPE_DTYPE<true>(value, {B, T, Hv, Dv}, at::kBFloat16);
+  const auto act_dtype = query.scalar_type();
+  TORCH_CHECK(
+      act_dtype == at::kBFloat16 || act_dtype == at::kHalf,
+      "chunk_gated_delta_rule_cpu: expect query, key, value, and beta to be "
+      "bfloat16 or float16.");
+  CHECK_INPUT_SHAPE_DTYPE<true>(query, {B, T, H, D}, act_dtype);
+  CHECK_INPUT_SHAPE_DTYPE<true>(key, {B, T, H, D}, act_dtype);
+  CHECK_INPUT_SHAPE_DTYPE<true>(value, {B, T, Hv, Dv}, act_dtype);
   CHECK_INPUT_SHAPE_DTYPE<false>(g, {B, T, Hv}, at::kFloat);
-  CHECK_INPUT_SHAPE_DTYPE<false>(beta, {B, T, Hv}, at::kBFloat16);
+  CHECK_INPUT_SHAPE_DTYPE<false>(beta, {B, T, Hv}, act_dtype);
   CHECK_INPUT_SHAPE_DTYPE<false>(cu_seqlens, {num_seqs + 1}, at::kInt);
   TORCH_CHECK(initial_state.sizes() == at::IntArrayRef({initial_state.size(0), Hv, Dv, D}),
               "chunk_gated_delta_rule_cpu: initial_state shape mismatch, got ", initial_state.sizes());
