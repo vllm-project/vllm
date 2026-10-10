@@ -19,6 +19,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers.configuration_utils import PreTrainedConfig
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -804,6 +805,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
+    @eager_break_during_capture
     def _forward(
         self,
         q_proj_states: torch.Tensor,
