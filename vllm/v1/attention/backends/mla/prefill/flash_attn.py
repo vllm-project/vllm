@@ -448,6 +448,14 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         lse = None
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
+            # Normalize the ROCm LSE layout
+            if (
+                not self._is_vllm_fa
+                and lse is not None
+                and lse.shape != (q.shape[1], q.shape[0])
+            ):
+                assert lse.shape == (q.shape[0], q.shape[1])
+                lse = lse.transpose(0, 1).contiguous()
 
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
