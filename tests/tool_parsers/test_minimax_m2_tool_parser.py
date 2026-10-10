@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
@@ -601,3 +602,68 @@ class TestParameterWhitespace:
         assert json.loads(tc[0]["arguments"]) == {
             "content": "    def foo():\n        return 1\n"
         }
+
+
+def _invoke(name: str, params: list[tuple[str, str]]) -> str:
+    body = "".join(f'<parameter name="{k}">{v}</parameter>' for k, v in params)
+    return f'<invoke name="{name}">{body}</invoke>'
+
+
+def _tool_call(*invokes: str) -> str:
+    return f"<minimax:tool_call>{''.join(invokes)}</minimax:tool_call>"
+
+
+class TestMinimaxM2ToolParser(ToolParserTests):
+    """Common parity suite for the MiniMax M2 XML wire format."""
+
+    @pytest.fixture
+    def test_config(self) -> ToolParserTestConfig:
+        return ToolParserTestConfig(
+            parser_name="minimax_m2",
+            no_tool_calls_output="How can I help you today?",
+            single_tool_call_output=_tool_call(
+                _invoke("get_weather", [("city", "Tokyo")])
+            ),
+            parallel_tool_calls_output=_tool_call(
+                _invoke("get_weather", [("city", "Tokyo")]),
+                _invoke("get_time", [("timezone", "Asia/Tokyo")]),
+            ),
+            various_data_types_output=_tool_call(
+                _invoke(
+                    "test_function",
+                    [
+                        ("string_field", "hello"),
+                        ("int_field", "42"),
+                        ("float_field", "3.14"),
+                        ("bool_field", "true"),
+                        ("null_field", "null"),
+                        ("array_field", '["a", "b", "c"]'),
+                        ("object_field", '{"nested": "value"}'),
+                    ],
+                )
+            ),
+            empty_arguments_output=_tool_call(_invoke("refresh", [])),
+            surrounding_text_output=(
+                "Let me check the weather for you.\n"
+                + _tool_call(_invoke("get_weather", [("city", "Tokyo")]))
+                + "\nI'll get that information."
+            ),
+            escaped_strings_output=_tool_call(
+                _invoke(
+                    "test_function",
+                    [
+                        ("quoted", 'He said "hello"'),
+                        ("backslash", "C:\\Users\\test"),
+                        ("newline", "line1\nline2"),
+                    ],
+                )
+            ),
+            malformed_input_outputs=[
+                '<minimax:tool_call><invoke name="broken">',
+                _tool_call('<invoke><parameter name="a">1</parameter></invoke>'),
+                "<minimax:tool_call></minimax:tool_call>",
+            ],
+            # Parameter values arrive as XML text; without a tool schema on the
+            # request they stay strings rather than being coerced to JSON types.
+            supports_typed_arguments=False,
+        )
