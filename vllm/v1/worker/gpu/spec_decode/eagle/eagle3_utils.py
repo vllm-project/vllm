@@ -83,7 +83,7 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
         return
 
     key = inner.AUX_HIDDEN_STATE_KEY
-    hidden_size = inner.config.hidden_size
+    hidden_size = getattr(inner, "aux_hidden_size", inner.config.hidden_size)
     make_empty = model.make_empty_intermediate_tensors
 
     def make_empty_with_aux(batch_size, dtype, device):
