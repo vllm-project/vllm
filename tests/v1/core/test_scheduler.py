@@ -2051,6 +2051,43 @@ def test_per_request_spec_decode_subtracts_invalid_drafts():
     assert payload["acceptance_histogram"] == [0, 0, 1, 0]
 
 
+def test_spec_decode_stats_count_only_verified_drafts():
+    """When the runner verifies fewer drafts than scheduled, only those count
+    as proposed, while the rejection rollback still covers every placeholder."""
+    scheduler = create_scheduler(
+        num_speculative_tokens=3, per_request_spec_decode_metrics="detailed"
+    )
+    [req] = create_requests(num_requests=1, num_tokens=1)
+    scheduler.add_request(req)
+    rid = req.request_id
+
+    def _mk_output(sampled, num_verified=None):
+        return ModelRunnerOutput(
+            req_ids=[rid],
+            req_id_to_index={rid: 0},
+            sampled_token_ids=[sampled],
+            num_verified_spec_tokens=num_verified,
+        )
+
+    scheduler.update_from_output(scheduler.schedule(), _mk_output([0]))
+    scheduler.update_draft_token_ids(DraftTokenIds([rid], [[1, 2, 3]]))
+    output = scheduler.schedule()
+    # 3 scheduled, 2 verified, 1 accepted.
+    engine_core_outputs = scheduler.update_from_output(
+        output, _mk_output([1, 9], num_verified=[2])
+    )
+
+    stats = engine_core_outputs[0].scheduler_stats.spec_decoding_stats
+    assert stats.num_drafts == 1
+    assert stats.num_draft_tokens == 2
+    assert stats.num_accepted_tokens == 1
+    assert stats.num_draft_tokens_per_pos == [1, 1, 0]
+    payload = req.spec_decode_metrics.to_dict()
+    assert payload["per_step_drafted"] == [2]
+    assert payload["per_step_accepted"] == [1]
+    assert req.num_computed_tokens == 1 + 4 - 2
+
+
 def test_per_request_spec_decode_acceptance_disabled_by_default():
     scheduler = create_scheduler(num_speculative_tokens=3)
     assert scheduler.spec_decode_metrics_level == "none"

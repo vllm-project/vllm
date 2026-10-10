@@ -2125,9 +2125,15 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens -= num_rejected
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
+                # Only the verified drafts count as proposed.
+                num_proposed = num_draft_tokens
+                if model_runner_output.num_verified_spec_tokens is not None:
+                    num_proposed = model_runner_output.num_verified_spec_tokens[
+                        req_index
+                    ]
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
+                    num_draft_tokens=num_proposed,
                     num_accepted_tokens=num_accepted,
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
@@ -2136,7 +2142,7 @@ class Scheduler(SchedulerInterface):
                     # Exclude grammar-invalidated drafts from the proposed
                     # count, mirroring make_spec_decoding_stats; the accepted
                     # bucket (j) is unaffected.
-                    adj_draft_tokens = num_draft_tokens
+                    adj_draft_tokens = num_proposed
                     if scheduler_output.num_invalid_spec_tokens:
                         adj_draft_tokens -= (
                             scheduler_output.num_invalid_spec_tokens.get(req_id, 0)

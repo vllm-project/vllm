@@ -269,6 +269,7 @@ class CudaGraphManager:
         # draft tokens. The scheduler might use a smaller number so we need
         # to capture graphs for all possible values during decode.
         speculative_config = self.vllm_config.speculative_config
+        single_req_only_lens: set[int] = set()
         if (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
@@ -291,6 +292,19 @@ class CudaGraphManager:
                     for num_spec in dense_schedule[1:]
                 }
             )
+        elif (
+            speculative_config
+            and speculative_config.draft_confidence_fallback_depth is not None
+            and self.decode_query_len > self.vllm_config.num_speculative_tokens
+        ):
+            # One request may stop after 1..K drafts; larger batches verify the
+            # fallback depth.
+            base = self.decode_query_len - self.vllm_config.num_speculative_tokens
+            decode_query_lens = list(range(base + 1, self.decode_query_len + 1))
+            single_req_only_lens = set(decode_query_lens) - {
+                self.decode_query_len,
+                base + speculative_config.draft_confidence_fallback_depth,
+            }
         else:
             decode_query_lens = [self.decode_query_len]
 
@@ -322,6 +336,10 @@ class CudaGraphManager:
                         rounded_num_tokens > max_decode_tokens
                         or rounded_num_tokens > max_cg_capture_size
                         or rounded_num_reqs > self.max_num_reqs
+                        or (
+                            decode_query_len in single_req_only_lens
+                            and rounded_num_reqs > 1
+                        )
                     ):
                         continue
 

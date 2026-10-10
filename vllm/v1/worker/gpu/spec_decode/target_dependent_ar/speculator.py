@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import partial
 from typing import Any
 
 import torch
@@ -17,6 +18,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.confidence_stop import DraftConfidenceStop
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
@@ -101,7 +103,8 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         self._configure_fused_multi_step_decode()
 
     def _configure_fused_multi_step_decode(self) -> None:
-        if self.num_speculative_steps == 1:
+        # The confidence stop decides between steps, so each needs its own graph.
+        if self.num_speculative_steps == 1 or self.confidence_stop is not None:
             self.use_fused_multi_step_decode = False
             return
 
@@ -329,6 +332,22 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             )
         self.on_prefill_end(num_reqs)
 
+        num_draft_steps = num_speculative_tokens
+        confidence_stop = None
+        stop = self.confidence_stop
+        if stop is not None and not (dummy_run or is_profile):
+            if input_batch.has_structured_output_reqs:
+                # Grammar masks cover every scheduled draft, so draft them all.
+                stop.fixed_round(input_batch.idx_mapping_np, num_draft_steps)
+            elif num_reqs > 1:
+                # Past one request the per-step wait does not pay off.
+                num_draft_steps = stop.fallback_depth
+                stop.fixed_round(input_batch.idx_mapping_np, num_draft_steps)
+            else:
+                confidence_stop = stop
+                stop.begin_round(int(input_batch.idx_mapping_np[0]))
+                stop.step_launched()
+
         if num_speculative_tokens <= 1:
             if num_speculative_tokens == 0:
                 self.draft_tokens[:num_reqs].fill_(-1)
@@ -372,7 +391,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
         if self.decode_cudagraph_manager is not None:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
-                decode_batch_desc, num_speculative_tokens
+                decode_batch_desc, num_draft_steps
             )
         num_tokens_across_dp = (
             decode_batch_sync.num_tokens_across_dp
@@ -385,7 +404,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         decode_fn = (
             self._fused_multi_step_decode
             if self.use_fused_multi_step_decode
-            else self._multi_step_decode
+            else partial(self._multi_step_decode, confidence_stop=confidence_stop)
         )
         decode_fn(
             num_reqs,
@@ -393,7 +412,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             decode_batch_desc,
             num_tokens_across_dp,
             input_batch.seq_lens_cpu_upper_bound,
-            num_speculative_tokens,
+            num_draft_steps,
         )
         self.on_multi_step_decode_end(num_reqs)
 
@@ -521,6 +540,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
         num_speculative_steps: int,
+        confidence_stop: DraftConfidenceStop | None = None,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -549,6 +569,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                     step=step,
                 )
 
+            # Wait only after building this step's metadata.
+            if confidence_stop is not None and not confidence_stop.should_continue():
+                return
+
             self.current_draft_step.fill_(step)
 
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -564,6 +588,11 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                     cudagraph_runtime_mode=batch_desc.cg_mode,
                     num_speculative_steps=num_speculative_steps,
                 )
+            if confidence_stop is not None:
+                confidence_stop.step_launched()
+
+        if confidence_stop is not None:
+            confidence_stop.end_round()
 
     def _fused_multi_step_decode(
         self,

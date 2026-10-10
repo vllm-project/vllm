@@ -552,6 +552,18 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
 
+    draft_confidence_threshold: float | None = Field(default=None, gt=0.0, le=1.0)
+    """While a single request is decoding, stop autoregressive drafting once its
+    drafter top-1 probability falls below this threshold, treating
+    num_speculative_tokens as the maximum depth. Requires
+    draft_confidence_fallback_depth. SM121 GPUs, Model Runner V2 and methods
+    'mtp', 'eagle' and 'eagle3' only."""
+
+    draft_confidence_fallback_depth: int | None = Field(default=None, ge=1)
+    """Fixed number of draft tokens used, without the confidence stop, whenever
+    more than one request is decoding. Required with
+    draft_confidence_threshold; usually the best fixed depth for the model."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using

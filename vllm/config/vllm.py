@@ -1074,6 +1074,44 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _verify_draft_confidence_threshold(self) -> None:
+        spec = self.speculative_config
+        if spec is None or spec.draft_confidence_threshold is None:
+            if spec is not None and spec.draft_confidence_fallback_depth is not None:
+                raise ValueError("draft_confidence_fallback_depth needs a threshold.")
+            return
+        from vllm.platforms import current_platform
+
+        fallback = spec.draft_confidence_fallback_depth
+        error = None
+        if spec.method not in ("mtp", "eagle", "eagle3"):
+            error = f"requires method 'mtp', 'eagle' or 'eagle3', got {spec.method!r}"
+        elif spec.use_multi_module_mtp() or spec.use_gemma4_mtp():
+            error = "does not support multi-module or Gemma 4 MTP drafters"
+        elif fallback is None or not 1 <= fallback < spec.num_speculative_tokens:
+            error = (
+                "needs draft_confidence_fallback_depth in [1, num_speculative_tokens)"
+            )
+        elif not self.use_v2_model_runner:
+            error = "requires Model Runner V2"
+        elif self.parallel_config.data_parallel_size > 1:
+            error = "does not support data parallelism"
+        elif spec.uses_dynamic_speculative_decoding():
+            error = "is not compatible with num_speculative_tokens_per_batch_size"
+        elif spec.enable_adaptive_verification:
+            error = "is not compatible with enable_adaptive_verification"
+        elif spec.use_local_argmax_reduction:
+            error = "is not compatible with use_local_argmax_reduction"
+        elif spec.parallel_drafting:
+            error = "is not compatible with parallel_drafting"
+        elif not (
+            current_platform.is_cuda() and current_platform.is_device_capability(121)
+        ):
+            # The per-step readback only pays off where a draft step is long.
+            error = "is only supported on SM121 GPUs"
+        if error:
+            raise ValueError(f"draft_confidence_threshold {error}.")
+
     def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
     ) -> None:
@@ -1797,6 +1835,7 @@ class VllmConfig:
             )
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
+        self._verify_draft_confidence_threshold()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (

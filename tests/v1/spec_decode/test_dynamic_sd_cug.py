@@ -28,6 +28,8 @@ def _create_vllm_config_for_dsd(
     cudagraph_mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
     use_dynamic_sd: bool = True,
     num_spec_per_batch_size: list[tuple[int, int, int]] | None = None,
+    draft_confidence_threshold: float | None = None,
+    draft_confidence_fallback_depth: int | None = None,
 ) -> MagicMock:
     """Create a minimal config that exercises DSD cudagraph dispatch.
 
@@ -78,6 +80,8 @@ def _create_vllm_config_for_dsd(
         )
     else:
         speculative_config.num_speculative_tokens_per_batch_size = None
+    speculative_config.draft_confidence_threshold = draft_confidence_threshold
+    speculative_config.draft_confidence_fallback_depth = draft_confidence_fallback_depth
     vllm_config.speculative_config = speculative_config
 
     return vllm_config
@@ -426,3 +430,48 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs is None
             assert desc.num_active_loras == 0
+
+
+@pytest.mark.parametrize(
+    ("decode_query_len", "expected"),
+    [
+        # Target verification with K=4, fallback depth 2: the full and fallback
+        # lengths at every batch size, the other stop lengths for one request.
+        (
+            5,
+            {(5, n) for n in range(1, 9)}
+            | {(3, n) for n in range(1, 9)}
+            | {(2, 1), (4, 1)},
+        ),
+        # Draft decode steps always run one token per request.
+        (1, {(1, n) for n in range(1, 9)}),
+    ],
+)
+def test_confidence_stop_captures_verified_lengths(
+    monkeypatch, decode_query_len, expected
+):
+    """A stopped single request verifies 1..K drafts; larger batches verify the
+    fallback depth, so only those shapes get FULL graphs."""
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=8,
+        max_spec_tokens=4,
+        use_dynamic_sd=False,
+        draft_confidence_threshold=0.6,
+        draft_confidence_fallback_depth=2,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=decode_query_len,
+    )
+    shapes = {
+        (desc.uniform_token_count, desc.num_reqs)
+        for desc in manager._capture_descs[CUDAGraphMode.FULL]
+    }
+    assert shapes == expected

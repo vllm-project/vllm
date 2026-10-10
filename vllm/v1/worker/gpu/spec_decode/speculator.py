@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
+from vllm.v1.worker.gpu.spec_decode.confidence_stop import DraftConfidenceStop
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -103,6 +104,8 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    confidence_stop: DraftConfidenceStop | None = None
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
@@ -207,6 +210,18 @@ class DraftModelSpeculator(BaseSpeculator):
 
         self.supports_mm_inputs = False
         self.pcp_manager: PCPManager | None = None
+
+        threshold = self.speculative_config.draft_confidence_threshold
+        if threshold is not None:
+            fallback_depth = self.speculative_config.draft_confidence_fallback_depth
+            assert fallback_depth is not None
+            self.confidence_stop = DraftConfidenceStop(
+                threshold,
+                fallback_depth,
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                device,
+            )
 
     @abstractmethod
     def load_draft_model(
@@ -430,6 +445,9 @@ class DraftModelSpeculator(BaseSpeculator):
             return self.get_draft_top_tokens(hidden_states, spec_step_idx)
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
+        if self.confidence_stop is not None:
+            # Before sampling, which may scale the logits in place.
+            self.confidence_stop.update(logits, draft_step)
         if draft_logits is not None:
             sampler = (
                 gumbel_sample
