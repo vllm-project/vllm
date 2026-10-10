@@ -471,6 +471,45 @@ def _shuffle_mxfp8_moe_weights(
     )
 
 
+def _pad_mxfp8_native_intermediate(
+    layer: torch.nn.Module,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pad non-gated MXFP8 experts before FlashInfer weight/scale shuffling."""
+    assert not layer.moe_config.is_act_and_mul
+    e, h, n = w2.shape
+    assert w13.shape == (e, n, h)
+    assert h % 32 == 0 and n % 32 == 0
+    s13 = w13_scale.reshape(e, n, h // 32)
+    s2 = w2_scale.reshape(e, h, n // 32)
+    pn = round_up(n, 128)
+    ph = round_up(h, 256)
+    if pn == n and ph == h:
+        return w13, w2, w13_scale, w2_scale
+    b13 = torch.zeros((e, pn, ph), dtype=torch.uint8, device=w13.device)
+    b2 = torch.zeros((e, ph, pn), dtype=torch.uint8, device=w2.device)
+    b13[:, :n, :h] = w13.view(torch.uint8)
+    b2[:, :h, :n] = w2.view(torch.uint8)
+    # UE8M0 encodes scale 1 as 127; padded FP8 weight bytes are zero.
+    p13 = torch.full((e, pn, ph // 32), 127, dtype=torch.uint8, device=s13.device)
+    p2 = torch.full((e, ph, pn // 32), 127, dtype=torch.uint8, device=s2.device)
+    p13[:, :n, : h // 32] = s13
+    p2[:, :h, : n // 32] = s2
+    layer.moe_config.intermediate_size_per_partition = pn
+    layer.moe_config.hidden_dim = ph
+    logger.info_once(
+        "Native MXFP8 v3 runtime padding intermediate %d->%d hidden %d->%d",
+        n,
+        pn,
+        h,
+        ph,
+    )
+    return b13.view(w13.dtype), b2.view(w2.dtype), p13, p2
+
+
 def prepare_fp8_moe_layer_for_fi(
     layer: torch.nn.Module,
     w13: torch.Tensor,
@@ -499,6 +538,10 @@ def prepare_fp8_moe_layer_for_fi(
 
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
     if is_mxfp8 and is_trtllm:
+        if not layer.moe_config.is_act_and_mul:
+            w13, w2, w13_scale, w2_scale = _pad_mxfp8_native_intermediate(
+                layer, w13, w2, w13_scale, w2_scale
+            )
         # FlashInfer TRT-LLM SwiGLU expects [up; gate] but vLLM stores
         # [gate; up].  Swap both weights and scales before interleaving.
         if layer.moe_config.is_act_and_mul:
