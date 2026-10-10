@@ -311,6 +311,9 @@ class MoRIIOConfig:
         #                     notification is reaped and its blocks force-freed (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec).
+        # write_recv_timeout -> WRITE-mode consumer only: timeout before a
+        #                     request whose producer write_done never arrived
+        #                     is failed (sec). Read by the scheduler.
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -422,6 +425,10 @@ class MoRIIOConstants:
     # is aborted, so the decode worker does not hang on it forever.
     # Overridable via kv_connector_extra_config["recv_abort_timeout"].
     DEFAULT_RECV_ABORT_TIMEOUT = 120.0
+    # Timeout (seconds) before a WRITE-mode consumer request whose producer
+    # write_done never arrived is failed. Its blocks stay allocated.
+    # Overridable via kv_connector_extra_config["write_recv_timeout"].
+    DEFAULT_WRITE_RECV_TIMEOUT = 540.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -518,6 +525,10 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        # WRITE-mode consumer blocks whose write_done timed out (ROCm/mori#655).
+        # Filled by the scheduler, drained by the worker's
+        # get_block_ids_with_load_errors so vLLM frees/recomputes the request.
+        self.write_load_failed_block_ids: list[int] = []
 
     def __repr__(self):
         return (
