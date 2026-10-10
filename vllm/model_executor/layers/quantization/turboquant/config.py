@@ -202,6 +202,31 @@ class TurboQuantConfig:
             logger.info("TQ hybrid: full-attention layers %s", attn_indices)
             return []
 
+        # Models with heterogeneous head dimensions (e.g. Gemma4: head_dim=256
+        # for sliding-window layers, global_head_dim=512 for full-attention)
+        # already have sliding-window layers falling back to fp8. Skip boundary
+        # protection to avoid inflating the shared page size.
+        # Use model_arch_config (same approach as Gemma4Config) to detect this.
+        try:
+            arch_config = model_config.model_arch_config
+            layer_types = (
+                getattr(model_config.hf_text_config, "layer_types", None) or []
+            )
+            layer_head_sizes = {
+                arch_config[i].head_size
+                for i in range(
+                    min(arch_config.total_num_hidden_layers, len(layer_types))
+                )
+            }
+            is_heterogeneous_head_dim = len(layer_head_sizes) > 1
+        except AttributeError:
+            is_heterogeneous_head_dim = False
+        if is_heterogeneous_head_dim:
+            logger.info(
+                "TQ: skipping boundary protection for heterogeneous head_dim model."
+            )
+            return []
+
         num_layers = model_config.hf_text_config.num_hidden_layers
         if n <= 0 or num_layers <= 0:
             return []
