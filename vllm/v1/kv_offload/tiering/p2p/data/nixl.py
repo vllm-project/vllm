@@ -126,6 +126,14 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
+        if peer_id in self._peer_nixl_names or peer_id in self._remote_dlists:
+            logger.info(
+                "NixlTransport %s: replacing remote peer registration for %s",
+                self._agent_name,
+                peer_id,
+            )
+            self.remove_remote_peer(peer_id)
+
         nixl_name = self._agent.add_remote_agent(agent_metadata)
         block_descs = [
             (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)

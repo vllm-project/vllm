@@ -470,6 +470,30 @@ class TestConnectHandshake:
         _, conn, _ = _make_session(local_hash_seed="777")
         assert conn._sent[0][ConnectMsg.HASH_SEED] == "777"
 
+    def test_reconnect_connect_msg_refreshes_remote_peer(self):
+        """A post-handshake ConnectMsg refreshes data-plane registration."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        first_ack_count = sum(
+            1 for msg in conn._sent if msg[TYPE_KEY] == ConnectAckMsg.TYPE
+        )
+
+        reconnect = _peer_connect_msg()
+        reconnect[ConnectMsg.AGENT_METADATA] = b"peer-metadata-reconnect"
+        reconnect[ConnectMsg.BASE_ADDR] = 0x3000
+        conn.enqueue(reconnect)
+        session.poll()
+
+        assert session.alive
+        assert transport._remote_peers["peer:8000"][ConnectMsg.AGENT_METADATA] == (
+            b"peer-metadata-reconnect"
+        )
+        assert transport._remote_peers["peer:8000"][ConnectMsg.BASE_ADDR] == 0x3000
+        assert (
+            sum(1 for msg in conn._sent if msg[TYPE_KEY] == ConnectAckMsg.TYPE)
+            == first_ack_count + 1
+        )
+
 
 # ---------------------------------------------------------------------------
 # Client-role flows

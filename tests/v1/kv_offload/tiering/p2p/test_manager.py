@@ -663,6 +663,7 @@ class _FakeSession:
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
         self.finishes: list[str] = []
+        self.close_calls = 0
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
         # P2PSession._client.has_active_loads for the shutdown-drain and
         # drain_jobs paths. Tests populate _server._inflight when needed.
@@ -698,6 +699,7 @@ class _FakeSession:
         self.finishes.append(kv_request_id)
 
     def close(self):
+        self.close_calls += 1
         return SessionCloseResult(
             failed_jobs=self._close_jobs,
             failed_req_ids=self._close_req_ids,
@@ -1316,22 +1318,43 @@ class TestBidirectionalManager:
 
 
 class _RecordingConn:
-    """Inbound connection stub that records close()/peer_id only."""
+    """Inbound connection stub that records sends and close()."""
 
     def __init__(self, peer_id: str) -> None:
         self.peer_id = peer_id
+        self.alive = True
+        self.sent: list[dict] = []
         self.close_calls: int = 0
 
+    def send(self, msg: dict) -> None:
+        self.sent.append(msg)
+
     def close(self) -> None:
+        self.alive = False
         self.close_calls += 1
 
 
 class TestAcceptNewPeers:
-    """A second inbound from an already-connected peer is rejected and the
-    new conn is closed; the existing session is left untouched."""
+    """Inbound peer connection handling."""
 
-    def test_duplicate_connection_is_closed_and_existing_session_untouched(self):
+    def test_duplicate_connection_replaces_existing_session(self):
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def __init__(self) -> None:
+                self.removed: list[str] = []
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+            def remove_remote_peer(self, peer_id: str) -> None:
+                self.removed.append(peer_id)
+
         mgr = _make_manager()
+        mgr._data = FakeData()
         peer_id = "10.0.0.1:8000"
         existing = _FakeSession(peer_id=peer_id, connected=True)
         mgr._sessions[peer_id] = existing
@@ -1339,12 +1362,12 @@ class TestAcceptNewPeers:
         new_conn = _RecordingConn(peer_id)
         mgr._accept_new_peers([new_conn])
 
-        # Manager swallowed the ValueError and closed the duplicate conn.
-        assert new_conn.close_calls == 1
-        # Existing session was NOT re-attached.
-        assert existing.attached == []
-        # Session map unchanged.
-        assert mgr._sessions[peer_id] is existing
+        assert new_conn.close_calls == 0
+        assert existing.close_calls == 1
+        assert mgr._data.removed == [peer_id]
+        assert mgr._sessions[peer_id] is not existing
+        assert mgr._sessions[peer_id].connected is True
+        assert new_conn.sent
 
     def test_creates_session_for_new_peer(self):
         """An inbound conn from a peer with no existing session creates

@@ -720,7 +720,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             try:
                 existing = self._sessions.get(conn.peer_id)
                 if existing is not None:
-                    raise ValueError(f"duplicate connection from {conn.peer_id}")
+                    logger.info(
+                        "P2P %s: replacing existing session for reconnect from %s",
+                        self._local_id,
+                        conn.peer_id,
+                    )
+                    del self._sessions[conn.peer_id]
+                    self._close_session(conn.peer_id, existing)
                 self._sessions[conn.peer_id] = P2PSession(
                     peer_id=conn.peer_id,
                     local_id=self._local_id,
@@ -737,6 +743,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             except (ValueError, KeyError, TypeError, AssertionError) as exc:
                 logger.error("P2P %s: rejecting peer: %s", self._local_id, exc)
                 conn.close()
+
+    def _close_session(self, peer_id: str, session: P2PSession) -> None:
+        stale_kv_ids = [
+            kid
+            for kid, bound_session in self._kv_to_session.items()
+            if bound_session is session
+        ]
+        for kid in stale_kv_ids:
+            del self._kv_to_session[kid]
+
+        close_result = session.close()
+        for job_id in close_result.failed_jobs:
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+        for job_id in close_result.failed_stores:
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+        self._failed_req_ids.update(close_result.failed_req_ids)
+        self._failed_serve_ctxs.extend(close_result.failed_serves)
+        self._data.remove_remote_peer(peer_id)
 
     def _reap_dead_sessions(self) -> None:
         # Reap connected sessions whose connection died — peer is gone.
