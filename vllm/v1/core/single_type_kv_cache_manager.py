@@ -1052,14 +1052,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
+            # The run ends at an aligned block, so it needs no re-alignment
+            # here: without EAGLE its length is already aligned, and with EAGLE
+            # it is aligned once the EAGLE block is dropped below. Re-aligning
+            # before the drop would shorten the hit by up to an alignment unit.
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
-            while (
-                block_size != alignment_tokens  # Faster for common case.
-                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-            ):
-                for computed in computed_blocks:
-                    computed.pop()
         if drop_eagle_block and computed_blocks[0]:
             for computed in computed_blocks:
                 computed.pop()

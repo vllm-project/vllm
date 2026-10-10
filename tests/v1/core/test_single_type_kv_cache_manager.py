@@ -631,6 +631,49 @@ def test_sliding_window_possible_cached_prefix():
     )
 
 
+def test_sliding_window_eagle_prefix_hit_keeps_alignment_unit():
+    """A cached prefix shorter than the window keeps every aligned block once
+    the EAGLE block is dropped."""
+    block_size = 2
+    alignment_tokens = 6
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=20,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    # Blocks 0-10 are cached and block 11 is not. The window needs 11 blocks
+    # (10 + the EAGLE block) ending at an aligned block, so there is no full
+    # window match, and the cached prefix is used instead.
+    block_is_cached = [True] * 11 + [False]
+    block_hashes = [BlockHash(str(i).encode()) for i in range(len(block_is_cached))]
+    for i, is_cached in enumerate(block_is_cached):
+        if is_cached:
+            block_pool.cached_block_hash_to_block.insert(
+                make_block_hash_with_group_id(block_hashes[i], 0),
+                block_pool.blocks[i + 1],
+            )
+
+    computed_blocks, hit_length = SlidingWindowManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=len(block_hashes) * block_size,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=True,
+        alignment_tokens=alignment_tokens,
+    )
+
+    # The aligned run is blocks 0-9; dropping the EAGLE block leaves blocks
+    # 0-8, i.e. 18 tokens, which is a multiple of `alignment_tokens`.
+    assert hit_length == 18
+    assert computed_blocks[0] == block_pool.blocks[1:10]
+
+
 def test_sliding_window_cache_hit_with_finer_hash_alignment():
     """Sliding-window lookup uses full blocks with finer hybrid-cache hashes."""
     hash_block_size = 2
