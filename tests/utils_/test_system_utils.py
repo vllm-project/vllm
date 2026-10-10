@@ -4,10 +4,11 @@
 import contextlib
 import io
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import psutil
 
@@ -54,23 +55,46 @@ def test_suppress_stdout_keeps_stderr_when_sys_stdout_is_stderr(capfd, monkeypat
     assert "error message" in err
 
 
+def _sleeper() -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
 def test_kill_process_tree_skips_child_that_exits_mid_walk(monkeypatch):
-    class Child:
-        def __init__(self, pid: int, exited: bool = False):
-            self.pid = pid
-            self.exited = exited
+    target, *children = procs = [_sleeper() for _ in range(4)]
+    try:
+        # List the children while they are alive, then let one exit and be
+        # reaped before the walk reaches it, so psutil's name() raises.
+        listed = [psutil.Process(p.pid) for p in children]
+        children[1].kill()
+        children[1].wait()
+        monkeypatch.setattr(
+            psutil.Process, "children", lambda self, recursive=False: listed
+        )
 
-        def name(self) -> str:
-            if self.exited:
-                raise psutil.NoSuchProcess(self.pid)
-            return "VLLM::Worker"
+        system_utils.kill_process_tree(target.pid)
 
-    children = [Child(101), Child(102, exited=True), Child(103)]
-    parent = SimpleNamespace(children=lambda recursive: children)
-    killed: list[int] = []
-    monkeypatch.setattr(system_utils.psutil, "Process", lambda pid: parent)
-    monkeypatch.setattr(system_utils.os, "kill", lambda pid, sig: killed.append(pid))
+        for p in (children[0], children[2], target):
+            assert p.wait(timeout=10) == -signal.SIGKILL
+    finally:
+        for p in procs:
+            p.kill()
+            p.wait()
 
-    system_utils.kill_process_tree(100)
 
-    assert killed == [101, 103, 100]
+def test_kill_process_tree_returns_when_target_exits_before_children(monkeypatch):
+    target = _sleeper()
+    list_children = psutil.Process.children
+
+    def exit_then_list(self, recursive=False):
+        # The target exits and is reaped after the lookup, so psutil raises
+        # NoSuchProcess from inside children().
+        target.kill()
+        target.wait()
+        return list_children(self, recursive=recursive)
+
+    monkeypatch.setattr(psutil.Process, "children", exit_then_list)
+    try:
+        system_utils.kill_process_tree(target.pid)
+    finally:
+        target.kill()
+        target.wait()
