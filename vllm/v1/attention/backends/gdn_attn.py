@@ -128,16 +128,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
-        # update_block_table() keeps the source group's batch-level FULL graph
-        # buffers, so only MRV2, which also reuses metadata at capture, may use
-        # it.
-        self.supports_update_block_table = (
-            vllm_config.use_v2_model_runner
-            and device.type == "cuda"
-            # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
-            and type(self) is GDNAttentionMetadataBuilder
-        )
-        if self.supports_update_block_table:
+        if vllm_config.use_v2_model_runner and device.type == "cuda":
             # Opts into MRV2's CUDA-only aligned-index precompute.
             self.mamba_aligned_state_indices: torch.Tensor | None = None
 
@@ -281,6 +272,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 m.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
+            )
+        group_cache = m._cross_group_cache
+        cache_key = (self.kv_cache_spec, type(self))
+        if group_cache is not None and cache_key in group_cache:
+            return self._update_state_indices(
+                group_cache[cache_key], m.block_table_tensor, block_table_tensor
             )
 
         uniform_spec_sequence_length = None
@@ -627,6 +624,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        if group_cache is not None:
+            # Capture and replay share the first group's batch-level buffers.
+            group_cache[cache_key] = attn_metadata
         return attn_metadata
 
     def _stage_spec_decode(
@@ -656,11 +656,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_decodes <= self.decode_cudagraph_max_bs
         )
 
-    def update_block_table(
+    def _update_state_indices(
         self,
         metadata: GDNAttentionMetadata,
         blk_table: torch.Tensor,
-        slot_mapping: torch.Tensor,
+        state_indices: torch.Tensor,
     ) -> GDNAttentionMetadata:
         """Re-gather this group's state indices. The other fields are
         batch-level and stay shared with ``metadata``."""
@@ -670,21 +670,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if m.checkpoint is not None
             else None
         )
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
-            assert self.mamba_aligned_state_indices is not None
-            blk_table = self.mamba_aligned_state_indices
         masks = m.spec_sequence_masks_cpu
         spec_indices = non_spec_indices = prefill_indices = None
         if masks is None:
-            non_spec_indices = blk_table[:, 0]
+            non_spec_indices = state_indices[:, 0]
             if m.num_prefills > 0:
                 prefill_indices = non_spec_indices[m.num_decodes :]
         elif m.num_prefills == 0:
             # Same as build(): padded sequences trail the spec decodes.
-            spec_indices = blk_table[: m.num_spec_decodes, : self.num_spec + 1]
+            spec_indices = state_indices[: m.num_spec_decodes, : self.num_spec + 1]
         else:
-            spec_indices = blk_table[masks, : self.num_spec + 1]
-            non_spec_indices = prefill_indices = blk_table[~masks, 0]
+            spec_indices = state_indices[masks, : self.num_spec + 1]
+            non_spec_indices = prefill_indices = state_indices[~masks, 0]
 
         if self._stage_spec_decode(
             m.num_prefills, m.num_decodes, m.num_spec_decodes, m.num_spec_decode_tokens

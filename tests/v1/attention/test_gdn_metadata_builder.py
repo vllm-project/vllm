@@ -5,7 +5,7 @@ reclassification of non-spec decodes as prefills when spec decodes exist.
 Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import pytest
 import torch
@@ -180,12 +180,11 @@ def _build(
     builder: GDNAttentionMetadataBuilder,
     batch_spec: BatchSpec,
     num_decode_draft_tokens: list[int] | None = None,
-    block_table: torch.Tensor | None = None,
+    common: CommonAttentionMetadata | None = None,
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
-    common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
-    if block_table is not None:
-        common = common.replace(block_table_tensor=block_table)
+    if common is None:
+        common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
     kwargs: dict = {}
     if num_decode_draft_tokens is not None:
         kwargs["num_decode_draft_tokens_cpu"] = torch.tensor(
@@ -219,47 +218,52 @@ def test_gdn_build_classification(test_case: GDNBuildTestCase):
 @pytest.mark.parametrize(
     "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
 )
-def test_update_block_table_matches_build(
+def test_cross_group_build(
     test_case: GDNBuildTestCase, full_cuda_graph: bool, mamba_cache_mode: str
 ):
-    """update_block_table() on another group's metadata matches build()."""
+    """Share batch metadata while retaining each group's state indices."""
     batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
     src, dst, ref = (
         _create_gdn_builder(test_case.num_speculative_tokens, full_cuda_graph)
         for _ in range(3)
     )
+    cache: dict = {}
+    source_common, common = (
+        create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+            _cross_group_cache=cache
+        )
+        for _ in range(2)
+    )
     for builder in (src, dst, ref):
         builder.vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
-    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
     if mamba_cache_mode == "align":
-        # MRV2 precomputes these for every Mamba group each step.
-        dst.mamba_aligned_state_indices = ref.mamba_aligned_state_indices = (
-            mamba_get_block_table_tensor(
-                common.block_table_tensor, common.seq_lens, ref.kv_cache_spec, "align"
-            )
+        # The first group exercises the CPU gather fallback; the second uses
+        # the indices MRV2 precomputes on CUDA/ROCm.
+        dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+            common.block_table_tensor,
+            common.seq_lens,
+            dst.kv_cache_spec,
+            "align",
         )
     draft_tokens = test_case.num_decode_draft_tokens
-    expected = _build(ref, batch, draft_tokens, common.block_table_tensor)
-    source = _build(src, batch, draft_tokens)
-    fields = (
+    source = _build(src, batch, draft_tokens, source_common)
+    meta = _build(dst, batch, draft_tokens, common)
+    expected = _build(ref, batch, draft_tokens, common.replace(_cross_group_cache=None))
+
+    state_fields = (
         "spec_state_indices_tensor",
         "non_spec_state_indices_tensor",
         "prefill_state_indices",
     )
-    source_indices = [getattr(source, f) for f in fields]
-    source_indices = [t if t is None else t.clone() for t in source_indices]
-    meta = dst.update_block_table(
-        source, common.block_table_tensor, common.slot_mapping
-    )
-
-    for field, source_index in zip(fields, source_indices):
-        actual = getattr(meta, field)
-        torch.testing.assert_close(actual, getattr(expected, field))
-        # The source group's indices are untouched.
-        torch.testing.assert_close(getattr(source, field), source_index)
+    for field in fields(GDNAttentionMetadata):
+        actual = getattr(meta, field.name)
+        if field.name not in state_fields:
+            assert actual is getattr(source, field.name)
+            continue
+        torch.testing.assert_close(actual, getattr(expected, field.name))
         # FULL graph state indices land in this group's own buffers.
         if full_cuda_graph and meta.num_prefills == 0 and actual is not None:
-            assert actual.data_ptr() == getattr(dst, field).data_ptr()
+            assert actual.data_ptr() == getattr(dst, field.name).data_ptr()
 
 
 def test_has_initial_state_after_reclassification():
@@ -460,13 +464,14 @@ def test_checkpoint_metadata_preserves_non_spec_order(
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
-def test_update_block_table_regathers_checkpoint(num_spec):
+def test_cross_group_build_regathers_checkpoint(num_spec):
     """Checkpoint pages come from the target group's block table, not the
     source group's (otherwise the target group's checkpoint page is never
     written while the prefix cache treats it as valid)."""
     src, common, kwargs = _create_checkpoint_builder_and_batch(num_spec)
     dst, _, _ = _create_checkpoint_builder_and_batch(num_spec)
     ref, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    common = common.replace(_cross_group_cache={})
     other_table = common.block_table_tensor + 100
     other = common.replace(block_table_tensor=other_table)
     dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
@@ -474,8 +479,8 @@ def test_update_block_table_regathers_checkpoint(num_spec):
     )
 
     source = src.build(0, common, **kwargs)
-    expected = ref.build(0, other, **kwargs)
-    actual = dst.update_block_table(source, other_table, other.slot_mapping)
+    expected = ref.build(0, other.replace(_cross_group_cache=None), **kwargs)
+    actual = dst.build(0, other, **kwargs)
 
     assert source.checkpoint is not None and expected.checkpoint is not None
     assert actual.checkpoint is not None

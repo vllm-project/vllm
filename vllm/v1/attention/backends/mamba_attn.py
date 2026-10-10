@@ -98,6 +98,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        if torch.device(device).type == "cuda" and vllm_config.use_v2_model_runner:
+            # Opts into MRV2's CUDA-only aligned-index precompute.
+            self.mamba_aligned_state_indices: torch.Tensor | None = None
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -225,13 +228,22 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         **kwargs: Any,
     ) -> M:
         """Default build implementation for Mamba-like attention backends.
-        Subclasses (e.g., Mamba2) can override to add additional metadata.
+        Subclasses can extend _compute_common_metadata with batch-level fields.
         """
-        return self._compute_common_metadata(
+        group_cache = common_attn_metadata._cross_group_cache
+        cache_key = (self.kv_cache_spec, type(self))
+        if group_cache is not None and cache_key in group_cache:
+            return self._update_state_indices(
+                group_cache[cache_key], common_attn_metadata.block_table_tensor
+            )
+        metadata = self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+        if group_cache is not None:
+            group_cache[cache_key] = metadata
+        return metadata
 
     @staticmethod
     def _compute_chunk_metadata(
@@ -469,11 +481,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = None
         replayssm_scratch = None
 
-        state_indices_tensor = mamba_get_block_table_tensor(
+        state_indices_tensor = self._get_state_indices(
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
         )
 
         if state_indices_tensor.dim() == 1:
@@ -729,12 +739,23 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
-        state_indices_tensor = mamba_get_block_table_tensor(
+        return self._update_state_indices(metadata, blk_table)
+
+    def _get_state_indices(
+        self, blk_table: torch.Tensor, seq_lens: torch.Tensor
+    ) -> torch.Tensor:
+        state_indices = getattr(self, "mamba_aligned_state_indices", None)
+        if state_indices is not None:
+            return state_indices
+        return mamba_get_block_table_tensor(
             blk_table,
-            metadata.seq_lens,
+            seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )
+
+    def _update_state_indices(self, metadata: M, blk_table: torch.Tensor) -> M:
+        state_indices_tensor = self._get_state_indices(blk_table, metadata.seq_lens)
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
 
