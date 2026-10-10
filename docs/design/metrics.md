@@ -670,7 +670,8 @@ fall under the more general heading of "Observability".
 vLLM has support for OpenTelemetry tracing:
 
 - Added by <https://github.com/vllm-project/vllm/pull/4687> and reinstated by <https://github.com/vllm-project/vllm/pull/20372>
-- Configured with `--otlp-traces-endpoint` and `--collect-detailed-traces`
+- Configured with `--otlp-traces-endpoint`. `--collect-detailed-traces` is
+  still accepted but no longer changes what is traced - see below.
 - [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
 - [User-facing docs](../../examples/observability/opentelemetry/README.md)
 - [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
@@ -684,7 +685,7 @@ of tracing to be quite separate from metrics.
 
 ### OpenTelemetry Model Forward vs Execute Time
 
-The current implementation exposes the following two metrics:
+The V0 engine exposed the following two metrics:
 
 - `vllm:model_forward_time_milliseconds` (Histogram) - The time spent
   in the model forward pass when this request was in the batch.
@@ -692,15 +693,15 @@ The current implementation exposes the following two metrics:
   in the model execute function. This will include model forward,
   block/sync across workers, cpu-gpu sync time and sampling time.
 
-These metrics are only enabled when OpenTelemetry tracing is enabled
-and if `--collect-detailed-traces=all/model/worker` is used. The
+These metrics were only enabled when OpenTelemetry tracing was enabled
+and if `--collect-detailed-traces=all/model/worker` was used. The
 documentation for this option states:
 
 > collect detailed traces for the specified modules. This involves
 > use of possibly costly and or blocking operations and hence might
 > have a performance impact.
 
-The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and show up in an OpenTelemetry trace
+The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and showed up in an OpenTelemetry trace
 as:
 
 ```text
@@ -708,6 +709,14 @@ as:
 -> gen_ai.latency.time_in_model_forward: Double(3.151565277099609)
 -> gen_ai.latency.time_in_model_execute: Double(3.6468167304992676)
 ```
+
+Neither metric exists in V1, and none of these three span attributes are
+set. `ObservabilityConfig.collect_model_forward_time` and
+`collect_model_execute_time` are still derived from
+`--collect-detailed-traces`, but nothing reads them. The V1 request span
+instead carries coarser timings computed from per-request timestamps:
+`gen_ai.latency.time_in_model_prefill`, `gen_ai.latency.time_in_model_decode`
+and `gen_ai.latency.time_in_model_inference`.
 
 We already have `inference_time` and `decode_time` metrics, so the
 question is whether there are sufficiently common use cases for the
