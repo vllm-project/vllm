@@ -50,6 +50,8 @@ jobs:
     runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        fetch-depth: 2
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.12"
@@ -58,5 +60,12 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - run: echo "::add-matcher::.github/workflows/matchers/shellcheck.json"
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+      env:
+        SKIP: pip-compile
       with:
         extra_args: --all-files --hook-stage manual
+    - name: pip-compile (only if its inputs changed)
+      if: ${{ !cancelled() }}
+      uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+      with:
+        extra_args: --hook-stage manual --from-ref HEAD^1 --to-ref HEAD pip-compile
