@@ -135,7 +135,9 @@ which the writer drains to drop stale ``_push_finished_blocks`` /
 Either side can arrive first. The writer matches in both directions:
 when a ``PUSH_REG`` arrives we look up ``_push_finished_blocks``, and
 when finished blocks arrive we look up ``_pending_d_registrations``.
-Both lookups try an exact ``request_id`` match first, then fall back
+Both lookups match on the per-dispatch ``transfer_id`` the router sets in the
+``kv_transfer_params`` of both requests (D sends it in ``PUSH_REG``).
+If either side has none, they fall back (deprecated, to be removed)
 to comparing the ids after stripping the trailing per-engine random
 suffix (via ``get_base_request_id``). The fallback exists because the
 proxy hands the same ``X-Request-Id`` to both legs, so P and D wrap it
@@ -159,7 +161,8 @@ Fields in the dict:
 
 | Field                | Set by | Meaning                                                                |
 |----------------------|--------|------------------------------------------------------------------------|
-| ``request_id``       | D      | D's own vLLM request id; P's match key, echoed in the completion notif |
+| ``request_id``       | D      | D's own vLLM request id; fallback key, echoed in the completion notif  |
+| ``transfer_id``      | router | per-dispatch id from the router; P's match key                         |
 | ``decode_engine_id`` | D      | D's engine id (P uses this for the reverse handshake)                  |
 | ``decode_host``      | D      | D's NIXL side-channel host                                             |
 | ``decode_port``      | D      | D's NIXL side-channel port                                             |

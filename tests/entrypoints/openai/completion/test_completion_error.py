@@ -1013,3 +1013,38 @@ def test_non_numeric_logprobs_rejected(field_name):
             max_tokens=10,
             **{field_name: "2"},
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prompt", "expected_ids"),
+    [("Test prompt", ["xfer-1"]), (["A", "B"], ["xfer-1-0", "xfer-1-1"])],
+)
+async def test_completion_batch_gets_per_prompt_transfer_id(prompt, expected_ids):
+    """P and D must not pair prompt 1 of a batch with prompt 0 of the other leg."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    serving_completion = _build_serving_completion(mock_engine)
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_metrics_request_output()
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=1,
+        kv_transfer_params={"transfer_id": "xfer-1"},
+    )
+
+    await serving_completion.create_completion(request)
+
+    transfer_ids = [
+        call.args[1].extra_args["kv_transfer_params"]["transfer_id"]
+        for call in mock_engine.generate.call_args_list
+    ]
+    assert transfer_ids == expected_ids
+    assert request.kv_transfer_params == {"transfer_id": "xfer-1"}
