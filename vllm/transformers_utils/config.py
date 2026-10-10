@@ -79,8 +79,6 @@ class LazyConfigDict(dict):
 
 
 _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
-    afmoe="AfmoeConfig",
-    axk1="AXK1Config",
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
     chatglm="ChatGLMConfig",
@@ -89,24 +87,20 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
-    cosmos3_omni="Cosmos3Config",
     cosmos3_edge="Cosmos3EdgeConfig",
-    diffusion_gemma="DiffusionGemmaConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
-    granite4_vision="Granite4VisionConfig",
-    hyperclovax="HyperCLOVAXConfig",
-    hy_v3="HYV3Config",
     hy_v4="HYV4Config",
+    hyperclovax="HyperCLOVAXConfig",  # Upstream class, hub remote code is broken
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
-    kimi_k25="KimiK25Config",
+    kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
     muse_glimmer="MuseGlimmerConfig",
     muse_glimmer_text="MuseGlimmerTextConfig",
     muse_glimmer_vision="MuseGlimmerVisionConfig",
@@ -123,8 +117,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
-    nemotron="NemotronConfig",
-    olmo_hybrid="OlmoHybridConfig",
     openvla="OpenVLAConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
@@ -133,12 +125,6 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     step3p5="Step3p5Config",
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
-    qwen3_next="Qwen3NextConfig",
-    qwen3_5="Qwen3_5Config",
-    qwen3_5_text="Qwen3_5TextConfig",
-    qwen3_5_moe="Qwen3_5MoeConfig",
-    qwen3_5_moe_text="Qwen3_5MoeTextConfig",
-    lfm2_moe="Lfm2MoeConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
@@ -161,14 +147,6 @@ _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 # shared ones. `laguna` gets them injected by `convert_rope_params_to_dict`;
 # `gemma4_text` ships them in the checkpoint itself.
 _PATCH_HF_NESTED_ROPE_VALIDATION: set[str] = {"laguna", "gemma4_text"}
-
-# Model types whose checkpoints declare `layer_types` entries that upstream
-# transformers has not added to `ALLOWED_LAYER_TYPES` yet, so its strict config
-# validation rejects them (e.g.  GLM-5.2 `glm_moe_dsa` use
-# `deepseek_sparse_attention`). Extend the allowed set for these model types.
-_PATCH_HF_ALLOWED_LAYER_TYPES: dict[str, tuple[str, ...]] = {
-    "glm_moe_dsa": ("deepseek_sparse_attention",),
-}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -314,24 +292,6 @@ def _patch_hf_transformers_nested_rope_validation() -> None:
     )
 
 
-def _patch_hf_transformers_allowed_layer_types(
-    extra_layer_types: tuple[str, ...],
-) -> None:
-    """Extend transformers' ``ALLOWED_LAYER_TYPES`` so its strict config
-    validation accepts layer types (e.g. ``deepseek_sparse_attention``) that a
-    checkpoint declares but upstream transformers has not registered yet.
-    """
-    import transformers.configuration_utils as hf_configuration_utils
-
-    missing = tuple(
-        layer_type
-        for layer_type in extra_layer_types
-        if layer_type not in hf_configuration_utils.ALLOWED_LAYER_TYPES
-    )
-    if missing:
-        hf_configuration_utils.ALLOWED_LAYER_TYPES += missing
-
-
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -378,9 +338,6 @@ class HFConfigParser(ConfigParserBase):
 
         if model_type in _PATCH_HF_NESTED_ROPE_VALIDATION:
             _patch_hf_transformers_nested_rope_validation()
-
-        if extra_layer_types := _PATCH_HF_ALLOWED_LAYER_TYPES.get(model_type):
-            _patch_hf_transformers_allowed_layer_types(extra_layer_types)
 
         if model_type == "vlm":
             # HyperCLOVAX remote code registers this alias in a bare
@@ -1139,7 +1096,7 @@ def get_sentence_transformer_tokenizer_config(
 
     logger.info("Found sentence-transformers tokenize configuration.")
 
-    if all(k in encoder_dict for k in ("max_seq_length", "do_lower_case")):
+    if "max_seq_length" in encoder_dict:
         return encoder_dict
     return None
 
@@ -1355,6 +1312,30 @@ def _read_safetensors_metadata_in_dir(local_dir: Path) -> dict[str, Any]:
     }
 
 
+def _read_safetensors_metadata_in_repo(
+    model: str,
+    *,
+    revision: str | None = None,
+) -> dict[str, Any]:
+    api = hf_api()
+    try:
+        filenames = [
+            filename
+            for filename in api.list_repo_files(model, revision=revision)
+            if filename.endswith(".safetensors")
+        ]
+        return {
+            param_name: asdict(info)
+            for filename in filenames
+            for param_name, info in api.parse_safetensors_file_metadata(
+                model, filename, revision=revision
+            ).tensors.items()
+        }
+    except Exception as e:
+        logger.debug("Could not read safetensors headers for %s: %s", model, e)
+        return {}
+
+
 def get_safetensors_params_metadata(
     model: str,
     *,
@@ -1371,6 +1352,12 @@ def get_safetensors_params_metadata(
             for file_mt in files_mt.values()
             for param_name, info in file_mt.tensors.items()
         }
+
+    # `get_safetensors_metadata` only looks for `model.safetensors` and its
+    # index, so older checkpoints naming their weights differently land here
+    # even though their headers are perfectly readable.
+    if metadata := _read_safetensors_metadata_in_repo(model, revision=revision):
+        return metadata
 
     # Hub fetch failed (e.g. 429, network unreachable). Fall back to the
     # local HF cache: weights may already be cached from a prior run, and
@@ -1390,7 +1377,15 @@ def get_safetensors_params_metadata(
             str(e),
         )
         return {}
-    return _read_safetensors_metadata_in_dir(Path(local_dir))
+
+    metadata = _read_safetensors_metadata_in_dir(Path(local_dir))
+    if not metadata:
+        logger.warning_once(
+            "Could not retrieve safetensors metadata for %s "
+            "(Hub fetch failed and the cached snapshot holds no weights yet).",
+            model,
+        )
+    return metadata
 
 
 @cache

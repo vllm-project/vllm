@@ -4,7 +4,7 @@
 import sys
 from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -91,9 +91,7 @@ def test_int4_per_group_32_is_not_an_online_moe_method():
         QuantizationConfigArgs(moe={"weight": "int4_per_group_32"})
     )
     assert (
-        config.resolve_quant_method_cls(
-            Mock(spec=RoutedExperts), "model.layers.0.mlp.experts"
-        )
+        config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")
         is None
     )
 
@@ -103,6 +101,4 @@ def test_unknown_online_moe_weight_still_raises():
         QuantizationConfigArgs(moe={"weight": "fp8_per_token"})
     )
     with pytest.raises(ValueError, match="online quantization"):
-        config.resolve_quant_method_cls(
-            Mock(spec=RoutedExperts), "model.layers.0.mlp.experts"
-        )
+        config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")

@@ -253,7 +253,7 @@ async def fetch_spec_decode_metrics(
                 num_accepted_tokens=num_accepted_tokens,
                 accepted_per_pos=accepted_per_pos,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -315,7 +315,7 @@ async def fetch_diffusion_metrics(
                 num_canvas_positions=num_canvas_positions,
                 num_committed_tokens=num_committed_tokens,
             )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except (TimeoutError, aiohttp.ClientError):
         return None
 
 
@@ -2208,11 +2208,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "Sampling parameters are only supported by openai-compatible backends."
             )
-
-        # The Responses API accepts every sampling parameter above except
-        # min_p, which it would silently drop as an unknown field.
-        if args.backend == "openai-responses" and "min_p" in sampling_params:
-            raise ValueError("--min-p is not supported by the Responses API.")
 
         if "temperature" not in sampling_params:
             print(

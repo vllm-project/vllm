@@ -237,8 +237,6 @@ steps:
   - tests/models/language/generation_ppl_test
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
@@ -693,27 +691,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
   - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "dynamo_partition"
-
-# - label: ":amd: (MI300) Sequence Parallel Correctness" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_2
-#   num_gpus: 2
-#   optional: true
-#   working_dir: "/vllm-workspace/"
-#   source_file_dependencies:
-#   - vllm/model_executor/layers/
-#   - vllm/compilation/
-#   - vllm/v1/worker/
-#   - vllm/v1/cudagraph_dispatcher.py
-#   - tests/compile/correctness_e2e/test_sequence_parallel.py
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-#   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 - label: ":amd: (MI300) Distributed Compile + RPC" # TBD
   timeout_in_minutes: 65
@@ -1044,12 +1022,12 @@ steps:
   source_file_dependencies:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
-  - tests/entrypoints/weight_transfer
+  - tests/entrypoints/rl/weight_transfer
   - tests/entrypoints/launchers
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/unit_tests
-  - pytest -v -s entrypoints/weight_transfer
+  - pytest -v -s entrypoints/rl/weight_transfer
   - pytest -v -s entrypoints/launchers
 
 - label: ":amd: (MI300) Entrypoints Integration (Responses API)" # TBD
@@ -2625,7 +2603,6 @@ steps:
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/registry.py
   - vllm/transformers_utils/configs/extract_hidden_states.py
-  - vllm/transformers_utils/configs/qwen3_5.py
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
   - vllm/v1/kv_cache_interface.py
@@ -3180,7 +3157,6 @@ steps:
   # TODO: FP4 output-quant and trained MXFP4 AR/RMS fusion remain unsupported.
   - amd-smi
   - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_CUSTOM_AR=1 pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k 'test_tp2_ar_rms_fp8_fusions and qwen3 and ROCM_AITER_UNIFIED_ATTN and +quant_fp8 and (dynamo_partition or not +rms_norm)'
-  - pytest -v -s tests/compile/fusions_e2e/test_tp2_rocm_moe.py
 
 - label: ":amd: (MI355) Fusion and Compile FP8"
   timeout_in_minutes: 45
@@ -3204,64 +3180,6 @@ steps:
   - amd-smi
   - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
   - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
-
-- label: ":amd: (MI355) Sequence Parallel Correctness"
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  dind: false
-  agent_pool: mi355_2
-  num_gpus: 2
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - .buildkite/test_areas/compile.yaml
-  - vllm/compilation/
-  - vllm/config/
-  - vllm/distributed/
-  - vllm/model_executor/kernels/linear/
-  - vllm/model_executor/layers/
-  - vllm/model_executor/models/llama.py
-  - vllm/v1/attention/
-  - vllm/v1/worker/
-  - vllm/v1/cudagraph_dispatcher.py
-  - vllm/platforms/rocm.py
-  - tests/compile/correctness_e2e/test_sequence_parallel.py
-  - tests/models/registry.py
-  - tests/utils.py
-  commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
-
-- label: ":amd: (MI355) AsyncTP Correctness"
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  dind: false
-  agent_pool: mi355_2
-  num_gpus: 2
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - .buildkite/test_areas/compile.yaml
-  - vllm/compilation/
-  - vllm/config/
-  - vllm/distributed/
-  - vllm/model_executor/layers/
-  - vllm/model_executor/kernels/linear/
-  - vllm/model_executor/models/llama.py
-  - vllm/model_executor/models/qwen3.py
-  - vllm/v1/attention/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - vllm/transformers_utils/repo_utils.py
-  - tests/compile/correctness_e2e/test_async_tp.py
-  - tests/compile/fusions_e2e/common.py
-  - tests/models/registry.py
-  - tests/utils.py
-  commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py::test_rocm_async_tp_bf16_output_correctness
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py::test_async_tp_pass_correctness -k RedHatAI
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py::test_async_tp_pass_nvfp4_correctness
 
 - label: ":amd: (MI355 DPX) Fusion E2E FP8 Config Sweep"
   timeout_in_minutes: 45
@@ -3746,11 +3664,13 @@ steps:
   - vllm/
   - tests/entrypoints/serve
   - tests/entrypoints/scale_out
+  - tests/entrypoints/rl
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s entrypoints/rl --ignore=entrypoints/rl/weight_transfer --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 65
@@ -3991,8 +3911,6 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
@@ -4034,8 +3952,6 @@ steps:
   - vllm/model_executor/models/qwen3_next_mtp.py
   - vllm/model_executor/models/nemotron_h.py
   - vllm/model_executor/models/nemotron_h_mtp.py
-  - vllm/transformers_utils/configs/qwen3_next.py
-  - vllm/transformers_utils/configs/nemotron_h.py
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/layers/fused_moe/
@@ -4233,7 +4149,6 @@ steps:
   - tests/evals/gsm8k/
   - tests/utils.py
   - vllm/distributed/
-  - vllm/transformers_utils/configs/diffusion_gemma.py
   - vllm/v1/attention/ops/
   - tests/evals/gsm8k/configs/models-small-tp-mi355.txt
   commands:
@@ -5125,8 +5040,6 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
@@ -5856,6 +5769,7 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/models/test_deepseek_v4_vl_rocm.py
+  - tests/models/test_deepseek_v4_aiter_mega_moe.py
   - vllm/models/deepseek_v4/amd/
   - vllm/models/deepseek_v4/common/
   - vllm/model_executor/layers/fused_moe/
@@ -5869,6 +5783,7 @@ steps:
   - vllm/envs.py
   commands:
   - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+  - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
   dind: false
   working_dir: /vllm-workspace/tests
   agent_pool: mi355_1
@@ -5912,35 +5827,6 @@ steps:
   - amdmi355
   optional: true
 
-- label: ':amd: (MI355) Fusion E2E TP2 AsyncTP BF16 Config Sweep'
-  timeout_in_minutes: 30
-  working_dir: /vllm-workspace/
-  source_file_dependencies:
-  - vllm/compilation/
-  - vllm/model_executor/layers/linear.py
-  - vllm/model_executor/layers/utils.py
-  - vllm/distributed/
-  - vllm/v1/attention/backends/triton_attn.py
-  - tests/compile/fusions_e2e/
-  - tests/compile/passes/distributed/test_async_tp.py
-  - tests/compile/rocm/test_async_tp.py
-  - tests/compile/correctness_e2e/test_async_tp.py
-  - vllm/model_executor/kernels/linear/
-  - vllm/model_executor/models/qwen3.py
-  commands:
-  - rocm-smi
-  - pytest -v -s tests/compile/rocm/test_async_tp.py
-  - pytest -v -s tests/compile/fusions_e2e/test_tp2_rocm_async_tp.py
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py::test_rocm_async_tp_bf16_output_correctness
-  dind: false
-  agent_pool: mi355_2
-  num_gpus: 2
-  mirror_hardwares:
-  - amdexperimental
-  - amdproduction
-  - amdgfx950nightly
-  - amdmi355
-  optional: true
 
 - label: ":amd: (MI355 DPX) MRV2 Sampler JIT Warmup"
   timeout_in_minutes: 10

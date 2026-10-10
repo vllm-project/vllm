@@ -29,6 +29,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import AXK1Config
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
@@ -78,7 +79,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.AXK1 import AXK1Config
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
@@ -199,6 +199,7 @@ class AXK1MoE(nn.Module):
             if self.is_fused_shared_expert_enabled
             else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
