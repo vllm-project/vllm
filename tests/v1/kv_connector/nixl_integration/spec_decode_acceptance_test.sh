@@ -24,7 +24,7 @@
 #   KV_CACHE_MEMORY_BYTES - optional KV cache size per server
 #   ATTENTION_BACKEND   - attention backend to use
 #                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA
-#                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
+#                         ROCm options: TRITON_ATTN, ROCM_AITER_FA,
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
 #   VLLM_SSM_CONV_STATE_LAYOUT - SSM conv state layout (e.g. "DS" required for Mamba models)
