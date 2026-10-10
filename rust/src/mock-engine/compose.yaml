@@ -1,0 +1,36 @@
+services:
+  frontend:
+    image: vllm-mock-engine
+    build:
+      context: ../../..
+      dockerfile: rust/src/mock-engine/Dockerfile
+    entrypoint: ["vllm-rs"]
+    command:
+      - serve
+      - Qwen/Qwen3-0.6B
+      - --host
+      - 0.0.0.0
+      - --data-parallel-address
+      - frontend
+      - --data-parallel-rpc-port
+      - "29550"
+      - --data-parallel-size
+      - "1"
+      - --data-parallel-size-local
+      - "0"
+    ports:
+      - "8000:8000"
+    volumes:
+      - huggingface-cache:/home/vllm/.cache/huggingface
+
+  mock-engine:
+    image: vllm-mock-engine
+    depends_on:
+      - frontend
+    command:
+      - --handshake-address
+      - tcp://frontend:29550
+    restart: on-failure
+
+volumes:
+  huggingface-cache:
