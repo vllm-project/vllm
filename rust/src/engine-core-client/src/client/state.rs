@@ -2,12 +2,15 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tracing::trace;
 
 use crate::EngineId;
+use crate::client::output_channel::output_channel;
+pub(crate) use crate::client::output_channel::{OutputReceiver, OutputSender};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
 use crate::protocol::output::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
@@ -15,8 +18,6 @@ use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
 
-pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
-pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreStreamOutput>>;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 
@@ -67,25 +68,40 @@ struct EngineRoutingState {
     inflight: usize,
     /// The latest real scheduler snapshot received from this engine, if any.
     last_scheduler_stats: Option<EngineLoadSnapshot>,
+    /// Requests admitted since the last scheduler snapshot was received.
+    ///
+    /// Added to the snapshot so each admission raises the routing score before
+    /// the next snapshot arrives. Only tracked once a snapshot exists.
+    admitted_since_stats: usize,
 }
 
 impl EngineRoutingState {
     /// Compute the routing score used to pick the least-loaded engine.
     ///
-    /// Scheduler stats can raise the load estimate above the frontend-local
-    /// view, but they should not lower it below requests this frontend has
-    /// already admitted.
+    /// Scheduler stats, plus admissions not yet reflected in them, can raise
+    /// the load estimate above the frontend-local view, but they should not
+    /// lower it below requests this frontend has already admitted.
     fn routing_score(&self) -> usize {
         let Some(stats) = self.last_scheduler_stats else {
             return self.inflight;
         };
 
-        self.inflight.max(stats.running + stats.waiting)
+        self.inflight.max(stats.running + stats.waiting + self.admitted_since_stats)
     }
 
-    /// Replace the local routing view with a fresh real scheduler snapshot.
+    /// Record one request admitted to this engine.
+    fn record_admission(&mut self) {
+        self.inflight += 1;
+        if self.last_scheduler_stats.is_some() {
+            self.admitted_since_stats += 1;
+        }
+    }
+
+    /// Replace the local routing view with a fresh real scheduler snapshot,
+    /// resetting the admissions counted on top of the previous one.
     fn apply_scheduler_counts(&mut self, next: EngineLoadSnapshot) {
         self.last_scheduler_stats = Some(next);
+        self.admitted_since_stats = 0;
     }
 }
 
@@ -121,19 +137,23 @@ impl RequestRegistry {
     ///
     /// When `data_parallel_rank` is provided, the request is routed directly to
     /// the engine at that rank index, bypassing load balancing. Otherwise
-    /// the engine with the fewest in-flight requests is chosen.
+    /// the engine with the lowest routing score is chosen.
+    ///
+    /// `stream_interval` sets how many new tokens the channel batches into one
+    /// delivery after the first output; see [`OutputSender::send`].
     pub fn register(
         &mut self,
         request_id: String,
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
+        stream_interval: NonZeroU32,
     ) -> Result<(EngineId, OutputReceiver)> {
         if self.requests.contains_key(&request_id) {
             return Err(Error::DuplicateRequestId { request_id });
         }
 
         let engine_id = self.choose_engine_for_request(data_parallel_rank)?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = output_channel(stream_interval);
         let lora = lora_name.map(|adapter_name| LoraRequestState {
             adapter_name,
             phase: LoraPhase::Waiting,
@@ -154,7 +174,7 @@ impl RequestRegistry {
             .routing_per_engine
             .get_mut(&engine_id)
             .expect("request registry must track all known engines");
-        state.inflight += 1;
+        state.record_admission();
 
         Ok((engine_id, rx))
     }
@@ -198,17 +218,30 @@ impl RequestRegistry {
         by_engine
     }
 
-    /// Obtain the stream sender for one output. If it indicates the request is
-    /// finished, it will be removed from the registry.
-    pub fn sender_for_output(&mut self, output: &EngineCoreOutput) -> Option<OutputSender> {
-        self.apply_lora_events(output);
+    /// Send one output to its request stream. If it indicates the request is
+    /// finished, the request will be removed from the registry. Returns the
+    /// output back if its request is no longer tracked.
+    ///
+    /// The send happens under the registry lock: the sender is stateful (see
+    /// [`OutputSender::send`]) and owned by the registry entry, and sending on
+    /// its unbounded channel never blocks.
+    pub fn send_output(
+        &mut self,
+        output: EngineCoreStreamOutput,
+    ) -> Option<EngineCoreStreamOutput> {
+        self.apply_lora_events(&output.output);
         if output.finished() {
-            self.remove(output.request_id.as_str()).map(|tracked| tracked.0)
+            match self.remove(output.request_id.as_str()) {
+                Some((mut sender, _)) => sender.send(output),
+                None => return Some(output),
+            }
         } else {
-            self.requests
-                .get(output.request_id.as_str())
-                .map(|tracked| tracked.sender.clone())
+            match self.requests.get_mut(output.request_id.as_str()) {
+                Some(tracked) => tracked.sender.send(output),
+                None => return Some(output),
+            }
         }
+        None
     }
 
     /// Advance the request's LoRA scheduling phase from the engine-core events
@@ -252,17 +285,8 @@ impl RequestRegistry {
         (running, waiting)
     }
 
-    /// Obtain stream senders for a whole engine output batch under one
-    /// registry lock. Finished outputs are removed before returning.
-    pub fn senders_for_outputs<'a>(
-        &mut self,
-        outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
-    ) -> Vec<Option<OutputSender>> {
-        outputs.into_iter().map(|output| self.sender_for_output(output)).collect()
-    }
-
     /// Remove a batch of requests that have finished or aborted, returning
-    /// their stream senders.
+    /// their stream senders after delivering any held-back outputs.
     pub fn finish_many<'a>(
         &mut self,
         request_ids: impl IntoIterator<Item = &'a String>,
@@ -270,6 +294,10 @@ impl RequestRegistry {
         request_ids
             .into_iter()
             .filter_map(|request_id| self.remove(request_id.as_str()).map(|tracked| tracked.0))
+            .map(|mut sender| {
+                sender.flush();
+                sender
+            })
             .collect()
     }
 
@@ -310,7 +338,7 @@ impl RequestRegistry {
     ) -> Vec<String> {
         let mut aborted = Vec::new();
         for request_id in request_ids {
-            let Some((sender, engine_id)) = self.remove(request_id) else {
+            let Some((mut sender, engine_id)) = self.remove(request_id) else {
                 continue;
             };
             let output = EngineCoreStreamOutput {
@@ -322,7 +350,7 @@ impl RequestRegistry {
                     ..EngineCoreOutput::default()
                 },
             };
-            let _ = sender.send(Ok(output));
+            sender.send(output);
             aborted.push(request_id.clone());
         }
         aborted
@@ -441,6 +469,11 @@ impl UtilityRegistry {
         self.utility_calls.contains_key(&call_id)
     }
 
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.utility_calls.len()
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -449,11 +482,13 @@ impl UtilityRegistry {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::num::NonZeroU32;
 
     use crate::EngineId;
     use crate::client::state::{
-        EngineLoadSnapshot, EngineRoutingState, RequestRegistry, UtilityRegistry,
+        EngineLoadSnapshot, EngineRoutingState, OutputReceiver, RequestRegistry, UtilityRegistry,
     };
+    use crate::client::stream::EngineCoreStreamOutput;
     use crate::mock_engine::default_ready_response;
     use crate::protocol::output::{
         EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
@@ -488,6 +523,14 @@ mod tests {
         }
     }
 
+    fn stream_output(output: EngineCoreOutput) -> EngineCoreStreamOutput {
+        EngineCoreStreamOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            output,
+        }
+    }
+
     fn adapter_names(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|name| (*name).to_string()).collect()
     }
@@ -495,8 +538,9 @@ mod tests {
     #[test]
     fn registry_rejects_duplicate_request_ids() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None).unwrap();
-        let error = registry.register("req-1".to_string(), None, None).unwrap_err();
+        registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let error =
+            registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::DuplicateRequestId { request_id } if request_id == "req-1"
@@ -506,25 +550,99 @@ mod tests {
     #[test]
     fn registry_removes_finished_request_on_output() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None).unwrap();
+        registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
 
-        let sender = registry.sender_for_output(&EngineCoreOutput {
+        let unrouted = registry.send_output(stream_output(EngineCoreOutput {
             request_id: "req-1".to_string(),
             finish_reason: Some(EngineCoreFinishReason::Length),
             ..Default::default()
-        });
+        }));
 
-        assert!(sender.is_some());
+        assert!(unrouted.is_none());
         assert!(!registry.contains("req-1"));
+    }
+
+    /// Drain the outputs that are ready on `receiver` without waiting,
+    /// rendering each as its token ids and finish reason.
+    fn ready_outputs(
+        receiver: &mut OutputReceiver,
+    ) -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
+        let mut outputs = Vec::new();
+        while let Ok(delivery) = receiver.try_recv() {
+            for output in delivery.unwrap() {
+                outputs.push((output.output.new_token_ids, output.output.finish_reason));
+            }
+        }
+        outputs
+    }
+
+    #[test]
+    fn registry_abort_delivers_held_back_outputs_before_terminal_output() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        let (_, mut receiver) = registry
+            .register("req-1".to_string(), None, None, NonZeroU32::new(4).unwrap())
+            .unwrap();
+
+        for token_id in 1..=3 {
+            let unrouted = registry.send_output(stream_output(EngineCoreOutput {
+                request_id: "req-1".to_string(),
+                new_token_ids: vec![token_id],
+                ..Default::default()
+            }));
+            assert!(unrouted.is_none());
+        }
+        // Only the first output is delivered; the next two are held back
+        // below the stream interval.
+        expect_test::expect![[r#"
+            [
+                (
+                    [
+                        1,
+                    ],
+                    None,
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&ready_outputs(&mut receiver));
+
+        registry.abort_many(&["req-1".to_string()], 0.0);
+        expect_test::expect![[r#"
+            [
+                (
+                    [
+                        2,
+                    ],
+                    None,
+                ),
+                (
+                    [
+                        3,
+                    ],
+                    None,
+                ),
+                (
+                    [],
+                    Some(
+                        Abort,
+                    ),
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&ready_outputs(&mut receiver));
     }
 
     #[test]
     fn registry_tracks_lora_phases_from_engine_events() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-lora".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                NonZeroU32::MIN,
+            )
             .unwrap();
-        registry.register("req-plain".to_string(), None, None).unwrap();
+        registry.register("req-plain".to_string(), None, None, NonZeroU32::MIN).unwrap();
 
         // Registered but not yet scheduled: counted as waiting. The non-LoRA
         // request never shows up.
@@ -534,7 +652,7 @@ mod tests {
         );
 
         // Queued then scheduled in one output: running.
-        drop(registry.sender_for_output(&output_with_events(
+        registry.send_output(stream_output(output_with_events(
             "req-lora",
             &[EngineCoreEventType::Queued, EngineCoreEventType::Scheduled],
             None,
@@ -545,7 +663,7 @@ mod tests {
         );
 
         // Preempted: back to waiting.
-        drop(registry.sender_for_output(&output_with_events(
+        registry.send_output(stream_output(output_with_events(
             "req-lora",
             &[EngineCoreEventType::Preempted],
             None,
@@ -556,7 +674,7 @@ mod tests {
         );
 
         // Finished: dropped from tracking entirely.
-        drop(registry.sender_for_output(&output_with_events(
+        registry.send_output(stream_output(output_with_events(
             "req-lora",
             &[EngineCoreEventType::Scheduled],
             Some(EngineCoreFinishReason::Stop),
@@ -571,18 +689,33 @@ mod tests {
     fn registry_unions_lora_adapters_across_requests() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-a1".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-a1".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                NonZeroU32::MIN,
+            )
             .unwrap();
         registry
-            .register("req-a2".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-a2".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                NonZeroU32::MIN,
+            )
             .unwrap();
         registry
-            .register("req-b".to_string(), Some("adapter-b".to_string()), None)
+            .register(
+                "req-b".to_string(),
+                Some("adapter-b".to_string()),
+                None,
+                NonZeroU32::MIN,
+            )
             .unwrap();
 
         // One of adapter-a's requests starts running while the other waits:
         // the adapter appears in both sets.
-        drop(registry.sender_for_output(&output_with_events(
+        registry.send_output(stream_output(output_with_events(
             "req-a1",
             &[EngineCoreEventType::Scheduled],
             None,
@@ -600,7 +733,7 @@ mod tests {
     fn registry_counts_only_active_lora_requests() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
 
-        registry.register("req-plain".to_string(), None, None).unwrap();
+        registry.register("req-plain".to_string(), None, None, NonZeroU32::MIN).unwrap();
         assert_eq!(registry.active_lora_requests(), 0);
         assert_eq!(
             registry.lora_adapter_states(),
@@ -612,6 +745,7 @@ mod tests {
                 "req-lora-a".to_string(),
                 Some("adapter-a".to_string()),
                 None,
+                NonZeroU32::MIN,
             )
             .unwrap();
         registry
@@ -619,6 +753,7 @@ mod tests {
                 "req-lora-b".to_string(),
                 Some("adapter-b".to_string()),
                 None,
+                NonZeroU32::MIN,
             )
             .unwrap();
         assert_eq!(registry.active_lora_requests(), 2);
@@ -641,7 +776,12 @@ mod tests {
     fn registry_clears_lora_count_on_close() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-lora".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                NonZeroU32::MIN,
+            )
             .unwrap();
 
         assert_eq!(registry.active_lora_requests(), 1);
@@ -657,7 +797,12 @@ mod tests {
     fn registry_drops_lora_tracking_on_abort() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
         registry
-            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .register(
+                "req-lora".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+                NonZeroU32::MIN,
+            )
             .unwrap();
 
         drop(registry.finish_many(&["req-lora".to_string()]));
@@ -671,8 +816,8 @@ mod tests {
     #[test]
     fn registry_closes_all_requests_on_failure() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None, None).unwrap();
-        registry.register("req-2".to_string(), None, None).unwrap();
+        registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        registry.register("req-2".to_string(), None, None, NonZeroU32::MIN).unwrap();
 
         let senders = registry.close();
 
@@ -688,9 +833,12 @@ mod tests {
             connected_engine(engine_0.clone()),
             connected_engine(engine_1.clone()),
         ]);
-        let (chosen_0, _) = registry.register("req-1".to_string(), None, None).unwrap();
-        let (chosen_1, _) = registry.register("req-2".to_string(), None, None).unwrap();
-        let (chosen_0_again, _) = registry.register("req-3".to_string(), None, None).unwrap();
+        let (chosen_0, _) =
+            registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let (chosen_1, _) =
+            registry.register("req-2".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let (chosen_0_again, _) =
+            registry.register("req-3".to_string(), None, None, NonZeroU32::MIN).unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -717,9 +865,12 @@ mod tests {
             connected_engine(engine_1.clone()),
         ]);
 
-        let (chosen_0, _) = registry.register("req-1".to_string(), None, None).unwrap();
-        let (chosen_1, _) = registry.register("req-2".to_string(), None, None).unwrap();
-        let (chosen_0_again, _) = registry.register("req-3".to_string(), None, None).unwrap();
+        let (chosen_0, _) =
+            registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let (chosen_1, _) =
+            registry.register("req-2".to_string(), None, None, NonZeroU32::MIN).unwrap();
+        let (chosen_0_again, _) =
+            registry.register("req-3".to_string(), None, None, NonZeroU32::MIN).unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -731,6 +882,7 @@ mod tests {
         let state = EngineRoutingState {
             inflight: 3,
             last_scheduler_stats: None,
+            ..Default::default()
         };
 
         assert_eq!(state.routing_score(), 3);
@@ -744,6 +896,7 @@ mod tests {
                 waiting: 0,
                 running: 2,
             }),
+            ..Default::default()
         };
 
         assert_eq!(state.routing_score(), 7);
@@ -757,6 +910,7 @@ mod tests {
                 waiting: 3,
                 running: 2,
             }),
+            ..Default::default()
         };
 
         assert_eq!(state.routing_score(), 5);
@@ -786,8 +940,141 @@ mod tests {
             }
         ));
 
-        let (chosen, _) = registry.register("req-stats".to_string(), None, None).unwrap();
+        let (chosen, _) =
+            registry.register("req-stats".to_string(), None, None, NonZeroU32::MIN).unwrap();
         assert_eq!(chosen, engine_1);
+    }
+
+    #[test]
+    fn registry_spreads_bursts_after_cancellation_before_stats_refresh() {
+        let mut distributions = Vec::new();
+        for counts in [[10, 12], [12, 12]] {
+            let mut registry = RequestRegistry::new(
+                &[0, 1].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+            );
+            let mut old_requests = Vec::new();
+            for (rank, running) in counts.into_iter().enumerate() {
+                for index in 0..running {
+                    let request_id = format!("old-{rank}-{index}");
+                    registry
+                        .register(request_id.clone(), None, Some(rank as u32), NonZeroU32::MIN)
+                        .unwrap();
+                    old_requests.push(request_id);
+                }
+                registry.apply_scheduler_counts(
+                    rank as u32,
+                    EngineLoadSnapshot {
+                        waiting: 0,
+                        running,
+                    },
+                );
+            }
+            drop(registry.abort_many(&old_requests, 0.0));
+
+            let mut distribution = [0; 2];
+            for index in 0..14 {
+                let (engine, _) =
+                    registry.register(format!("new-{index}"), None, None, NonZeroU32::MIN).unwrap();
+                distribution[engine.engine_index().unwrap() as usize] += 1;
+            }
+            distributions.push(distribution);
+        }
+        expect_test::expect!["[[8, 6], [7, 7]]"].assert_eq(&format!("{distributions:?}"));
+    }
+
+    #[test]
+    fn registry_preserves_tie_order_across_finished_requests_and_stats_refreshes() {
+        let ranks = [2, 5, 9];
+        let mut registry = RequestRegistry::new(
+            &ranks.map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        let mut chosen = Vec::new();
+        for index in 0..6 {
+            for rank in ranks {
+                registry.apply_scheduler_counts(
+                    u32::from(rank),
+                    EngineLoadSnapshot {
+                        waiting: 0,
+                        running: 0,
+                    },
+                );
+            }
+            let request_id = format!("req-{index}");
+            let (engine, _) =
+                registry.register(request_id.clone(), None, None, NonZeroU32::MIN).unwrap();
+            chosen.push(engine.engine_index().unwrap());
+            drop(registry.finish_many(&[request_id]));
+        }
+        expect_test::expect!["[2, 2, 2, 2, 2, 2]"].assert_eq(&format!("{chosen:?}"));
+    }
+
+    #[test]
+    fn registry_refreshes_estimates_without_erasing_inflight() {
+        let mut registry = RequestRegistry::new(
+            &[0, 1].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        let snapshot = EngineLoadSnapshot {
+            waiting: 0,
+            running: 10,
+        };
+        registry.apply_scheduler_counts(0, snapshot);
+        registry.apply_scheduler_counts(
+            1,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 12,
+            },
+        );
+        for index in 0..4 {
+            registry
+                .register(format!("pinned-{index}"), None, Some(0), NonZeroU32::MIN)
+                .unwrap();
+        }
+
+        // Even unchanged counts replace the optimistic estimate for that engine.
+        registry.apply_scheduler_counts(0, snapshot);
+        let (after_refresh, _) =
+            registry.register("after-refresh".into(), None, None, NonZeroU32::MIN).unwrap();
+        // An older, empty snapshot must not erase the five admitted requests.
+        for rank in [0, 1] {
+            registry.apply_scheduler_counts(
+                rank,
+                EngineLoadSnapshot {
+                    waiting: 0,
+                    running: 0,
+                },
+            );
+        }
+        let (after_empty, _) =
+            registry.register("after-empty".into(), None, None, NonZeroU32::MIN).unwrap();
+        expect_test::expect!["(Some(0), Some(1))"].assert_eq(&format!(
+            "{:?}",
+            (after_refresh.engine_index(), after_empty.engine_index())
+        ));
+    }
+
+    #[test]
+    fn registry_explicit_admissions_raise_routing_score() {
+        let mut registry = RequestRegistry::new(
+            &[2, 5, 9].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        for rank in [2, 5, 9] {
+            registry.apply_scheduler_counts(
+                rank,
+                EngineLoadSnapshot {
+                    waiting: 0,
+                    running: 10,
+                },
+            );
+        }
+        registry.register("pinned".into(), None, Some(9), NonZeroU32::MIN).unwrap();
+        let mut chosen = Vec::new();
+        for index in 0..3 {
+            let (engine, _) =
+                registry.register(format!("auto-{index}"), None, None, NonZeroU32::MIN).unwrap();
+            chosen.push(engine.engine_index().unwrap());
+        }
+        expect_test::expect!["[2, 5, 2]"].assert_eq(&format!("{chosen:?}"));
     }
 
     #[test]
@@ -802,15 +1089,18 @@ mod tests {
         ]);
 
         // Explicitly target rank 2 (third engine).
-        let (chosen, _) = registry.register("req-1".to_string(), None, Some(2)).unwrap();
+        let (chosen, _) =
+            registry.register("req-1".to_string(), None, Some(2), NonZeroU32::MIN).unwrap();
         assert_eq!(chosen, engine_2);
 
         // Explicitly target rank 0 (first engine).
-        let (chosen, _) = registry.register("req-2".to_string(), None, Some(0)).unwrap();
+        let (chosen, _) =
+            registry.register("req-2".to_string(), None, Some(0), NonZeroU32::MIN).unwrap();
         assert_eq!(chosen, engine_0);
 
         // Explicitly target rank 1.
-        let (chosen, _) = registry.register("req-3".to_string(), None, Some(1)).unwrap();
+        let (chosen, _) =
+            registry.register("req-3".to_string(), None, Some(1), NonZeroU32::MIN).unwrap();
         assert_eq!(chosen, engine_1);
     }
 
@@ -824,11 +1114,12 @@ mod tests {
         ]);
 
         // Load-balance: first two go to engine_0 and engine_1.
-        registry.register("req-lb-0".to_string(), None, None).unwrap();
+        registry.register("req-lb-0".to_string(), None, None, NonZeroU32::MIN).unwrap();
 
         // Now engine_0 has 1 in-flight. Without dp_rank, next would go to engine_1.
         // But with dp_rank=0, it should still go to engine_0.
-        let (chosen, _) = registry.register("req-dp".to_string(), None, Some(0)).unwrap();
+        let (chosen, _) =
+            registry.register("req-dp".to_string(), None, Some(0), NonZeroU32::MIN).unwrap();
         assert_eq!(chosen, engine_0);
     }
 
@@ -839,7 +1130,9 @@ mod tests {
             connected_engine(EngineId::from_engine_index(1)),
         ]);
 
-        let error = registry.register("req-1".to_string(), None, Some(2)).unwrap_err();
+        let error = registry
+            .register("req-1".to_string(), None, Some(2), NonZeroU32::MIN)
+            .unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
@@ -854,10 +1147,13 @@ mod tests {
         let engine_3 = EngineId::from_engine_index(3);
         let mut registry = RequestRegistry::new(&[connected_engine(engine_3.clone())]);
 
-        let (chosen, _) = registry.register("req-ok".to_string(), None, Some(3)).unwrap();
+        let (chosen, _) =
+            registry.register("req-ok".to_string(), None, Some(3), NonZeroU32::MIN).unwrap();
         assert_eq!(chosen, engine_3);
 
-        let error = registry.register("req-bad".to_string(), None, Some(0)).unwrap_err();
+        let error = registry
+            .register("req-bad".to_string(), None, Some(0), NonZeroU32::MIN)
+            .unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {

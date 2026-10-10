@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test modular OAI Triton MoE
-"""
+"""Test modular OAI Triton MoE."""
 
 from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from tests.utils import wait_for_gpu_memory_to_clear
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version, has_triton_kernels
 
 if not has_triton_kernels():
     pytest.skip(
@@ -19,11 +18,14 @@ if not has_triton_kernels():
         allow_module_level=True,
     )
 
-from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+if get_triton_kernels_version() == "3.8":
+    # 3.8: matmul_ogs -> matmul
+    from triton_kernels.matmul import FlexCtx, PrecisionConfig
+else:
+    from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
 from triton_kernels.numerics_details.mxfp import downcast_to_mxfp, upcast_from_mxfp
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
-from triton_kernels.tensor_details import layout
 from triton_kernels.testing import assert_close
 
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -36,10 +38,12 @@ from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe imp
     UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mx_scale_kwargs
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
 
-from .utils import make_dummy_moe_config, shuffle_weight
+from .utils import make_dummy_moe_config, mxfp4_w_layouts, shuffle_weight
 
 MNK = [
     (1, 512, 384),
@@ -104,19 +108,38 @@ def make_weights(dtype, k, n, e):
     w1_tri = shuffle_weight(w1_tri)
     w1_bias_tri = shuffle_weight(w1_bias_tri)
 
+    if current_platform.is_rocm():
+        k_align, n2_align = 256, 512
+    else:
+        k_align, n2_align = 64, 128
+
+    w1_bottom_pad = round_up(w1_tri.shape[1], k_align) - w1_tri.shape[1]
+    w1_right_pad = round_up(w1_tri.shape[2], n2_align) - w1_tri.shape[2]
+    w2_bottom_pad = w1_right_pad // 2
+    w2_right_pad = w1_bottom_pad
+
+    w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0))
+    w2_tri = F.pad(w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0))
+    w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0))
+    w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0))
+
     # quant triton_weights
     w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
     w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, dtype, axis=1)
+    w1 = w1[..., :k, : 2 * n]
     w1 = unshuffle_weight(w1)
 
     w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
     w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, dtype, axis=1)
+    w2 = w2[..., :n, :k]
 
     num_warps = 8
-    w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
-    w_scale_layout, w_scale_layout_opts = (
-        layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1, num_warps=num_warps)
-    )
+    (
+        w_layout,
+        w_layout_opts,
+        w_scale_layout,
+        w_scale_layout_opts,
+    ) = mxfp4_w_layouts(mx_axis=1, num_warps=num_warps)
 
     w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout, **w_layout_opts)
     w1_scale_tri = convert_layout(
@@ -133,10 +156,10 @@ def make_weights(dtype, k, n, e):
     )
 
     w1_precision_config = PrecisionConfig(
-        weight_scale=w1_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+        **mx_scale_kwargs(w1_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
     )
     w2_precision_config = PrecisionConfig(
-        weight_scale=w2_scale_tri, flex_ctx=FlexCtx(rhs_data=InFlexData())
+        **mx_scale_kwargs(w2_scale_tri), flex_ctx=FlexCtx(rhs_data=InFlexData())
     )
 
     return (
@@ -150,6 +173,7 @@ def make_weights(dtype, k, n, e):
         w2_bias_tri,
         w1_precision_config,
         w2_precision_config,
+        w1_bottom_pad,
     )
 
 
@@ -237,7 +261,8 @@ def oai_triton_moe_impl(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not OAITritonExperts._supports_current_device(),
+    reason="OAI Triton MoE is not supported on this device.",
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("m,n,k", MNK)
@@ -256,6 +281,7 @@ def test_oai_triton_moe(
 ):
     wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
     set_random_seed(0)
+
     (
         w1,
         w2,
@@ -267,9 +293,11 @@ def test_oai_triton_moe(
         w2_bias_tri,
         w1_precision_config,
         w2_precision_config,
+        x_pad,
     ) = make_weights(dtype, k, n, num_experts)
 
     x = torch.randn((m, k), dtype=dtype, device="cuda")
+    x_tri = F.pad(x, (0, x_pad, 0, 0))
     router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
@@ -278,7 +306,7 @@ def test_oai_triton_moe(
         out_ref = torch_moe_impl(x, w1, w2, w1_bias, w2_bias, topk_weights, topk_ids)
 
         out = oai_triton_moe_impl(
-            x,
+            x_tri,
             w1_tri,
             w2_tri,
             w1_precision_config,
@@ -290,12 +318,14 @@ def test_oai_triton_moe(
             topk_ids,
             unfused,
         )
+        out = out[..., :k]
 
     assert_close(ref=out_ref, tri=out, maxtol=0.025, rmstol=0.005)
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+    not UnfusedOAITritonExperts._supports_current_device(),
+    reason="Unfused OAI Triton MoE is not supported on this device.",
 )
 def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_init):
     """Exercise ``UnfusedOAITritonExperts.apply`` with explicit workspaces.
@@ -321,9 +351,11 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
         w2_bias_tri,
         w1_precision_config,
         w2_precision_config,
+        x_pad,
     ) = make_weights(dtype, k, n, num_experts)
 
     x = torch.randn((m, k), dtype=dtype, device="cuda")
+    x_tri = F.pad(x, (0, x_pad, 0, 0))
     router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
@@ -342,10 +374,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
     )
     experts = UnfusedOAITritonExperts(moe_config, quant_config)
 
-    if not UnfusedOAITritonExperts._supports_current_device():
-        pytest.skip("UnfusedOAITritonExperts does not support this device")
-
-    _, _, N, K, top_k = experts.moe_problem_size(x, w1_tri, w2_tri, topk_ids)
+    _, _, N, K, top_k = experts.moe_problem_size(x_tri, w1_tri, w2_tri, topk_ids)
     assert top_k == topk
     ws13_shape, ws2_shape, out_shape = experts.workspace_shapes(
         m,
@@ -365,7 +394,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
         out_ref = torch_moe_impl(x, w1, w2, w1_bias, w2_bias, topk_weights, topk_ids)
         experts.apply(
             output=output,
-            hidden_states=x,
+            hidden_states=x_tri,
             w1=w1_tri,
             w2=w2_tri,
             topk_weights=topk_weights,
@@ -380,5 +409,6 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
             expert_tokens_meta=None,
             apply_router_weight_on_input=False,
         )
+        output = output[..., :k]
 
     assert_close(ref=out_ref, tri=output, maxtol=0.025, rmstol=0.005)

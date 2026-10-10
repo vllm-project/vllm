@@ -52,15 +52,15 @@ CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
-vllm serve $MODEL \
+vllm serve "$MODEL" \
   --port $PREFILL_PORT \
   --enforce-eager \
-  --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+  --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
   --max-model-len 16384 \
   --block-size 128 \
   --trust-remote-code \
   --enable-prefix-caching \
-  --mamba-cache-mode all \
+  --mamba-cache-mode align \
   --kv-transfer-config "$KV_CONFIG" \
   "${EXTRA_ARGS[@]}" &
 
@@ -70,15 +70,15 @@ CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
 VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
-vllm serve $MODEL \
+vllm serve "$MODEL" \
   --port $DECODE_PORT \
   --enforce-eager \
-  --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+  --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
   --max-model-len 16384 \
   --block-size 128 \
   --trust-remote-code \
   --enable-prefix-caching \
-  --mamba-cache-mode all \
+  --mamba-cache-mode align \
   --kv-transfer-config "$KV_CONFIG" \
   "${EXTRA_ARGS[@]}" &
 

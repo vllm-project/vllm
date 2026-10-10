@@ -141,7 +141,6 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         the full output[:num_actual_toks] buffer after both forward_mha and
         forward_mqa have written their results.
         """
-
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True
@@ -150,27 +149,14 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # MLA KV cache is 3D: (num_blocks, block_size, head_size)
-        attn_backend = self.mla_attn.attn_backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, 1, self.head_size
+        # MLA KV cache is 4D: (num_blocks, num_heads=1, block_size, head_size)
+        kv_cache = torch.zeros(
+            (num_blocks, 1, self.block_size, self.head_size),
+            dtype=self.kv_cache_dtype,
+            device=self.device,
         )
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-        ordered_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-
-        raw_tensor = torch.zeros(
-            ordered_shape, dtype=self.kv_cache_dtype, device=self.device
-        )
-        kv_cache = raw_tensor.permute(*inv_order)
-
-        self.mla_attn.kv_cache = kv_cache
+        self.mla_attn.bind_kv_cache(kv_cache)
 
         self.attn_metadata = self.builder.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
@@ -285,7 +271,6 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
 
     quant_key = kFp8Dynamic128Sym
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         weight_block_size=[128, 128],
     )
 
@@ -376,13 +361,27 @@ if current_platform.is_cuda():
     ]
     BACKENDS_MLA_FP8 = [AttentionBackendEnum.TRITON_MLA]
     BACKENDS_MLA_FP4 = [AttentionBackendEnum.TRITON_MLA]
+elif current_platform.is_rocm():
+    # ROCm supports the static-FP8 output-quant fusion through AITER MLA.
+    # Per-group FP8 still relies on the CUDA-only CUTLASS block-scaled
+    # kernel, and NVFP4 is NVIDIA-specific.
+    MLA_DIMS = [(16, 128, 64, 128, 512)]
+    PATTERN_TEST_MODELS_MLA_FP8 = [
+        (
+            "deepseek-ai/DeepSeek-V2-Lite",
+            TestMLAAttentionFp8StaticQuantPatternModel,
+        )
+    ]
+    BACKENDS_MLA_FP8 = [AttentionBackendEnum.ROCM_AITER_MLA]
 
 
 @pytest.mark.parametrize(
     "num_heads, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank",
     MLA_DIMS,
 )
-@pytest.mark.parametrize("batch_size", [7, 256] if current_platform.is_cuda() else [8])
+@pytest.mark.parametrize(
+    "batch_size", [7, 256] if current_platform.is_cuda_alike() else [8]
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
@@ -420,8 +419,9 @@ def test_mla_attention_quant_pattern(
     backend: AttentionBackendEnum,
     dist_init,
     disable_vllm_compile_cache,
+    workspace_init,
 ):
-    """Test MLA AttentionQuantPattern fusion pass"""
+    """Test MLA AttentionQuantPattern fusion pass."""
     if (
         model_class is TestMLAAttentionNvfp4QuantPatternModel
         and not is_nvfp4_supported()
@@ -481,6 +481,12 @@ def test_mla_attention_quant_pattern(
             device=device,
             vllm_config=vllm_config_unfused,
         )
+        if (
+            model_class is TestMLAAttentionFp8GroupQuantPatternModel
+            and type(model_unfused.block_fp8_linear.kernel)
+            is not CutlassFp8BlockScaledMMKernel
+        ):
+            pytest.skip("CUTLASS FP8 block kernel is not supported on this platform")
         model_unfused = model_unfused.to(device)
         # HACK: See #131044
         result_unfused_0 = model_unfused(q, kv_c_normed, k_pe)  # noqa: F841

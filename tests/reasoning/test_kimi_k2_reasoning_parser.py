@@ -1,30 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.reasoning.kimi_k2_reasoning_parser import KimiK2ReasoningParser
 from vllm.tokenizers import get_tokenizer
 
 REASONING_MODEL_NAME = "moonshotai/Kimi-K2.5"
-
-
-@pytest.fixture
-def mock_kimi_k2_tokenizer():
-    tokenizer = MagicMock()
-    tokenizer.get_vocab.return_value = {
-        "<think>": 100,
-        "</think>": 101,
-        "<|tool_calls_section_begin|>": 200,
-        "<|tool_calls_section_end|>": 201,
-        "<|tool_call_begin|>": 202,
-        "<|tool_call_end|>": 203,
-    }
-    return tokenizer
 
 
 @pytest.fixture(scope="module")
@@ -80,9 +66,13 @@ def test_extract_reasoning_tool_section_ends_reasoning(kimi_k2_tokenizer):
 def test_streaming_reasoning_then_content(kimi_k2_tokenizer):
     """Token-by-token streaming: reasoning tokens then content after </think>."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+    parser_engine = parser._parser_engine
+    assert isinstance(parser_engine, KimiK2Parser)
 
-    think_id = parser._parser_engine._start_token_id
-    end_think_id = parser._parser_engine._end_token_id
+    think_id = parser_engine._start_token_id
+    end_think_id = parser_engine._end_token_id
+    assert think_id is not None
+    assert end_think_id is not None
     # Use a real token ID from the tokenizer for regular content
     regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
 
@@ -138,9 +128,13 @@ def test_streaming_reasoning_then_content(kimi_k2_tokenizer):
 def test_streaming_tool_section_ends_reasoning(kimi_k2_tokenizer):
     """<|tool_calls_section_begin|> in delta ends reasoning during streaming."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+    parser_engine = parser._parser_engine
+    assert isinstance(parser_engine, KimiK2Parser)
 
-    think_id = parser._parser_engine._start_token_id
-    tool_begin_id = parser._parser_engine._tool_section_start_token_id
+    think_id = parser_engine._start_token_id
+    tool_begin_id = parser_engine._tool_section_start_token_id
+    assert think_id is not None
+    assert tool_begin_id is not None
     regular_id = kimi_k2_tokenizer.encode("hello", add_special_tokens=False)[0]
 
     # Tool section token arrives — should transition from reasoning to content

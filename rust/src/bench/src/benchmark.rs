@@ -17,8 +17,12 @@ use crate::metrics::calculator::{calculate_embedding_metrics, calculate_metrics}
 use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
-use crate::rate_control::compute_schedule;
-use crate::ready_checker::wait_for_endpoint;
+use crate::rate_control::{compute_schedule, trace_schedule};
+use crate::ready_checker::{get_first_model, wait_for_endpoint};
+
+/// Past this first-arrival offset a self-timed run is almost certainly a
+/// wrongly scaled or epoch-anchored trace rather than a real idle head.
+const TRACE_START_WARN_SECONDS: f64 = 3600.0;
 
 /// Pre-resolve the hostname in `base_url` and pin all resolved IPs on the
 /// client builder via [`reqwest::ClientBuilder::resolve_to_addrs`].  This
@@ -134,6 +138,17 @@ pub(crate) async fn fetch_spec_decode_metrics(
         Err(_) => return None,
     };
 
+    parse_spec_decode_metrics(&text)
+}
+
+/// Parse spec decode counters from Prometheus text exposition format.
+///
+/// Matches on the metric name (the part before any labels) rather than the
+/// whole line so label values cannot be mistaken for metric names, and only
+/// reads `_total` counter samples — skipping e.g. `_created` timestamp series,
+/// which would otherwise be summed into the counts (mirrors the Python fix
+/// in vllm#41916).
+pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics> {
     let mut num_drafts: u64 = 0;
     let mut num_draft_tokens: u64 = 0;
     let mut num_accepted_tokens: u64 = 0;
@@ -145,24 +160,25 @@ pub(crate) async fn fetch_spec_decode_metrics(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !line.starts_with("vllm:spec_decode") {
+        let first_token = match line.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let metric_name = first_token.split('{').next().unwrap_or(first_token);
+        if !metric_name.starts_with("vllm:spec_decode") || !metric_name.ends_with("_total") {
             continue;
         }
         found_spec_decode = true;
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let val = match parts.last().and_then(|s| s.parse::<f64>().ok()) {
+        let val = match line.split_whitespace().last().and_then(|s| s.parse::<f64>().ok()) {
             Some(v) => v as u64,
             None => continue,
         };
 
-        if line.contains("num_drafts") {
+        if metric_name.contains("num_drafts") {
             num_drafts += val;
-        } else if line.contains("num_draft_tokens") {
+        } else if metric_name.contains("num_draft_tokens") {
             num_draft_tokens += val;
-        } else if line.contains("num_accepted_tokens_per_pos") {
+        } else if metric_name.contains("num_accepted_tokens_per_pos") {
             // Parse position label: position="N"
             if let Some(start) = line.find("position=\"") {
                 let start = start + "position=\"".len();
@@ -172,7 +188,7 @@ pub(crate) async fn fetch_spec_decode_metrics(
                     *accepted_per_pos.entry(pos).or_insert(0) += val;
                 }
             }
-        } else if line.contains("num_accepted_tokens") {
+        } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
         }
     }
@@ -281,40 +297,6 @@ pub(crate) fn assign_lora_modules(
     Some(out)
 }
 
-/// Fetch the first model from the server's /v1/models endpoint.
-async fn get_first_model_from_server(
-    base_url: &str,
-    client: &reqwest::Client,
-    extra_headers: &Option<std::collections::HashMap<String, String>>,
-) -> Result<(String, String)> {
-    let url = format!("{base_url}/v1/models");
-    let mut request = client.get(&url);
-    if let Some(headers) = extra_headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
-    // Add API key from environment
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    let response = request.send().await?;
-    let data: serde_json::Value = response.json().await?;
-
-    if let Some(models) = data.get("data").and_then(|d| d.as_array())
-        && let Some(first) = models.first()
-    {
-        let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let root = first.get("root").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-        return Ok((id, root));
-    }
-
-    Err(BenchError::Config(format!(
-        "No models found on the server at {base_url}"
-    )))
-}
-
 /// Run the complete benchmark.
 ///
 /// This is the core orchestrator matching Python's benchmark() + main_async().
@@ -348,8 +330,13 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         (m.clone(), config.model_name.clone())
     } else {
         tracing::info!(base_url = %config.base_url, "fetching first model from server");
-        let (name, id) =
-            get_first_model_from_server(&config.base_url, &client, &config.extra_headers).await?;
+        let (name, id) = get_first_model(
+            &config.base_url,
+            &client,
+            &config.extra_headers,
+            config.ready_check_timeout_sec,
+        )
+        .await?;
         tracing::info!(
             model_name = name,
             model_id = id,
@@ -364,7 +351,11 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     } else {
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
         tracing::info!(tokenizer = tid, "loading tokenizer");
-        let server_info = Some((config.base_url.as_str(), model_id.as_str()));
+        let server_info = Some((
+            config.base_url.as_str(),
+            model_id.as_str(),
+            config.ready_check_timeout_sec,
+        ));
         let t =
             crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
@@ -382,14 +373,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             "{} prompts from ShareGPT ({})",
             config.num_prompts,
             config.dataset_path.as_deref().unwrap_or("auto-download")
-        ),
-        DatasetName::Sonnet => format!(
-            "{} prompts from Sonnet ({}, isl={}, osl={}, prefix={})",
-            config.num_prompts,
-            config.dataset_path.as_deref().unwrap_or("built-in"),
-            config.sonnet_input_len,
-            config.sonnet_output_len,
-            config.sonnet_prefix_len,
         ),
         DatasetName::SpeedBench => {
             let truncate_info = config
@@ -424,6 +407,12 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         DatasetName::RandomRerank => format!(
             "{} random rerank requests (batch={}, reranker={})",
             config.num_prompts, config.random_batch_size, config.is_reranker,
+        ),
+        DatasetName::TimedTrace => format!(
+            "{} requests from timed trace ({}, chunk_hash_size={})",
+            config.num_prompts,
+            config.dataset_path.as_deref().unwrap_or("unknown"),
+            config.timed_trace_chunk_hash_size,
         ),
     };
     tracing::info!(
@@ -497,21 +486,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 config.disable_shuffle,
             )?
         }
-        DatasetName::Sonnet => {
-            let tok = tokenizer
-                .as_ref()
-                .ok_or_else(|| BenchError::Config("Sonnet dataset requires a tokenizer".into()))?;
-            crate::datasets::sonnet::load_sonnet_dataset(
-                tok,
-                config.dataset_path.as_deref(),
-                config.num_prompts,
-                config.sonnet_input_len,
-                config.sonnet_output_len,
-                config.sonnet_prefix_len,
-                config.seed,
-                &config.request_id_prefix,
-            )?
-        }
         DatasetName::SpeedBench => {
             let tok = tokenizer.as_ref().ok_or_else(|| {
                 BenchError::Config("SPEED-Bench dataset requires a tokenizer".into())
@@ -527,12 +501,11 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     downloaded.as_str()
                 }
             };
-            let output_len = config.sharegpt_output_len.unwrap_or(config.random_output_len);
             crate::datasets::speed_bench::load_speed_bench_dataset(
                 tok,
                 path,
                 config.num_prompts,
-                output_len,
+                config.speed_bench_output_len,
                 config.seed,
                 &config.request_id_prefix,
                 config.speed_bench_category.as_deref(),
@@ -548,17 +521,18 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             let dataset_id = config.dataset_path.as_deref().ok_or_else(|| {
                 BenchError::Config("--dataset-path is required for --dataset-name hf".into())
             })?;
-            let (downloaded_path, _config, _split) =
-                crate::datasets::hf_dataset::download_hf_dataset(
-                    dataset_id,
-                    config.hf_subset.as_deref(),
-                    config.hf_split.as_deref(),
-                    config.num_prompts,
-                )
-                .await?;
+            let (entries, _config, _split) = crate::datasets::hf_dataset::download_hf_dataset(
+                dataset_id,
+                config.hf_subset.as_deref(),
+                config.hf_split.as_deref(),
+                config.num_prompts,
+                config.seed,
+                config.disable_shuffle,
+            )
+            .await?;
             crate::datasets::hf_dataset::load_hf_dataset(
                 tok,
-                &downloaded_path,
+                &entries,
                 config.num_prompts,
                 config.hf_output_len,
                 config.seed,
@@ -615,6 +589,30 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 &config.request_id_prefix,
                 config.random_batch_size,
                 config.is_reranker,
+            )?
+        }
+        DatasetName::TimedTrace => {
+            let tok = tokenizer.as_ref().ok_or_else(|| {
+                BenchError::Config("Timed trace dataset requires a tokenizer".into())
+            })?;
+            let path = config.dataset_path.as_deref().ok_or_else(|| {
+                BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                )
+            })?;
+            crate::datasets::timed_trace::load_timed_trace_dataset(
+                tok,
+                path,
+                config.num_prompts,
+                &config.request_id_prefix,
+                &crate::datasets::timed_trace::TimedTraceOptions {
+                    chunk_size: config.timed_trace_chunk_hash_size,
+                    sec_multiplier: config.timed_trace_sec_multiplier,
+                    label_timestamp: &config.timed_trace_label_timestamp,
+                    label_input_length: &config.timed_trace_label_input_length,
+                    label_output_length: &config.timed_trace_label_output_length,
+                    label_hash_ids: &config.timed_trace_label_hash_ids,
+                },
             )?
         }
     };
@@ -836,20 +834,30 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         tracing::info!("detected speculative decoding; collecting metrics");
     }
 
-    // Main benchmark
-    let distribution = if config.burstiness == 1.0 {
-        "Poisson process"
+    // Main benchmark. Self-timed runs ignore --request-rate/--burstiness
+    // entirely (config.rs rejects them), so don't report a rate that isn't used.
+    if config.self_timed {
+        tracing::info!(
+            timing = "trace",
+            max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
+            prompts = config.num_prompts,
+            "starting main benchmark run; firing requests at their trace timestamps"
+        );
     } else {
-        "Gamma distribution"
-    };
-    tracing::info!(
-        request_rate = config.request_rate,
-        burstiness = config.burstiness,
-        distribution,
-        max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
-        prompts = config.num_prompts,
-        "starting main benchmark run"
-    );
+        let distribution = if config.burstiness == 1.0 {
+            "Poisson process"
+        } else {
+            "Gamma distribution"
+        };
+        tracing::info!(
+            request_rate = config.request_rate,
+            burstiness = config.burstiness,
+            distribution,
+            max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
+            prompts = config.num_prompts,
+            "starting main benchmark run"
+        );
+    }
 
     // Pre-assign LoRA adapters to each request (None when --lora-modules not set).
     let lora_assignments = assign_lora_modules(
@@ -868,14 +876,40 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         );
     }
 
-    // Compute request schedule
-    let schedule = compute_schedule(
-        input_requests.len(),
-        config.request_rate,
-        config.burstiness,
-        config.seed,
-        config.ramp_up.as_ref(),
-    );
+    // Compute request schedule: the trace's recorded arrival offsets when
+    // self-timed, synthetic gamma inter-arrivals otherwise. Either way the
+    // dispatch loop below sleeps to benchmark_start + delay, an absolute
+    // deadline, so trace replay does not accumulate drift.
+    let schedule = if config.self_timed {
+        let schedule = trace_schedule(input_requests.iter().map(|r| r.timestamp));
+        let first = schedule.delays.first().copied().unwrap_or(0.0);
+        let last = schedule.delays.iter().copied().fold(0.0, f64::max);
+        tracing::info!(
+            first_arrival_seconds = first,
+            last_arrival_seconds = last,
+            "replaying trace arrival schedule"
+        );
+        // Timestamps are absolute offsets from now, never normalized (Python
+        // does the same). An unscaled millisecond trace or an epoch-anchored
+        // one parks every request past any plausible run length, so say so
+        // rather than sitting at 0/N.
+        if first > TRACE_START_WARN_SECONDS {
+            tracing::warn!(
+                first_arrival_seconds = first,
+                "first trace arrival is far in the future; check \
+                 --timed-trace-sec-multiplier or re-anchor the trace timestamps"
+            );
+        }
+        schedule
+    } else {
+        compute_schedule(
+            input_requests.len(),
+            config.request_rate,
+            config.burstiness,
+            config.seed,
+            config.ramp_up.as_ref(),
+        )
+    };
 
     // Progress bar
     let pb = if config.disable_tqdm {
@@ -1094,7 +1128,10 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     };
 
     // Attach steady-state metrics when the closed-loop scope gate passes.
+    // Trace replay is open-loop: an in-flight plateau there reflects a burst
+    // in the trace, not a saturated server, so it is out of scope.
     let scope_ok = !config.no_steady_state
+        && !config.self_timed
         && config.max_concurrency.is_some()
         && config.request_rate.is_infinite();
     if scope_ok {
@@ -1898,6 +1935,52 @@ mod tests {
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
         }
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_sums_counters_across_engines() {
+        let text = "\
+# TYPE vllm:spec_decode_num_drafts_total counter
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"0\"} 100.0
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"1\"} 50.0
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\",engine=\"0\"} 700.0
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"m\",engine=\"0\"} 300.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\",engine=\"0\"} 80.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\",engine=\"0\"} 40.0
+vllm:num_requests_running{model_name=\"m\"} 0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 150);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+        assert_eq!(m.accepted_per_pos, [(0, 80), (1, 40)].into_iter().collect());
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_skips_created_series_and_label_values() {
+        // `_created` timestamps must not be summed into counters, and metric
+        // matching must key off the metric name, not substrings inside label
+        // values (vllm#41916).
+        let text = "\
+vllm:spec_decode_num_drafts_total{model_name=\"m\"} 100.0
+vllm:spec_decode_num_drafts_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\"} 700.0
+vllm:spec_decode_num_draft_tokens_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"num_drafts\"} 300.0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 100);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_none_without_spec_metrics() {
+        let text = "\
+vllm:num_requests_running{model_name=\"m\"} 0
+vllm:prefix_cache_queries_total{model_name=\"m\"} 0
+";
+        assert!(parse_spec_decode_metrics(text).is_none());
     }
 
     #[test]

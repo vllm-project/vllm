@@ -31,6 +31,7 @@ def mxint4_quantize(
     Returns:
         - uint8 packed (2 INT4/byte): [..., k//2] - stores SIGNED INT4 [-8, 7]
         - scales in BF16: [..., k//sf_vec_size]
+
     """
     x_reshaped = x.reshape(-1, sf_vec_size)
     x_max = x_reshaped.max(dim=-1, keepdim=True)[0].to(torch.float32)
@@ -61,6 +62,7 @@ def mxint4_quantize_moe_weights(
     Returns:
         - weights_mxint4: Quantized weights [e, n, k//2] uint8
         - scales_mxint4: Quantization scales [e, n, k//group_size] bf16
+
     """
     e = weights_bf16.shape[0]
     weight_list = []
@@ -101,6 +103,7 @@ def marlin_quantize_moe_weights(
     Returns:
         - weights_marlin: Marlin quantized weights [e, k//8, n] int32
         - scales_marlin: Marlin quantization scales [e, k//group_size, n] bf16
+
     """
     from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
         marlin_quantize,
@@ -113,9 +116,7 @@ def marlin_quantize_moe_weights(
     for i in range(e):
         # Transpose for Marlin: [n, k] → [k, n]
         w_t = weights_bf16[i].T.contiguous()
-        _, w_q, w_s, _, _, _ = marlin_quantize(
-            w_t, scalar_types.uint4b8, group_size, act_order=False
-        )
+        _, w_q, w_s = marlin_quantize(w_t, scalar_types.uint4b8, group_size)
         weight_list.append(w_q)
         scale_list.append(w_s)
 
@@ -248,16 +249,11 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
         expert_map=None,
         global_scale1=None,
         global_scale2=None,
-        g_idx1=None,
-        g_idx2=None,
         input_global_scale1=None,
         input_global_scale2=None,
-        sort_indices1=None,
-        sort_indices2=None,
         w1_zeros=None,
         w2_zeros=None,
         input_dtype=dtype,
-        is_k_full=True,
     )
 
     # Sanity check: manually compute BF16 reference for comparison

@@ -8,10 +8,10 @@ with a pixel shuffle connector and ColBERT-style 128-dim per-token embeddings.
 Reference: https://huggingface.co/ModernVBERT/colmodernvbert-merged
 """
 
-from transformers import ModernBertConfig, PretrainedConfig, SiglipVisionConfig
+from transformers import ModernBertConfig, PreTrainedConfig, SiglipVisionConfig
 
 
-class ColModernVBertConfig(PretrainedConfig):
+class ColModernVBertConfig(PreTrainedConfig):
     model_type = "colmodernvbert"
 
     def __init__(

@@ -259,13 +259,13 @@ class FakeParent:
     ) -> TransferJob:
         keys_list = list(keys)
         self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
-        block_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
+        chunk_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
         job_id = self._next_job_id
         self._next_job_id += 1
         return TransferJob(
             job_id=job_id,
             keys=keys_list,
-            block_ids=block_ids,
+            chunk_ids=chunk_ids,
             is_promotion=False,
             req_context=ctx,
         )
@@ -288,17 +288,17 @@ def _make_session(
     session = P2PSession(
         peer_id=peer_id,
         local_id=local_id,
-        transport=transport,  # type: ignore[arg-type]
+        transport=transport,
         local_block_len=transport.block_len,
         local_hash_seed=local_hash_seed,
-        conn=conn,  # type: ignore[arg-type]
+        conn=conn,
     )
     return session, conn, transport
 
 
 def _serve(session: P2PSession, parent: FakeParent) -> None:
     """Resolve enqueued inbound lookups, as the manager does each step."""
-    session.serve_external_requests(parent)  # type: ignore[arg-type]
+    session.serve_external_requests(parent)
 
 
 def _activate(
@@ -534,6 +534,94 @@ class TestClientFlows:
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
         assert abort[AbortFetchMsg.KV_REQUEST_ID] == "req-1"
 
+    def test_finish_preserves_active_load_until_terminal_result(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=7, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+
+        session.finish_request("req-1")
+
+        load = _client_load(session, "req-1")
+        assert load.job_id == 7
+        assert load.aborted_at is not None
+        aborted_at = load.aborted_at
+        assert session._client.has_active_loads is True
+        session.finish_request("req-1")
+        assert _client_load(session, "req-1").aborted_at == aborted_at
+        aborts = [m for m in conn._sent if m[TYPE_KEY] == AbortFetchMsg.TYPE]
+        assert len(aborts) == 1
+        assert aborts[0][AbortFetchMsg.ROUND_SEQ] == 0
+
+    def test_finish_abort_ack_emits_one_failure(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=8, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        loads = session.poll().loads
+        assert loads == [LoadResult(job_id=8, kv_request_id="req-1", success=False)]
+        assert session._client.has_active_loads is False
+        assert "req-1" not in session._client._requests
+        assert session.poll().loads == []
+
+    def test_finish_abort_timeout_emits_one_failure(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=9, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+        _client_load(session, "req-1").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+
+        loads = session.poll().loads
+        assert loads == [LoadResult(job_id=9, kv_request_id="req-1", success=False)]
+        assert session._client.has_active_loads is False
+        assert "req-1" not in session._client._requests
+        assert session.poll().loads == []
+
+    def test_late_transfer_done_after_abort_ack_is_ignored(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=10, kv_request_id="req-1", keys=[b"k"], block_ids=[0]
+        )
+        session.finish_request("req-1")
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=10, kv_request_id="req-1", success=False)
+        ]
+
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-1",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is False
+
     def test_active_loads_work_list_tracks_in_flight(self):
         """collect_results / has_active_loads use the _active_loads work-list,
         armed when a fetch is issued and discarded exactly when its load
@@ -739,7 +827,7 @@ class TestLookupFlow:
         assert fresh[0][LookupMsg.KEYS] == [b"hA"]
 
     def test_flush_uses_work_list_not_full_scan(self):
-        """flush drains a work-list rather than scanning every live request.
+        """Flush drains a work-list rather than scanning every live request.
 
         A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
@@ -1863,7 +1951,7 @@ class TestFinishRequestServerSide:
         )
         session.poll()
         # Force write_blocks to fail on the next call.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
 
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
 
@@ -1969,7 +2057,7 @@ class TestFinishRequestServerSide:
         assert outbound.finishing is False
 
         # Round 2: write_blocks fails for k2 while transfer_1 is still inflight.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
         session.add_stored_blocks("req-1", [b"k2"], [1], job_id=200)
         # No new transfer was registered.
         assert list(session._server._inflight.keys()) == [tid_1]
@@ -2075,7 +2163,7 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
@@ -2095,13 +2183,13 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         conn = FakeConnection(peer_id="peer:8000")
-        session.attach_connection(conn)  # type: ignore[arg-type]
+        session.attach_connection(conn)
         assert conn._sent
         assert conn._sent[0][TYPE_KEY] == ConnectMsg.TYPE
 
@@ -2109,7 +2197,7 @@ class TestPendingSession:
         """attach_connection on an already-connected session raises."""
         session, conn, _ = _make_session()
         with pytest.raises(ValueError, match="already connected"):
-            session.attach_connection(FakeConnection())  # type: ignore[arg-type]
+            session.attach_connection(FakeConnection())
 
     def test_pending_close_returns_pending_stores(self):
         """Closing a pending session reports buffered stores as failed."""
@@ -2117,7 +2205,7 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
@@ -2225,7 +2313,7 @@ class TestAdversarial:
     def test_non_dict_message(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
-        conn._inbox.append(42)  # type: ignore[arg-type]
+        conn._inbox.append(42)
         result_ = session.poll()
         loads = result_.loads
         stores = result_.stores
@@ -2314,7 +2402,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[assignment]
+        session._server.on_fetch = _boom
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2337,7 +2425,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[assignment]
+        session._server.on_fetch = _boom
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS):
             conn.enqueue(
                 {
@@ -2366,7 +2454,7 @@ class TestDispatchErrorHandling:
         # Alternate (boom, success) (_MAX-1) times: counter rises to 1
         # then resets to 0 each cycle, never reaching the threshold.
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS - 1):
-            session._server.on_fetch = _boom  # type: ignore[assignment]
+            session._server.on_fetch = _boom
             conn.enqueue(
                 {
                     TYPE_KEY: FetchMsg.TYPE,
@@ -2377,7 +2465,7 @@ class TestDispatchErrorHandling:
                 }
             )
             session.poll()
-            session._server.on_fetch = original_on_fetch  # type: ignore[assignment]
+            session._server.on_fetch = original_on_fetch
             # A benign no-op message (unknown type) dispatches cleanly
             # and resets the consecutive-error counter.
             conn.enqueue({TYPE_KEY: "unknown_for_test"})

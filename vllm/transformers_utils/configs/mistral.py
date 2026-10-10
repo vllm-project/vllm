@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from packaging.version import Version
-from transformers import PretrainedConfig, WhisperConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
+from transformers import PreTrainedConfig, WhisperConfig
 
 from vllm.logger import init_logger
 
@@ -14,7 +12,7 @@ logger = init_logger(__name__)
 def adapt_config_dict(
     config_dict: dict[str, Any],
     defaults: dict[str, Any],
-) -> PretrainedConfig:
+) -> PreTrainedConfig:
     config_dict = _remap_general_mistral_args(config_dict)
     config_dict = _remap_mistral_sliding_window(config_dict)
 
@@ -88,7 +86,7 @@ def adapt_config_dict(
     for k, v in defaults.items():
         config_dict.setdefault(k, v)
 
-    config = PretrainedConfig.from_dict(config_dict)
+    config = PreTrainedConfig.from_dict(config_dict)
 
     logger.debug("Initialized config %s", config)
 
@@ -105,8 +103,8 @@ def _remap_mistral_vision_args(config: dict) -> dict:
     config = {
         "model_type": "pixtral",
         "architectures": ["PixtralForConditionalGeneration"],
-        "text_config": PretrainedConfig.from_dict(config),
-        "vision_config": PretrainedConfig.from_dict(vision_config),
+        "text_config": PreTrainedConfig.from_dict(config),
+        "vision_config": PreTrainedConfig.from_dict(vision_config),
     }
     if quant_config:
         config["quantization_config"] = quant_config
@@ -119,7 +117,6 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
         "original_max_position_embeddings": ("original_max_position_embeddings", int),
         "beta": ("beta_fast", float),
         "alpha": ("beta_slow", float),
-        "apply_scale": ("apply_yarn_scaling", bool),
     }
 
     yarn_config = config.get("yarn") or {}
@@ -136,9 +133,10 @@ def _remap_mistral_yarn_args(config: dict) -> dict:
             # Cast to remove Transformers > v5 type warnings
             config["rope_parameters"][new_name] = cast(yarn_config.pop(old_name))
 
-    # Ignore apply_yarn_scaling in Transformers > v5 RoPE validation to remove warnings
-    if Version(TRANSFORMERS_VERSION) >= Version("5.3.0.dev0"):
-        config["ignore_keys_at_rope_validation"] = {"apply_yarn_scaling"}
+    # `apply_scale: false` means no magnitude correction, which Transformers
+    # spells as an explicit attention_factor of 1.
+    if not yarn_config.pop("apply_scale", True):
+        config["rope_parameters"]["attention_factor"] = 1.0
 
     assert len(yarn_config) == 0, f"Unparsed yarn config: {yarn_config}"
 
@@ -250,7 +248,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
     config = {
         "model_type": "voxtral",
         "architectures": [architecture],
-        "text_config": PretrainedConfig.from_dict(config),
+        "text_config": PreTrainedConfig.from_dict(config),
         "audio_config": WhisperConfig(
             num_mel_bins=encoder_args["audio_encoding_args"]["num_mel_bins"],
             window_size=encoder_args["audio_encoding_args"]["window_size"],

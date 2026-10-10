@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class KimiLinearConfig(PretrainedConfig):
+class KimiLinearConfig(PreTrainedConfig):
     model_type = "kimi_linear"
     keys_to_ignore_at_inference = ["past_key_values"]
 

@@ -32,8 +32,7 @@ class W4A8Int8MoeBackend(Enum):
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[W4A8Int8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
+    """Get available backends in priority order based on platform and config.
 
     Currently only CPU INT4 backend is available for W4A8 INT8 MoE.
     """
@@ -75,8 +74,7 @@ def select_w4a8_int8_moe_backend(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts]]:
-    """
-    Select the primary W4A8 Int8 MoE backend.
+    """Select the primary W4A8 Int8 MoE backend.
 
     Args:
         config: MoE configuration
@@ -85,8 +83,8 @@ def select_w4a8_int8_moe_backend(
 
     Returns:
         Tuple of (backend, kernel_class)
-    """
 
+    """
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     if not AVAILABLE_BACKENDS:
@@ -160,8 +158,7 @@ def select_w4a8_int8_moe_backend(
 def make_w4a8_int8_moe_quant_config(
     block_shape: tuple[int, int] | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Create FusedMoEQuantConfig for W4A8 Int8 MoE.
+    """Create FusedMoEQuantConfig for W4A8 Int8 MoE.
 
     Args:
         block_shape: Quantization block shape (row, col).
@@ -170,6 +167,7 @@ def make_w4a8_int8_moe_quant_config(
 
     Returns:
         FusedMoEQuantConfig with appropriate settings for W4A8 Int8
+
     """
     # W4A8 Int8 uses static weight quantization, dynamic activation quantization
     # Weights are 4-bit (stored as int8, packed to uint8),
@@ -196,8 +194,7 @@ def pack_int4_weights_for_kleidi(
     out_features: int,
     group_size: int,
 ) -> torch.Tensor:
-    """
-    Pack INT4 weights (stored as int8 in [-8,7]) to KleidiAI format.
+    """Pack INT4 weights (stored as int8 in [-8,7]) to KleidiAI format.
 
     Args:
         int4_as_int8: [out, in] int8 tensor with values in [-8, 7]
@@ -209,6 +206,7 @@ def pack_int4_weights_for_kleidi(
 
     Returns:
         Packed weight tensor in KleidiAI format
+
     """
     # Shift to unsigned nibble [0, 15]
     tmp = int4_as_int8.add(8)
@@ -250,8 +248,7 @@ def convert_to_w4a8_int8_moe_format(
     torch.Tensor | None,
     torch.Tensor | None,
 ]:
-    """
-    Pack INT4 MoE weights to KleidiAI format.
+    """Pack INT4 MoE weights to KleidiAI format.
 
     This function packs the INT4 weights (stored as int8 values) into
     the format expected by the KleidiAI dynamic_4bit_int_moe kernel.
@@ -267,6 +264,7 @@ def convert_to_w4a8_int8_moe_format(
 
     Returns:
         Tuple of (w13_packed, w2_packed) tensors
+
     """
     # Derive dimensions from tensor shapes
     E = w13_weight.shape[0]  # num_experts
@@ -315,8 +313,7 @@ def make_w4a8_int8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    """
-    Create FusedMoEKernel for W4A8 Int8 MoE.
+    """Create FusedMoEKernel for W4A8 Int8 MoE.
 
     Args:
         moe_quant_config: Quantization configuration
@@ -326,6 +323,7 @@ def make_w4a8_int8_moe_kernel(
 
     Returns:
         Configured FusedMoEKernel instance
+
     """
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(

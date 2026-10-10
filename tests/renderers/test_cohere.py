@@ -30,6 +30,7 @@ from vllm.renderers.cohere import (
     _normalize_tool_call,
     _role_to_melody,
     _tool_to_melody,
+    _v2_tool_content_to_melody_block,
 )
 from vllm.tokenizers.hf import HfTokenizer
 
@@ -80,7 +81,7 @@ class TestRoleToMelody:
         # reject non-strings — any exception type is acceptable as long
         # as we don't silently produce a malformed prompt.
         with pytest.raises((AttributeError, TypeError, ValueError)):
-            _role_to_melody(None)  # type: ignore[arg-type]
+            _role_to_melody(None)
 
 
 # ======================================================================
@@ -134,7 +135,7 @@ class TestNormalizeToolCall:
 
     def test_invalid_type_rejected(self):
         with pytest.raises(TypeError, match="Unexpected tool_call value"):
-            _normalize_tool_call(42)  # type: ignore[arg-type]
+            _normalize_tool_call(42)
 
 
 # ======================================================================
@@ -248,7 +249,7 @@ class TestDocumentToMelody:
 
     def test_invalid_type_rejected(self):
         with pytest.raises(TypeError, match="Unsupported document type"):
-            _document_to_melody(42)  # type: ignore[arg-type]
+            _document_to_melody(42)
 
 
 # ======================================================================
@@ -301,7 +302,109 @@ class TestToolToMelody:
 
     def test_invalid_type_rejected(self):
         with pytest.raises(TypeError, match="Unsupported tool type"):
-            _tool_to_melody(42)  # type: ignore[arg-type]
+            _tool_to_melody(42)
+
+
+# ======================================================================
+# _v2_tool_content_to_melody_block
+# ======================================================================
+
+
+class TestV2ToolContentToMelodyBlock:
+    """Pins the v2 → melody mapping applied to every tool-message
+    content block. The serving layer forwards the original v2 blocks
+    verbatim under :data:`TOOL_MESSAGE_V2_CONTENT_KEY`; the renderer
+    owns this mapping so cmd3 / cmd4 render each result field as its
+    own entry rather than a single stringified-JSON blob.
+    """
+
+    def test_document_block_unwraps_data_into_melody_document(self):
+        # ``document.data`` becomes the melody ``document`` payload
+        # directly. Keeping the wrapping ``data`` key would produce a
+        # redundant ``{"data": {...}}`` nesting at render time.
+        # ``document.id`` is dropped here on purpose: outbound
+        # citation binding tracks IDs through the separate
+        # ``POSITION_TO_SOURCE_KEY`` map.
+        result = _v2_tool_content_to_melody_block(
+            {
+                "type": "document",
+                "document": {
+                    "id": "d1",
+                    "data": {"result": "The second tallest mountain is K2."},
+                },
+            }
+        )
+        assert result == {
+            "type": "document",
+            "document": {"result": "The second tallest mountain is K2."},
+        }
+
+    def test_document_block_with_missing_data_yields_empty_payload(self):
+        # A document block whose ``data`` isn't a mapping (e.g.
+        # missing entirely) still produces a document block so
+        # per-slot numbering stays aligned with the outbound citation
+        # walk in ``CohereServingChatV2._walk_citable_positions``.
+        result = _v2_tool_content_to_melody_block(
+            {"type": "document", "document": {"id": "d1"}}
+        )
+        assert result == {"type": "document", "document": {}}
+
+    def test_json_parseable_text_becomes_document_dict(self):
+        # A ``text`` block whose payload parses to a JSON object lands
+        # directly under ``document`` (no ``content`` wrapper) so
+        # cmd3/cmd4 render each field individually.
+        result = _v2_tool_content_to_melody_block(
+            {"type": "text", "text": '{"temperature": "20C"}'}
+        )
+        assert result == {"type": "document", "document": {"temperature": "20C"}}
+
+    def test_non_json_text_wrapped_under_content_key(self):
+        # Plain-text tool output gets wrapped under a ``content`` key
+        # so cmd3/cmd4 templates have a stable field to look up.
+        result = _v2_tool_content_to_melody_block(
+            {"type": "text", "text": "K2 is 8611m."}
+        )
+        assert result == {"type": "document", "document": {"content": "K2 is 8611m."}}
+
+    def test_json_text_that_is_not_a_dict_is_treated_as_plain_text(self):
+        # A ``text`` block whose payload parses as a JSON *array* or
+        # *scalar* isn't a valid melody document (which must be a
+        # mapping). Fall back to the ``{"content": <text>}`` wrapper so
+        # the raw text still reaches the prompt.
+        result = _v2_tool_content_to_melody_block({"type": "text", "text": "[1, 2, 3]"})
+        assert result == {"type": "document", "document": {"content": "[1, 2, 3]"}}
+
+    def test_empty_text_still_produces_content_block(self):
+        # Even an empty text block must produce an entry so melody's
+        # per-content-block numbering stays aligned with the
+        # citation-side walk in ``_walk_citable_positions``.
+        result = _v2_tool_content_to_melody_block({"type": "text", "text": ""})
+        assert result == {"type": "document", "document": {"content": ""}}
+
+    def test_missing_text_field_treated_as_empty(self):
+        # ``model_dump(exclude_none=True)`` on a ``TextToolContent``
+        # with an explicitly empty text still emits ``text: ""``, but
+        # guard against a future v2 shape that omits it entirely.
+        result = _v2_tool_content_to_melody_block({"type": "text"})
+        assert result == {"type": "document", "document": {"content": ""}}
+
+    def test_unknown_block_type_returns_none(self):
+        # Callers use ``None`` to know they should skip the slot; a
+        # future v2 addition shouldn't silently render as an empty
+        # document.
+        assert _v2_tool_content_to_melody_block({"type": "audio"}) is None
+        assert _v2_tool_content_to_melody_block({"not": "a block"}) is None
+
+    def test_document_block_with_non_dict_document_returns_none(self):
+        # Malformed ``document`` field -- e.g. someone forwarding a
+        # raw string rather than the ``{id, data}`` wrapper -- is
+        # unusable, so return ``None`` so the caller skips it.
+        assert (
+            _v2_tool_content_to_melody_block(
+                {"type": "document", "document": "not a dict"}
+            )
+            is None
+        )
 
 
 # ======================================================================
@@ -315,7 +418,7 @@ class TestConversationToMelody:
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello"},
         ]
-        out = _conversation_to_melody_messages(conv)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv)
         assert out == [
             {
                 "role": "user",
@@ -340,7 +443,7 @@ class TestConversationToMelody:
                 "reasoning": "thoughts",
             }
         ]
-        out = _conversation_to_melody_messages(conv)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv)
         assert out[0]["content"] == [
             {"type": MelodyContentType.THINKING, "thinking": "thoughts"},
             {"type": MelodyContentType.TEXT, "text": "answer"},
@@ -354,7 +457,7 @@ class TestConversationToMelody:
                 "reasoning_content": "thoughts",
             }
         ]
-        out = _conversation_to_melody_messages(conv)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv)
         assert out[0]["content"][0] == {
             "type": MelodyContentType.THINKING,
             "thinking": "thoughts",
@@ -371,7 +474,7 @@ class TestConversationToMelody:
                 "reasoning": "should be ignored",
             }
         ]
-        out = _conversation_to_melody_messages(conv)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv)
         assert out[0]["content"] == [{"type": MelodyContentType.TEXT, "text": "hi"}]
 
     def test_tool_calls_normalized(self):
@@ -388,7 +491,7 @@ class TestConversationToMelody:
                 ],
             }
         ]
-        out = _conversation_to_melody_messages(conv)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv)
         assert out[0]["tool_calls"] == [
             {"id": "c1", "name": "f", "parameters": '{"a":1}'}
         ]
@@ -401,7 +504,7 @@ class TestConversationToMelody:
                 "tool_call_id": "c1",
             }
         ]
-        out = _conversation_to_melody_messages(conv)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv)
         assert out[0]["tool_call_id"] == "c1"
 
     def test_messages_citations_attached_by_index(self):
@@ -428,21 +531,86 @@ class TestConversationToMelody:
                 }
             ]
         }
-        out = _conversation_to_melody_messages(conv, citations)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv, citations)
         assert "citations" not in out[0]
         assert out[1]["citations"] == citations[1]
 
     def test_messages_citations_none_is_a_no_op(self):
         conv = [{"role": "assistant", "content": "a"}]
-        out = _conversation_to_melody_messages(conv, None)  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv, None)
         assert "citations" not in out[0]
 
     def test_messages_citations_missing_index_is_a_no_op(self):
         # A ``messages_citations`` dict whose key doesn't hit any
         # message must not attach anything (and must not raise).
         conv = [{"role": "assistant", "content": "a"}]
-        out = _conversation_to_melody_messages(conv, {5: [{"anything": 1}]})  # type: ignore[arg-type]
+        out = _conversation_to_melody_messages(conv, {5: [{"anything": 1}]})
         assert "citations" not in out[0]
+
+    def test_tool_message_v2_content_replaces_default_content(self):
+        # When ``tool_message_v2_content`` has an entry for a message
+        # index, the renderer maps those v2 blocks through
+        # :func:`_v2_tool_content_to_melody_block` and uses the result
+        # instead of the block list ``_content_blocks`` would derive
+        # from ``msg["content"]``.
+        conv = [
+            {"role": "user", "content": "q"},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                # ``_convert_tool_message`` on the serving side flattens
+                # the original ``document`` block to this text part.
+                # The renderer should ignore this flattened content
+                # because the forwarded map carries the structural
+                # truth.
+                "content": '[{"type":"text","text":"{\\"result\\":\\"K2\\"}"}]',
+            },
+        ]
+        v2_content = {
+            1: [
+                {
+                    "type": "document",
+                    "document": {"id": "d1", "data": {"result": "K2"}},
+                }
+            ]
+        }
+        out = _conversation_to_melody_messages(
+            conv,
+            tool_message_v2_content=v2_content,
+        )
+        # User message (no forwarded entry) still goes through the
+        # default ``_content_blocks`` path.
+        assert out[0]["content"] == [{"type": "text", "text": "q"}]
+        # Tool message picks up the mapped melody document block.
+        assert out[1]["content"] == [{"type": "document", "document": {"result": "K2"}}]
+        assert out[1]["tool_call_id"] == "c1"
+
+    def test_tool_message_v2_content_skips_unrecognized_blocks(self):
+        # ``_v2_tool_content_to_melody_block`` returns ``None`` for
+        # shapes it doesn't recognise; the renderer must skip those
+        # rather than let a ``None`` reach melody.
+        conv = [{"role": "tool", "tool_call_id": "c", "content": "ignored"}]
+        v2_content = {
+            0: [
+                {"type": "text", "text": "keep me"},
+                {"type": "mystery", "unexpected": True},
+            ]
+        }
+        out = _conversation_to_melody_messages(
+            conv,
+            tool_message_v2_content=v2_content,
+        )
+        assert out[0]["content"] == [
+            {"type": "document", "document": {"content": "keep me"}}
+        ]
+
+    def test_tool_message_v2_content_none_falls_back_to_default(self):
+        conv = [{"role": "tool", "tool_call_id": "c", "content": "plain text"}]
+        out = _conversation_to_melody_messages(
+            conv,
+            tool_message_v2_content=None,
+        )
+        assert out[0]["content"] == [{"type": "text", "text": "plain text"}]
 
 
 # ======================================================================
@@ -458,7 +626,7 @@ class TestBuildRenderConfig:
         # Bare kwargs -> cmd4 (the current Command A+ prompt format).
         # Mirrors ``_DEFAULT_FORMAT`` in ``vllm/renderers/cohere.py`` and
         # the ``--cohere-format`` CLI default.
-        fmt, cfg = _build_render_config(self._conv(), {})  # type: ignore[arg-type]
+        fmt, cfg = _build_render_config(self._conv(), {})
         assert fmt == "cmd4"
         assert cfg["use_jinja"] is True
         assert isinstance(cfg["messages"], list)
@@ -466,12 +634,12 @@ class TestBuildRenderConfig:
         assert "additional_template_fields" not in cfg
 
     def test_explicit_cmd3(self):
-        fmt, cfg = _build_render_config(self._conv(), {"cohere_format": "cmd3"})  # type: ignore[arg-type]
+        fmt, cfg = _build_render_config(self._conv(), {"cohere_format": "cmd3"})
         assert fmt == "cmd3"
 
     def test_invalid_format_raises(self):
         with pytest.raises(ValueError, match="Invalid cohere_format"):
-            _build_render_config(self._conv(), {"cohere_format": "cmd5"})  # type: ignore[arg-type]
+            _build_render_config(self._conv(), {"cohere_format": "cmd5"})
 
     def test_documents_converted(self):
         _, cfg = _build_render_config(
@@ -482,7 +650,7 @@ class TestBuildRenderConfig:
                     {"id": "d1", "data": {"text": "wrapped"}},
                 ]
             },
-        )  # type: ignore[arg-type]
+        )
         assert cfg["documents"] == [
             {"text": "doc text"},
             {"id": "d1", "text": "wrapped"},
@@ -497,7 +665,7 @@ class TestBuildRenderConfig:
                     {"type": "function", "function": {"name": "preferred"}}
                 ],
             },
-        )  # type: ignore[arg-type]
+        )
         names = [t["name"] for t in cfg["available_tools"]]
         assert names == ["preferred"]
 
@@ -505,30 +673,30 @@ class TestBuildRenderConfig:
         _, cfg = _build_render_config(
             self._conv(),
             {"tools": [{"type": "function", "function": {"name": "from_tools"}}]},
-        )  # type: ignore[arg-type]
+        )
         assert [t["name"] for t in cfg["available_tools"]] == ["from_tools"]
 
     @pytest.mark.parametrize("value", ["enabled", "disabled"])
     def test_reasoning_type_direct(self, value):
-        _, cfg = _build_render_config(self._conv(), {"reasoning_type": value})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(self._conv(), {"reasoning_type": value})
         assert cfg["reasoning_type"] == value
 
     def test_thinking_dict_shorthand_resolves_reasoning_type(self):
-        _, cfg = _build_render_config(self._conv(), {"thinking": {"type": "enabled"}})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(self._conv(), {"thinking": {"type": "enabled"}})
         assert cfg["reasoning_type"] == "enabled"
 
     def test_thinking_shorthand_ignores_unknown_type(self):
-        _, cfg = _build_render_config(self._conv(), {"thinking": {"type": "auto"}})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(self._conv(), {"thinking": {"type": "auto"}})
         assert "reasoning_type" not in cfg
 
     def test_dev_instruction_forwarded(self):
-        _, cfg = _build_render_config(self._conv(), {"dev_instruction": "be brief"})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(self._conv(), {"dev_instruction": "be brief"})
         assert cfg["dev_instruction"] == "be brief"
 
     def test_response_format_json_object_sets_json_mode(self):
         _, cfg = _build_render_config(
             self._conv(), {"response_format": {"type": "json_object"}}
-        )  # type: ignore[arg-type]
+        )
         assert cfg["json_mode"] is True
         assert "json_schema" not in cfg
 
@@ -537,7 +705,7 @@ class TestBuildRenderConfig:
         _, cfg = _build_render_config(
             self._conv(),
             {"response_format": {"type": "json_schema", "schema": schema}},
-        )  # type: ignore[arg-type]
+        )
         # JSON-encoded for melody (string-only schema field).
         assert cfg["json_schema"] == json.dumps(schema)
 
@@ -553,35 +721,35 @@ class TestBuildRenderConfig:
                     "schema": {"schema": inner},
                 }
             },
-        )  # type: ignore[arg-type]
+        )
         assert cfg["json_schema"] == json.dumps(inner)
 
     def test_json_schema_kwarg_direct(self):
         # Caller can also pass ``json_schema`` directly, both as dict and
         # as a pre-stringified value.
-        _, cfg = _build_render_config(self._conv(), {"json_schema": {"a": 1}})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(self._conv(), {"json_schema": {"a": 1}})
         assert cfg["json_schema"] == '{"a": 1}'
         _, cfg = _build_render_config(
             self._conv(), {"json_schema": "raw-string-schema"}
-        )  # type: ignore[arg-type]
+        )
         assert cfg["json_schema"] == "raw-string-schema"
 
     def test_json_mode_kwarg_overrides(self):
-        _, cfg = _build_render_config(self._conv(), {"json_mode": True})  # type: ignore[arg-type]
+        _, cfg = _build_render_config(self._conv(), {"json_mode": True})
         assert cfg["json_mode"] is True
 
     def test_cmd3_safety_mode_lowercased(self):
         _, cfg = _build_render_config(
             self._conv(),
             {"cohere_format": "cmd3", "safety_mode": "CONTEXTUAL"},
-        )  # type: ignore[arg-type]
+        )
         assert cfg["safety_mode"] == "contextual"
 
     def test_cmd3_citation_quality_direct(self):
         _, cfg = _build_render_config(
             self._conv(),
             {"cohere_format": "cmd3", "citation_quality": "ACCURATE"},
-        )  # type: ignore[arg-type]
+        )
         assert cfg["citation_quality"] == "accurate"
 
     def test_cmd3_citation_quality_derived_from_citation_options(self):
@@ -590,20 +758,20 @@ class TestBuildRenderConfig:
         _, cfg = _build_render_config(
             self._conv(),
             {"cohere_format": "cmd3", "citation_options": {"mode": "accurate"}},
-        )  # type: ignore[arg-type]
+        )
         assert cfg["citation_quality"] == "on"
 
         _, cfg = _build_render_config(
             self._conv(),
             {"cohere_format": "cmd3", "citation_options": {"mode": "off"}},
-        )  # type: ignore[arg-type]
+        )
         assert cfg["citation_quality"] == "off"
 
     def test_cmd3_skip_preamble_forwarded(self):
         _, cfg = _build_render_config(
             self._conv(),
             {"cohere_format": "cmd3", "skip_preamble": True},
-        )  # type: ignore[arg-type]
+        )
         assert cfg["skip_preamble"] is True
 
     def test_cmd3_no_grounding_field(self):
@@ -611,7 +779,7 @@ class TestBuildRenderConfig:
         _, cfg = _build_render_config(
             self._conv(),
             {"cohere_format": "cmd3", "grounding": "fast"},
-        )  # type: ignore[arg-type]
+        )
         assert "grounding" not in cfg
 
     @pytest.mark.parametrize(
@@ -632,7 +800,7 @@ class TestBuildRenderConfig:
         _, cfg = _build_render_config(
             self._conv(),
             {"cohere_format": "cmd4", "grounding": raw},
-        )  # type: ignore[arg-type]
+        )
         assert cfg["grounding"] == expected
 
     @pytest.mark.parametrize(
@@ -650,7 +818,7 @@ class TestBuildRenderConfig:
                 "cohere_format": "cmd4",
                 "citation_options": {"mode": mode},
             },
-        )  # type: ignore[arg-type]
+        )
         assert cfg["grounding"] == expected
 
     def test_cmd4_grounding_rejects_unknown_value(self):
@@ -658,7 +826,7 @@ class TestBuildRenderConfig:
             _build_render_config(
                 self._conv(),
                 {"cohere_format": "cmd4", "grounding": "foobar"},
-            )  # type: ignore[arg-type]
+            )
 
     def test_cmd4_platform_instruction(self):
         _, cfg = _build_render_config(
@@ -667,7 +835,7 @@ class TestBuildRenderConfig:
                 "cohere_format": "cmd4",
                 "platform_instruction": "do this",
             },
-        )  # type: ignore[arg-type]
+        )
         assert cfg["platform_instruction"] == "do this"
 
     def test_cmd4_no_safety_mode_field(self):
@@ -679,7 +847,7 @@ class TestBuildRenderConfig:
                 "safety_mode": "contextual",
                 "citation_quality": "on",
             },
-        )  # type: ignore[arg-type]
+        )
         assert "safety_mode" not in cfg
         assert "citation_quality" not in cfg
 
@@ -694,7 +862,7 @@ class TestBuildRenderConfig:
                 "my_var": "x",
                 "documents": ["doc"],  # consumed, must NOT leak through
             },
-        )  # type: ignore[arg-type]
+        )
         extras = cfg["additional_template_fields"]
         assert extras == {"reasoning_effort": "low", "my_var": "x"}
         # Sanity: the consumed key still produced its dedicated config slot.
@@ -707,7 +875,7 @@ class TestBuildRenderConfig:
         _, cfg = _build_render_config(
             self._conv(),
             {"template_id": "tpl1"},
-        )  # type: ignore[arg-type]
+        )
         assert cfg["template_id"] == "tpl1"
         # use_jinja is always True, regardless of caller input.
         assert cfg["use_jinja"] is True
@@ -728,7 +896,7 @@ class TestBuildRenderConfig:
             _build_render_config(
                 self._conv(),
                 {cohere_only_key: "raw {{ jinja }}"},
-            )  # type: ignore[arg-type]
+            )
 
     @pytest.mark.parametrize("cohere_only_key", ["template_jinja", "template"])
     def test_cohere_only_template_kwargs_none_is_tolerated(self, cohere_only_key):
@@ -738,7 +906,7 @@ class TestBuildRenderConfig:
         _, cfg = _build_render_config(
             self._conv(),
             {cohere_only_key: None},
-        )  # type: ignore[arg-type]
+        )
         assert cohere_only_key not in cfg
         assert "additional_template_fields" not in cfg
 
@@ -750,7 +918,7 @@ class TestBuildRenderConfig:
             self._conv(),
             {},
             "raw {{ jinja }}",
-        )  # type: ignore[arg-type]
+        )
         assert cfg["template_jinja"] == "raw {{ jinja }}"
         assert cfg["use_jinja"] is True
 
@@ -759,8 +927,42 @@ class TestBuildRenderConfig:
             self._conv(),
             {},
             None,
-        )  # type: ignore[arg-type]
+        )
         assert "template_jinja" not in cfg
+
+    def test_tool_message_v2_content_key_picked_up_from_kwargs(self):
+        # ``_build_render_config`` must pull
+        # ``TOOL_MESSAGE_V2_CONTENT_KEY`` out of
+        # ``chat_template_kwargs`` and hand it to
+        # ``_conversation_to_melody_messages`` so the renderer's
+        # v2 → melody mapping runs over the original v2 blocks rather
+        # than the flattened string content on the OpenAI-shape tool
+        # message.
+        from vllm.renderers.cohere import TOOL_MESSAGE_V2_CONTENT_KEY
+
+        conv = [
+            {"role": "user", "content": "q"},
+            {"role": "tool", "tool_call_id": "c1", "content": '{"r":"k"}'},
+        ]
+        kwargs = {
+            TOOL_MESSAGE_V2_CONTENT_KEY: {
+                1: [
+                    {
+                        "type": "document",
+                        "document": {"id": "d1", "data": {"r": "k"}},
+                    }
+                ]
+            }
+        }
+        _, cfg = _build_render_config(conv, kwargs)
+        tool_msg = cfg["messages"][1]
+        assert tool_msg["content"] == [{"type": "document", "document": {"r": "k"}}]
+        # And the key must be *consumed* -- not surfaced as a stray
+        # Jinja variable (``_RENDERER_CONSUMED_KEYS`` covers this but
+        # pin it here so a removal from that set surfaces immediately).
+        assert TOOL_MESSAGE_V2_CONTENT_KEY not in cfg.get(
+            "additional_template_fields", {}
+        )
 
 
 # ======================================================================
@@ -795,6 +997,7 @@ class _MockModelConfig:
     skip_tokenizer_init: bool = True
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
 

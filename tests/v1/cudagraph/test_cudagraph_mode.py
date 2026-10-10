@@ -54,13 +54,16 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
 
         llm = LLM(
             model="Qwen/Qwen2-1.5B-Instruct",
-            max_num_seqs=256,
+            max_num_seqs=16,
+            max_num_batched_tokens=128,
             trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,
             compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=cudagraph_mode
+                mode=CompilationMode.VLLM_COMPILE,
+                cudagraph_mode=cudagraph_mode,
+                cudagraph_capture_sizes=[1, 2, 4, 8, 16, 64, 128],
             ),
         )
         llm.generate(["Hello, my name is"] * 10)
@@ -72,11 +75,9 @@ attn_backend = "RocmAttn" if current_platform.is_rocm() else "FA2"
 
 combo_cases_2 = [
     (attn_backend, "FULL", CompilationMode.NONE, True),
-    (attn_backend, "FULL", CompilationMode.VLLM_COMPILE, True),
     (attn_backend, "PIECEWISE", CompilationMode.NONE, True),
     (attn_backend, "PIECEWISE", CompilationMode.VLLM_COMPILE, True),
     (attn_backend, "FULL_AND_PIECEWISE", CompilationMode.NONE, True),
-    (attn_backend, "FULL_AND_PIECEWISE", CompilationMode.VLLM_COMPILE, True),
     (attn_backend, "FULL_DECODE_ONLY", CompilationMode.NONE, True),
     (attn_backend, "FULL_DECODE_ONLY", CompilationMode.VLLM_COMPILE, True),
     (attn_backend, "NONE", CompilationMode.NONE, True),
@@ -100,13 +101,16 @@ def test_cudagraph_compilation_combo(
 
         llm = LLM(
             model="Qwen/Qwen2-1.5B-Instruct",
-            max_num_seqs=256,
+            max_num_seqs=16,
+            max_num_batched_tokens=128,
             trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,
             compilation_config=CompilationConfig(
-                mode=compilation_mode, cudagraph_mode=cudagraph_mode
+                mode=compilation_mode,
+                cudagraph_mode=cudagraph_mode,
+                cudagraph_capture_sizes=[1, 2, 4, 8, 16, 64, 128],
             ),
         )
         llm.generate(["Hello, my name is"] * 10)

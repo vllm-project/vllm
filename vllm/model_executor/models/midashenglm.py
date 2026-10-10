@@ -26,7 +26,7 @@
 import collections
 import collections.abc
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Annotated, Any, TypeAlias, cast
+from typing import Annotated, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -36,7 +36,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -61,6 +61,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.midashenglm import DashengConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -511,11 +512,9 @@ class AudioProjectorSubsample(nn.Module):
 
 # === Audio Inputs === #
 class MiDashengLMAudioInputs(TensorSchema):
-    """
-
-    Dimensions:
-        - bn: Batch size * number of audios
-        - p: Number of sampling points
+    """Dimensions:
+    - bn: Batch size * number of audios
+    - p: Number of sampling points
     """
 
     input_values: Annotated[torch.Tensor, TensorShape("n", "p")]
@@ -565,17 +564,13 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
-
         return {
             "audio": self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -583,47 +578,33 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
 class MiDashengLMMultiModalProcessor(
     BaseMultiModalProcessor[MiDashengLMProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, Any],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        audios = mm_data.pop("audios", [])
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        # + Padding
-        min_audio_len = self.info.get_min_audio_len()
-        processed_audios = [
-            np.pad(
-                audio,
-                (0, min_audio_len - audio.shape[-1]),
-                mode="constant",
-                constant_values=0,
-            )
-            if isinstance(audio, np.ndarray) and audio.shape[-1] < min_audio_len
-            else audio
-            for audio in audios
-        ]
+        if audios := hf_inputs.hf_data.get("audio"):
+            assert isinstance(audios, list)
 
-        if processed_audios:
-            mm_data["audio"] = processed_audios
+            min_audio_len = self.info.get_min_audio_len()
+            hf_inputs.hf_data["audio"] = [
+                np.pad(
+                    audio,
+                    (0, min_audio_len - audio.shape[-1]),
+                    mode="constant",
+                    constant_values=0,
+                )
+                if isinstance(audio, np.ndarray) and audio.shape[-1] < min_audio_len
+                else audio
+                for audio in audios
+            ]
 
-        if not mm_data.get("audio", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        mm_kwargs = dict(
-            **mm_kwargs,
-        )
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,
@@ -650,6 +631,7 @@ class MiDashengLMMultiModalProcessor(
 
         out_mm_data = out_mm_kwargs.get_data()
         audio_length = out_mm_data.get("audio_length")
+        audio_output_lengths: list[int]
         if audio_length is None:
             audio_output_lengths = []
         else:
@@ -658,10 +640,13 @@ class MiDashengLMMultiModalProcessor(
                 if isinstance(audio_length, torch.Tensor)
                 else audio_length
             )
-            audio_output_lengths = [
-                max(1, calculate_mel_frames_dasheng(int(length)))  # at least one frame
-                for length in audio_length_np
-            ]
+            assert isinstance(audio_length_np, (list, tuple, np.ndarray))
+            audio_output_lengths = []
+            for length in audio_length_np:
+                assert isinstance(length, (int, np.integer))
+                audio_output_lengths.append(
+                    max(1, calculate_mel_frames_dasheng(int(length)))
+                )
 
         def get_replacement_midashenglm(item_idx: int):
             num_features = audio_output_lengths[item_idx]
@@ -675,7 +660,7 @@ class MiDashengLMMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_midashenglm,
             )
         ]

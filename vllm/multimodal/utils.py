@@ -5,13 +5,13 @@ import bisect
 import mimetypes
 from collections import defaultdict
 from collections.abc import Generator, Sequence
+from dataclasses import replace
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
-from typing_extensions import deprecated
 
 from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
@@ -67,8 +67,7 @@ def encode_image_base64(
     image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
-    """
-    Encode a pillow image to base64 format.
+    """Encode a pillow image to base64 format.
 
     By default, the image is converted into RGB format before being encoded.
     Pass `image_mode=None` to keep the original image mode.
@@ -83,8 +82,7 @@ def encode_image_url(
     image_mode: str | None = "RGB",
     format: str = "PNG",
 ) -> str:
-    """
-    Encode a pillow image as a data URL.
+    """Encode a pillow image as a data URL.
 
     By default, the image is converted into RGB format before being encoded.
     Pass `image_mode=None` to keep the original image mode.
@@ -147,14 +145,14 @@ def get_mm_features_in_window(
 def argsort_mm_positions(
     mm_positions: MultiModalPlaceholders,
 ) -> list[tuple[str, int]]:
-    """
-    Given a `MultiModalPlaceholders`, output a sequence of keys to
+    """Given a `MultiModalPlaceholders`, output a sequence of keys to
     sort the dictionary by `offset` (starting index in the input sequence)
     in ascending order.
 
     Returns:
         A list of `(modality, idx)`, which can be used to access an item
         by `mm_positions[modality][idx]`.
+
     """
     flat_items = (
         (modality, idx, item)
@@ -212,14 +210,48 @@ def _batch_mm_items(
     }
 
 
+def strip_covered_mm_data(
+    mm_features: list[MultiModalFeatureSpec],
+    num_computed_tokens: int,
+    uses_mrope: bool = False,
+) -> list[MultiModalFeatureSpec]:
+    """Drop the tensor data of mm items whose placeholder span is fully inside
+    a prefix-cache-covered region: no encoder run can be scheduled for them,
+    so the workers never consume the payload fields. M-RoPE models keep
+    CPU-side metadata fields used to compute positions. SHM address items
+    are also kept so workers can balance the sender's reference count. The
+    scheduler-side ``Request`` keeps the full features."""
+    if not mm_features or num_computed_tokens == 0:
+        return mm_features
+
+    def maybe_strip(f: MultiModalFeatureSpec) -> MultiModalFeatureSpec:
+        if (
+            f.data is None
+            # SHM address items must reach the worker so it can acknowledge
+            # the sender's reference count before the item is evicted. This
+            # mirrors how the SHM receiver identifies them ("address" in item).
+            or "address" in f.data
+            or (f.mm_position.offset + f.mm_position.length > num_computed_tokens)
+        ):
+            return f
+
+        data = None
+        if uses_mrope:
+            data = MultiModalKwargsItem(
+                {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
+            )
+        return replace(f, data=data)
+
+    return [maybe_strip(f) for f in mm_features]
+
+
 def group_and_batch_mm_items(
     items: Sequence[MultiModalKwargsItem],
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
 ) -> Generator[tuple[int, BatchedTensorInputs]]:
-    """
-    Group consecutive items (possibly from different requests) into batches.
+    """Group consecutive items (possibly from different requests) into batches.
 
     Items must be split across groups if any of the following occurs,
     as the batch would otherwise be invalid:
@@ -235,6 +267,7 @@ def group_and_batch_mm_items(
         A tuple `(num_items, grouped_kwargs)`, where:
         - `kwargs` is a dictionary of keyword arguments to pass to the model;
         - `num_items` is the corresponding number of items.
+
     """
     start_idx = 0
     for end_idx in range(1, len(items) + 1):
@@ -261,8 +294,7 @@ def group_and_batch_mm_kwargs(
     device: torch.types.Device = None,
     pin_memory: bool = False,
 ) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
-    """
-    Group consecutive items (possibly from different requests) into batches.
+    """Group consecutive items (possibly from different requests) into batches.
 
     Items must be split across groups if any of the following occurs,
     as the batch would otherwise be invalid:
@@ -282,6 +314,7 @@ def group_and_batch_mm_kwargs(
         - `modality` is the modality of the batch;
         - `kwargs` is a dictionary of keyword arguments to pass to the model;
         - `num_items` is the corresponding number of items.
+
     """
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
@@ -294,31 +327,18 @@ def group_and_batch_mm_kwargs(
             yield modality, num_items, mm_kwargs_batch
 
 
-@deprecated(
-    "`group_mm_kwargs_by_modality` has been renamed to `group_and_batch_mm_kwargs`. "
-    "The old name will be removed in v0.19."
-)
-def group_mm_kwargs_by_modality(
-    mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
-    *,
-    device: torch.types.Device = None,
-    pin_memory: bool = False,
-) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
-    return group_and_batch_mm_kwargs(mm_kwargs, device=device, pin_memory=pin_memory)
-
-
 def fetch_audio(
     audio_url: str,
     audio_io_kwargs: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, int | float]:
-    """
-    Args:
+    """Args:
         audio_url: URL of the audio file to fetch.
         audio_io_kwargs: Additional kwargs passed to handle audio IO.
 
     Warning:
         This method has direct access to local files and is only intended
         to be called by user code. Never call this from the online server!
+
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
     media_connector = MediaConnector(
@@ -332,14 +352,14 @@ def fetch_image(
     image_url: str,
     image_io_kwargs: dict[str, Any] | None = None,
 ) -> Image.Image:
-    """
-    Args:
+    """Args:
         image_url: URL of the image file to fetch.
         image_io_kwargs: Additional kwargs passed to handle image IO.
 
     Warning:
         This method has direct access to local files and is only intended
         to be called by user code. Never call this from the online server!
+
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
     media_connector = MediaConnector(
@@ -353,14 +373,14 @@ def fetch_video(
     video_url: str,
     video_io_kwargs: dict[str, Any] | None = None,
 ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
-    """
-    Args:
+    """Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
 
     Warning:
         This method has direct access to local files and is only intended
         to be called by user code. Never call this from the online server!
+
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
     media_connector = MediaConnector(

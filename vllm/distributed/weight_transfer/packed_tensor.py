@@ -5,6 +5,7 @@
 import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 import torch
@@ -13,6 +14,14 @@ from torch.multiprocessing.reductions import reduce_tensor
 # Default values for packed tensor transfer.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
+
+
+# Streams are cached across calls: the caching allocator keys cached blocks by the
+# stream they were allocated on, so fresh streams at every call would strand the
+# packed buffers' reserved memory per call. See gh-52950.
+@cache
+def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.cuda.Stream, ...]:
+    return tuple(torch.cuda.Stream(device=device_idx) for _ in range(num_buffers))
 
 
 def unpack_tensor(
@@ -36,6 +45,7 @@ def unpack_tensor(
         shapes: List of tensor shapes
         dtypes: List of tensor dtypes
         tensor_sizes: List of tensor sizes in bytes
+
     """
     unpacked_tensors = packed_tensor.split(tensor_sizes)
 
@@ -76,6 +86,7 @@ def pack_tensors(
         tensor_list: Pre-existing tensor list to append to (for NCCL
                     multi-buffer reuse). If None, a fresh list is created.
         current_size: Byte count already accumulated in tensor_list
+
     """
     if tensor_list is None:
         tensor_list = []
@@ -154,7 +165,7 @@ def packed_nccl_broadcast_producer(
                     Both producer and consumer must use the same value.
 
     """
-    streams = [torch.cuda.Stream() for _ in range(num_buffers)]
+    streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     # Keep references to in-flight chunks so their packed_tensors
     # aren't freed while an async broadcast is still reading them.
     in_flight: list[PackedChunk | None] = [None] * num_buffers
@@ -209,7 +220,7 @@ def packed_nccl_broadcast_consumer(
     """
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.cuda.Stream() for _ in range(num_buffers)]
+    streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [
@@ -326,6 +337,7 @@ def packed_ipc_producer(
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
             Every chunk is guaranteed to fit within this size.  A
             ``ValueError`` is raised if any single tensor exceeds it.
+
     """
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="cuda")
     _, ipc_args = reduce_tensor(ipc_buffer)
@@ -454,6 +466,7 @@ def packed_ipc_consumer(
             export so the buffer mapping is opened and released exactly once
             (see ``PackedBufferImporter``). ``None`` builds an ephemeral one,
             which is only safe for single-chunk consumption.
+
     """
     props = torch.cuda.get_device_properties(device_index)
     physical_gpu_id = str(props.uuid)

@@ -15,8 +15,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SharedTopkIndicesBuffer,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -30,13 +35,123 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
+    flat_kv_row_view,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_sparse_attn_decode_bf16,
+    rocm_sparse_attn_prefill,
+    rocm_sparse_decode_bf16_num_splits,
+)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+
+def _use_rocm_sparse_triton(
+    *,
+    kv_cache_dtype: str,
+    head_size: int,
+    kv_lora_rank: int,
+    num_prefills: int,
+    num_decodes: int,
+    num_decode_tokens: int,
+    max_query_len: int,
+) -> bool:
+    """Select the rope-free BF16 path not supported by AITER sparse MLA.
+
+    The ragged Triton kernel indexes metadata per query token, so multi-token
+    speculative verification rows have the same capability requirements as
+    plain decode rows.
+    """
+    return (
+        not kv_cache_dtype.startswith("fp8")
+        and head_size == kv_lora_rank
+        and (num_prefills > 0 or num_decodes > 0)
+    )
+
+
+@triton.jit
+def _fit_kpool_indices_kernel(
+    token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS + TAIL_WIDTH]
+    out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    ti_stride0,
+    ti_stride1,
+    out_stride0,
+    out_stride1,
+    NUM_TOPK_TOKENS: tl.constexpr,
+    TAIL_WIDTH: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_TAIL: tl.constexpr,
+):
+    row_ptr = token_indices_ptr + tl.program_id(0) * ti_stride0
+    columns = tl.arange(0, BLOCK_T)
+    column_mask = columns < NUM_TOPK_TOKENS
+    history = tl.load(row_ptr + columns * ti_stride1, mask=column_mask, other=-1)
+
+    tail_columns = tl.arange(0, BLOCK_TAIL)
+    tail = tl.load(
+        row_ptr + (NUM_TOPK_TOKENS + tail_columns) * ti_stride1,
+        mask=tail_columns < TAIL_WIDTH,
+        other=-1,
+    )
+
+    valid_history = tl.sum((history >= 0).to(tl.int32))
+    valid_tail = tl.sum((tail >= 0).to(tl.int32))
+    keep_history = tl.minimum(valid_history, NUM_TOPK_TOKENS - valid_tail)
+
+    tail_offsets = columns - keep_history
+    tail_values = tl.load(
+        row_ptr + (NUM_TOPK_TOKENS + tail_offsets) * ti_stride1,
+        mask=column_mask & (tail_offsets >= 0) & (tail_offsets < TAIL_WIDTH),
+        other=-1,
+    )
+    fitted = tl.where(columns < keep_history, history, tail_values)
+    fitted = tl.where(columns < keep_history + valid_tail, fitted, -1)
+    tl.store(
+        out_ptr + tl.program_id(0) * out_stride0 + columns * out_stride1,
+        fitted,
+        mask=column_mask,
+    )
+
+
+def fit_kpool_indices_to_aiter(
+    token_indices: torch.Tensor, topk_tokens: int
+) -> torch.Tensor:
+    """Keep the live kpool tail while fitting AITER's fixed top-k width."""
+    if token_indices.shape[1] < topk_tokens:
+        raise ValueError("token_indices width must be at least topk_tokens")
+    if token_indices.shape[1] == topk_tokens:
+        return token_indices
+
+    num_tokens, width = token_indices.shape
+    tail_width = width - topk_tokens
+    output = torch.empty(
+        (num_tokens, topk_tokens),
+        dtype=token_indices.dtype,
+        device=token_indices.device,
+    )
+    if num_tokens == 0:
+        return output
+
+    _fit_kpool_indices_kernel[(num_tokens,)](
+        token_indices,
+        output,
+        token_indices.stride(0),
+        token_indices.stride(1),
+        output.stride(0),
+        output.stride(1),
+        NUM_TOPK_TOKENS=topk_tokens,
+        TAIL_WIDTH=tail_width,
+        BLOCK_T=triton.next_power_of_2(topk_tokens),
+        BLOCK_TAIL=triton.next_power_of_2(tail_width),
+    )
+    return output
 
 
 @triton.jit
@@ -49,6 +164,7 @@ def _convert_req_index_to_global_index_kernel(
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    BLOCK_STRIDE_ROWS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     # strides (in elements)
     bt_stride0,
@@ -90,9 +206,8 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
-    # # If token == -1 OR block_id OOB, output 0; else base * BLOCK_SIZE + offset
     out_val = tl.where(
-        is_invalid_tok | (~valid_block), 0, base * BLOCK_SIZE + inblock_off
+        is_invalid_tok | (~valid_block), 0, base * BLOCK_STRIDE_ROWS + inblock_off
     )
     out_ptr_ij = out_ptr + seq_start + indice_id
     out_ptr_ij_mask = (seq_start + indice_id) < seq_end
@@ -107,14 +222,14 @@ def triton_convert_req_index_to_global_index(
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     cu_seqlens: torch.Tensor,  # int32 [num_tokens + 1]
     paged_kv_indices: torch.Tensor,  # int32 [num_tokens * topk] out_buffer
+    BLOCK_STRIDE_ROWS: int,
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
 ):
-    """
-    out[token_id, indice_id] =
+    """out[token_id, indice_id] =
         block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
+            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_STRIDE_ROWS
         + token_indices[token_id, indice_id] % BLOCK_SIZE
 
     Only when token_indices[token_id, indice_id] == -1 do we output -1.
@@ -154,6 +269,7 @@ def triton_convert_req_index_to_global_index(
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
+        BLOCK_STRIDE_ROWS,
         BLOCK_N,
         # strides
         bt_stride0,
@@ -221,48 +337,6 @@ def generate_sparse_seqlen_triton(
     return out
 
 
-@triton.jit
-def fetch_id_to_ragged_kernel(
-    in_tensor_ptr,  # [num_seq, topk]
-    cumsum_ptr,  # [num_seq + 1]
-    out_tensor_ptr,  # [max_num_seq * topk]
-    in_tensor_ptr_stride,
-    TOPK: tl.constexpr,
-    TOKEN_NUM: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    seq_id = tl.program_id(0)
-    block_id = tl.program_id(1)
-    offset = tl.arange(0, BLOCK_SIZE)
-    token_start = tl.load(cumsum_ptr + seq_id)
-    token_end = tl.load(cumsum_ptr + seq_id + 1)
-    token_num = token_end - token_start
-    row_offset = block_id * BLOCK_SIZE
-    if row_offset >= token_num:
-        return
-    in_tensor_offset = seq_id * in_tensor_ptr_stride + row_offset + offset
-    in_tensor_mask = (row_offset + offset) < TOPK
-    in_tensor_val = tl.load(in_tensor_ptr + in_tensor_offset, mask=in_tensor_mask)
-    out_tensor_offset = token_start + row_offset + offset
-    out_tensor_mask = (out_tensor_offset < token_end) & in_tensor_mask
-    tl.store(out_tensor_ptr + out_tensor_offset, in_tensor_val, mask=out_tensor_mask)
-
-
-def fetch_id_to_ragged_triton(
-    in_tensor: torch.Tensor, cumsum: torch.Tensor, out_tensor: torch.Tensor, topk
-):
-    num_tokens = in_tensor.size(0)
-    block_size = 64
-    num_block_per_row = triton.cdiv(topk, block_size)
-    grid = (
-        num_tokens,
-        num_block_per_row,
-    )
-    fetch_id_to_ragged_kernel[grid](
-        in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, num_tokens, block_size
-    )
-
-
 class ROCMAiterMLASparseBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -274,8 +348,12 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1, 64]
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [1, MultipleOf(16)]
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        return align_blocks_to_rows(spec)
 
     @staticmethod
     def get_name() -> str:
@@ -293,16 +371,6 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     def get_impl_cls() -> type["ROCMAiterMLASparseImpl"]:
         return ROCMAiterMLASparseImpl
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
     @classmethod
     def is_mla(cls) -> bool:
         return True
@@ -310,6 +378,16 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        from vllm.platforms.rocm import on_mi3xx
+
+        return on_mi3xx()
 
 
 @dataclass
@@ -368,6 +446,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.kv_cache_spec = kv_cache_spec
         self.model_config = vllm_config.model_config
         self.model_dtype = vllm_config.model_config.dtype
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         parallel_config = vllm_config.parallel_config
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -377,7 +456,17 @@ class ROCMAiterMLASparseMetadataBuilder(
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens = vllm_config.model_config.hf_text_config.index_topk
+        attention_context = vllm_config.compilation_config.static_forward_context
+        # Sink decode must use AITER's nonpersistent path. In particular,
+        # gfx942 has no persistent+LSE kernel, and its metadata heuristic
+        # terminates for HY-V4's TP1 H64 shape. The Triton sparse MLA kernel
+        # never reads the persistent metadata either.
+        self._use_persistent_metadata = all(
+            getattr(attention_context[name].impl, "sinks", None) is None
+            and not getattr(attention_context[name].impl, "use_aiter_sparse_mla", False)
+            for name in layer_names
+        )
         # Bounds the KV-split heuristic (see `_sparse_decode_max_split`).
         self._num_compute_units = current_platform.num_compute_units()
         self.max_model_len_tensor = torch.tensor(
@@ -422,9 +511,11 @@ class ROCMAiterMLASparseMetadataBuilder(
         # so the buffers are large enough for any decode shape we might see.
         from aiter import dtypes, get_mla_metadata_info_v1
 
-        # Aiter sparse MLA also requires num_heads >= 16 (will be padded by
-        # AiterMLAHelper.get_mla_padded_q in forward).
-        self._num_attention_heads = max(16, self.num_heads)
+        # Keep metadata sizing consistent with the padded tensor shape passed
+        # to the sparse decode kernel.
+        self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
+            self.num_heads
+        )
 
         q_dtype = self.model_dtype
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
@@ -523,7 +614,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         self._prev_req_extent = new_req_extent
         self._prev_indices_extent = new_indices_extent
         self.req_id_per_token_buffer[:new_req_extent].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
         query_lens = (
             common_attn_metadata.query_start_loc[1:]
@@ -549,61 +640,83 @@ class ROCMAiterMLASparseMetadataBuilder(
         paged_kv_indices = self.paged_kv_indices[: num_tokens * self.topk_tokens]
 
         # ----- Compute persistent MLA metadata -----
-        # The aiter sparse decode kernel uses qseqlen=1 (each query token is
-        # treated as its own batch entry), so persistent metadata can always
-        # be precomputed here. The kernel switches to the persistent
-        # work-stealing path automatically when work_meta_data is non-None.
-        # The output is a deterministic function of the per-request query and
-        # context lengths (both clamped to topk_tokens, past which per-token KV
-        # length saturates) and num_heads; fingerprint those CPU-side and skip
-        # the launch when nothing changed.
-        num_reqs = common_attn_metadata.num_reqs
-        clamped_seq_lens = np.minimum(
-            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
-            self.topk_tokens,
+        # The AITER sparse decode kernel uses qseqlen=1 (each query token is
+        # treated as its own batch entry). Build its persistent work metadata
+        # only when AITER is selected and no layer needs the nonpersistent LSE
+        # path for attention sinks. The output is a deterministic function of
+        # the per-request query and context lengths (both clamped to
+        # topk_tokens, past which per-token KV length saturates) and num_heads;
+        # fingerprint those CPU-side and skip the launch when nothing changed.
+        head_size = self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim
+        use_triton_sparse = _use_rocm_sparse_triton(
+            kv_cache_dtype=self.kv_cache_dtype,
+            head_size=head_size,
+            kv_lora_rank=self.mla_dims.kv_lora_rank,
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            max_query_len=common_attn_metadata.max_query_len,
         )
-        clamped_context_lens = np.minimum(
-            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - seg_lengths,
-            self.topk_tokens,
-        )
-        metadata_key = (
-            num_tokens,
-            int(common_attn_metadata.max_query_len),
-            self._num_attention_heads,
-            clamped_seq_lens.tobytes(),
-            clamped_context_lens.tobytes(),
-            seg_lengths.tobytes(),
-        )
-        if metadata_key != self._prev_metadata_key:
-            from aiter import get_mla_metadata_v1
-
-            max_split_per_batch = self._sparse_decode_max_split(
-                int(common_attn_metadata.max_seq_len)
+        work_meta_data = None
+        work_indptr = None
+        work_info_set = None
+        reduce_indptr = None
+        reduce_final_map = None
+        reduce_partial_map = None
+        if self._use_persistent_metadata and not use_triton_sparse:
+            num_reqs = common_attn_metadata.num_reqs
+            with gpu_sync_allowed():
+                seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
+            clamped_seq_lens = np.minimum(
+                seq_lens_cpu,
+                self.topk_tokens,
             )
-            get_mla_metadata_v1(
-                qo_indptr,
-                paged_kv_indptr,
-                paged_kv_last_page_len,
+            clamped_context_lens = np.minimum(
+                seq_lens_cpu - seg_lengths,
+                self.topk_tokens,
+            )
+            metadata_key = (
+                num_tokens,
+                int(common_attn_metadata.max_query_len),
                 self._num_attention_heads,
-                1,
-                True,
-                self._mla_work_meta_data,
-                self._mla_work_info_set,
-                self._mla_work_indptr,
-                self._mla_reduce_indptr,
-                self._mla_reduce_final_map,
-                self._mla_reduce_partial_map,
-                page_size=1,
-                kv_granularity=16,
-                max_seqlen_qo=1,
-                uni_seqlen_qo=1,
-                fast_mode=True,
-                max_split_per_batch=max_split_per_batch,
+                clamped_seq_lens.tobytes(),
+                clamped_context_lens.tobytes(),
+                seg_lengths.tobytes(),
             )
-            # The persistent metadata buffers are read by graph replay. Order
-            # the async metadata write before the graph-captured decode kernel.
-            torch.cuda.current_stream(self.device).synchronize()
-            self._prev_metadata_key = metadata_key
+            if metadata_key != self._prev_metadata_key:
+                from aiter import get_mla_metadata_v1
+
+                max_split_per_batch = self._sparse_decode_max_split(
+                    int(common_attn_metadata.max_seq_len)
+                )
+                get_mla_metadata_v1(
+                    qo_indptr,
+                    paged_kv_indptr,
+                    paged_kv_last_page_len,
+                    self._num_attention_heads,
+                    1,
+                    True,
+                    self._mla_work_meta_data,
+                    self._mla_work_info_set,
+                    self._mla_work_indptr,
+                    self._mla_reduce_indptr,
+                    self._mla_reduce_final_map,
+                    self._mla_reduce_partial_map,
+                    page_size=1,
+                    kv_granularity=16,
+                    max_seqlen_qo=1,
+                    uni_seqlen_qo=1,
+                    fast_mode=True,
+                    max_split_per_batch=max_split_per_batch,
+                )
+                torch.cuda.current_stream(self.device).synchronize()
+                self._prev_metadata_key = metadata_key
+            work_meta_data = self._mla_work_meta_data
+            work_indptr = self._mla_work_indptr
+            work_info_set = self._mla_work_info_set
+            reduce_indptr = self._mla_reduce_indptr
+            reduce_final_map = self._mla_reduce_final_map
+            reduce_partial_map = self._mla_reduce_partial_map
 
         metadata = ROCMAiterMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
@@ -624,12 +737,12 @@ class ROCMAiterMLASparseMetadataBuilder(
             paged_kv_last_page_len=paged_kv_last_page_len,
             paged_kv_indices=paged_kv_indices,
             paged_kv_indptr=paged_kv_indptr,
-            work_meta_data=self._mla_work_meta_data,
-            work_indptr=self._mla_work_indptr,
-            work_info_set=self._mla_work_info_set,
-            reduce_indptr=self._mla_reduce_indptr,
-            reduce_final_map=self._mla_reduce_final_map,
-            reduce_partial_map=self._mla_reduce_partial_map,
+            work_meta_data=work_meta_data,
+            work_indptr=work_indptr,
+            work_info_set=work_info_set,
+            reduce_indptr=reduce_indptr,
+            reduce_final_map=reduce_final_map,
+            reduce_partial_map=reduce_partial_map,
         )
         return metadata
 
@@ -663,9 +776,13 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(
+    MLAAttentionImpl[ROCMAiterMLASparseMetadata], SharedTopkIndicesBuffer
+):
     is_sparse = True
     supports_dense_mha_prefill = False
+    supports_dcp = False
+    use_aiter_sparse_mla = False
 
     def __init__(
         self,
@@ -690,15 +807,24 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        sinks = mla_args.pop("sinks", None)
+        if sinks is not None:
+            if sinks.dtype != torch.float32:
+                raise ValueError(
+                    f"ROCm AITER MLA sinks must be float32, got {sinks.dtype}"
+                )
+            if sinks.ndim != 1 or sinks.numel() != num_heads:
+                raise ValueError(
+                    "ROCm AITER MLA sinks must have shape "
+                    f"({num_heads},), got {tuple(sinks.shape)}"
+                )
+            if not sinks.is_contiguous():
+                raise ValueError("ROCm AITER MLA sinks must be contiguous")
+        self.sinks: torch.Tensor | None = sinks
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
-        )
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -706,6 +832,37 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
+        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+
+        if rocm_aiter_ops.is_triton_sparse_mla_enabled():
+            reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
+            if reason is None:
+                self.use_aiter_sparse_mla = True
+            else:
+                logger.warning_once(
+                    "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; "
+                    "using the default sparse MLA path instead.",
+                    reason,
+                )
+
+    def _aiter_sparse_mla_unsupported_reason(
+        self, vllm_config: VllmConfig
+    ) -> str | None:
+        model_dtype = vllm_config.model_config.dtype
+        if model_dtype != torch.bfloat16:
+            return f"the model dtype is {model_dtype}, not bfloat16"
+        cache_dtype = self.kv_cache_dtype
+        if cache_dtype not in ("auto", "bfloat16", "fp8", "fp8_e4m3"):
+            return f"kv-cache dtype {cache_dtype!r} is neither bfloat16 nor e4m3 fp8"
+        # Context parallelism merges each rank's partials with a per-token LSE.
+        if self.dcp_world_size > 1 or self.pcp_world_size > 1:
+            return "context parallelism is not supported"
+        return None
+
+    def record_logical_topk_ready(self) -> None:
+        # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
+        # but does not participate in sparse-MLA index groups.
+        pass
 
     def _forward_mla(
         self,
@@ -713,46 +870,265 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         q: torch.Tensor,  # [sq, heads, d_qk]
         kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
         attn_metadata: ROCMAiterMLASparseMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         num_tokens = q.shape[0]
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        base_mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        mla_num_heads = base_mla_num_heads
+        need_lse = self.sinks is not None
+        from vllm.platforms.rocm import on_gfx942
+
+        # Keep sink attention available for dtypes/head shapes without an
+        # AITER return-LSE kernel. Sink layers never need persistent metadata.
+        triton_sink_fallback = (
+            need_lse
+            and q.dtype == kv_c_and_k_pe_cache.dtype
+            and (
+                q.dtype == torch.float16
+                or (
+                    q.dtype == torch.bfloat16
+                    and (
+                        mla_num_heads > 128
+                        or (on_gfx942() and 32 < mla_num_heads <= 64)
+                    )
+                )
+            )
+        )
+
+        if triton_sink_fallback or _use_rocm_sparse_triton(
+            kv_cache_dtype=self.kv_cache_dtype,
+            head_size=q.shape[-1],
+            kv_lora_rank=self.kv_lora_rank,
+            num_prefills=attn_metadata.num_prefills,
+            num_decodes=attn_metadata.num_decodes,
+            num_decode_tokens=attn_metadata.num_decode_tokens,
+            max_query_len=attn_metadata.max_query_len,
+        ):
+            output = torch.empty(
+                [num_tokens, q.shape[1], self.kv_lora_rank],
+                dtype=attn_metadata.attn_out_dtype,
+                device=q.device,
+            )
+            triton_sinks = None
+            if self.sinks is not None:
+                triton_sinks = AiterMLAHelper.get_mla_padded_q(
+                    self.num_heads,
+                    self.sinks.reshape(1, self.num_heads, 1),
+                    q.shape[1],
+                ).reshape(-1)
+            kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
+            decode_num_splits = (
+                rocm_sparse_decode_bf16_num_splits(
+                    num_tokens,
+                    q.shape[1],
+                    min(attn_metadata.max_seq_len, attn_metadata.topk_tokens),
+                )
+                if attn_metadata.num_decode_tokens == num_tokens
+                else 1
+            )
+            if decode_num_splits > 1:
+                rocm_sparse_attn_decode_bf16(
+                    q=q,
+                    kv=kv,
+                    scale=self.scale,
+                    head_dim=q.shape[-1],
+                    nope_head_dim=self.kv_lora_rank,
+                    rope_head_dim=q.shape[-1] - self.kv_lora_rank,
+                    attn_sink=triton_sinks,
+                    output=output,
+                    ragged_indices=attn_metadata.paged_kv_indices,
+                    ragged_indptr=attn_metadata.paged_kv_indptr,
+                    num_splits=decode_num_splits,
+                )
+            else:
+                rocm_sparse_attn_prefill(
+                    q=q,
+                    kv=kv,
+                    indices=None,
+                    topk_length=None,
+                    scale=self.scale,
+                    head_dim=q.shape[-1],
+                    nope_head_dim=self.kv_lora_rank,
+                    rope_head_dim=q.shape[-1] - self.kv_lora_rank,
+                    attn_sink=triton_sinks,
+                    output=output,
+                    ragged_indices=attn_metadata.paged_kv_indices,
+                    ragged_indptr=attn_metadata.paged_kv_indptr,
+                )
+            output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
+            return output, None
+
+        # AITER's nonpersistent return-LSE dispatch has discrete head kernels.
+        supported_head_buckets: tuple[int, ...] | None = None
+        head_dtype_name = ""
+        if need_lse:
+            if (
+                q.dtype == torch.bfloat16
+                and kv_c_and_k_pe_cache.dtype == torch.bfloat16
+            ):
+                supported_head_buckets = (16, 32, 64, 128)
+                head_dtype_name = "BF16"
+            elif (
+                q.dtype == current_platform.fp8_dtype()
+                and kv_c_and_k_pe_cache.dtype == current_platform.fp8_dtype()
+            ):
+                supported_head_buckets = (16, 128)
+                head_dtype_name = "FP8"
+            else:
+                raise ValueError(
+                    "ROCm AITER MLA attention sinks require query and KV to "
+                    "both use BF16 or both use FP8, got "
+                    f"query={q.dtype}, KV={kv_c_and_k_pe_cache.dtype}"
+                )
+
+        if supported_head_buckets is not None:
+            from vllm.platforms.rocm import on_mi3xx
+
+            if on_mi3xx():
+                supported_heads = next(
+                    (
+                        heads
+                        for heads in supported_head_buckets
+                        if heads >= mla_num_heads
+                    ),
+                    None,
+                )
+                if supported_heads is None:
+                    raise ValueError(
+                        "ROCm AITER MLA attention sinks support at most 128 "
+                        f"padded local {head_dtype_name} heads; increase "
+                        "tensor_parallel_size"
+                    )
+                if supported_heads != mla_num_heads:
+                    q = AiterMLAHelper.get_mla_padded_q(
+                        mla_num_heads, q, supported_heads
+                    )
+                    mla_num_heads = supported_heads
         output = torch.empty(
             [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
             device=q.device,
         )
 
-        # Build kwargs and forward the persistent MLA metadata when it has
-        # been computed. The aiter mla_decode_fwd switches to its
-        # work-stealing persistent kernel path when work_meta_data is given.
-        mla_kwargs: dict = dict(
-            q_scale=layer._q_scale,
-            kv_scale=layer._k_scale,
-        )
-        if attn_metadata.work_meta_data is not None:
-            mla_kwargs.update(
-                work_meta_data=attn_metadata.work_meta_data,
-                work_indptr=attn_metadata.work_indptr,
-                work_info_set=attn_metadata.work_info_set,
-                reduce_indptr=attn_metadata.reduce_indptr,
-                reduce_final_map=attn_metadata.reduce_final_map,
-                reduce_partial_map=attn_metadata.reduce_partial_map,
+        if need_lse:
+            # gfx942 has no persistent MLA code object that writes final LSE.
+            # The split-KV path consumes the same ragged indices and is exact.
+            lse = rocm_aiter_ops.mla_decode_fwd_lse(
+                q,
+                kv_c_and_k_pe_cache,
+                output,
+                self.scale,
+                attn_metadata.qo_indptr,
+                1,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
+                q_scale=layer._q_scale,
+                kv_scale=layer._k_scale,
             )
+        else:
+            # Preserve the persistent work-stealing fast path for models that
+            # do not use sinks.
+            mla_kwargs: dict = dict(
+                q_scale=layer._q_scale,
+                kv_scale=layer._k_scale,
+            )
+            if attn_metadata.work_meta_data is not None:
+                mla_kwargs.update(
+                    work_meta_data=attn_metadata.work_meta_data,
+                    work_indptr=attn_metadata.work_indptr,
+                    work_info_set=attn_metadata.work_info_set,
+                    reduce_indptr=attn_metadata.reduce_indptr,
+                    reduce_final_map=attn_metadata.reduce_final_map,
+                    reduce_partial_map=attn_metadata.reduce_partial_map,
+                )
 
-        rocm_aiter_ops.mla_decode_fwd(
-            q,
-            kv_c_and_k_pe_cache,
-            output,
+            rocm_aiter_ops.mla_decode_fwd(
+                q,
+                kv_c_and_k_pe_cache,
+                output,
+                self.scale,
+                attn_metadata.qo_indptr,
+                1,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                attn_metadata.paged_kv_last_page_len,
+                **mla_kwargs,
+            )
+            lse = None
+
+        if mla_num_heads != base_mla_num_heads:
+            if mla_num_heads % base_mla_num_heads == 0:
+                head_stride = mla_num_heads // base_mla_num_heads
+                output = output[:, ::head_stride]
+                if lse is not None:
+                    lse = lse[:, ::head_stride]
+            else:
+                output = output[:, :base_mla_num_heads]
+                if lse is not None:
+                    lse = lse[:, :base_mla_num_heads]
+
+        output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
+        if lse is not None:
+            lse = AiterMLAHelper.get_mla_unpadded_o(
+                self.num_heads, lse.unsqueeze(-1)
+            ).squeeze(-1)
+
+        if self.sinks is not None:
+            assert lse is not None
+            # Empty ragged rows have only sink mass and no value contribution.
+            # AITER can return NaN output/LSE for those rows; do not multiply it
+            # by a zero normalization factor and propagate the NaN.
+            has_keys = (
+                attn_metadata.paged_kv_indptr[1:] > attn_metadata.paged_kv_indptr[:-1]
+            ).unsqueeze(-1)
+            lse = torch.where(has_keys, lse, float("-inf"))
+            sink_lse = torch.logaddexp(lse, self.sinks)
+            sink_scale = torch.exp(lse - sink_lse)
+            output = torch.where(
+                has_keys.unsqueeze(-1),
+                output.float() * sink_scale.unsqueeze(-1),
+                0.0,
+            ).to(output.dtype)
+            lse = sink_lse
+
+        return output, lse
+
+    def _forward_mla_aiter(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,  # [sq, heads, d_qk], not head-padded
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: ROCMAiterMLASparseMetadata,
+    ) -> torch.Tensor:
+        """_forward_mla on aiter's Triton sparse MLA kernel.
+
+        Reads the same index stream, but needs no q head padding and no
+        persistent metadata, and its launch depends on shapes only, so it is
+        CUDA-graph capturable.
+        """
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        output = torch.empty(
+            [q.shape[0], self.num_heads, self.kv_lora_rank],
+            dtype=attn_metadata.attn_out_dtype,
+            device=q.device,
+        )
+        rocm_aiter_ops.triton_sparse_mla_fwd(
+            q[:num_actual_tokens],
+            kv_c_and_k_pe_cache.view(-1, 1, 1, q.shape[-1]),
+            output[:num_actual_tokens],
             self.scale,
-            attn_metadata.qo_indptr,
-            1,
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_indices,
-            attn_metadata.paged_kv_last_page_len,
-            **mla_kwargs,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            q_scale=layer._q_scale,
+            kv_scale=layer._k_scale,
+            attn_sink=self.sinks,
+            # triton_convert_req_index_to_global_index writes 0, never -1,
+            # for an invalid top-k entry, so no slot in the stream is negative.
+            has_invalid=False,
         )
-
-        return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
+        return output
 
     def forward_mqa(
         self,
@@ -773,14 +1149,24 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 )
             else:
                 q = self.q_concat_buffer[: ql_nope.shape[0]]
-                ops.concat_mla_q(ql_nope, q_pe, q)
+                if q_pe.shape[-1] == 0:
+                    q.copy_(ql_nope)
+                elif q.dtype == torch.float16:
+                    torch.cat((ql_nope, q_pe), dim=-1, out=q)
+                else:
+                    ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
         # Get topk indices
         assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        topk_indices = fit_kpool_indices_to_aiter(
+            self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
+        )
 
+        kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
@@ -788,6 +1174,7 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
@@ -798,9 +1185,12 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
+        if self.use_aiter_sparse_mla:
+            output = self._forward_mla_aiter(
+                layer, q, kv_c_and_k_pe_cache, attn_metadata
+            )
+            return output, None
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
-        attn_out = self._forward_mla(
-            layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
+        return self._forward_mla(
+            layer, mla_padded_q, kv_c_and_k_pe_cache.unsqueeze(1), attn_metadata
         )
-
-        return attn_out, None

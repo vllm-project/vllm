@@ -1,0 +1,3 @@
+Qwen3-30B-A3B-Fp8-AutoFp8-fi-cutlass.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-deepgemm.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-triton.yaml

@@ -217,7 +217,7 @@ def kernel_unified_attention(
     SLIDING_WINDOW: tl.constexpr,  # int
     USE_CAUSAL: tl.constexpr,  # bool
     USE_PER_SEQ_CAUSAL: tl.constexpr,  # bool
-    per_seq_causal_ptr,  # [num_seqs] bool, or None
+    per_seq_causal_ptr,  # [num_seqs] int32, or None
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
@@ -408,12 +408,17 @@ def kernel_unified_attention(
         BLOCK_Q,
         num_queries_per_kv,
         SLIDING_WINDOW,
-        USE_MM_PREFIX or USE_R_SWA,
+        USE_MM_PREFIX,
         IS_3D,
         USE_CAUSAL,
         USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
+        USE_R_SWA,
+        MM_PREFIX_CLAMP_SW,
+        MAX_MM_RANGES,
+        mm_prefix_range_ptr,
+        seq_idx,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -581,7 +586,15 @@ def kernel_unified_attention(
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
-            acc += tl.dot(P.to(V.dtype), V)
+            # Keep softmax weights representable when the P @ V dot uses FP8
+            # tensor cores. Undo the power-of-two scale after the dot.
+            if V.dtype == tl.float8e4nv:
+                p_scale = 256.0
+            elif V.dtype.is_fp8():
+                p_scale = 128.0
+            else:
+                p_scale = 1.0
+            acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:

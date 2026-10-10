@@ -145,9 +145,6 @@ pub struct BenchConfig {
     pub prefix_repetition_num_prefixes: usize,
     pub prefix_repetition_output_len: usize,
     pub sharegpt_output_len: Option<usize>,
-    pub sonnet_input_len: usize,
-    pub sonnet_output_len: usize,
-    pub sonnet_prefix_len: usize,
     pub no_oversample: bool,
     pub disable_shuffle: bool,
     pub num_prompts: usize,
@@ -196,10 +193,20 @@ pub struct BenchConfig {
     pub speed_bench_config: SpeedBenchConfig,
     pub speed_bench_category: Option<String>,
     pub speed_bench_max_input_len: Option<usize>,
+    pub speed_bench_output_len: usize,
     pub hf_split: Option<String>,
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
     pub hf_text_column: Option<String>,
+    /// Fire each request at its trace-recorded timestamp instead of a
+    /// synthetic --request-rate schedule. Only timed_trace can set this.
+    pub self_timed: bool,
+    pub timed_trace_chunk_hash_size: usize,
+    pub timed_trace_sec_multiplier: f64,
+    pub timed_trace_label_timestamp: String,
+    pub timed_trace_label_input_length: String,
+    pub timed_trace_label_output_length: String,
+    pub timed_trace_label_hash_ids: String,
     pub reset_prefix_cache: bool,
     pub prompt_token_ids: bool,
     // --- Random multimodal dataset ---
@@ -308,6 +315,14 @@ impl BenchConfig {
             }
         }
 
+        if uses_server_default_temperature(args.backend, extra_body.as_ref()) {
+            tracing::warn!(
+                "vllm-bench does not set temperature==0 (greedy) in requests by default. \
+                 The default will be determined on the server side and can be \
+                 model/API specific. For greedy decoding, include --temperature=0."
+            );
+        }
+
         // Parse metadata
         let metadata = match &args.metadata {
             None => None,
@@ -370,6 +385,79 @@ impl BenchConfig {
         let mut multi_turn_min_turns = args.multi_turn_num_turns;
         let mut multi_turn_max_turns = args.multi_turn_num_turns;
 
+        let self_timed = if args.dataset_name == DatasetName::TimedTrace {
+            if !matches!(args.backend, BackendKind::Vllm | BackendKind::Openai) {
+                return Err(BenchError::Config(
+                    "timed_trace passes pre-tokenized prompts (list[int]) and requires \
+                     a completions backend ('vllm' or 'openai')"
+                        .into(),
+                ));
+            }
+            if args.dataset_path.is_none() {
+                return Err(BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                ));
+            }
+            // A zero, negative or non-finite scale turns trace timestamps into
+            // offsets the scheduler cannot sleep on.
+            if !(args.timed_trace_sec_multiplier.is_finite()
+                && args.timed_trace_sec_multiplier > 0.0)
+            {
+                return Err(BenchError::Config(format!(
+                    "--timed-trace-sec-multiplier must be finite and positive, got {}",
+                    args.timed_trace_sec_multiplier
+                )));
+            }
+            let self_timed = !args.no_self_timed;
+            if self_timed {
+                // Flags that shape a synthetic schedule are unreachable once
+                // the trace supplies arrival times. Accepting them silently
+                // would still stamp the result JSON and its filename with a
+                // request rate that never ran.
+                let mut unused: Vec<&str> = Vec::new();
+                if args.request_rate.is_finite() {
+                    unused.push("--request-rate");
+                }
+                if args.burstiness != 1.0 {
+                    unused.push("--burstiness");
+                }
+                if args.ramp_up_strategy.is_some() {
+                    unused.push("--ramp-up-strategy");
+                }
+                if args.sweep_request_rate.is_some() {
+                    unused.push("--sweep-request-rate");
+                }
+                // A per-point num_prompts truncates the trace to a different
+                // number of rows, so each sweep point replays a different span.
+                if args.sweep_max_concurrency.is_some() && args.sweep_num_prompts_factor.is_some() {
+                    return Err(BenchError::Config(
+                        "--sweep-num-prompts-factor truncates the trace to a different \
+                         number of rows per sweep point, so each point replays a \
+                         different span; drop it to sweep concurrency over the whole trace"
+                            .into(),
+                    ));
+                }
+                if !unused.is_empty() {
+                    return Err(BenchError::Config(format!(
+                        "{} {} no effect under trace-driven timing; pass --no-self-timed \
+                         to schedule timed_trace by --request-rate instead",
+                        unused.join(" / "),
+                        if unused.len() == 1 { "has" } else { "have" },
+                    )));
+                }
+            }
+            self_timed
+        } else {
+            if args.self_timed || args.no_self_timed {
+                return Err(BenchError::Config(
+                    "--self-timed/--no-self-timed is only supported with \
+                     --dataset-name timed_trace"
+                        .into(),
+                ));
+            }
+            false
+        };
+
         // For random datasets with openai-compatible backends, default to ignore_eos.
         // Exception: multi-turn mode, where ignore_eos causes unbounded context growth
         // across turns. Multi-turn uses min_tokens instead for output length control.
@@ -378,6 +466,8 @@ impl BenchConfig {
             false
         } else {
             args.ignore_eos
+                // timed_trace: generation must run to the trace's output_length
+                || args.dataset_name == DatasetName::TimedTrace
                 || ((args.dataset_name == DatasetName::Random
                     || args.dataset_name == DatasetName::RandomMm)
                     && args.backend.is_openai_compatible()
@@ -438,8 +528,7 @@ impl BenchConfig {
             (MmLimitPerPrompt::default(), Vec::new())
         };
 
-        // Note: --dataset-path is optional for sharegpt (auto-downloads) and
-        // sonnet (uses built-in Shakespeare's sonnets).
+        // --dataset-path is optional for sharegpt (auto-downloads).
 
         // Range ratio (Python semantics: [len*(1-r), len*(1+r)], each r in [0,1))
         let random_range_ratio = RangeRatio::parse(&args.random_range_ratio)?;
@@ -548,13 +637,15 @@ impl BenchConfig {
                 ));
             }
 
-            // Normalize and validate min/max turns. ShareGPT only consumes max_turns
-            // (the loader walks all available turns up to the cap), so the
-            // min/num/max coupling used for synthetic generation does not apply.
-            if args.dataset_name == DatasetName::ShareGpt {
+            // Normalize and validate min/max turns. Conversation datasets only
+            // consume max_turns (the loader walks all available turns up to the
+            // cap), so the min/num/max coupling used for synthetic generation
+            // does not apply.
+            if matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf) {
                 if args.multi_turn_max_turns == 1 {
                     return Err(BenchError::Config(
-                        "--multi-turn-max-turns must be at least 2 for ShareGPT multi-turn".into(),
+                        "--multi-turn-max-turns must be at least 2 for ShareGPT-format multi-turn"
+                            .into(),
                     ));
                 }
             } else {
@@ -640,6 +731,15 @@ impl BenchConfig {
             ));
         }
 
+        if args.tokenizer_mode != "auto" {
+            tracing::warn!(
+                mode = %args.tokenizer_mode,
+                "--tokenizer-mode is ignored by the Rust client; tokenizer resolution always \
+                 follows the HF tokenizer.json -> tiktoken -> server-side /tokenize fallback \
+                 chain (mistral_common tokenizers are not supported locally)"
+            );
+        }
+
         Ok(BenchConfig {
             backend: args.backend,
             base_url,
@@ -669,9 +769,6 @@ impl BenchConfig {
             random_cache_hit_fraction: args.random_cache_hit_fraction,
             random_cache_ratio: args.random_cache_ratio,
             sharegpt_output_len: args.sharegpt_output_len,
-            sonnet_input_len: args.sonnet_input_len,
-            sonnet_output_len: args.sonnet_output_len,
-            sonnet_prefix_len: args.sonnet_prefix_len,
             no_oversample: args.no_oversample,
             disable_shuffle: args.disable_shuffle,
             num_prompts: args.num_prompts,
@@ -712,7 +809,7 @@ impl BenchConfig {
             multi_turn_min_turns,
             multi_turn_max_turns,
             sharegpt_multi_turn_max_turns: if args.multi_turn
-                && args.dataset_name == DatasetName::ShareGpt
+                && matches!(args.dataset_name, DatasetName::ShareGpt | DatasetName::Hf)
                 && args.multi_turn_max_turns != 0
             {
                 Some(args.multi_turn_max_turns)
@@ -727,10 +824,18 @@ impl BenchConfig {
             speed_bench_config: args.speed_bench_config,
             speed_bench_category: args.speed_bench_category.clone(),
             speed_bench_max_input_len: args.speed_bench_max_input_len,
+            speed_bench_output_len: args.speed_bench_output_len,
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
             hf_output_len: args.hf_output_len,
             hf_text_column: args.hf_text_column.clone(),
+            self_timed,
+            timed_trace_chunk_hash_size: args.timed_trace_chunk_hash_size,
+            timed_trace_sec_multiplier: args.timed_trace_sec_multiplier,
+            timed_trace_label_timestamp: args.timed_trace_label_timestamp.clone(),
+            timed_trace_label_input_length: args.timed_trace_label_input_length.clone(),
+            timed_trace_label_output_length: args.timed_trace_label_output_length.clone(),
+            timed_trace_label_hash_ids: args.timed_trace_label_hash_ids.clone(),
             reset_prefix_cache: args.reset_prefix_cache,
             prompt_token_ids: args.prompt_token_ids,
             random_mm_base_items_per_request: args.random_mm_base_items_per_request,
@@ -849,6 +954,21 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
     }))
 }
 
+/// Whether generation requests leave `temperature` to the server-side default.
+///
+/// Python `vllm bench serve` defaulted to greedy decoding before v0.15, so
+/// results are only comparable with older runs when temperature is set explicitly.
+/// An explicit `"temperature": null` also falls back to the server default.
+fn uses_server_default_temperature(
+    backend: BackendKind,
+    extra_body: Option<&serde_json::Value>,
+) -> bool {
+    !backend.is_pooling()
+        && extra_body
+            .and_then(|b| b.get("temperature"))
+            .is_none_or(serde_json::Value::is_null)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -870,6 +990,98 @@ mod tests {
         TestCli::parse_from(args).args
     }
 
+    fn base_timed_trace_args() -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "timed_trace",
+            "--dataset-path",
+            "trace.jsonl",
+        ]
+    }
+
+    #[test]
+    fn test_timed_trace_defaults_to_self_timed() {
+        let config = BenchConfig::from_args(&parse_args(base_timed_trace_args())).unwrap();
+        assert!(config.self_timed);
+        assert!(config.ignore_eos);
+    }
+
+    #[test]
+    fn test_no_self_timed_restores_rate_scheduling() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--no-self-timed", "--request-rate", "10"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert!(!config.self_timed);
+        assert_eq!(config.request_rate, 10.0);
+    }
+
+    /// Rate/burstiness/ramp-up shape a synthetic schedule the trace replaces;
+    /// accepting them would mislabel the result JSON with a rate that never ran.
+    #[test]
+    fn test_self_timed_rejects_synthetic_schedule_flags() {
+        for flag in [
+            vec!["--request-rate", "10"],
+            vec!["--burstiness", "0.5"],
+            vec!["--sweep-request-rate", "1,5,10"],
+        ] {
+            let mut args = base_timed_trace_args();
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("self-timed replay should reject synthetic schedule flags")
+                .to_string();
+            assert!(
+                msg.contains(flag[0]) && msg.contains("--no-self-timed"),
+                "{flag:?}: {msg}"
+            );
+        }
+    }
+
+    /// A per-point num_prompts truncates the trace differently at every sweep
+    /// point, so the replayed span stops being comparable across them.
+    #[test]
+    fn test_self_timed_rejects_sweep_num_prompts_factor() {
+        let mut args = base_timed_trace_args();
+        args.extend([
+            "--sweep-max-concurrency",
+            "8,16",
+            "--sweep-num-prompts-factor",
+            "4",
+        ]);
+        let err = BenchConfig::from_args(&parse_args(args)).expect_err("should reject the factor");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--sweep-num-prompts-factor") && msg.contains("different span"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_self_timed_allows_concurrency_sweep_over_full_trace() {
+        let mut args = base_timed_trace_args();
+        args.extend(["--sweep-max-concurrency", "8,16"]);
+        assert!(BenchConfig::from_args(&parse_args(args)).is_ok());
+    }
+
+    #[test]
+    fn test_non_positive_sec_multiplier_fails() {
+        // `=` form: clap reads a bare "-0.001" as a flag.
+        for value in [
+            "--timed-trace-sec-multiplier=0",
+            "--timed-trace-sec-multiplier=-0.001",
+            "--timed-trace-sec-multiplier=inf",
+            "--timed-trace-sec-multiplier=nan",
+        ] {
+            let mut args = base_timed_trace_args();
+            args.push(value);
+            let err = BenchConfig::from_args(&parse_args(args))
+                .expect_err("should reject a multiplier that cannot scale timestamps");
+            assert!(err.to_string().contains("--timed-trace-sec-multiplier"));
+        }
+    }
+
     fn base_multi_turn_args() -> Vec<&'static str> {
         vec![
             "vllm-bench",
@@ -879,6 +1091,58 @@ mod tests {
             "--model",
             "test-model",
         ]
+    }
+
+    #[test]
+    fn test_speed_bench_flags_match_python() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--speed-bench-dataset-subset",
+            "throughput_8k",
+        ]);
+        assert!(matches!(
+            args.speed_bench_config,
+            crate::cli::SpeedBenchConfig::Throughput8k
+        ));
+        assert_eq!(args.speed_bench_output_len, 4096);
+    }
+
+    /// Temperature left unset is flagged, since older Python versions defaulted to greedy.
+    #[test]
+    fn test_uses_server_default_temperature() {
+        let check = |backend, extra: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model", "--backend", backend];
+            argv.extend_from_slice(extra);
+            let config = BenchConfig::from_args(&parse_args(argv)).unwrap();
+            uses_server_default_temperature(config.backend, config.extra_body.as_ref())
+        };
+
+        assert!(check("openai-chat", &[]));
+        assert!(check("vllm", &["--extra-body", r#"{"top_p": 0.9}"#]));
+        assert!(!check("openai-chat", &["--temperature", "0"]));
+        assert!(!check(
+            "openai",
+            &["--extra-body", r#"{"temperature": 0.6}"#]
+        ));
+        assert!(!check("openai-embeddings", &[]));
+
+        // `"temperature": null` leaves it to the server, and `--extra-body`
+        // overrides `--temperature`, so both cases must still warn.
+        assert!(check(
+            "openai-chat",
+            &["--extra-body", r#"{"temperature": null}"#]
+        ));
+        assert!(check(
+            "openai-chat",
+            &[
+                "--temperature",
+                "0",
+                "--extra-body",
+                r#"{"temperature": null}"#
+            ]
+        ));
     }
 
     #[test]
@@ -1038,6 +1302,30 @@ mod tests {
         let config = BenchConfig::from_args(&args).unwrap();
 
         assert_eq!(config.sharegpt_multi_turn_max_turns, Some(20));
+    }
+
+    #[test]
+    fn test_hf_multi_turn_uses_conversation_turn_cap() {
+        let args = vec![
+            "vllm-bench",
+            "--backend",
+            "openai-chat",
+            "--multi-turn",
+            "--model",
+            "test-model",
+            "--dataset-name",
+            "hf",
+            "--dataset-path",
+            "org/sharegpt-dataset",
+            "--hf-subset",
+            "sharegpt",
+            "--multi-turn-max-turns",
+            "2",
+        ];
+        let args = parse_args(args);
+        let config = BenchConfig::from_args(&args).unwrap();
+
+        assert_eq!(config.sharegpt_multi_turn_max_turns, Some(2));
     }
 
     #[test]

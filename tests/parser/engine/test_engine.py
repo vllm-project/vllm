@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the streaming parser engine core pipeline."""
 
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,6 +68,16 @@ def _think_config() -> ParserEngineConfig:
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
             ),
+        },
+    )
+
+
+def _token_think_config() -> ParserEngineConfig:
+    return replace(
+        _think_config(),
+        token_id_terminals={
+            "THINK_START": "<think>",
+            "THINK_END": "</think>",
         },
     )
 
@@ -439,6 +450,46 @@ class TestTokenIdFiltering:
 
         assert sum(1 for e in all_events if e.type == EventType.TOOL_CALL_START) == 1
         assert sum(1 for e in all_events if e.type == EventType.TOOL_CALL_END) == 1
+
+
+class TestReasoningTokenCounts:
+    def test_counts_reasoning_and_excludes_boundaries_and_content(self):
+        engine = StreamingParserEngine(_token_think_config(), _make_think_tokenizer())
+
+        events = engine.feed(
+            "<think>tok1tok2</think>tok3",
+            [_START_ID, 1, 2, _END_ID, 3],
+        )
+        events.extend(engine.finish())
+
+        reasoning = [e for e in events if e.type == EventType.REASONING_CHUNK]
+        assert "".join(e.value for e in reasoning) == "tok1tok2"
+        assert sum(e.token_count for e in reasoning) == 2
+        assert engine.reasoning_token_count == 2
+
+    def test_counts_tokens_after_final_deferred_start_terminal(self):
+        engine = StreamingParserEngine(_token_think_config(), _make_think_tokenizer())
+
+        assert engine.feed("", [_START_ID, 1, 2]) == []
+        events = engine.feed("<think>tok1tok2", [])
+
+        reasoning = [e for e in events if e.type == EventType.REASONING_CHUNK]
+        assert "".join(e.value for e in reasoning) == "tok1tok2"
+        assert sum(e.token_count for e in reasoning) == 2
+        assert engine.reasoning_token_count == 2
+
+    def test_deferred_reasoning_tokens_stay_before_next_end_terminal(self):
+        engine = StreamingParserEngine(_token_think_config(), _make_think_tokenizer())
+
+        assert engine.feed("", [_START_ID, 1, 2]) == []
+        events = engine.feed("<think>tok1tok2</think>tok3", [_END_ID, 3])
+
+        assert (
+            sum(e.token_count for e in events if e.type == EventType.REASONING_CHUNK)
+            == 2
+        )
+        assert sum(e.token_count for e in events if e.type == EventType.TEXT_CHUNK) == 1
+        assert engine.reasoning_token_count == 2
 
 
 def _func_prefix_config() -> ParserEngineConfig:
@@ -902,3 +953,61 @@ class TestSkipToolParsingFromMessageHeader:
         assert types[0] == EventType.TEXT_CHUNK
         assert events[0].value == "<tool_call>"
         assert engine._message_header_buffer == ""
+
+
+# ── Terminals with several spellings ──────────────────────────────────
+
+
+def _alias_config() -> ParserEngineConfig:
+    """``TOOL_START`` has a canonical spelling and one corrupted alias."""
+    return ParserEngineConfig(
+        name="alias_test",
+        terminals={"TOOL_START": ("<tc>", "<tcx>"), "TOOL_END": "</tc>"},
+        transitions={
+            (ParserState.CONTENT, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+        },
+        content_events={
+            ParserState.CONTENT: EventType.TEXT_CHUNK,
+            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+        },
+        tool_args_json=False,
+    )
+
+
+class TestTerminalAliases:
+    def test_terminal_defs_expand_every_spelling(self):
+        defs = terminals_from_literals({"A": ("x", "y"), "B": "z"})
+        assert [(d.name, d.literal) for d in defs] == [
+            ("A", "x"),
+            ("A", "y"),
+            ("B", "z"),
+        ]
+
+    def test_terminal_literal_is_canonical_spelling(self):
+        cfg = _alias_config()
+        assert cfg.terminal_literal("TOOL_START") == "<tc>"
+        assert cfg.terminal_literal("TOOL_END") == "</tc>"
+        assert cfg.terminal_literal("MISSING") is None
+        assert cfg.terminal_literals == {"<tc>", "<tcx>", "</tc>"}
+
+    @pytest.mark.parametrize("spelling", ["<tc>", "<tcx>"])
+    @pytest.mark.parametrize("char_by_char", [False, True])
+    def test_every_spelling_shares_transitions(self, spelling, char_by_char):
+        engine = StreamingParserEngine(_alias_config(), None)
+        text = f"{spelling}a</tc>"
+        events = []
+        for chunk in list(text) if char_by_char else [text]:
+            events.extend(engine.feed(chunk, []))
+        events.extend(engine.finish())
+        assert [e.type for e in events] == [
+            EventType.TOOL_CALL_START,
+            EventType.ARG_VALUE_CHUNK,
+            EventType.TOOL_CALL_END,
+        ]

@@ -7,6 +7,11 @@ import pytest
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -33,15 +38,33 @@ def make_request(
     prompt_token_ids: list[int],
     hash_block_size: int,
     hash_fn: Callable,
+    session_id: str | None = None,
+    mm_positions: list[PlaceholderRange] | None = None,
+    mm_hashes: list[str] | None = None,
 ) -> Request:
+    mm_features = []
+    if mm_positions is not None:
+        for j, position in enumerate(mm_positions):
+            identifier = mm_hashes[j] if mm_hashes else f"hash_{j}"
+            mm_features.append(
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    mm_position=position,
+                    identifier=identifier,
+                    modality="image",
+                )
+            )
+
     sampling_params = SamplingParams(max_tokens=17)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
+        mm_features=mm_features if mm_features else None,
         sampling_params=sampling_params,
         pooling_params=None,
         block_hasher=get_request_block_hasher(hash_block_size, hash_fn),
+        session_id=session_id,
     )
 
 
@@ -55,9 +78,9 @@ def cache_full_block_and_partial_tail(
     token_ids: list[int],
     *,
     enable_kv_cache_events: bool = False,
+    block_size: int = 6,
 ) -> tuple[BlockPool, Request, list[KVCacheBlock], BlockHash]:
     hash_block_size = 2
-    block_size = 6
     kv_cache_group_id = 0
     req = make_request("0", token_ids, hash_block_size, sha256)
     pool = BlockPool(
@@ -123,6 +146,7 @@ def test_cache_partial_block_kv_cache_events():
         prompt_token_ids=list(range(hash_block_size * 2)),
         hash_block_size=hash_block_size,
         hash_fn=sha256,
+        session_id="agent-session-partial",
     )
 
     block = pool.get_new_blocks(1)[0]
@@ -148,6 +172,7 @@ def test_cache_partial_block_kv_cache_events():
     assert stored_event.token_ids == req.all_token_ids[hash_block_size:]
     assert stored_event.block_size == 4
     assert stored_event.group_idx == kv_cache_group_id
+    assert stored_event.session_id == "agent-session-partial"
 
     duplicate_entry_hash = pool.cache_partial_block(
         request=req,
@@ -167,6 +192,54 @@ def test_cache_partial_block_kv_cache_events():
     assert isinstance(removed_event, BlockRemoved)
     assert removed_event.block_hashes == stored_event.block_hashes
     assert removed_event.group_idx == kv_cache_group_id
+
+
+def test_cache_partial_block_event_keeps_every_mm_feature():
+    """The event window can reach into more than one multimodal feature.
+
+    ``cache_partial_block`` builds the ``BlockStored`` extra keys over
+    ``[(num_hash_blocks - 1) * hash_block_size, num_tokens)``. Starting that
+    scan at the last feature drops any earlier one that also reaches into the
+    window, so two requests differing only in that feature would be published
+    under the same key.
+    """
+    hash_block_size = 4
+    block_size = 8
+    num_tokens = 12
+    # The event window is tokens [8, 12): "A" ends inside it and "B" sits
+    # entirely within it.
+    mm_positions = [
+        PlaceholderRange(offset=6, length=3),
+        PlaceholderRange(offset=10, length=2),
+    ]
+
+    pool = BlockPool(
+        num_gpu_blocks=2,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_partial_mm",
+        prompt_token_ids=list(range(num_tokens)),
+        hash_block_size=hash_block_size,
+        hash_fn=sha256,
+        mm_positions=mm_positions,
+        mm_hashes=["A", "B"],
+    )
+
+    assert pool.cache_partial_block(
+        request=req,
+        block=pool.get_new_blocks(1)[0],
+        num_tokens=num_tokens,
+        kv_cache_group_id=0,
+        block_size=block_size,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].extra_keys == [(("A", -2), ("B", 2))]
 
 
 def test_partial_block_replacement_emits_remove_then_store_events():
@@ -389,27 +462,34 @@ def test_reset_prefix_cache_clears_partial_entry_metadata():
     assert pool.cached_block_hashes_by_block == {}
 
 
-def test_evict_cached_block_removes_full_hash_and_partial_entry():
-    pool, req, blocks, partial_hash_10 = cache_full_block_and_partial_tail(
-        [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_evict_cached_block_removes_full_hash_and_partial_entry(
+    dcp_world_size: int,
+):
+    block_size = 6 * dcp_world_size
+    partial_num_tokens = 2 * block_size - 2
+    pool, req, blocks, partial_hash = cache_full_block_and_partial_tail(
+        list(range(partial_num_tokens)), block_size=block_size
     )
-    full_hash = BlockHashListWithBlockSize(req.block_hashes, 2, 6)[0]
+    full_hash = BlockHashListWithBlockSize(req.block_hashes, 2, block_size)[0]
 
     assert pool.get_cached_block(full_hash, [0]) == [blocks[0]]
-    assert pool.get_cached_block(partial_hash_10, [0]) == [blocks[1]]
+    assert pool.get_cached_block(partial_hash, [0]) == [blocks[1]]
 
     pool.evict_blocks({blocks[0].block_id, blocks[1].block_id})
 
     assert pool.get_cached_block(full_hash, [0]) is None
-    assert pool.get_cached_block(partial_hash_10, [0]) is None
+    assert pool.get_cached_block(partial_hash, [0]) is None
     assert pool.cached_block_hashes_by_block == {}
 
 
-def test_partial_block_promotes_to_direct_full_block_hash():
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_partial_block_promotes_to_direct_full_block_hash(dcp_world_size: int):
     hash_block_size = 2
-    block_size = 6
+    block_size = 6 * dcp_world_size
     kv_cache_group_id = 0
-    token_ids = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+    partial_num_tokens = 2 * block_size - hash_block_size
+    token_ids = list(range(partial_num_tokens))
     req = make_request("0", token_ids, hash_block_size, sha256)
     pool = BlockPool(
         num_gpu_blocks=3,
@@ -426,27 +506,22 @@ def test_partial_block_promotes_to_direct_full_block_hash():
         block_size=block_size,
         kv_cache_group_id=kv_cache_group_id,
     )
-    partial_hash_10 = boundary_hash(req, hash_block_size, 10)
+    partial_hash = boundary_hash(req, hash_block_size, partial_num_tokens)
     assert pool.cache_partial_block(
         request=req,
         block=blocks[1],
-        num_tokens=10,
+        num_tokens=partial_num_tokens,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
-    assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) == [blocks[1]]
+    assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) == [blocks[1]]
 
-    req.append_output_token_ids([5, 5])
+    req.append_output_token_ids(list(range(partial_num_tokens, 2 * block_size)))
     full_hashes = BlockHashListWithBlockSize(
         req.block_hashes, hash_block_size, block_size
     )
     promoted_full_hash = full_hashes[1]
-    # The promoted full-block hash is the fine hash at the 12-token boundary,
-    # not a concatenation of the fine hashes inside the block.
-    assert promoted_full_hash == req.block_hashes[12 // hash_block_size - 1]
-    assert promoted_full_hash != BlockHash(
-        req.block_hashes[3] + req.block_hashes[4] + req.block_hashes[5]
-    )
+    assert promoted_full_hash == req.block_hashes[2 * block_size // hash_block_size - 1]
 
     pool.cache_full_blocks(
         request=req,
@@ -457,4 +532,4 @@ def test_partial_block_promotes_to_direct_full_block_hash():
         kv_cache_group_id=kv_cache_group_id,
     )
     assert pool.get_cached_block(promoted_full_hash, [kv_cache_group_id]) == [blocks[1]]
-    assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) is None
+    assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) is None

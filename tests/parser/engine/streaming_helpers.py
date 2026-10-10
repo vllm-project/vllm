@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 
 
 def _build_token_id_map(parser) -> dict[str, int]:

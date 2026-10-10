@@ -81,21 +81,14 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
             if not valid_format_and_bits:
                 raise ValueError(
-                    "For Fused MoE layers, only format: ",
-                    f"{CompressionFormat.pack_quantized.value} ",
-                    f" and bits: {WNA16_SUPPORTED_BITS} is supported ",
+                    "For Fused MoE layers, only format: "
+                    f"{CompressionFormat.pack_quantized.value} "
+                    f"and bits: {WNA16_SUPPORTED_BITS} is supported "
                     f"but got format: {CompressionFormat.pack_quantized.value} "
-                    f" and bits: {weight_quant.num_bits}",
+                    f"and bits: {weight_quant.num_bits}"
                 )
 
-            # Native ROCm HIP kernels (RDNA3, etc.)
             if current_platform.is_rocm():
-                from . import rocm_moe_rdna
-
-                if rocm_moe_rdna.is_supported(weight_quant):
-                    return rocm_moe_rdna.make_method(
-                        weight_quant, input_quant, layer.moe_config
-                    )
                 from vllm.platforms.rocm import on_gfx950
 
                 vllm_config = get_current_vllm_config()
@@ -145,8 +138,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
             if not _is_valid_nvfp4_activations:
                 raise ValueError(
-                    "For NVFP4 weights, input quantization must also be NVFP4 format ",
-                    f"or None for NVFP4A16, found {input_quant}",
+                    "For NVFP4 weights, input quantization must also be NVFP4 "
+                    f"format or None for NVFP4A16, found {input_quant}"
                 )
             return CompressedTensorsW4A4Nvfp4MoEMethod(
                 layer.moe_config, layer_name, use_a16=(input_quant is None)
@@ -171,7 +164,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW8A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
-        elif quant_config._is_fp8_w4a8_sm90(weight_quant, input_quant):
+        elif quant_config._is_fp8_w4a8(weight_quant, input_quant):
             from .compressed_tensors_moe_w4a8_fp8 import (
                 CompressedTensorsW4A8Fp8MoEMethod,
             )

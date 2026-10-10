@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     with_cancellation,

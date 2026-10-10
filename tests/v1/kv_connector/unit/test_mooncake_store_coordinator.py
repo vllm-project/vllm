@@ -30,7 +30,13 @@ def _mamba_align(block_size=32):
     )
 
 
-def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=None):
+def _make_coord(
+    groups,
+    hash_block_size,
+    use_eagle=False,
+    retention_interval=None,
+    enable_partial_hash_hits=False,
+):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
     the test fixtures."""
@@ -42,6 +48,7 @@ def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=Non
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
         retention_interval=retention_interval,
+        enable_partial_hash_hits=enable_partial_hash_hits,
     )
 
 
@@ -219,8 +226,7 @@ def test_coordinator_fine_grained_partial_tail_hit():
         KVCacheGroupSpec(["L0"], _full(32)),
         KVCacheGroupSpec(["L1"], _mamba_align(32)),
     ]
-    coord = _make_coord(groups, hash_block_size=16)
-    assert coord.enable_partial_hash_hits
+    coord = _make_coord(groups, hash_block_size=16, enable_partial_hash_hits=True)
     hs = _hashes(4)  # 4 hash units of 16 = 64 tokens; block 0 = [0,32), etc.
     # Both groups: full block 0 (key = last sub-hash hs[1]) + partial boundary
     # at token 48 (key = hs[2]). No hs[3] -> block 1 is not full.
@@ -449,6 +455,27 @@ def test_store_mask_retention_prefix_stable_as_aligned_length_grows():
     assert shorter is not None
     assert longer is not None
     assert longer[: len(shorter)] == shorter
+
+
+def test_store_mask_excludes_mamba_groups_lookup_unaffected():
+    """Align-mode mamba block tables are not append-only (interior states are
+    nulled/freed; speculative blocks relocate), so the positional normal save
+    must never cover mamba chunks — regardless of retention. Lookups still
+    probe mamba boundaries: their keys come from the pinned snapshot/CoW
+    hand-off path instead."""
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba_align(16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    masks = coord.store_mask(64)
+    assert masks[0] is None  # full attn stays dense
+    assert masks[1] == [False] * 4
+
+    coord = _make_coord(groups, hash_block_size=16, retention_interval=32)
+    assert coord.store_mask(64)[1] == [False] * 4
+
+    assert coord.lookup_mask(64)[1] is None
 
 
 # ----- Eagle / MTP interaction with load_mask -----

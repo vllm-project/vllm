@@ -10,10 +10,6 @@ from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-# Dimensions supported by the DSV3 specialized kernel
-DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
-DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
-
 # Dimensions supported by the gpt-oss specialized kernel
 GPT_OSS_SUPPORTED_NUM_EXPERTS = [32, 128]
 GPT_OSS_SUPPORTED_HIDDEN_SIZES = [2880]
@@ -71,11 +67,6 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
         is_hopper_or_blackwell = current_platform.is_device_capability(
             90
         ) or current_platform.is_device_capability_family(100)
-        allow_dsv3_router_gemm = (
-            is_hopper_or_blackwell
-            and num_experts in DSV3_SUPPORTED_NUM_EXPERTS
-            and hidden_size in DSV3_SUPPORTED_HIDDEN_SIZES
-        )
         allow_gpt_oss_router_gemm = (
             is_hopper_or_blackwell
             and num_experts in GPT_OSS_SUPPORTED_NUM_EXPERTS
@@ -116,9 +107,7 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
         elif provider == "vllm":
 
             def runner():
-                if allow_dsv3_router_gemm:
-                    ops.dsv3_router_gemm(mat_a, mat_b, torch.bfloat16)
-                elif allow_fp32_router_gemm:
+                if allow_fp32_router_gemm:
                     ops.fp32_router_gemm(mat_a, mat_b)
                 elif allow_gpt_oss_router_gemm:
                     ops.gpt_oss_router_gemm(mat_a, mat_b, bias)

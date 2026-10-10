@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
@@ -282,7 +283,8 @@ class MiniMaxText01LinearAttention(LinearAttention):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, LinearAttentionMetadata)
             num_actual_tokens = (
                 attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
@@ -324,6 +326,7 @@ class MiniMaxText01LinearAttention(LinearAttention):
         output[:num_actual_tokens], _ = self.out_proj(hidden)
 
 
+@eager_break_during_capture
 def linear_attention(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -335,18 +338,8 @@ def linear_attention(
     self._forward(hidden_states=hidden_states, output=output, positions=positions)
 
 
-def linear_attention_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    positions: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="linear_attention",
     op_func=linear_attention,
     mutates_args=["output"],
-    fake_impl=linear_attention_fake,
 )

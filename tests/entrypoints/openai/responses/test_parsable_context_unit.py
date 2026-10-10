@@ -6,17 +6,21 @@ These tests verify that ParsableContext correctly delegates to the unified
 Parser (via parse) and properly builds response output items.
 """
 
+import json
 from collections.abc import Sequence
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.mcp.tool import HarmonyPythonTool
 from vllm.entrypoints.openai.responses.context import ParsableContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -35,9 +39,6 @@ class _NoOpParser(DelegatingParser):
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return False
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        return input_ids
 
     def extract_reasoning(self, model_output, request):
         return None, model_output
@@ -63,9 +64,6 @@ class _ReasoningOnlyParser(DelegatingParser):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return False
 
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        return input_ids
-
     def extract_reasoning(self, model_output, request):
         if "<think>" in model_output and "</think>" in model_output:
             start = model_output.index("<think>") + len("<think>")
@@ -88,6 +86,18 @@ class _ReasoningOnlyParser(DelegatingParser):
 
     def parse_delta(self, *args, **kwargs) -> DeltaMessage | None:
         return None
+
+
+class _CountingParser(_NoOpParser):
+    """Parser that records the ids it counts; token id 7 is reasoning."""
+
+    def __init__(self, tokenizer, *args, **kwargs):
+        super().__init__(tokenizer)
+        self.counted_ids: list[list[int]] = []
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        self.counted_ids.append(list(token_ids))
+        return sum(token_id == 7 for token_id in token_ids)
 
 
 class _StubToolParser:
@@ -130,9 +140,6 @@ class _ToolCallingParser(DelegatingParser):
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return False
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        return input_ids
 
     def extract_reasoning(self, model_output, request):
         return None, model_output
@@ -314,6 +321,65 @@ def test_process_extracts_tool_calls():
     assert tool_item.status == "completed"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "session_name", "dispatched_name", "arguments"),
+    [
+        ("code_interpreter", "python", "python", {"code": "print(42)"}),
+        ("web_search_preview", "browser", "search", {"query": "vLLM"}),
+        ("container.exec", "container", "exec", {"cmd": ["pwd"]}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_builtin_tool_output_preserves_function_call_id(
+    tool_name, session_name, dispatched_name, arguments
+):
+    """Built-in tool outputs remain correlated with their originating call."""
+    tool_session = MagicMock()
+    tool_session.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="result")])
+    )
+    context = _make_context(None, available_tools=[session_name])
+    tool_call = ResponseFunctionToolCall(
+        id=f"fc_{session_name}",
+        call_id=f"call_{session_name}",
+        type="function_call",
+        name=tool_name,
+        arguments=json.dumps(arguments),
+    )
+    context.response_messages.append(tool_call)
+    context._tool_sessions[session_name] = tool_session
+
+    output = await context.call_tool()
+
+    tool_session.call_tool.assert_awaited_once_with(dispatched_name, arguments)
+    assert output[0].call_id == tool_call.call_id
+
+
+@pytest.mark.asyncio
+async def test_local_python_tool_output_preserves_function_call_id():
+    """Local code-interpreter output remains correlated with its call."""
+
+    async def process(_):
+        yield SimpleNamespace(content=[SimpleNamespace(text="result")])
+
+    python_tool = object.__new__(HarmonyPythonTool)
+    python_tool.python_tool = MagicMock(process=process)
+    context = _make_context(None, available_tools=["python"])
+    tool_call = ResponseFunctionToolCall(
+        id="fc_python",
+        call_id="call_python",
+        type="function_call",
+        name="code_interpreter",
+        arguments='{"code": "print(42)"}',
+    )
+    context.response_messages.append(tool_call)
+    context._tool_sessions["python"] = python_tool
+
+    output = await context.call_tool()
+
+    assert output[0].call_id == tool_call.call_id
+
+
 # ---------------------------------------------------------------------------
 # Tests: finish_reason tracking
 # ---------------------------------------------------------------------------
@@ -346,6 +412,25 @@ def test_multi_turn_accumulation():
     assert len(ctx.response_messages) == 2
     texts = [m.content[0].text for m in ctx.response_messages]
     assert texts == ["First turn", "Second turn"]
+
+
+def test_reasoning_tokens_counted_per_round():
+    """Each round is counted on its own ids, not the concatenated rounds."""
+    ctx = _make_context(_CountingParser)
+
+    ctx.append_output(_make_request_output(token_ids=[7, 7, 1]))
+    ctx.append_output(_make_request_output(token_ids=[7, 2]))
+
+    assert ctx.response_parser.counted_ids == [[7, 7, 1], [7, 2]]
+    assert ctx.num_reasoning_tokens == 3
+
+
+def test_reasoning_tokens_zero_without_parser():
+    ctx = _make_context(None)
+
+    ctx.append_output(_make_request_output(token_ids=[7, 7, 1]))
+
+    assert ctx.num_reasoning_tokens == 0
 
 
 def test_num_init_messages_offset():

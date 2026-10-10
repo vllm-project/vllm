@@ -1,42 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Warmup kernels used during model execution.
+"""Warmup kernels used during model execution.
 This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
+import json
+import sys
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
-    deepseek_v4_mhc_warmup,
-)
-from vllm.model_executor.warmup.fa4_cutedsl_warmup import (
-    fa4_cutedsl_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
-    write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
+    autotune_hisparse_flashinfer_attention,
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
-from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
-from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
-    sparse_mla_triton_warmup,
+from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
+from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
+    qwen4_exp_qsa_triton_warmup,
 )
-from vllm.model_executor.warmup.v1_block_table_warmup import (
-    warm_v1_block_table_kernels,
+from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
+from vllm.model_executor.warmup.replayssm_warmup import (
+    replayssm_autotune_warmup,
+)
+from vllm.model_executor.warmup.watermark_sample_warmup import (
+    watermark_sample_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -96,42 +99,118 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_bf16x3_router_gemm(
+    model: torch.nn.Module,
+    max_num_tokens: int,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+        warmup_bf16x3_router_gemm,
+    )
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    gate = next(
+        (
+            module
+            for module in model.modules()
+            if isinstance(module, GateLinear) and module.allow_bf16x3_router_gemm
+        ),
+        None,
+    )
+    if gate is None:
+        logger.debug_once(
+            "Skipping BF16x3 router GEMM warmup: no eligible GateLinear found."
+        )
+        return
+
+    min_num_tokens = gate.FP32_MAX_TOKENS + 1 if gate.allow_fp32_router_gemm else 1
+    logger.info_once(
+        "Warming up BF16x3 router GEMM for K=%d, M=%d.",
+        gate.input_size,
+        gate.output_size,
+    )
+    configs = warmup_bf16x3_router_gemm(
+        gate.input_size,
+        gate.output_size,
+        min_num_tokens,
+        max_num_tokens,
+    )
+    logger.info_once("Warmed up BF16x3 router GEMM configs: %s.", configs)
+
+
+def _warmup_gemm_rs_ar() -> None:
+    # Model construction (Kimi-K3, DeepSeek-V4.1) imports this module only
+    # when GEMM-RS/AR is enabled and initializes its singleton before
+    # kernel_warmup runs. Avoid importing it here so other models do not
+    # compile the RS/AR variants.
+    module = sys.modules.get("vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar")
+    if module is None:
+        return
+    compiled = module.warmup_gemm_rs_ar()
+    if compiled:
+        logger.info_once("Warmed up %d GEMM-RS/AR variants.", compiled)
+
+
+def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.low_latency_gemm")
+    if module is not None:
+        module.autotune_kda_qkvg(model)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
 
     if not worker.use_v2_model_runner:
-        # Pooling models do not use the generation slot-mapping path.
-        if not worker.model_runner.is_pooling_model:
-            warm_v1_block_table_kernels(worker.model_runner)
         # The KV-block zeroing kernel is driven by the scheduler's
         # `new_block_ids_to_zero`, so no dummy run ever reaches it.
         zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
         if zeroer is not None:
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
 
-    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
+    if enable_jit_warmup:
+        logger.info("JIT kernel warmup starting.")
+        jit_warmup_start = time.perf_counter()
+        try:
+            registry = (
+                worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
+            )
+            registry.warmup()
+        except Exception:
+            logger.exception(
+                "JIT kernel warmup failed after %.2fs.",
+                time.perf_counter() - jit_warmup_start,
+            )
+            raise
+        logger.info(
+            "JIT kernel warmup finished in %.2fs.",
+            time.perf_counter() - jit_warmup_start,
+        )
 
-    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
-    # layer per token; warm them across token sizes first so the first real
-    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
-    )
+    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    qwen_vl_triton_warmup(worker.model_runner)
+    mamba_triton_warmup(worker.model_runner)
+
+    compilation_config = worker.vllm_config.compilation_config
+    cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
 
     # Run next so input-prep kernels JIT against pristine runner state.
-    if worker.vllm_config.kernel_config.enable_jit_warmup:
+    if enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-        fa4_cutedsl_warmup(worker)
-        sparse_mla_triton_warmup(worker)
+        watermark_sample_warmup(worker)
+        qwen4_exp_qsa_triton_warmup(worker)
+
+    if enable_jit_warmup and current_platform.is_device_capability_family(100):
+        _warmup_bf16x3_router_gemm(
+            worker.get_model(),
+            worker.scheduler_config.max_num_batched_tokens,
+        )
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
+
+    _warmup_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
@@ -142,21 +221,39 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if process_local_only:
         return
 
+    if current_platform.is_rocm():
+        from vllm.model_executor.warmup.rocm_segmented_attn_autotune_warmup import (
+            rocm_segmented_attn_autotune_warmup,
+        )
+
+        rocm_segmented_attn_autotune_warmup(worker)
+
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
-        envs.VLLM_USE_DEEP_GEMM
-        and is_deep_gemm_supported()
-        and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
+        is_deep_gemm_supported() and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
+    b12x_warmup(worker, cudagraph_capture_sizes)
+
     minimax_m3_msa_warmup(worker)
+
+    # Allocate the exact decode-sized workspace, autotune cache misses, and
+    # resolve every CUDA Graph bucket before capture begins.
+    # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,
+    # which initializes CUDA at import time and must not run at module scope.
+    if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
+        from vllm.distributed.device_communicators import (
+            flashinfer_pcie_ipc_all_reduce,
+        )
+
+        flashinfer_pcie_ipc_all_reduce.warmup_flashinfer_pcie_ipc_allreduce(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
@@ -219,9 +316,98 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
+def _flashinfer_deferred_moe_token_counts(
+    runner: "GPUModelRunner",
+) -> tuple[int, ...]:
+    """Return bounded token counts that exercise deferred MoE finalization."""
+    from vllm.model_executor.layers.fused_moe import MoERunner
+
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    token_counts: list[int] = []
+    for module in runner.get_model().modules():
+        if not isinstance(module, MoERunner):
+            continue
+
+        moe_config = module.moe_config
+        max_deferred_tokens = moe_config.defer_moe_finalize_max_num_tokens
+        if moe_config.use_deferred_moe_finalize and max_deferred_tokens > 0:
+            token_counts.append(min(max_tokens, max_deferred_tokens))
+
+    return tuple(dict.fromkeys(token_counts))
+
+
+def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    # Tune the widest bucket set first so bounded passes reuse its configs.
+    token_counts = [max_tokens]
+    token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
+    return tuple(dict.fromkeys(token_counts))
+
+
+def _run_flashinfer_autotune_dummy_runs(
+    runner: "GPUModelRunner", *, skip_attn: bool = False
+) -> None:
+    import vllm.utils.flashinfer as fi_utils
+
+    dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        # The drafter may use more tokens than this pass in the same dummy run.
+        # Include its max M when building the autotune buckets.
+        max_tuning_tokens = num_tokens
+        speculator = getattr(runner, "speculator", None)
+        if speculator is not None:
+            num_query_per_req = speculator.num_query_per_req
+            num_draft_reqs = min(
+                num_tokens,
+                runner.max_num_reqs,
+                runner.max_num_tokens // num_query_per_req,
+            )
+            max_tuning_tokens = max(
+                max_tuning_tokens, num_draft_reqs * num_query_per_req
+            )
+
+        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
+            max_tuning_tokens
+        )
+        logger.info(
+            "Running FlashInfer autotune with %d tokens and token buckets %s.",
+            num_tokens,
+            tuning_buckets,
+        )
+        # Round M up to match serving-time bucket selection for non-bucket M.
+        # See https://github.com/flashinfer-ai/flashinfer/issues/5450
+        with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
+            runner._dummy_run(
+                num_tokens=num_tokens,
+                skip_eplb=True,
+                is_profile=True,
+                randomize_inputs=True,
+                **dummy_run_kwargs,
+            )
+
+
+def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
+    """Identify a saved autotune file by its FlashInfer metadata and size."""
+    try:
+        configs = json.loads(path.read_text())
+        metadata = configs.pop("_metadata", None)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return json.dumps(metadata, sort_keys=True), len(configs)
+
+
+def _all_ranks_have_matching_cache(path: Path, group) -> bool:
+    """True iff every rank in ``group`` has its own, mutually consistent file."""
+    fingerprint = _autotune_cache_fingerprint(path)
+    if group.world_size == 1:
+        return fingerprint is not None
+    gathered: list[tuple[str, int] | None] = [None] * group.world_size
+    torch.distributed.all_gather_object(gathered, fingerprint, group=group.cpu_group)
+    return fingerprint is not None and all(f == fingerprint for f in gathered)
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
-    """
-    Autotune FlashInfer operations.
+    """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
     the results. The results are cached transparently and
@@ -229,17 +415,30 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Every rank profiles the same tactics. When distributed, per-tactic
-    timings are averaged over the world CPU group so all ranks select the
-    same tactic.
+    With PP > 1, stages run different layers and may profile different ops,
+    so each stage's TP group tunes separately with its own cache file;
+    otherwise the world group tunes together. Per-tactic timings are
+    averaged over the tuning group so all its ranks select the same tactic.
+
+    Results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
+    (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
+    rank. A rank with a cache hit skips the per-tactic reduce the others block
+    in, so ranks keep loaded configs only if every rank in the tuning group
+    has a matching file and successfully loads it.
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
     import vllm.utils.flashinfer as fi_utils
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.distributed.parallel_state import (
+        get_pp_group,
+        get_tp_group,
+        get_world_group,
+    )
 
     world = get_world_group()
-    is_leader = world.rank_in_group == 0
+    pp_size = get_pp_group().world_size
+    tune_group = get_tp_group() if pp_size > 1 else world
+    is_leader = tune_group.rank_in_group == 0
     tuner = AutoTuner.get()
 
     autotune_kwargs: dict = {}
@@ -252,47 +451,53 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         autotune_kwargs["skip_ops"] = skip_ops
 
     cache_path = resolve_flashinfer_autotune_file(runner)
+    # The world group only spans DP ranks when vLLM folds DP into it.
+    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
+    cache_path = cache_path.with_name(
+        f"{cache_path.stem}_dp{dp_rank}_rank{world.rank_in_group}{cache_path.suffix}"
+    )
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
 
     # We skip EPLB here since we don't want to record dummy metrics.
-    # When autotuning with number of tokens m, flashinfer will autotune
-    # operations for all number of tokens up to m, so we only need to
-    # run with the max number of tokens.
     # Randomize inputs to avoid every token pick the same experts,
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    dummy_run_kwargs = dict(
-        num_tokens=runner.scheduler_config.max_num_batched_tokens,
-        skip_eplb=True,
-        is_profile=True,
-        randomize_inputs=True,
-    )
+    if _all_ranks_have_matching_cache(cache_path, tune_group):
+        loaded = tuner.load_configs(str(cache_path))
+        if tune_group.world_size > 1:
+            loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
+            torch.distributed.all_gather_object(
+                loaded_by_rank, loaded, group=tune_group.cpu_group
+            )
+            loaded = all(loaded_by_rank)
+        if not loaded:
+            tuner.clear_cache()
 
-    # Read cached autotune results and broadcast to all ranks.
-    cached_results: bytes | None = None
-    if is_leader and cache_path.exists():
-        with open(cache_path, "rb") as f:
-            cached_results = f.read()
-    cached_results = world.broadcast_object(cached_results, src=0)
-    if cached_results is not None:
-        write_flashinfer_autotune_cache(cache_path, cached_results)
-        world.barrier()
-        tuner.load_configs(str(cache_path))
-
-    group = world.cpu_group if world.world_size > 1 else None
+    group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
     try:
         with (
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            runner._dummy_run(**dummy_run_kwargs)
+            hisparse_enabled = (
+                runner.vllm_config.attention_config.hisparse_config is not None
+            )
+            if hisparse_enabled:
+                # HiSparse hot-buffer attention is bounded by decode batch
+                # size, not the prefill-sized batch used for the full model.
+                autotune_hisparse_flashinfer_attention(runner)
+            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=hisparse_enabled)
+            replayssm_autotune_warmup(runner)
+            _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
         set_autotune_process_group(None)
 
     if world.world_size > 1:
         world.barrier()
-    if is_leader:
+    # Skip the rewrite when nothing was tuned this start (every entry came from
+    # the file). FlashInfer gates its own autotune(cache=...) save the same way.
+    if tuner._dirty:
         tuner.save_configs(str(cache_path))

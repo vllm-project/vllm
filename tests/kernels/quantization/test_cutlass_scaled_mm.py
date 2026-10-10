@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for cutlass kernels
+"""Tests for cutlass kernels.
 
 Run `pytest tests/kernels/quantization/test_cutlass_scaled_mm.py`.
 """
@@ -62,7 +62,8 @@ PER_TOKEN_GROUP_SHAPE = (1, -1)
 PER_OUT_CH_GROUP_SHAPE = (-1, 1)
 
 capability = current_platform.get_device_capability()
-capability = capability[0] * 10 + capability[1]
+# Fall back to 0 so import doesn't fail on unknown capability
+capability_int = (capability[0] * 10 + capability[1]) if capability is not None else 0
 
 
 def rand_int8(shape: tuple, device: str = "cuda"):
@@ -229,7 +230,18 @@ def test_cutlass_fp8_gemm_padded(
     torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
 
 
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+# Two prefill-sized cases for the SM 12.x blockwise path, where the op switches
+# the tile scheduler to a swizzled CTA order once the weight exceeds the L2
+# (16384x2560 = 40 MiB and 5120x5120 = 25 MiB on a 24 MiB L2 part); the odd M
+# also covers the non-swap-AB dispatch. Elsewhere they run the default order
+# like the rest of the list.
+BLOCKWISE_PREFILL_FACTORS = [
+    (8193, 16384, 2560),
+    (5120, 5120, 5120),
+]
+
+
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS + BLOCKWISE_PREFILL_FACTORS)
 @pytest.mark.parametrize(
     "a_scale_group_shape,b_scale_group_shape", [((1, 128), (128, 128))]
 )
@@ -628,7 +640,7 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
 
 
 def test_cutlass_support_opcheck():
-    opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability,))
+    opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability_int,))
 
 
 @pytest.mark.parametrize("num_experts", [8, 64])

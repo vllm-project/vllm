@@ -19,6 +19,11 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     dsv4_topk,
 )
 
+# AITER instantiates biased_grouped_topk only for these NUM_GRP values, with at
+# most this many experts per group.
+AITER_SUPPORTED_NUM_GRP = (1, 2, 4, 8)
+AITER_MAX_EXPERTS_PER_GROUP = 32
+
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
     if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -81,6 +86,8 @@ def vllm_topk_softplus_sqrt(
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_hash_softplus_sqrt(
         topk_weights,
@@ -93,6 +100,8 @@ def vllm_topk_softplus_sqrt(
         input_tokens,
         hash_indices_table,
         is_padding=_get_padding_mask(topk_indices.shape[0]),
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
     )
 
     return topk_weights, topk_indices
@@ -100,15 +109,38 @@ def vllm_topk_softplus_sqrt(
 
 @functools.lru_cache(maxsize=8)
 def _aiter_get_num_expert_group(num_experts: int) -> int:
-    _AITER_MAX_EXPERTS_PER_GROUP = 32
-    g = max(1, -(-num_experts // _AITER_MAX_EXPERTS_PER_GROUP))
+    g = max(1, -(-num_experts // AITER_MAX_EXPERTS_PER_GROUP))
     while num_experts % g != 0:
         g += 1
     assert num_experts % g == 0, f"{num_experts=} not divisible by {g=}"
-    assert num_experts // g <= _AITER_MAX_EXPERTS_PER_GROUP, (
-        f"group size {num_experts // g} exceeds limit {_AITER_MAX_EXPERTS_PER_GROUP}"
+    # Grouping is a no-op here (topk_group == num_expert_group), so any divisor
+    # within the limit routes identically and we are free to pick one AITER has
+    # a kernel for. If none fits, the unsupported value is returned as-is --
+    # callers must gate on _aiter_can_use_biased_grouped_topk.
+    if g not in AITER_SUPPORTED_NUM_GRP:
+        g = next(
+            (
+                c
+                for c in sorted(AITER_SUPPORTED_NUM_GRP, reverse=True)
+                if num_experts % c == 0
+                and num_experts // c <= AITER_MAX_EXPERTS_PER_GROUP
+            ),
+            g,
+        )
+    assert num_experts // g <= AITER_MAX_EXPERTS_PER_GROUP, (
+        f"group size {num_experts // g} exceeds limit {AITER_MAX_EXPERTS_PER_GROUP}"
     )
     return g
+
+
+def _aiter_can_use_biased_grouped_topk(num_experts: int, topk: int) -> bool:
+    """Whether AITER has an instantiated kernel for this routing shape.
+
+    Both checks are needed: an unsupported group count can still be small
+    enough to satisfy ``topk >= g`` (num_experts=33 gives g=3).
+    """
+    g = _aiter_get_num_expert_group(num_experts)
+    return topk >= g and g in AITER_SUPPORTED_NUM_GRP
 
 
 def fused_topk_bias(
@@ -122,6 +154,8 @@ def fused_topk_bias(
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ):
     if (
         input_tokens is not None
@@ -130,18 +164,28 @@ def fused_topk_bias(
     ):
         input_tokens = input_tokens.to(dtype=hash_indices_table.dtype)
 
+    if bias_vl is not None:
+        # Image tokens carry five consecutive in-vocab sentinel ids starting
+        # at image_sentinel_lo and select experts with bias_vl instead of the
+        # regular routing path. image_sentinel_lo == 0 disables this.
+        assert input_tokens is not None, "bias_vl routing requires input_tokens"
+
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
         )
 
         output_indices_dtype = torch.int32 if indices_type is None else indices_type
-        if scoring_func == "sqrtsoftplus" and can_use_dsv4_topk(
-            gating_output,
-            e_score_correction_bias,
-            topk,
-            renormalize,
-            output_indices_dtype,
+        if (
+            scoring_func == "sqrtsoftplus"
+            and hash_indices_table is None
+            and can_use_dsv4_topk(
+                gating_output,
+                e_score_correction_bias,
+                topk,
+                renormalize,
+                output_indices_dtype,
+            )
         ):
             assert e_score_correction_bias is not None
             return dsv4_topk(
@@ -149,6 +193,9 @@ def fused_topk_bias(
                 e_score_correction_bias,
                 output_indices_dtype,
                 routed_scaling_factor,
+                input_ids=input_tokens,
+                bias_vl=bias_vl,
+                image_sentinel_lo=image_sentinel_lo,
             )
 
         M, _ = hidden_states.size()
@@ -200,6 +247,8 @@ def fused_topk_bias(
                 input_tokens,
                 hash_indices_table,
                 routed_scaling_factor,
+                bias_vl=bias_vl,
+                image_sentinel_lo=image_sentinel_lo,
             )
         else:
             raise ValueError(f"Unsupported scoring function: {scoring_func}")
@@ -208,7 +257,7 @@ def fused_topk_bias(
         M = hidden_states.size(0)
         num_experts = gating_output.shape[-1]
         num_expert_group = _aiter_get_num_expert_group(num_experts)
-        if topk >= num_expert_group:
+        if _aiter_can_use_biased_grouped_topk(num_experts, topk):
             topk_weights = torch.empty(
                 M, topk, dtype=torch.float32, device=hidden_states.device
             )
@@ -255,6 +304,8 @@ def fused_topk_bias(
             input_tokens,
             hash_indices_table,
             routed_scaling_factor,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
         )
 
     n_routed_experts = gating_output.shape[-1]
@@ -270,10 +321,39 @@ def fused_topk_bias(
         ) + e_score_correction_bias.unsqueeze(0)
     else:
         scores_for_choice = scores.view(-1, n_routed_experts)
+    image_mask = None
+    if bias_vl is not None and image_sentinel_lo > 0:
+        # Image tokens (five consecutive sentinel ids starting at
+        # image_sentinel_lo) select experts with bias_vl instead of
+        # e_score_correction_bias / the hash table. Ids above the sentinel
+        # block are regular special tokens and must not match.
+        assert input_tokens is not None, "bias_vl routing requires input_tokens"
+        image_mask = (
+            (input_tokens >= image_sentinel_lo) & (input_tokens < image_sentinel_lo + 5)
+        ).unsqueeze(-1)
+        text_bias = (
+            e_score_correction_bias
+            if e_score_correction_bias is not None
+            else torch.zeros_like(bias_vl)
+        )
+        row_bias = torch.where(image_mask, bias_vl, text_bias)
+        scores_for_choice = scores.view(-1, n_routed_experts) + row_bias
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     if hash_indices_table is not None:
         assert input_tokens is not None
-        topk_indices = hash_indices_table[input_tokens]
+        if image_mask is None:
+            topk_indices = hash_indices_table[input_tokens]
+        else:
+            # Clamp sentinel rows (overwritten below) to keep the table
+            # lookup well-defined.
+            safe_ids = torch.where(image_mask.squeeze(-1), 0, input_tokens).to(
+                hash_indices_table.dtype
+            )
+            topk_indices = hash_indices_table[safe_ids]
+            vl_indices = torch.topk(scores_for_choice, k=topk, dim=-1)[1]
+            topk_indices = torch.where(
+                image_mask, vl_indices.to(topk_indices.dtype), topk_indices
+            )
     else:
         use_sorted = envs.VLLM_BATCH_INVARIANT
         topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=use_sorted)[
@@ -306,6 +386,8 @@ class FusedTopKBiasRouter(BaseRouter):
         hash_indices_table: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
         shared_expert_weight: float = 1.0,
+        bias_vl: torch.Tensor | None = None,
+        image_sentinel_lo: int = 0,
     ):
         super().__init__(
             top_k=top_k,
@@ -318,6 +400,11 @@ class FusedTopKBiasRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.scoring_func = scoring_func
         self._hash_indices_table = hash_indices_table
+        # Vision bias: image sentinel tokens (five consecutive in-vocab ids
+        # starting at image_sentinel_lo) select experts with bias_vl instead
+        # of e_score_correction_bias / the hash table.
+        self.bias_vl = bias_vl
+        self.image_sentinel_lo = image_sentinel_lo
         # Fused shared experts: append constant slots (ids immediately after
         # the routed experts, [global, global+n)) routed to by every token at
         # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
@@ -332,7 +419,6 @@ class FusedTopKBiasRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=None,
             has_e_score_bias=True,
-            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(
@@ -357,6 +443,8 @@ class FusedTopKBiasRouter(BaseRouter):
             input_tokens=input_ids,
             hash_indices_table=self._hash_indices_table,
             routed_scaling_factor=self.routed_scaling_factor,
+            bias_vl=self.bias_vl.data if self.bias_vl is not None else None,
+            image_sentinel_lo=self.image_sentinel_lo,
         )
 
         if self.num_fused_shared_experts > 0:

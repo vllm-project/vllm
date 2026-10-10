@@ -130,6 +130,7 @@ class WindowQFormerDownsampler(nn.Module):
 
         self.dropout = nn.Dropout(config.projector_dropout)
 
+        self.downsampler: SpatialOffsetDownsampler | InterpolateDownsampler
         if spatial_offset is not None:
             self.downsampler = SpatialOffsetDownsampler(config, offset=spatial_offset)
         else:
@@ -398,7 +399,7 @@ class Granite4VisionMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
 
@@ -492,13 +493,9 @@ class Granite4VisionForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
-            # image_newline parameter
-            if config.use_image_newline_parameter:
-                self.image_newline = nn.Parameter(
-                    torch.empty(config.text_config.hidden_size)
-                )
-            else:
-                self.image_newline = None
+            self.image_newline = nn.Parameter(
+                torch.empty(config.text_config.hidden_size)
+            )
 
             cache_config = vllm_config.cache_config
 
@@ -516,20 +513,18 @@ class Granite4VisionForConditionalGeneration(
             )
 
             # Spatial projectors: 4 offset groups
-            self.spatial_projectors = None
-            if config.use_spatial_sampling:
-                self.spatial_projectors = nn.ModuleList(
-                    [
-                        WindowQFormerDownsampler(
-                            config,
-                            quant_config=quant_config,
-                            cache_config=cache_config,
-                            spatial_offset=i,
-                            prefix=maybe_prefix(prefix, f"spatial_projectors.{i}"),
-                        )
-                        for i in range(4)
-                    ]
-                )
+            self.spatial_projectors = nn.ModuleList(
+                [
+                    WindowQFormerDownsampler(
+                        config,
+                        quant_config=quant_config,
+                        cache_config=cache_config,
+                        spatial_offset=i,
+                        prefix=maybe_prefix(prefix, f"spatial_projectors.{i}"),
+                    )
+                    for i in range(4)
+                ]
+            )
 
         # ----- Language model (marked as LM) -----
         with self._mark_language_model(vllm_config):
@@ -544,12 +539,9 @@ class Granite4VisionForConditionalGeneration(
 
         # Store config values we need
         self._deepstack_layer_map = config.deepstack_layer_map  # [[-19, 9], ...]
-        self._use_spatial_sampling = getattr(config, "use_spatial_sampling", False)
-        self._spatial_vision_layer = getattr(config, "spatial_vision_layer", -1)
-        self._spatial_target_layers = getattr(config, "spatial_target_layers", [])
-        self._vision_feature_select_strategy = getattr(
-            config, "vision_feature_select_strategy", "full"
-        )
+        self._spatial_vision_layer = config.spatial_vision_layer
+        self._spatial_target_layers = config.spatial_target_layers
+        self._vision_feature_select_strategy = config.vision_feature_select_strategy
         self._downsample_rate = Fraction(config.downsample_rate)
 
         # Ordered list of LLM layer indices for each deepstack level.
@@ -557,7 +549,7 @@ class Granite4VisionForConditionalGeneration(
         # (before any embed_multimodal call).
         self._ds_layer_indices: list[int] = [
             llm_layer for _, llm_layer in config.deepstack_layer_map
-        ] + list(getattr(config, "spatial_target_layers", []))
+        ] + list(config.spatial_target_layers)
 
         # Share ds_layer_indices with the LLM causal model so
         # make_empty_intermediate_tensors includes the correct keys
@@ -570,7 +562,7 @@ class Granite4VisionForConditionalGeneration(
         # the updated values written just before each prefill.
         # Shape: (max_num_batched_tokens, lm_hidden_size) per level.
         n_layerwise = len(config.deepstack_layer_map)
-        n_spatial = len(getattr(config, "spatial_target_layers", []))
+        n_spatial = len(config.spatial_target_layers)
         num_ds_levels = n_layerwise + n_spatial
         lm_hidden = config.text_config.hidden_size
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -643,26 +635,24 @@ class Granite4VisionForConditionalGeneration(
                 )
                 image_feature = unpad_image(image_feature, image_sizes[image_idx])
 
-                if self.image_newline is not None:
-                    image_feature = torch.cat(
-                        (
-                            image_feature,
-                            self.image_newline[:, None, None]
-                            .expand(*image_feature.shape[:-1], 1)
-                            .to(image_feature.device, image_feature.dtype),
-                        ),
-                        dim=-1,
-                    )
+                image_feature = torch.cat(
+                    (
+                        image_feature,
+                        self.image_newline[:, None, None]
+                        .expand(*image_feature.shape[:-1], 1)
+                        .to(image_feature.device, image_feature.dtype),
+                    ),
+                    dim=-1,
+                )
 
                 image_feature = image_feature.flatten(1, 2).transpose(0, 1)
                 image_feature = torch.cat((base_image_feature, image_feature), dim=0)
             else:
                 image_feature = image_feature[0]
-                if self.image_newline is not None:
-                    image_feature = torch.cat(
-                        (image_feature, self.image_newline[None].to(image_feature)),
-                        dim=0,
-                    )
+                image_feature = torch.cat(
+                    (image_feature, self.image_newline[None].to(image_feature)),
+                    dim=0,
+                )
 
             new_image_features.append(image_feature)
 
@@ -683,6 +673,7 @@ class Granite4VisionForConditionalGeneration(
 
         Packing on dim=-1 means the framework's token-level slicing for
         chunked prefill preserves all levels intact.
+
         """
         select_strategy = self._vision_feature_select_strategy
 
@@ -716,16 +707,15 @@ class Granite4VisionForConditionalGeneration(
             )
             levels.append((llm_layer, per_image))
 
-        if self._use_spatial_sampling and self.spatial_projectors is not None:
-            spatial_hidden = all_hidden_states[self._spatial_vision_layer]
-            if select_strategy == "default":
-                spatial_hidden = spatial_hidden[:, 1:]
-            for group_idx, llm_layer in enumerate(self._spatial_target_layers):
-                projected = self.spatial_projectors[group_idx](spatial_hidden)
-                per_image = self._pack_and_unpad_image_features(
-                    torch.split(projected, image_num_patches, dim=0), image_sizes
-                )
-                levels.append((llm_layer, per_image))
+        spatial_hidden = all_hidden_states[self._spatial_vision_layer]
+        if select_strategy == "default":
+            spatial_hidden = spatial_hidden[:, 1:]
+        for group_idx, llm_layer in enumerate(self._spatial_target_layers):
+            projected = self.spatial_projectors[group_idx](spatial_hidden)
+            per_image = self._pack_and_unpad_image_features(
+                torch.split(projected, image_num_patches, dim=0), image_sizes
+            )
+            levels.append((llm_layer, per_image))
 
         llm_layer_indices = [llm_layer for llm_layer, _ in levels]
         num_images = len(image_sizes)
@@ -843,6 +833,7 @@ class Granite4VisionForConditionalGeneration(
         #    (possibly a chunk slice from the framework's encoder cache).
         #    Concatenate along token dim → (total_mm_tokens, lm_h * num_levels).
         N, lm_h = inputs_embeds.shape
+        assert multimodal_embeddings is not None
         all_packed = torch.cat(
             [t.to(dtype=inputs_embeds.dtype) for t in multimodal_embeddings],
             dim=0,

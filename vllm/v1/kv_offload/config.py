@@ -14,6 +14,8 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Original KVCacheConfig group index.
+    group_id: int
 
 
 @dataclass(frozen=True)
@@ -84,3 +86,5 @@ class OffloadingConfig:
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.
     canonical_layout: bool = False
+    # Resolved KVCacheLayout name of the worker KV cache.
+    kv_cache_layout: str | None = None

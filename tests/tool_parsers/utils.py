@@ -3,13 +3,13 @@
 
 from collections.abc import Iterable
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 

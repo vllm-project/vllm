@@ -1,0 +1,6 @@
+model_name: "Qwen/Qwen3-4B"
+accuracy_threshold: 0.78
+num_questions: 1319
+num_fewshot: 5
+# Triton serves the unquantized boundary layers with TurboQuant-compatible layout.
+server_args: "--kv-cache-dtype turboquant_k3v4_nc --max-model-len 4096 --attention-backend TRITON_ATTN"
