@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -109,7 +109,7 @@ class ClsToken(nn.Module):
 class ViTPatchGenerator(nn.Module):
     def __init__(
         self,
-        #  config: PretrainedConfig,
+        #  config: PreTrainedConfig,
         patch_size: int,
         embed_dim: int,
         input_dims: input_dim_t,
@@ -535,7 +535,7 @@ class RadioInternVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig = None,
+        config: PreTrainedConfig = None,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -670,7 +670,7 @@ class RadioModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

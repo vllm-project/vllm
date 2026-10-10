@@ -7,6 +7,7 @@ import pytest
 from tests.plugins.vllm_add_dummy_stat_logger.dummy_stat_logger.dummy_stat_logger import (  # noqa E501
     DummyStatLogger,
 )
+from tests.utils import wait_for_memory_to_settle
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 
@@ -30,8 +31,15 @@ async def test_async_llm_replace_default_loggers(log_stats_enabled_engine_args):
     engine = AsyncLLM.from_engine_args(
         log_stats_enabled_engine_args, stat_loggers=[RayPrometheusStatLogger]
     )
-    assert isinstance(engine.logger_manager.stat_loggers[0], RayPrometheusStatLogger)
-    engine.shutdown()
+    try:
+        assert isinstance(
+            engine.logger_manager.stat_loggers[0], RayPrometheusStatLogger
+        )
+    finally:
+        engine.shutdown()
+        wait_for_memory_to_settle(
+            threshold_ratio=1.0 - log_stats_enabled_engine_args.gpu_memory_utilization
+        )
 
 
 @pytest.mark.asyncio
@@ -48,14 +56,18 @@ async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
         disabled_log_engine_args, stat_loggers=[DummyStatLogger]
     )
 
-    assert len(engine.logger_manager.stat_loggers) == 2
-    assert len(engine.logger_manager.stat_loggers[0].per_engine_stat_loggers) == 1
-    assert isinstance(
-        engine.logger_manager.stat_loggers[0].per_engine_stat_loggers[0],
-        DummyStatLogger,
-    )
+    try:
+        assert len(engine.logger_manager.stat_loggers) == 2
+        assert len(engine.logger_manager.stat_loggers[0].per_engine_stat_loggers) == 1
+        assert isinstance(
+            engine.logger_manager.stat_loggers[0].per_engine_stat_loggers[0],
+            DummyStatLogger,
+        )
 
-    # log_stats is still True, since custom stat loggers are used
-    assert engine.log_stats
-
-    engine.shutdown()
+        # log_stats is still True, since custom stat loggers are used
+        assert engine.log_stats
+    finally:
+        engine.shutdown()
+        wait_for_memory_to_settle(
+            threshold_ratio=1.0 - disabled_log_engine_args.gpu_memory_utilization
+        )

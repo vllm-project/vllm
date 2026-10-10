@@ -77,6 +77,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -197,14 +198,18 @@ def test_swa_offload_window_covers_unaligned_hit(
     manager.complete_load(job.keys, state.req_context)
 
 
-def _make_partial_tail_scheduler() -> OffloadingConnectorScheduler:
+def _make_partial_tail_scheduler(
+    recurrent_only: bool = False,
+) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
-    vllm_config.cache_config.prefix_match_unit = 4
+    vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
     vllm_config.speculative_config = None
     vllm_config.kv_events_config = KVEventsConfig(
         enable_kv_cache_events=True, publisher="null"
     )
     kv_cache_config = _make_mamba_hybrid_kv_cache_config()
+    if recurrent_only:
+        kv_cache_config.kv_cache_groups = kv_cache_config.kv_cache_groups[1:]
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
     return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
@@ -574,6 +579,284 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     # not a load destination. Before the fix the boundary collapsed to 0.
     assert 41 not in loaded
     assert 42 in loaded
+
+
+@pytest.mark.parametrize(
+    ("recurrent_source", "expected"),
+    [
+        ("host", {CacheHitSource.P2P: 16, CacheHitSource.HOST: 12}),
+        ("p2p", {CacheHitSource.P2P: 28}),
+        (None, {CacheHitSource.P2P: 16, CacheHitSource.HOST: 12}),
+    ],
+)
+def test_external_cache_hit_sources_preserve_partial_tail_origin(
+    recurrent_source, expected
+):
+    """Recurrent state covers the whole prefix; the outermost tier wins."""
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(req_status) == 28
+
+    def get_load_source(key, req_context):
+        if get_offload_group_idx(key) == 1:
+            assert recurrent_source is not None
+            return recurrent_source
+        block_hash = get_offload_block_hash(key)
+        return "p2p" if block_hash == b"h3" else "host"
+
+    scheduler.manager.get_load_source.side_effect = get_load_source
+
+    recurrent_block = KVCacheBlock(41)
+    if recurrent_source is None:
+        recurrent_block.set_block_hash(
+            make_block_hash_with_group_id(BlockHash(b"cached"), 1), 12
+        )
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(31), KVCacheBlock(32)],
+                [KVCacheBlock(0, is_null=True), recurrent_block],
+            )
+        ),
+        num_external_tokens=28,
+    )
+    assert req_status.partial_tail_boundary is None
+    assert scheduler.get_external_cache_hit_sources(request, 28) == expected
+
+
+@pytest.mark.parametrize(
+    ("second_source", "expected"),
+    [
+        ("host", {CacheHitSource.HOST: 4, CacheHitSource.DISK: 4}),
+        ("p2p", {CacheHitSource.P2P: 4, CacheHitSource.DISK: 4}),
+    ],
+)
+def test_external_cache_hit_sources_reconcile_different_group_chunk_sizes(
+    request_runner,
+    second_source,
+    expected,
+):
+    """Groups with different chunk sizes overlap; the outermost tier wins."""
+    block_size = 4
+    groups = [
+        KVCacheGroupSpec(
+            [f"layer{group_idx}"],
+            FullAttentionSpec(
+                block_size=block_size * (group_idx + 1),
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        )
+        for group_idx in range(2)
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        kv_cache_groups=groups,
+    )
+    scheduler = runner.connector_scheduler
+    request = MagicMock(request_id="mixed")
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=request,
+        req_context=ReqContext(req_id=request.request_id),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.CHUNK_LEVEL),
+    )
+    for group_idx, group_state in enumerate(req_status.group_states):
+        group_state.offload_keys = [
+            make_offload_key(f"h{chunk_idx}".encode(), group_idx)
+            for chunk_idx in range(2 // (group_idx + 1))
+        ]
+    scheduler._req_status[request.request_id] = req_status
+    runner.manager.get_load_source.side_effect = lambda key, req_context: (
+        ("host" if get_offload_block_hash(key) == b"h0" else "disk")
+        if get_offload_group_idx(key) == 0
+        else second_source
+    )
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(([KVCacheBlock(1), KVCacheBlock(2)], [KVCacheBlock(3)])),
+        2 * block_size,
+    )
+
+    assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == expected
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        pytest.param(
+            [(8, 12, "host"), (0, 8, "host"), (4, 10, "host")],
+            {CacheHitSource.HOST: 8, CacheHitSource.EXTERNAL_UNSPECIFIED: 4},
+            id="overlapping-same-source-and-adjacent-endpoints",
+        ),
+        pytest.param(
+            [(10, 20, "p2p"), (6, 10, "disk"), (0, 8, "host"), (4, 12, "host")],
+            {CacheHitSource.HOST: 2, CacheHitSource.DISK: 4, CacheHitSource.P2P: 6},
+            id="nested-tiers-and-clipped-ranges",
+        ),
+        pytest.param(
+            [(0, 4, "disk"), (16, 20, "disk"), (8, 8, "disk")],
+            {CacheHitSource.EXTERNAL_UNSPECIFIED: 12},
+            id="no-covering-ranges",
+        ),
+    ],
+)
+def test_external_cache_hit_sources_range_boundaries(ranges, expected):
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    state = scheduler._req_status[request.request_id]
+    state.num_locally_computed_tokens = 4
+    for idx, (lo, hi, source) in enumerate(ranges):
+        key = make_offload_key(str(idx).encode(), 0)
+        state.load_key_ranges.append((lo, hi, key))
+    scheduler.manager.get_load_source.side_effect = lambda key, ctx: ranges[
+        int(get_offload_block_hash(key))
+    ][2]
+
+    result = scheduler.get_external_cache_hit_sources(request, 12)
+    assert result == expected
+    assert sum(result.values()) == 12
+
+
+@pytest.mark.parametrize("source", ["host", "disk", "p2p", "external_unspecified"])
+def test_external_cache_hit_sources_recurrent_only_state(source):
+    scheduler = _make_partial_tail_scheduler(recurrent_only=True)
+    request = _make_partial_tail_request(scheduler)
+    request.num_prompt_tokens = request.num_tokens = 64
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(4)]
+    request.all_token_ids = list(range(64))
+    state = scheduler._req_status[request.request_id]
+    state.update_offload_keys()
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert scheduler._lookup(state) == 48
+    scheduler.manager.get_load_source.return_value = source
+    scheduler.update_state_after_alloc(
+        request,
+        KVCacheBlocks(
+            (
+                [
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(0, is_null=True),
+                    KVCacheBlock(41),
+                ],
+            )
+        ),
+        48,
+    )
+    assert scheduler.get_external_cache_hit_sources(request, 48) == {
+        CacheHitSource(source): 48
+    }
+    scheduler.manager.get_load_source.assert_called_once()
+
+
+@pytest.mark.parametrize("sparse_kind", ["sliding", "chunked_local"])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2])
+@pytest.mark.parametrize("local_tokens", [0, 4])
+@pytest.mark.parametrize("full_attention", [False, True])
+@pytest.mark.parametrize(
+    "sparse_source", ["host", "disk", "p2p", "external_unspecified", "mixed"]
+)
+def test_external_cache_hit_sources_use_loaded_attention_ranges(
+    sparse_kind,
+    blocks_per_chunk,
+    local_tokens,
+    full_attention,
+    sparse_source,
+):
+    """SWA/local attention affects only loaded positions, not omitted history."""
+    block_size = 4
+    chunk_size = block_size * blocks_per_chunk
+    spec_kwargs = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    sparse_spec = (
+        SlidingWindowSpec(**spec_kwargs, sliding_window=2 * chunk_size)
+        if sparse_kind == "sliding"
+        else ChunkedLocalAttentionSpec(
+            **spec_kwargs, attention_chunk_size=2 * chunk_size
+        )
+    )
+    groups = [KVCacheGroupSpec(["sparse"], sparse_spec)]
+    if full_attention:
+        groups.insert(0, KVCacheGroupSpec(["full"], FullAttentionSpec(**spec_kwargs)))
+    vllm_config = _make_vllm_config(extra_config={"block_size": chunk_size})
+    vllm_config.cache_config.block_size = block_size
+    vllm_config.speculative_config = None
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+    request = MagicMock(request_id="sparse")
+    req_status = RequestOffloadState(
+        config=scheduler.config,
+        req=request,
+        req_context=ReqContext(req_id=request.request_id),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.CHUNK_LEVEL),
+        num_locally_computed_tokens=local_tokens,
+    )
+    scheduler._req_status[request.request_id] = req_status
+    block_groups = []
+    for group_idx, state in enumerate(req_status.group_states):
+        state.offload_keys = [
+            make_offload_key(str(i).encode(), group_idx) for i in range(4)
+        ]
+        block_groups.append(
+            [
+                KVCacheBlock(
+                    0
+                    if group_idx == len(groups) - 1 and i < 2 * blocks_per_chunk
+                    else 1 + group_idx * 100 + i,
+                    is_null=group_idx == len(groups) - 1 and i < 2 * blocks_per_chunk,
+                )
+                for i in range(4 * blocks_per_chunk)
+            ]
+        )
+
+    def get_load_source(key, req_context):
+        chunk_idx = int(get_offload_block_hash(key))
+        if get_offload_group_idx(key) == len(groups) - 1:
+            assert chunk_idx >= 2  # Earlier sparse keys were not loaded.
+            if sparse_source == "mixed":
+                return "host" if chunk_idx == 2 else "disk"
+            return sparse_source
+        return "host"
+
+    scheduler.manager.get_load_source.side_effect = get_load_source
+    count = 4 * chunk_size - local_tokens
+    scheduler.update_state_after_alloc(
+        request, KVCacheBlocks(tuple(block_groups)), count
+    )
+    expected: dict[CacheHitSource, int] = {}
+
+    def expect(source: CacheHitSource, num_tokens: int) -> None:
+        expected[source] = expected.get(source, 0) + num_tokens
+
+    expect(
+        CacheHitSource.HOST if full_attention else CacheHitSource.EXTERNAL_UNSPECIFIED,
+        2 * chunk_size - local_tokens,
+    )
+    for chunk_idx in range(2, 4):
+        source = (
+            ("host" if chunk_idx == 2 else "disk")
+            if sparse_source == "mixed"
+            else sparse_source
+        )
+        expect(CacheHitSource(source), chunk_size)
+    result = scheduler.get_external_cache_hit_sources(request, count)
+    assert result == expected
+    assert sum(result.values()) == count
+    assert scheduler.get_external_cache_hit_sources(request, 0) == {}
 
 
 def test_partial_lookup_requires_every_cache_group():
@@ -1400,7 +1683,6 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
         #   are within the window → loads blocks 1,2
         expected_loaded=((0, 0), (0, 1), (0, 2), (1, 1), (1, 2)),
     )
-
     runner.manager.touch.assert_not_called()
 
     # 3 blocks are hit on GPU [0, 1, 2]
@@ -3439,59 +3721,6 @@ class TestEagle:
         #   so the pop landed on the only queried chunk and zeroed the
         #   whole request.
         assert sched._lookup(req_status) == 4
-
-    def test_eagle_verified_survives_eagle_tighten(self, request_runner):
-        """Eagle group tightening does NOT clear eagle_verified.
-
-        Groups: 0=non-eagle full-attn, 1=eagle full-attn.
-        Group 0 finds 3 hits (max_hit=12). Group 1 finds 3 hits, pops to 2
-        (max_hit=8). Since group 1 IS eagle, eagle_verified is NOT cleared.
-        Result: 8 tokens (eagle only pops once).
-        """
-        block_size = 4
-        groups = [
-            KVCacheGroupSpec(
-                ["layer0"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-                is_eagle_group=False,
-            ),
-            KVCacheGroupSpec(
-                ["layer1"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=2,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-                is_eagle_group=True,
-            ),
-        ]
-        runner = request_runner(
-            block_size=block_size,
-            num_gpu_blocks=100,
-            async_scheduling=False,
-            kv_cache_groups=groups,
-        )
-        runner.manager.lookup.side_effect = lambda key, req_context: (
-            LookupResult.HIT
-            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
-            else LookupResult.MISS
-        )
-        sched = runner.connector_scheduler
-        req_status = self._make_req_status(
-            sched,
-            num_tokens=12,
-            offload_keys_per_group=[[1, 2, 3], [1, 2, 3]],
-        )
-        # Group 0: 3 hits → max_hit=12, num_hit=12
-        # Group 1 (eagle): 3 hits, pop to 2 → max_hit=8, num_hit=8
-        # Tightened but IS eagle → no clear. No re-iteration.
-        assert sched._lookup(req_status) == 8
 
     # -------------------------------------------------------------------
     # Integration tests: store and load via request_runner

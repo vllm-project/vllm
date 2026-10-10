@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
@@ -61,7 +62,10 @@ def test_vision_warmup_calls_only_position_and_rotary_paths() -> None:
     assert calls == []
 
 
-def test_mrope_warmup_launches_triton_shapes() -> None:
+@pytest.mark.parametrize(
+    "owners_fused, skipped", [((), False), ((True,), True), ((True, False), False)]
+)
+def test_mrope_warmup_launches_triton_shapes(owners_fused, skipped) -> None:
     from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 
     launched: list[tuple[torch.Size, torch.Size]] = []
@@ -84,7 +88,13 @@ def test_mrope_warmup_launches_triton_shapes() -> None:
 
         def __init__(self) -> None:
             super().__init__()
-            self.rotary_emb = FakeRope()
+            rope = FakeRope()
+            if not owners_fused:
+                self.rotary_emb = rope
+            for i, fused in enumerate(owners_fused):
+                owner = torch.nn.Module()
+                owner.rotary_emb, owner.use_fused_qk_norm_rope_gate = rope, fused
+                self.add_module(f"attn{i}", owner)
 
         def get_mrope_input_positions(self, input_tokens, mm_features):
             raise AssertionError("warmup must not build live M-RoPE positions")
@@ -99,11 +109,8 @@ def test_mrope_warmup_launches_triton_shapes() -> None:
         device=torch.device("cpu"),
     )
     _warm_mrope(runner, FakeMropeModel())
-    assert [shape for shape, _ in launched] == [
-        torch.Size((3, 1)),
-        torch.Size((3, 2)),
-        torch.Size((3, 16)),
-    ]
+    expected = [torch.Size((3, n)) for n in (1, 2, 16)]
+    assert [shape for shape, _ in launched] == ([] if skipped else expected)
 
 
 def test_mrope_warmup_skips_models_without_supports_mrope() -> None:

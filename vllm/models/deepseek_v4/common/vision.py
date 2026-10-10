@@ -38,6 +38,7 @@ from vllm.model_executor.models.vision import (
     get_load_balance_assignment,
     is_vit_use_data_parallel,
 )
+from vllm.utils.torch_utils import async_tensor_h2d
 
 
 def _compute_vision_cos_sin(
@@ -219,8 +220,8 @@ class DeepseekV4ViT(nn.Module):
     ) -> torch.Tensor:
         x = self.patch_embed(patches)
         cos, sin = get_vision_cos_sin(n_vit_h, n_vit_w, self.rope_dim, self.rope_theta)
-        cos = cos.to(device=x.device)
-        sin = sin.to(device=x.device)
+        cos = async_tensor_h2d(cos, x.device)
+        sin = async_tensor_h2d(sin, x.device)
         for block in self.blocks:
             x = block(x, cos, sin)
         return self.norm(x)
@@ -279,8 +280,8 @@ def build_packed_vit_metadata(
         cu_seqlens.append(cu_seqlens[-1] + n)
         max_seqlen = max(max_seqlen, n)
     if cos_list:
-        cos = torch.cat(cos_list).to(device)
-        sin = torch.cat(sin_list).to(device)
+        cos = async_tensor_h2d(torch.cat(cos_list), device)
+        sin = async_tensor_h2d(torch.cat(sin_list), device)
     else:
         cos = torch.zeros((0, 1, rope_dim), dtype=torch.float32, device=device)
         sin = torch.zeros((0, 1, rope_dim), dtype=torch.float32, device=device)
@@ -289,7 +290,7 @@ def build_packed_vit_metadata(
     return {
         "vit_cos": cos,
         "vit_sin": sin,
-        "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32, device=device),
+        "cu_seqlens": async_tensor_h2d(cu_seqlens, device, dtype=torch.int32),
         # Read on the host by the attention wrapper; keep on CPU.
         "max_seqlen": torch.tensor(max_seqlen, dtype=torch.int32),
     }
@@ -327,8 +328,10 @@ def build_packed_merge_metadata(
         mask_list.append(valid)
         offset += n_h * n_w
     if idx_list:
-        merge_idx = torch.cat(idx_list).to(device)
-        merge_mask = torch.cat(mask_list).unsqueeze(-1).to(device=device, dtype=dtype)
+        merge_idx = async_tensor_h2d(torch.cat(idx_list), device)
+        merge_mask = async_tensor_h2d(
+            torch.cat(mask_list).unsqueeze(-1), device, dtype=dtype
+        )
     else:
         merge_idx = torch.zeros((0, r * r), dtype=torch.int64, device=device)
         merge_mask = torch.zeros((0, r * r, 1), dtype=dtype, device=device)

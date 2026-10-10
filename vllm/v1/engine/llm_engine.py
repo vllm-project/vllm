@@ -12,11 +12,16 @@ from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.profiler import (
+    validate_profile_iteration_bounds,
+    validate_profile_prefix,
+)
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.inputs import EngineInput, PromptType
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -60,6 +65,7 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         multiprocess_mode: bool = False,
     ) -> None:
+        configure_logging_if_needed(vllm_config.logging_config)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
@@ -115,6 +121,7 @@ class LLMEngine:
             log_stats=self.log_stats,
             renderer=renderer,
         )
+        self._profile_session_active = False
 
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:
@@ -253,6 +260,13 @@ class LLMEngine:
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                # This request object is owned by the engine from here on.
+                self.input_processor.apply_watermarking(
+                    request_params,
+                    self.input_processor.resolve_watermarking(request_params),
+                )
         else:
             request = self.input_processor.process_inputs(
                 request_id,
@@ -322,6 +336,14 @@ class LLMEngine:
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
             )
+
+            mm_processor_cache = self.renderer.mm_processor_cache
+            if mm_processor_cache is not None:
+                for engine_core_output in outputs.outputs:
+                    if engine_core_output.mm_cache_miss_hashes:
+                        for mm_hash in engine_core_output.mm_cache_miss_hashes:
+                            mm_processor_cache.invalidate(mm_hash)
+
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
@@ -342,11 +364,33 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
-    def start_profile(self, profile_prefix: str | None = None):
-        self.engine_core.profile(True, profile_prefix)
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        if self._profile_session_active:
+            raise ProfilerAlreadyActiveError()
+        validate_profile_prefix(profile_prefix)
+        validate_profile_iteration_bounds(delay_iterations, max_iterations)
+
+        self._profile_session_active = True
+        try:
+            self.engine_core.profile(
+                True,
+                profile_prefix,
+                delay_iterations,
+                max_iterations,
+            )
+        except BaseException:
+            self._profile_session_active = False
+            raise
 
     def stop_profile(self):
         self.engine_core.profile(False)
+        self._profile_session_active = False
 
     def reset_mm_cache(self):
         # Join the background MM warmup first: the mm_processor_cache is not
@@ -385,11 +429,13 @@ class LLMEngine:
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(self, tags: list[str] | None = None) -> bool:
         fully_awake = self.engine_core.wake_up(tags)
 
         if self.logger_manager is not None and fully_awake:
             self.logger_manager.record_sleep_state(0, 0)
+
+        return fully_awake
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()

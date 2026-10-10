@@ -1099,6 +1099,7 @@ def build_flashinfer_mixed_sparse_indices(
     prefill_left_visible: torch.Tensor | None = None,
     prefill_right_visible: torch.Tensor | None = None,
     max_image_tokens: int = 0,
+    num_rows: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
@@ -1108,6 +1109,9 @@ def build_flashinfer_mixed_sparse_indices(
     per token). Decode tokens read precomputed SWA/compressed indices; prefill
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
+
+    ``num_rows`` (>= ``num_tokens``) sizes both outputs for a kernel call that
+    spans a CUDA-graph-padded batch; the rows past ``num_tokens`` stay unset.
 
     When ``prefill_left_visible``/``prefill_right_visible`` are given (vision
     variant), the SWA column region widens by ``max_image_tokens`` and prefill
@@ -1170,13 +1174,15 @@ def build_flashinfer_mixed_sparse_indices(
     # by ``sparse_topk_lens``, so padding never changes the attention result.
     padded_topk = max(topk, decode_compressed_topk)
     padded_topk = (padded_topk + 3) // 4 * 4
+    num_rows = num_tokens if num_rows is None else num_rows
+    assert num_rows >= num_tokens
     sparse_indices = torch.empty(
-        (num_tokens, swa_total_width + padded_topk),
+        (num_rows, swa_total_width + padded_topk),
         dtype=torch.int32,
         device=decode_swa_indices.device,
     )
     sparse_topk_lens = torch.empty(
-        num_tokens, dtype=torch.int32, device=decode_swa_indices.device
+        num_rows, dtype=torch.int32, device=decode_swa_indices.device
     )
     if num_tokens == 0:
         return sparse_indices, sparse_topk_lens
@@ -1193,9 +1199,10 @@ def build_flashinfer_mixed_sparse_indices(
         if compressed_block_span is None
         else compressed_block_span
     )
+    # The launch grid follows the output rows, so hand over only the real ones.
     _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL(
-        sparse_indices,
-        sparse_topk_lens,
+        sparse_indices[:num_tokens],
+        sparse_topk_lens[:num_tokens],
         decode_swa_indices,
         decode_compressed_indices,
         decode_compressed_topk_lens,
@@ -1234,7 +1241,7 @@ def build_flashinfer_mixed_sparse_indices(
 def _remap_flashinfer_index(values, block_size, block_span):
     # FlashInfer's DSv4 kernel indexes sparse KV by physical token stride, so
     # packed pages (#44577) need block*block_size+off -> block*block_span+off.
-    # TODO: remove once flashinfer-ai/flashinfer#3856 is fixed.
+    # The launcher declares these indices with sparse_indices_are_storage_offsets=True.
     is_valid = values >= 0
     safe_values = tl.where(is_valid, values, 0)
     values = (safe_values // block_size) * block_span
@@ -1322,12 +1329,52 @@ class BuildFlashinferMixedSparseIndicesKernel(
         SWA_TOTAL_WIDTH: tl.constexpr = SWA_INDEX_WIDTH + IMAGE_WIDTH
 
         if token_idx < NUM_DECODE_TOKENS:
+            # A decode row wider than the window is DSpark's non-causal block:
+            # the block-anchored window of context followed by the whole block,
+            # contiguous from column 0. The kernel treats every entry of its
+            # active ranges as a key -- the first min(WINDOW_SIZE, pos + 1)
+            # columns and [WINDOW_SIZE, sparse_topk_lens) -- so -1 must not
+            # appear in either. Fill the causal window with the first visible
+            # entries and put the rest from column WINDOW_SIZE on, followed
+            # directly by the compressed entries.
+            NONCAUSAL: tl.constexpr = SWA_INDEX_WIDTH > WINDOW_SIZE
+            compressed_start = SWA_TOTAL_WIDTH
+            if NONCAUSAL:
+                req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+                query_start = tl.load(query_start_loc_ptr + req_idx)
+                query_len = tl.load(query_start_loc_ptr + req_idx + 1) - query_start
+                context_len = tl.load(seq_lens_ptr + req_idx) - query_len
+                token_in_query = token_idx - query_start
+                window_len = tl.minimum(context_len + token_in_query + 1, WINDOW_SIZE)
+                spill_len = (
+                    tl.minimum(context_len, WINDOW_SIZE) + query_len - window_len
+                )
+                # A CUDA-graph pad token sits outside its empty request, so
+                # the kernel never reads its row; keep it the shape of a
+                # causal pad row (all -1, WINDOW_SIZE long) rather than let
+                # the formulas above go negative.
+                is_block_token = (token_in_query >= 0) & (token_in_query < query_len)
+                window_len = tl.where(is_block_token, window_len, 0)
+                spill_len = tl.where(is_block_token, spill_len, 0)
+                compressed_start = WINDOW_SIZE + spill_len
             for i in range(0, SWA_TOTAL_WIDTH, WINDOW_BLOCK_SIZE):
                 offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
                 mask = offset < SWA_TOTAL_WIDTH
+                src = offset
+                src_mask = offset < SWA_INDEX_WIDTH
+                if NONCAUSAL:
+                    # Columns from compressed_start on belong to the loops below.
+                    mask = mask & (offset < compressed_start)
+                    spill = offset >= WINDOW_SIZE
+                    src = tl.where(spill, offset - WINDOW_SIZE + window_len, offset)
+                    src_mask = tl.where(
+                        spill,
+                        offset < WINDOW_SIZE + spill_len,
+                        offset < window_len,
+                    )
                 values = tl.load(
-                    decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
-                    mask=offset < SWA_INDEX_WIDTH,
+                    decode_swa_indices_ptr + token_idx * decode_swa_stride + src,
+                    mask=src_mask,
                     other=-1,
                 )
                 values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
@@ -1372,11 +1419,26 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 tl.store(
                     sparse_indices_ptr
                     + token_idx * sparse_indices_stride
-                    + SWA_TOTAL_WIDTH
+                    + compressed_start
                     + offset,
                     values,
                     mask=mask,
                 )
+
+            if NONCAUSAL:
+                # The row's remaining columns, left over by the shifted
+                # compressed block.
+                for i in range(0, SWA_TOTAL_WIDTH - WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+                    offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
+                    tl.store(
+                        sparse_indices_ptr
+                        + token_idx * sparse_indices_stride
+                        + compressed_start
+                        + PADDED_TOP_K
+                        + offset,
+                        tl.full((WINDOW_BLOCK_SIZE,), -1, dtype=tl.int32),
+                        mask=offset < SWA_TOTAL_WIDTH - compressed_start,
+                    )
 
             if DECODE_COMPRESSED_TOPK == 0:
                 compressed_len = tl.zeros((), dtype=tl.int32)
@@ -1388,7 +1450,9 @@ class BuildFlashinferMixedSparseIndicesKernel(
                 else:
                     compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
 
-            tl.store(sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + compressed_len)
+            tl.store(
+                sparse_topk_lens_ptr + token_idx, compressed_start + compressed_len
+            )
             return
 
         prefill_idx = token_idx - NUM_DECODE_TOKENS

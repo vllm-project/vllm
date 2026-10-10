@@ -142,6 +142,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 engine.current_layer = 0
             if hasattr(engine, "layerwise_retrievers"):
                 engine.layerwise_retrievers = []
+            engine.layerwise_storers = []
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector to vLLM's paged

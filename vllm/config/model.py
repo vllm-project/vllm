@@ -26,7 +26,7 @@ from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -37,7 +37,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_rope_parameters_nested,
+    iter_rope_parameters,
     mrope_num_dims,
     try_get_dense_modules,
     try_get_generation_config,
@@ -55,7 +55,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
 else:
-    PretrainedConfig = Any
+    PreTrainedConfig = Any
 
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
@@ -89,7 +89,6 @@ ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
     "auto",
     "hf",
-    "slow",
     "mistral",
     "deepseek_v32",
     "deepseek_v4",
@@ -105,15 +104,43 @@ PROCESSED_LOGPROBS_MODES: tuple[LogprobsMode, ...] = (
     "processed_logits",
     "processed_logprobs",
 )
-HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
+HfOverrides = dict[str, Any] | Callable[[PreTrainedConfig], PreTrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
+
+_ATTENTION_LAYER_TYPES = frozenset(
+    {
+        "full_attention",
+        "indexed_attention",
+        # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
+        "deepseek_sparse_attention",
+        "qwen_sparse_attention",
+    }
+)
+"""`layer_types` spellings that consume a full attention KV cache. Sparse
+attention still caches every token, so it counts as attention here."""
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
     "pooling": ["embed", "classify"],
     "draft": [],
 }
+
+
+def _modelopt_mixed_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
+    """Whether a ModelOpt MIXED_PRECISION checkpoint quantizes any layer to NVFP4.
+
+    ``W4A16_NVFP4`` is excluded on purpose: it quantizes weights only, so there
+    is no activation quantization for the fusion passes to act on.
+    """
+    layers = (quant_config or {}).get("quantized_layers")
+    if not isinstance(layers, dict):
+        return False
+    return any(
+        isinstance(info, dict) and info.get("quant_algo") == "NVFP4"
+        for info in layers.values()
+    )
+
 
 AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
@@ -148,7 +175,6 @@ class ModelConfig:
     - "auto" will use the tokenizer from `mistral_common` for Mistral models
       if available, otherwise it will use the "hf" tokenizer.
     - "hf" will use the fast tokenizer if available.
-    - "slow" will always use the slow tokenizer.
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
@@ -183,9 +209,9 @@ class ModelConfig:
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,
     leading to inconsistent results."""
-    hf_config: PretrainedConfig = field(init=False)
+    hf_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the model."""
-    hf_text_config: PretrainedConfig = field(init=False)
+    hf_text_config: PreTrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
     is_submodel_config: bool = field(default=False, init=False)
     """Whether this is a submodule view derived by `VllmConfig.with_hf_config`
@@ -352,6 +378,9 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    sleep_mode_offload_cudagraph: bool = False
+    """Back up CUDA graph memory to CPU during sleep, restored in place on wake.
+    Takes effect with enable_sleep_mode, the cumem backend and CUDA graphs."""
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
@@ -479,11 +508,15 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
+            # Sizes Qwen3.5's M-RoPE cache.
+            factors["video_pruning"] = (
+                self.multimodal_config.is_multimodal_pruning_enabled()
+            )
         return hash_factors(factors)
 
     def _update_nested(
         self,
-        target: PretrainedConfig | dict[str, Any],
+        target: PreTrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
         """Recursively updates a config or dict with nested updates."""
@@ -511,15 +544,15 @@ class ModelConfig:
 
     def _apply_dict_overrides(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
         """Apply dict overrides, handling both nested configs and dict values."""
-        from transformers import PretrainedConfig
+        from transformers import PreTrainedConfig
 
         for key, value in overrides.items():
             attr = getattr(config, key, None)
-            if attr is not None and isinstance(attr, PretrainedConfig):
+            if attr is not None and isinstance(attr, PreTrainedConfig):
                 # It's a nested config - recursively update it
                 self._update_nested(attr, value)
             else:
@@ -589,22 +622,27 @@ class ModelConfig:
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
         # If loading model/tokenizer from HF Hub, resolve the revision once
-        # to prevent resolving it multiple times downstream.
-        # If the weights come from a different repo, we cannot eagerly resolve revision
-        weights_from_model = not self.model_weights or self.model_weights == self.model
-        # If the config comes from a different repo, we cannot eagerly resolve revision
-        config_from_model = not self.hf_config_path or self.hf_config_path == self.model
-        can_resolve_model_revision = config_from_model and weights_from_model
-        if can_resolve_model_revision:
-            self.revision = resolve_revision(
-                self.model,
+        # to prevent resolving it multiple times downstream. A resolved revision
+        # only pins the repo it was resolved for, so each repo needs its own call.
+        self.revision = resolve_revision(
+            self.model,
+            self.revision,
+            self.hf_token,
+        )
+
+        # The config can live in another repo, which `self.revision` does not pin.
+        # It stays `None` if the config comes from `self.model`, so that call sites
+        # fall back to `self.revision` the same way they fall back to `self.model`.
+        self._hf_config_revision = None
+        if self.hf_config_path and self.hf_config_path != self.model:
+            self._hf_config_revision = resolve_revision(
+                self.hf_config_path,
                 self.revision,
                 self.hf_token,
             )
 
         if (
-            can_resolve_model_revision
-            and self.tokenizer == self.model
+            self.tokenizer == self.model
             and self.tokenizer_revision == requested_revision
         ):
             self.tokenizer_revision = self.revision
@@ -632,7 +670,7 @@ class ModelConfig:
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
-            self.revision,
+            self._hf_config_revision or self.revision,
             self.code_revision,
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
@@ -1715,7 +1753,8 @@ class ModelConfig:
             if layer_types_value is not None:
                 if block_type == "attention":
                     return sum(
-                        t == "full_attention" for t in layer_types_value[start:end]
+                        t in _ATTENTION_LAYER_TYPES
+                        for t in layer_types_value[start:end]
                     )
                 elif block_type == "linear_attention":
                     return sum(
@@ -1779,7 +1818,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
-                revision=self.revision,
+                revision=self._hf_config_revision or self.revision,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
@@ -1822,6 +1861,8 @@ class ModelConfig:
 
         available_params = [
             "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
             "temperature",
             "top_k",
             "top_p",
@@ -2233,13 +2274,20 @@ class ModelConfig:
         return getattr(self.hf_config, "quantization_config", None) is not None
 
     def is_nvfp4_quantized(self) -> bool:
+        quant_config = self.model_arch_config.quantization_config
+
         # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
         if self.quantization in ("modelopt_fp4",):
             return True
 
+        # A checkpoint mixing NVFP4 with another algorithm declares
+        # quant_algo MIXED_PRECISION and resolves to modelopt_mixed, so the
+        # per-layer algorithms decide.
+        if self.quantization == "modelopt_mixed":
+            return _modelopt_mixed_has_nvfp4(quant_config)
+
         # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
         # in the quantization config
-        quant_config = self.model_arch_config.quantization_config
         return (
             self.quantization == "compressed-tensors"
             and quant_config is not None
@@ -2393,7 +2441,7 @@ def _resolve_auto_dtype(
 
 def _get_and_verify_dtype(
     model_id: str,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     dtype: str | torch.dtype,
     *,
     is_pooling_model: bool,
@@ -2414,6 +2462,12 @@ def _get_and_verify_dtype(
                 config_dtype,
                 is_pooling_model=is_pooling_model,
             )
+            if (
+                current_platform.is_cpu()
+                and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+                and torch_dtype in (torch.float16, torch.float32)
+            ):
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
@@ -2440,7 +2494,7 @@ def _get_and_verify_dtype(
 
 
 def _get_head_dtype(
-    config: PretrainedConfig, dtype: torch.dtype, runner_type: str
+    config: PreTrainedConfig, dtype: torch.dtype, runner_type: str
 ) -> torch.dtype:
     head_dtype: str | torch.dtype | None = getattr(config, "head_dtype", None)
 
@@ -2464,7 +2518,7 @@ def _get_head_dtype(
 
 
 def _get_and_verify_max_len(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     model_arch_config: ModelArchitectureConfig,
     tokenizer_config: dict | None,
     max_model_len: int | None,
@@ -2516,24 +2570,14 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
-    # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
-    # To simplify the verification, we convert it to dict[str, TypedDict].
-    rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
-        rope_parameters = {"": rope_parameters}
-    if rope_parameters is not None:
-        # Layers without RoPE do not contribute to context length scaling.
-        rope_parameters = {
-            layer_type: rp
-            for layer_type, rp in rope_parameters.items()
-            if rp is not None
-        }
+    # Layers without RoPE do not contribute to context length scaling.
+    rope_parameters = list(iter_rope_parameters(hf_config))
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
-    if rope_parameters is not None and "gemma3" not in hf_config.model_type:
+    if rope_parameters and "gemma3" not in hf_config.model_type:
         scaling_factor = 1.0
-        for rp in rope_parameters.values():
+        for rp in rope_parameters:
             # No need to consider "type" key because of patch_rope_parameters when
             # loading HF config
             rope_type = rp["rope_type"]
@@ -2573,9 +2617,7 @@ def _get_and_verify_max_len(
     if max_model_len is None or max_model_len == -1:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
-        if rope_parameters is not None and any(
-            rp["rope_type"] == "longrope" for rp in rope_parameters.values()
-        ):
+        if any(rp["rope_type"] == "longrope" for rp in rope_parameters):
             max_model_len = int(
                 getattr(
                     hf_config, "original_max_position_embeddings", derived_max_model_len

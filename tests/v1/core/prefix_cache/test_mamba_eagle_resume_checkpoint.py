@@ -196,6 +196,28 @@ def test_sibling_resumes_below_the_block_grid_when_the_prefix_ends_early():
     assert hit == resume, f"expected the resume point at {resume}, got {hit}"
 
 
+@pytest.mark.parametrize("mtp_draft_group_identified", [False, True])
+def test_mamba_prefix_cache_drops_hash_block(mtp_draft_group_identified):
+    block_size, hash_block_size = 1024, 64
+    manager = _manager(
+        block_size,
+        hash_block_size,
+        eagle_group=0 if mtp_draft_group_identified else None,
+    )
+    prompt_a = PREFIX[:1600]
+    hit_after_mtp_block_drop = len(prompt_a) - hash_block_size
+
+    _prefill(
+        manager,
+        _stub(manager, block_size, hash_block_size),
+        make_request("A", prompt_a, hash_block_size, sha256),
+    )
+
+    tokens_after_a = [-1] * 500
+    hit = _sibling_hit(manager, len(prompt_a), tokens_after_a, hash_block_size)
+    assert hit == hit_after_mtp_block_drop
+
+
 # --------------------------------------------------------------------------
 # Invariants the two clauses have to keep
 

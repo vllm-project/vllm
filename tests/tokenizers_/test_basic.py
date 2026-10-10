@@ -23,7 +23,7 @@ def _assert_tokenizer_like(tokenizer: object):
 
 
 def test_tokenizer_like_protocol():
-    tokenizer = get_tokenizer("openai-community/gpt2", use_fast=True)
+    tokenizer = get_tokenizer("openai-community/gpt2")
     assert isinstance(tokenizer, TokenizersBackend)
     _assert_tokenizer_like(tokenizer)
 

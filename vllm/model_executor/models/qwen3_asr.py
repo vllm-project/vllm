@@ -39,6 +39,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     StreamingTranscriptionPostProcessor,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -189,7 +190,6 @@ class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Qwen3ASRProcessor:
         processor = self.ctx.get_hf_processor(
             Qwen3ASRProcessor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
         if not hasattr(processor, "audio_token"):
@@ -275,7 +275,7 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen3ASRMultiModalProcessor(
-    Qwen3OmniMoeThinkerMultiModalProcessor,
+    Qwen3OmniMoeThinkerMultiModalProcessor[Qwen3ASRProcessingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -317,6 +317,7 @@ class Qwen3ASRMultiModalProcessor(
             if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
+                assert audio is not None
                 raise ValueError(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model"
@@ -345,6 +346,7 @@ class Qwen3ASRForConditionalGeneration(
     SupportsMRoPE,
     SupportsTranscription,
     SupportsLoRA,
+    SupportsEagle3,
 ):
     # LoRA support
     packed_modules_mapping = {

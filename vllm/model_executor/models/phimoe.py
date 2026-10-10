@@ -29,7 +29,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -62,7 +62,7 @@ from .utils import (
 )
 
 
-class PhiMoEConfig(PretrainedConfig):
+class PhiMoEConfig(PreTrainedConfig):
     model_type = "phimoe"
     keys_to_ignore_at_inference = ["past_key_values"]
 

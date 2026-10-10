@@ -23,7 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
+from transformers import BaseImageProcessor, BatchFeature, PreTrainedConfig
 from transformers.activations import GELUActivation
 from transformers.image_utils import ChannelDimension
 from transformers.modeling_outputs import (
@@ -318,8 +318,8 @@ class PaddleOCRVLMultiModalProcessor(
 class Projector(nn.Module):
     def __init__(
         self,
-        text_config: PretrainedConfig,
-        vision_config: PretrainedConfig,
+        text_config: PreTrainedConfig,
+        vision_config: PreTrainedConfig,
         prefix: str = "",
     ):
         super().__init__()
@@ -392,7 +392,7 @@ class PaddleOCRImagePixelInputs(TensorSchema):
 
 
 class SiglipVisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -682,7 +682,7 @@ class SigLIPRotaryEmbedding(nn.Module):
 class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -735,7 +735,7 @@ class SiglipEncoderLayer(nn.Module):
 class SiglipEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -837,7 +837,7 @@ class SiglipEncoder(nn.Module):
 class SiglipVisionTransformer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):

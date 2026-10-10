@@ -4,6 +4,7 @@
 
 import json
 import os
+import sys
 from argparse import BooleanOptionalAction
 
 import pytest
@@ -250,6 +251,28 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
     assert "--optimization-level" in caplog_vllm.text
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13), reason="argparse handles deprecated natively"
+)
+def test_deprecated_arg_scoped_to_subcommand(caplog_vllm, disable_log_dedup):
+    """A deprecated arg of one subcommand must not warn for a sibling
+    subcommand that defines a non-deprecated arg with the same dest."""
+    parser = FlexibleArgumentParser()
+    subparsers = parser.add_subparsers(dest="subcommand")
+    run_batch = subparsers.add_parser("run-batch")
+    run_batch.add_argument_group("Frontend").add_argument(
+        "--url", default="0.0.0.0", deprecated=True
+    )
+    chat = subparsers.add_parser("chat")
+    chat.add_argument("--url", default="http://localhost:8000/v1")
+
+    parser.parse_args(["chat", "--url", "http://localhost:9000/v1"])
+    assert "is deprecated" not in caplog_vllm.text
+
+    parser.parse_args(["run-batch", "--url", "1.2.3.4"])
+    assert caplog_vllm.text.count("argument 'url' is deprecated") == 1
 
 
 def test_model_specification(

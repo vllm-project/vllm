@@ -25,7 +25,7 @@ from typing import Literal
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -122,7 +122,7 @@ class HrmTextAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_idx_in_stack: int,
         stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
@@ -245,7 +245,7 @@ class HrmTextAttention(nn.Module):
 class HrmTextDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         layer_idx_in_stack: int,
         stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
@@ -310,7 +310,7 @@ class HrmTextStack(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,

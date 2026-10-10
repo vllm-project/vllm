@@ -13,7 +13,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -47,7 +47,7 @@ NORM2FN = {
 
 
 class InternVisionEmbeddings(nn.Module):
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: PreTrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -119,7 +119,7 @@ class InternParallelAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
@@ -222,7 +222,7 @@ class InternParallelAttention(nn.Module):
 class InternMLP(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -264,7 +264,7 @@ class InternMLP(nn.Module):
 class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
@@ -297,7 +297,7 @@ class InternVisionEncoderLayer(nn.Module):
 
     def _init_attn(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         num_dummy_heads: int,
@@ -324,7 +324,7 @@ class InternVisionEncoderLayer(nn.Module):
 class InternVisionEncoder(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
@@ -369,7 +369,7 @@ class InternVisionModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,

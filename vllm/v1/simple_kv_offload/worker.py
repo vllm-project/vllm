@@ -67,7 +67,6 @@ class SimpleCPUOffloadWorker:
 
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
-        self._store_submitted = False
 
         # Compute-done event recorded before each store; reused across steps
         # (get_finished runs once per step, copy queue is FIFO).
@@ -246,15 +245,12 @@ class SimpleCPUOffloadWorker:
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata
-        self._store_submitted = False
         if metadata.load_event >= 0:
             self._pending_load_event_indices.add(metadata.load_event)
         if metadata.store_event >= 0:
             self._pending_store_event_indices.add(metadata.store_event)
 
     def clear_connector_metadata(self) -> None:
-        # No-forward steps skip the normal wait_for_save hook.
-        self.wait_for_save()
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
@@ -283,11 +279,7 @@ class SimpleCPUOffloadWorker:
         #45704 for the bug and #39306 for the srcAccessOrder rationale.
         """
         metadata = self._connector_metadata
-        if (
-            metadata is not None
-            and metadata.store_gpu_blocks
-            and not self._store_submitted
-        ):
+        if metadata is not None and metadata.store_gpu_blocks:
             backend = self._backend
             assert backend is not None
             if self._store_compute_done is None:
@@ -301,7 +293,6 @@ class SimpleCPUOffloadWorker:
                 events_list=self._store_events,
                 wait_event=self._store_compute_done,
             )
-            self._store_submitted = True
 
     def get_finished(
         self, finished_req_ids: set[str]

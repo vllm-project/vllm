@@ -286,11 +286,14 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
 
         def get_replacement_qwen2_audio(item_idx: int):
             if "audio_num_tokens" in out_mm_data:
-                num_features = int(out_mm_data["audio_num_tokens"][item_idx])
+                audio_num_tokens = out_mm_data["audio_num_tokens"]
+                assert isinstance(audio_num_tokens, torch.Tensor)
+                num_features = int(audio_num_tokens[item_idx])
             elif audio_output_lengths:
                 num_features = audio_output_lengths[item_idx]
             else:
                 audio_embeds = out_mm_data["audio_embeds"][item_idx]
+                assert isinstance(audio_embeds, torch.Tensor)
                 assert len(audio_embeds.shape) == 2, "audio_embeds must be a 2D tensor"
                 num_features = audio_embeds.shape[0]
 

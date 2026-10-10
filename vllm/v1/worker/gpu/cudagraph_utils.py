@@ -19,10 +19,13 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.cudagraph_pool import (
+    capture_outside_cumem_pool,
+    capture_pool,
+)
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -40,7 +43,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
@@ -69,7 +72,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     # Upper bound on per-request query length. Varlen decode graphs leave
-    # uniform_token_count unset, so this is what keeps a prefill batch out of one.
+    # uniform_token_count unset, so this is what keeps a prefill batch out of one:
+    # the runner passes None for any batch with a prefill.
     max_query_len: int | None = None
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
@@ -160,7 +164,6 @@ class CudaGraphManager:
         # DBO supports FULL CUDA graphs only.
         self.ubatch_runner = ubatch_runner
 
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
@@ -269,6 +272,7 @@ class CudaGraphManager:
         if (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
+            and self.decode_query_len > self.vllm_config.num_speculative_tokens
         ):
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens
             # _per_step. Recover num_new_sampled_tokens_per_step
@@ -384,6 +388,23 @@ class CudaGraphManager:
                         self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
 
+    @property
+    def dp_size(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on scale.
+        return self.vllm_config.parallel_config.data_parallel_size
+
+    def release_graphs(self) -> None:
+        """Drop the captured graphs so a later capture() can refill them.
+
+        Elastic EP reallocates the MoE workspace when it grows, which leaves
+        every captured graph holding a stale data pointer. `_capture_descs` is
+        kept, so `needs_capture()` still reports the work to redo.
+        """
+        self.graphs.clear()
+        self._graphs_captured = False
+        if self.breakable_cg_runner is not None:
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
 
@@ -464,15 +485,14 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
-                        if self.pool is not None:
-                            set_graph_pool_id(self.pool)
-                        else:
-                            set_graph_pool_id(current_platform.graph_pool_handle())
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
-                        with torch.cuda.graph(
-                            graph, self.pool, stream=self._capture_stream(desc)
+                        with (
+                            capture_pool(self.pool, self.vllm_config) as pool,
+                            torch.cuda.graph(
+                                graph, pool, stream=self._capture_stream(desc)
+                            ),
                         ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -643,8 +663,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self.intermediate_tensors[k][:num_tokens] = v
 
         def create_forward_fn(
-            desc: BatchExecutionDescriptor,
-            warmup: bool,
+            desc: BatchExecutionDescriptor, warmup: bool
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
@@ -705,7 +724,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
-                max_query_len=desc.max_query_len,
+                max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
             )
 
@@ -776,6 +795,10 @@ def prepare_inputs_to_capture(
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
+    if full_cudagraph and max_query_len is None:
+        # Mixed graphs can replay a single prefill spanning the entire batch,
+        # even when the dummy batch distributes one token to each request.
+        max_query_len = num_tokens
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
@@ -789,15 +812,16 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
-        input_buffers.dcp_local_seq_lens,
-        input_batch.seq_lens,
-        input_batch.num_reqs,
-        block_tables.cp_size,
-        block_tables.cp_rank,
-        block_tables.cp_interleave,
-        num_reqs_padded=input_batch.num_reqs_after_padding,
-    )
+    if block_tables.cp_size > 1:
+        input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            input_batch.num_reqs,
+            block_tables.cp_size,
+            block_tables.cp_rank,
+            block_tables.cp_interleave,
+            num_reqs_padded=input_batch.num_reqs_after_padding,
+        )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention
     # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
@@ -920,7 +944,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
-            measured = int(runner.capture_model(profile_only=True))
+            with capture_outside_cumem_pool():
+                measured = int(runner.capture_model(profile_only=True))
 
             # The measured delta covers PIECEWISE, encoder and speculator graphs
             # plus the sampled FULL graphs; swap the sampled FULL cost for the

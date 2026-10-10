@@ -28,7 +28,7 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
 from vllm.envs import enable_envs_cache
-from vllm.logger import init_logger
+from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.cache import (
@@ -53,6 +53,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
+    resolve_cache_hit_alignment_tokens,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
 )
@@ -219,10 +220,7 @@ class EngineCore:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.is_ec_consumer = (
-            vllm_config.ec_transfer_config is None
-            or vllm_config.ec_transfer_config.is_ec_consumer
-        )
+        self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
@@ -337,8 +335,8 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
-            # Exclude groups that opt out of prefix caching (e.g. GLM-5.3-Flash
-            # kpool tail, a 1-block/req scratch buffer with block_size=kpool):
+            # Exclude groups that opt out of prefix caching (e.g. a circular
+            # buffer, a 1-block/req scratch buffer with a small ring block):
             # their small block_size would otherwise drag the global block_size
             # below the real allocator block size and desync it from mamba.
             participating = [
@@ -354,6 +352,22 @@ class EngineCore:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()
+
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            scheduler_kv_cache_config, vllm_config
+        )
+        cache_hit_alignment_tokens = resolve_cache_hit_alignment_tokens(
+            scheduler_kv_cache_config,
+            vllm_config,
+            scheduler_block_size,
+            hash_block_size,
+        )
+        # The scheduler's config is a deep copy taken before these are resolved,
+        # so set them there too: the KV connector's scheduler side reads the same
+        # fields as its workers.
+        for kv_cache_config in (*kv_cache_configs, scheduler_kv_cache_config):
+            kv_cache_config.hash_block_size = hash_block_size
+            kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
@@ -702,7 +716,7 @@ class EngineCore:
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
-            if self.is_ec_consumer:
+            if not self.is_mm_encoder_only:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if self.is_pooling_model or not model_executed:
@@ -813,8 +827,19 @@ class EngineCore:
         cleanup_dist_env_and_memory()
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        self.model_executor.profile(is_start, profile_prefix)
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        self.model_executor.profile(
+            is_start,
+            profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -1007,6 +1032,9 @@ class EngineCore:
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
+
+    def compute_weight_checksums(self) -> list[dict[str, str]]:
+        return self.collective_rpc("compute_weight_checksums")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -1350,6 +1378,10 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+        vllm_config: VllmConfig = kwargs["vllm_config"]
+        if logging_config := getattr(vllm_config, "logging_config", None):
+            configure_logging(logging_config)
+
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
@@ -1357,7 +1389,6 @@ class EngineCoreProc(EngineCore):
         signal_callback: SignalCallback | None = None
         clean_shutdown = False
         try:
-            vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
@@ -1382,6 +1413,50 @@ class EngineCoreProc(EngineCore):
                     vllm_config.kv_transfer_config.engine_id,
                 )
 
+            # declare engine core as None and register signal handler before
+            # engine_core initialization in case engine core process is terminated
+            # in the middle of initialization. For example, frontend process exits
+            # unexpectedly, if signal handler is not registered, engine core process
+            # will use default signal handler which will terminate the process
+            # silently. If engine core model executor has been initialized, it will
+            # not be terminated asap. Register signal handler early and only log a
+            # message will make engine core process alive. engine core process and
+            # its subprocesses(model executor processes) will be force killed in
+            # CoreEngineProcManager.shutdown.
+            engine_core = None
+            # A termination signal can arrive while engine_core is still being
+            # constructed. At that point the request cannot be recorded on
+            # engine_core, so keep it in its own flag and apply it later.
+            shutdown_requested = False
+
+            def wakeup_engine():
+                # Wakes up idle engine via input_queue when shutdown is requested
+                # Not safe in a signal handler - we may interrupt the main thread
+                # while it is holding the non-reentrant input_queue.mutex
+                assert engine_core is not None
+                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+
+            def signal_handler(signum, frame):
+                nonlocal shutdown_requested
+                signal_name = signal.Signals(signum).name
+                logger.info(
+                    "[shutdown] EngineCore: trigger received signal=%s",
+                    signal_name,
+                )
+                # Record the request first so it survives the construction window.
+                shutdown_requested = True
+                if engine_core is not None:
+                    engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                # signal_callback is armed only after engine_core exists. Don't
+                # trigger it earlier: it is one-shot, and a wakeup cannot be
+                # delivered while there is no input_queue to wake.
+                # For more info: https://github.com/vllm-project/vllm/pull/52299#pullrequestreview-5370255271
+                if signal_callback is not None:
+                    signal_callback.trigger()
+
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
@@ -1396,25 +1471,15 @@ class EngineCoreProc(EngineCore):
 
             assert engine_core is not None
 
-            def wakeup_engine():
-                # Wakes up idle engine via input_queue when shutdown is requested
-                # Not safe in a signal handler - we may interrupt the main thread
-                # while it is holding the non-reentrant input_queue.mutex
-                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
-
-            signal_callback = SignalCallback(wakeup_engine)
-
-            def signal_handler(signum, frame):
-                signal_name = signal.Signals(signum).name
-                logger.info(
-                    "[shutdown] EngineCore: trigger received signal=%s",
-                    signal_name,
-                )
+            # Apply a signal received during construction before entering the
+            # loop. run_busy_loop calls _handle_shutdown first, so the loop exits
+            # right away instead of blocking on an idle input_queue.
+            if shutdown_requested:
                 engine_core.shutdown_state = EngineShutdownState.REQUESTED
-                signal_callback.trigger()
 
-            signal.signal(signal.SIGTERM, signal_handler)
-            signal.signal(signal.SIGINT, signal_handler)
+            # Arm the wakeup callback only now that input_queue exists, so a
+            # later signal can still wake an idle busy loop.
+            signal_callback = SignalCallback(wakeup_engine)
 
             engine_core.run_busy_loop()
 
@@ -2473,6 +2538,9 @@ class EngineCoreActorMixin:
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
+        if logging_config := getattr(vllm_config, "logging_config", None):
+            configure_logging(logging_config)
+
         # Initialize tracer for distributed tracing if configured.
         maybe_init_worker_tracer(
             instrumenting_module_name="vllm.engine_core",

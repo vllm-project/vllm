@@ -8,6 +8,7 @@ import pytest
 
 import vllm.entrypoints.launchers.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -27,7 +28,7 @@ assert CHATML_JINJA_PATH.exists()
 
 def _build_vllm_parsers():
     vllm_parser = FlexibleArgumentParser()
-    subparsers = vllm_parser.add_subparsers()
+    subparsers = vllm_parser.add_subparsers(dest="subparser")
     serve_parser = subparsers.add_parser("serve")
     make_arg_parser(serve_parser)
     return {"vllm": vllm_parser, "vllm serve": serve_parser}
@@ -67,6 +68,27 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
         ]
     )
     assert args.port == 9000
+
+
+def test_logging_config_cli_args(serve_parser):
+    with pytest.warns(UserWarning, match="--log-config-file is deprecated"):
+        args = serve_parser.parse_args(
+            [
+                "--logging-config",
+                '{"log_level":"WARNING","pylogging_config_file":"/tmp/json.json"}',
+                "--logging-config.formatter",
+                "json",
+                "--log-level",
+                "DEBUG",
+                "--log-config-file",
+                "/tmp/flat.json",
+            ]
+        )
+
+    config = AsyncEngineArgs.from_cli_args(args).create_logging_config()
+    assert config.log_level == "DEBUG"
+    assert config.formatter == "json"
+    assert config.pylogging_config_file == "/tmp/flat.json"
 
 
 ### Tests for LoRA module parsing
@@ -151,7 +173,76 @@ def test_multiple_valid_inputs(serve_parser):
 
 
 ### Tests for serve argument validation that run prior to loading
-def test_enable_auto_choice_passes_without_tool_call_parser(serve_parser):
+@pytest.mark.parametrize(
+    "port, extra_args",
+    [
+        (50051, []),
+        (0, ["--port", "0"]),
+        (50051, ["--port", "50051", "--uds", "/tmp/vllm.sock"]),
+    ],
+)
+def test_rust_grpc_port_accepts_frontend_launch(
+    vllm_parser, monkeypatch, port, extra_args
+):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    args = vllm_parser.parse_args(
+        [
+            "serve",
+            "--grpc-port",
+            str(port),
+            "--data-parallel-size",
+            "8",
+            "--data-parallel-size-local",
+            "4",
+            "--data-parallel-start-rank",
+            "4",
+            "--data-parallel-hybrid-lb",
+            *extra_args,
+        ]
+    )
+    validate_parsed_serve_args(args)
+    assert args.grpc_port == port
+
+
+@pytest.mark.parametrize(
+    "rust_enabled, extra_args, port",
+    [
+        (False, [], 50051),
+        (False, ["--grpc"], 50051),
+        (True, ["--grpc"], 50051),
+        (True, ["--headless"], 50051),
+        (True, ["--api-server-count", "0"], 50051),
+        (True, ["--api-server-count", "-1"], 50051),
+        (True, ["--data-parallel-multi-port-external-lb"], 50051),
+        (True, ["--port", "50051"], 50051),
+        (True, [], -1),
+        (True, [], 65536),
+    ],
+)
+def test_rust_grpc_port_rejects_incompatible_launch(
+    vllm_parser, monkeypatch, rust_enabled, extra_args, port
+):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1" if rust_enabled else "0")
+    args = vllm_parser.parse_args(["serve", "--grpc-port", str(port), *extra_args])
+    error = (
+        "--grpc and --grpc-port are mutually exclusive"
+        if "--grpc" in extra_args
+        else "--grpc-port"
+    )
+    with pytest.raises(ValueError, match=error):
+        validate_parsed_serve_args(args)
+
+
+def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
+    """Direct Python render/API entrypoints must reject a Rust-only listener."""
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    parser = make_arg_parser(FlexibleArgumentParser())
+    args = parser.parse_args(["--grpc-port", "50051"])
+    with pytest.raises(ValueError, match="--grpc-port requires"):
+        validate_parsed_serve_args(args)
+
+
+def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):
     """Ensure validation fails if tool choice is enabled with no call parser."""
     # If we enable-auto-tool-choice, explode with no tool-call-parser
     args = serve_parser.parse_args(args=["--enable-auto-tool-choice"])
@@ -171,17 +262,23 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     validate_parsed_serve_args(args)
 
 
-def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
-    """Ensure validation fails if reasoning is enabled with auto tool choice."""
+def test_auto_tool_choice_with_reasoning_parser_passes(serve_parser):
+    """Auto tool choice combined with a reasoning parser is supported.
+
+    See docs/features/tool_calling.md, which documents using
+    ``--tool-call-parser`` together with ``--reasoning-parser``. This
+    combination must pass validation as long as a tool call parser is set.
+    """
     args = serve_parser.parse_args(
         args=[
             "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "mistral",
             "--reasoning-parser",
             "deepseek_r1",
         ]
     )
-    with pytest.raises(TypeError):
-        validate_parsed_serve_args(args)
+    validate_parsed_serve_args(args)
 
 
 def test_passes_with_reasoning_parser(serve_parser):
@@ -243,13 +340,21 @@ def launch_render_parser():
     return _build_launch_render_parser()
 
 
-def test_launch_render_validates_serve_args(launch_render_parser):
+@pytest.mark.parametrize(
+    "cli_args, error",
+    [
+        (["--enable-auto-tool-choice"], TypeError),
+        (["--grpc-port", "50051"], ValueError),
+    ],
+)
+def test_launch_render_validates_serve_args(
+    launch_render_parser, monkeypatch, cli_args, error
+):
     """`vllm launch render` reuses the serve parser, so it gets the serve checks"""
-    args = launch_render_parser.parse_args(
-        args=["launch", "render", "--enable-auto-tool-choice"]
-    )
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    args = launch_render_parser.parse_args(args=["launch", "render", *cli_args])
     assert args.subparser == "launch"
-    with pytest.raises(TypeError):
+    with pytest.raises(error):
         validate_parsed_serve_args(args)
 
 

@@ -40,7 +40,7 @@ _SPECULATORS_CONFIG_DICT = {
 def _patched_get_config_dict(config_dict):
     """Return a patch context that bypasses HF Hub for get_config_dict."""
     return patch(
-        "vllm.transformers_utils.config.PretrainedConfig.get_config_dict",
+        "vllm.transformers_utils.config.PreTrainedConfig.get_config_dict",
         return_value=(config_dict, {}),
     )
 

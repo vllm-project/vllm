@@ -17,7 +17,7 @@ from einops import rearrange
 from transformers import (
     BartConfig,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
 )
 
 from vllm.config import CacheConfig, VllmConfig
@@ -440,7 +440,7 @@ class RadioWithNeck(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -480,7 +480,7 @@ class RadioWithNeck(nn.Module):
 
     def get_vit_model_from_radio_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> RadioModel:
         hf_config_vision = hf_config.encoder
@@ -568,6 +568,15 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.lm_head = ParallelLMHead(
             config.decoder.vocab_size, config.decoder.d_model, quant_config=quant_config
         )
+        # Some checkpoints (e.g. compact exports) tie the output head to the
+        # decoder's input embeddings instead of materializing a separate
+        # lm_head.weight tensor.
+        tie_word_embeddings = bool(
+            getattr(config, "tie_word_embeddings", False)
+            or getattr(config.decoder, "tie_word_embeddings", False)
+        )
+        if tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.decoder.embed_tokens)
         self.logits_processor = LogitsProcessor(
             self.vocab_size, config.decoder.vocab_size
         )

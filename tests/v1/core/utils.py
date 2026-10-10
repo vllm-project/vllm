@@ -18,6 +18,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.model import RunnerOption
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -58,7 +59,9 @@ def create_scheduler(
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
+    long_prefill_token_threshold_adaptive: bool = False,
     disable_chunked_mm_input: bool = False,
+    mm_encoder_only: bool = False,
     use_kv_connector: None | bool | str | MockKVConfig = None,
     kv_role: str = "kv_both",
     num_blocks: int = 10000,
@@ -76,6 +79,7 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
@@ -90,6 +94,9 @@ def create_scheduler(
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
                              (False)
+      long_prefill_token_threshold: cap on prefill chunk size
+      long_prefill_token_threshold_adaptive: floor the cap at a
+                             fair share of the token budget
 
     Returns:
       {class}`Scheduler` instance
@@ -104,7 +111,10 @@ def create_scheduler(
         # The scheduler reads model_config.max_model_len, not the
         # SchedulerConfig one, so both must agree.
         max_model_len=max_model_len,
+        runner=runner,
     )
+    if mm_encoder_only:
+        model_config.multimodal_config.mm_encoder_only = True
     if use_ec_connector and ec_role == "ec_producer":
         model_config.multimodal_config = MultiModalConfig()
     if max_model_len is None:
@@ -115,6 +125,7 @@ def create_scheduler(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
+        long_prefill_token_threshold_adaptive=(long_prefill_token_threshold_adaptive),
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
