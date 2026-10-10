@@ -24,6 +24,14 @@ from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 DEVICE_TYPE = current_platform.device_type
+HAS_DEVICE_GRAPH = current_platform.is_cuda() or current_platform.is_xpu()
+
+if current_platform.is_xpu():
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    # Route torch.cuda graph/stream APIs to torch.xpu, as XPUModelRunner does.
+    with _torch_cuda_wrapper():
+        pass
 
 
 # Helper MLP for testing
@@ -50,6 +58,7 @@ def _create_vllm_config(
     mock_config.parallel_config = ParallelConfig()
     mock_config.speculative_config = None  # No speculative decoding
     mock_config.num_speculative_tokens = 0
+    mock_config.use_cumem_cudagraph_pool = False
     if not lora_config:
         mock_config.lora_config = None
     else:
@@ -268,7 +277,7 @@ class TestCudagraphDispatcher:
         assert dispatcher.get_capture_descs() == []
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA or XPU graph")
 class TestCUDAGraphWrapper:
     def setup_method(self):
         self.vllm_config = _create_vllm_config(CompilationConfig())
@@ -415,7 +424,7 @@ def _run_and_monitor_call(
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA or XPU graph")
 def test_capture_replay_bypass_logic():
     comp_config = CompilationConfig(
         mode=CompilationMode.VLLM_COMPILE,
@@ -484,7 +493,7 @@ def test_capture_replay_bypass_logic():
 
 
 @create_new_process_for_each_test("spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA or XPU graph")
 def test_nested_wrappers():
     """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
     comp_config = CompilationConfig(
