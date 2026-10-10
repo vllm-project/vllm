@@ -2437,6 +2437,24 @@ class NixlBaseConnectorWorker:
                 "Hybrid MLA+Mamba NIXL transfers require matching DCP sizes, "
                 f"got local={self.dcp_size}, remote={remote_dcp_size}."
             )
+        # Mismatched DCP sizes hand out whole blocks by global position, which
+        # requires each local block to hold contiguous tokens.
+        interleave = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+        local_block_size = min(
+            g.kv_cache_spec.block_size for g in self.kv_cache_config.kv_cache_groups
+        )
+        if (
+            self.dcp_size > 1
+            and self.dcp_size != remote_dcp_size
+            and interleave != local_block_size
+        ):
+            raise RuntimeError(
+                "NIXL transfers between different DCP sizes "
+                f"(local={self.dcp_size}, remote={remote_dcp_size}) require "
+                f"cp_kv_cache_interleave_size == block_size ({local_block_size}), "
+                f"got {interleave}. Omit --cp-kv-cache-interleave-size to let "
+                "NIXL select it, or use matching DCP sizes."
+            )
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(

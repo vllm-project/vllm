@@ -1512,6 +1512,51 @@ class TestNixlHandshake:
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
+    @pytest.mark.parametrize("interleave", [1, 16])
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_asymmetric_dcp_requires_block_interleave(
+        self, default_vllm_config, dist_init, interleave
+    ):
+        """Mismatched DCP sizes move whole blocks by global position, which
+        scrambles KV unless the local interleave equals the block size."""
+        vllm_config = create_vllm_config()
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = interleave
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id, hand_shake_latency=0
+        )
+        worker = connector.connector_worker
+        worker.dcp_size = 2
+        worker.slot_size_per_layer = [4096]
+        worker.block_len_per_layer = [4096 * worker.block_size]
+        worker.num_blocks = 1
+        worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+        meta = NixlAgentMetadata(
+            engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+            kv_caches_base_addr=[0],
+            device_id=0,
+            num_blocks=1,
+            block_lens=worker.block_len_per_layer,
+            block_strides=worker.block_len_per_layer,
+            kv_cache_layout=worker.kv_cache_layout,
+            block_size=worker.block_size,
+            ssm_sizes=(0, 0),
+            attn_backend_name=worker.backend_name,
+            physical_blocks_per_logical_kv_block=1,
+        )
+
+        if interleave == worker.block_size:
+            worker.add_remote_agent(meta, remote_tp_size=1, remote_dcp_size=1)
+        else:
+            with pytest.raises(RuntimeError, match="cp_kv_cache_interleave_size"):
+                worker.add_remote_agent(meta, remote_tp_size=1, remote_dcp_size=1)
+
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
