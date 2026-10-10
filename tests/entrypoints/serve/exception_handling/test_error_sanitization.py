@@ -135,3 +135,21 @@ class TestAffectedModulesUseSanitize:
         source = Path(spec.origin).read_text()
         assert "sanitize_message" in source, f"{module} does not call sanitize_message"
         assert "import" in source and "sanitize_message" in source
+
+
+def test_engine_dead_error_response_hides_log_oriented_message():
+    """Clients get a generic message with no reference to server internals."""
+    from vllm.entrypoints.serve.exception_handling.error_response import (
+        create_error_response,
+    )
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    exc = EngineDeadError()
+    err = create_error_response(exc)
+
+    assert err.error.code == 500
+    assert err.error.type == "InternalServerError"
+    assert err.error.message == EngineDeadError.CLIENT_MESSAGE
+    assert "stack trace" not in err.error.message
+    assert "log" not in err.error.message
+    assert "stack trace (above)" in str(exc)
