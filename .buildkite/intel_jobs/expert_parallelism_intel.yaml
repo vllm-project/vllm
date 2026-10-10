@@ -17,12 +17,26 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
+  - .buildkite/intel_jobs/expert_parallelism_intel.yaml
   - vllm/distributed/eplb
+  - vllm/distributed/device_communicators/xpu_communicator.py
+  - vllm/distributed/elastic_ep/elastic_execute.py
+  - vllm/distributed/stateless_coordinator.py
+  - vllm/platforms/xpu.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/core_client.py
+  - vllm/v1/engine/utils.py
+  - tests/distributed/test_comm_ops.py
+  - tests/distributed/test_eplb_execute.py
   - tests/distributed/test_eplb_algo.py
   - tests/distributed/test_eplb_utils.py
+  - tests/v1/engine/test_startup_watch_processes.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s distributed/test_eplb_algo.py &&
-      pytest -v -s distributed/test_eplb_utils.py'
+      pytest -v -s distributed/test_eplb_utils.py &&
+      pytest -v -s distributed/test_comm_ops.py -k "xpu_" &&
+      pytest -v -s distributed/test_eplb_execute.py -k "xpu or stateless_gloo or stateless_xccl" &&
+      pytest -v -s v1/engine/test_startup_watch_processes.py -k "elastic_mp or ordinary_mp_monitor or elastic_ep_scaling_backend_gate"'

@@ -9,7 +9,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -1129,6 +1129,7 @@ class EngineCoreProc(EngineCore):
         log_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
+        addresses: EngineZmqAddresses | None = None,
         *,
         engine_index: int = 0,
     ):
@@ -1149,13 +1150,18 @@ class EngineCoreProc(EngineCore):
             self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
             logger.info("Using tensor IPC queue for multimodal tensor sharing")
 
-        with self._perform_handshakes(
-            handshake_address,
-            identity,
-            local_client,
-            vllm_config,
-            client_handshake_address,
-        ) as addresses:
+        handshake = (
+            nullcontext(addresses)
+            if addresses is not None
+            else self._perform_handshakes(
+                handshake_address,
+                identity,
+                local_client,
+                vllm_config,
+                client_handshake_address,
+            )
+        )
+        with handshake as addresses:
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
             self.frontend_stats_publish_address = (
@@ -2141,6 +2147,7 @@ class DPEngineCoreProc(EngineCoreProc):
         log_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
+        addresses: EngineZmqAddresses | None = None,
     ):
         assert vllm_config.model_config.is_moe, (
             "DPEngineCoreProc should only be used for MoE models"
@@ -2178,6 +2185,7 @@ class DPEngineCoreProc(EngineCoreProc):
             client_handshake_address,
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
+            addresses=addresses,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):

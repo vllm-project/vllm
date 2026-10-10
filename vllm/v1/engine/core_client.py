@@ -1745,14 +1745,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             cache.num_new_core_engines
         ):
             engine_manager = self.resources.engine_manager
-            assert isinstance(engine_manager, CoreEngineActorManager)
+            assert isinstance(
+                engine_manager, (CoreEngineActorManager, CoreEngineProcManager)
+            )
             assert cache.num_new_core_engines < 0
             old_dp_size = len(cache.existing_core_engines)
             new_dp_size = old_dp_size + cache.num_new_core_engines
             engine_manager.scale_down_elastic_ep(old_dp_size, new_dp_size)
-            self.vllm_config.parallel_config.data_parallel_size_local = len(
-                engine_manager.local_engine_actors
-            )
+            if isinstance(engine_manager, CoreEngineActorManager):
+                local_count = len(engine_manager.local_engine_actors)
+            else:
+                local_count = len(engine_manager._active_processes)
+            self.vllm_config.parallel_config.data_parallel_size_local = local_count
             self.eep_scaling_cache = None
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -1800,10 +1804,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 return
             raise RuntimeError("Elastic EP scaling is already prepared")
         cur_data_parallel_size = len(self.core_engines)
-        assert self.vllm_config.parallel_config.data_parallel_backend == "ray", (
-            "Only ray DP backend supports scaling elastic EP"
-        )
+        from vllm.platforms import current_platform
+
         parallel_config = self.vllm_config.parallel_config
+        assert parallel_config.data_parallel_backend == "ray" or (
+            parallel_config.data_parallel_backend == "mp"
+            and parallel_config.enable_elastic_ep
+            and current_platform.is_xpu()
+        ), "Only ray and XPU mp DP backends support scaling elastic EP"
         if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
             raise ValueError(
                 f"Cannot scale to data_parallel_size {new_data_parallel_size}; "
@@ -1920,7 +1928,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             reconfig_futures.append(asyncio.create_task(coro))
 
         # Phase 2: Create new engines
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        assert isinstance(
+            self.resources.engine_manager,
+            (CoreEngineActorManager, CoreEngineProcManager),
+        )
         start_new_worker_future = asyncio.to_thread(
             self.resources.engine_manager.scale_up_elastic_ep,
             self.vllm_config,
@@ -1985,6 +1996,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             parallel_config.data_parallel_size_local = len(
                 self.resources.engine_manager.local_engine_actors
             )
+        elif isinstance(self.resources.engine_manager, CoreEngineProcManager):
+            parallel_config.data_parallel_size_local = len(
+                self.resources.engine_manager._active_processes
+            )
         # Notify coordinator about scale up through existing
         # stats_update_task connection
         self._ensure_stats_update_task()
@@ -2040,8 +2055,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             for mode, engine in zip(pause_modes, old_core_engines)
         ]
         await asyncio.gather(*pause_futures)
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
-        self.resources.engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
+        engine_manager = self.resources.engine_manager
+        assert isinstance(
+            engine_manager, (CoreEngineActorManager, CoreEngineProcManager)
+        )
+        if isinstance(engine_manager, CoreEngineActorManager):
+            engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
         wait_future = self._eep_wait_for_setup_switch_complete()
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(old_core_engines):

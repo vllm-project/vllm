@@ -5,8 +5,11 @@
 Run `pytest tests/distributed/test_comm_ops.py`.
 """
 
+import socket
 from collections import deque
 from collections.abc import Callable
+from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -21,9 +24,17 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.distributed.device_communicators import flashinfer_all_reduce
+from vllm.distributed.device_communicators import (
+    flashinfer_all_reduce,
+    xpu_communicator,
+)
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.xpu_communicator import XpuCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.distributed.utils import (
+    stateless_destroy_torch_distributed_process_group,
+    stateless_init_torch_distributed_process_group,
+)
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -550,6 +561,91 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(communicator, "_can_use_aiter_ag_rs", Mock(return_value=True))
 
     assert communicator.all_gatherv(torch.empty(1)) is output
+
+
+@pytest.mark.parametrize(
+    ("backend", "elastic", "stateless", "expected"),
+    [
+        ("mp", True, True, True),
+        ("mp", True, False, False),
+        ("mp", False, True, False),
+        ("ray", True, True, False),
+    ],
+)
+def test_xpu_mp_elastic_ep_group_requires_config_and_stateless_group(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    elastic: bool,
+    stateless: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(
+        xpu_communicator.DeviceCommunicatorBase,
+        "__init__",
+        lambda self, *args, **kwargs: setattr(self, "use_all2all", False),
+    )
+    monkeypatch.setattr(
+        xpu_communicator,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_backend=backend, enable_elastic_ep=elastic
+            )
+        ),
+    )
+    communicator = XpuCommunicator(
+        cpu_group=object(), tcp_store_group=object() if stateless else None
+    )
+    assert communicator._mp_elastic_ep_group is expected
+
+
+def _xpu_stateless_collectives_worker(rank: int, port: int) -> None:
+    torch.xpu.set_device(rank)
+    group = stateless_init_torch_distributed_process_group(
+        host="127.0.0.1",
+        port=port,
+        rank=rank,
+        world_size=4,
+        backend="xccl",
+        group_name="test_xpu_stateless_collectives",
+        timeout=timedelta(seconds=60),
+    )
+    try:
+        device = torch.device(f"xpu:{rank}")
+        sizes = [1, 2, 3, 2]
+        communicator = XpuCommunicator.__new__(XpuCommunicator)
+        communicator.world_size = 4
+        communicator.rank_in_group = rank
+        communicator.device_group = group
+        communicator._mp_elastic_ep_group = True
+        torch.testing.assert_close(
+            communicator.all_gatherv(
+                torch.full((sizes[rank],), float(rank), device=device), sizes=sizes
+            ),
+            torch.arange(4, device=device, dtype=torch.float32).repeat_interleave(
+                torch.tensor(sizes, device=device)
+            ),
+        )
+        torch.testing.assert_close(
+            communicator.reduce_scatterv(
+                torch.full((sum(sizes),), float(rank + 1), device=device),
+                dim=0,
+                sizes=sizes,
+            ),
+            torch.full((sizes[rank],), 10.0, device=device),
+        )
+    finally:
+        stateless_destroy_torch_distributed_process_group(group)
+
+
+@pytest.mark.skipif(torch.xpu.device_count() < 4, reason="requires four XPUs")
+def test_xpu_four_rank_stateless_collectives() -> None:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    torch.multiprocessing.spawn(
+        _xpu_stateless_collectives_worker, args=(port,), nprocs=4
+    )
 
 
 def test_isend_object_posts_size_then_object_and_releases_on_wait(

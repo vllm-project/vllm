@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import copy
 import os
 import threading
 import weakref
@@ -251,8 +252,32 @@ class CoreEngineProcManager:
         log_stats: bool,
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
+        addresses: EngineZmqAddresses | None = None,
     ):
         self._request_shutdown_timeout = vllm_config.shutdown_timeout
+        parallel_config = vllm_config.parallel_config
+        self._mp_elastic_ep = (
+            current_platform.is_xpu()
+            and parallel_config.enable_elastic_ep
+            and parallel_config.data_parallel_backend == "mp"
+        )
+        self._executor_class = executor_class
+        self._log_stats = log_stats
+        self._handshake_address = handshake_address
+        self._addresses = addresses
+        self._tensor_queue = tensor_queue
+        self._active_processes: dict[int, BaseProcess] = {}
+        if self._mp_elastic_ep:
+            from vllm.distributed.utils import create_tcp_store
+
+            self._coord_store = create_tcp_store(
+                parallel_config.data_parallel_master_ip,
+                0,
+                is_master=True,
+                world_size=-1,
+                wait_for_workers=False,
+            )
+            parallel_config._coord_store_port = self._coord_store.port
         context = get_mp_context()
         common_kwargs = {
             "vllm_config": vllm_config,
@@ -286,6 +311,7 @@ class CoreEngineProcManager:
                     | {"dp_rank": global_index, "local_dp_rank": local_index},
                 )
             )
+            self._active_processes[global_index] = self.processes[-1]
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
@@ -349,21 +375,88 @@ class CoreEngineProcManager:
 
     def monitor_engine_liveness(self) -> None:
         """Monitor engine core process liveness."""
-        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
-        sentinels = set(sentinel_to_proc.keys())
+        if not self._mp_elastic_ep:
+            sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+            sentinels = set(sentinel_to_proc)
+            while sentinels and not self.manager_stopped.is_set():
+                died_sentinels = connection.wait(sentinels, timeout=1)
+                for sentinel in died_sentinels:
+                    proc = sentinel_to_proc.pop(cast(int, sentinel))
+                    if proc.exitcode != 0 and not self.manager_stopped.is_set():
+                        self.failed_proc_name = proc.name
+                if died_sentinels:
+                    break
+            self.shutdown()
+            return
 
-        while sentinels and not self.manager_stopped.is_set():
-            died_sentinels = connection.wait(sentinels, timeout=1)
-
-            for sentinel in died_sentinels:
-                proc = sentinel_to_proc.pop(cast(int, sentinel))
-                exitcode = proc.exitcode
-                if exitcode != 0 and not self.manager_stopped.is_set():
-                    self.failed_proc_name = proc.name
-            if died_sentinels:
+        while not self.manager_stopped.is_set():
+            active = list(self._active_processes.values())
+            if not active:
                 break
+            sentinel_to_proc = {proc.sentinel: proc for proc in active}
+            died_sentinels = connection.wait(list(sentinel_to_proc), timeout=1)
+            for sentinel in died_sentinels:
+                proc = sentinel_to_proc[cast(int, sentinel)]
+                if proc in self._active_processes.values():
+                    self.failed_proc_name = proc.name
+                    self.shutdown()
+                    return
 
         self.shutdown()
+
+    def scale_up_elastic_ep(
+        self,
+        cur_vllm_config: VllmConfig,
+        new_data_parallel_size: int,
+        num_redundant_experts: int,
+    ) -> None:
+        assert self._addresses is not None
+        parallel_config = cur_vllm_config.parallel_config
+        old_dp_size = parallel_config.data_parallel_size
+        if parallel_config.data_parallel_size_local != old_dp_size:
+            raise ValueError("MP elastic EP scaling requires all DP ranks on one node")
+        if (
+            new_data_parallel_size * parallel_config.world_size
+            > current_platform.device_count()
+        ):
+            raise ValueError("Not enough local devices for MP elastic EP scale-up")
+        for rank in range(old_dp_size, new_data_parallel_size):
+            config = copy.deepcopy(cur_vllm_config)
+            new_parallel_config = config.parallel_config
+            new_parallel_config.data_parallel_size = new_data_parallel_size
+            new_parallel_config.data_parallel_size_local = new_data_parallel_size
+            new_parallel_config.eplb_config.num_redundant_experts = (
+                num_redundant_experts
+            )
+            proc = get_mp_context().Process(
+                target=self._run_scale_up_engine,
+                name=f"EngineCore_DP{rank}",
+                kwargs={
+                    "vllm_config": config,
+                    "local_client": True,
+                    "handshake_address": self._handshake_address,
+                    "executor_class": self._executor_class,
+                    "log_stats": self._log_stats,
+                    "tensor_queue": self._tensor_queue,
+                    "addresses": self._addresses,
+                    "dp_rank": rank,
+                    "local_dp_rank": rank,
+                },
+            )
+            proc.start()
+            self.processes.append(proc)
+            self._active_processes[rank] = proc
+
+    @staticmethod
+    def _run_scale_up_engine(**kwargs) -> None:
+        os.environ["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "1"
+        from vllm.v1.engine.core import EngineCoreProc
+
+        EngineCoreProc.run_engine_core(**kwargs)
+
+    def scale_down_elastic_ep(self, old_dp_size: int, new_dp_size: int) -> None:
+        for rank in range(new_dp_size, old_dp_size):
+            self._active_processes.pop(rank)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -1340,6 +1433,7 @@ def launch_core_engines(
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
                 tensor_queue=tensor_queue,
+                addresses=addresses,
             )
         else:
             local_engine_manager = None
