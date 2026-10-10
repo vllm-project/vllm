@@ -198,32 +198,12 @@ The API server takes care of basic audio I/O and optional chunking before buildi
 - Chunking: If `SpeechToTextConfig.allow_audio_chunking` is True and the duration exceeds `max_audio_clip_s`, the server splits the audio into chunks and generates a prompt per chunk. There is no overlap between chunks, overlap_chunk_second controls the size of the search window used to find the split point.
 - Energy-aware splitting: When `min_energy_split_window_size` is set, the server finds low-energy regions to minimize cutting within words.
 
-Relevant server logic:
+The preprocessing implementation is in [SpeechToTextBaseServing](../../../vllm/entrypoints/speech_to_text/base/serving.py):
 
-??? code "_preprocess_speech_to_text()"
+1. `_decode_and_chunk_speech()` decodes the audio into a mono waveform at `SpeechToTextConfig.sample_rate`, then optionally calls `split_audio()`. Its asynchronous wrapper runs this CPU work in a separate thread pool and returns the audio chunks and duration in seconds.
+2. `_preprocess_speech_to_text()` builds a `SpeechToTextParams` object for each chunk and passes it to the model's `get_generation_prompt()`. It parses these prompts and renders them into engine inputs, returning `(engine_inputs, duration, chunk_start_offsets)`.
 
-    ```python
-    # vllm/entrypoints/openai/speech_to_text.py
-    async def _preprocess_speech_to_text(...):
-        language = self.model_cls.validate_language(request.language)
-        ...
-        y, sr = load_audio(bytes_, sr=self.asr_config.sample_rate)
-        duration = get_audio_duration(y=y, sr=sr)
-        do_split_audio = (self.asr_config.allow_audio_chunking
-                        and duration > self.asr_config.max_audio_clip_s)
-        chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
-        prompts = []
-        for chunk in chunks:
-            stt_params = request.build_stt_params(
-                audio=chunk,
-                stt_config=self.asr_config,
-                model_config=self.model_config,
-                task_type=self.task_type,
-            )
-            prompt = self.model_cls.get_generation_prompt(stt_params)
-            prompts.append(prompt)
-        return prompts, duration
-    ```
+`chunk_start_offsets` contains each chunk's start time in the audio, in seconds. The offsets are computed from the cumulative actual chunk lengths, rather than multiples of `max_audio_clip_s`. For example, chunks lasting 29.5, 29.7, and 5.0 seconds start at 0.0, 29.5, and 59.2 seconds. The server uses these offsets when assembling `verbose_json` segment timestamps.
 
 ## Exposing tasks automatically
 
