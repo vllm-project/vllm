@@ -2681,6 +2681,47 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
+@pytest.mark.parametrize("backends", [["UCX"], ["UCX", "LIBFABRIC"]])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_nixl_agent_serializes_calls(default_vllm_config, dist_init, backends):
+    """The handshake thread and the engine thread share one NIXL agent.
+
+    loadRemoteMD and remote prepXferDlist run on the handshake thread while
+    the engine thread posts, polls and releases transfers, sends
+    notifications and evicts remote agents. NIXL only guards its agent state
+    when the agent is created with a sync mode.
+    """
+    strict = object()
+    config_fn = MagicMock(return_value=MagicMock())
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
+            ".nixl_agent_config",
+            config_fn,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker"
+            ".nixl_thread_sync_t",
+            SimpleNamespace(NIXL_THREAD_SYNC_STRICT=strict),
+            create=True,
+        ),
+    ):
+        vllm_config = create_vllm_config(
+            kv_connector_extra_config={"backends": backends}
+        )
+        NixlConnectorWorker(
+            vllm_config,
+            vllm_config.kv_transfer_config.engine_id,
+            make_kv_cache_config(block_size=16),
+        )
+
+    config_fn.assert_called_once()
+    assert config_fn.call_args.kwargs.get("sync_mode") is strict
+
+
 # ── TTL-based remote engine eviction tests ──────────────────────────
 
 
