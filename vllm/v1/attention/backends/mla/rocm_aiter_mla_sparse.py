@@ -63,17 +63,16 @@ def _use_rocm_sparse_triton(
     num_decode_tokens: int,
     max_query_len: int,
 ) -> bool:
-    """Select the rope-free BF16 path not supported by AITER sparse MLA.
+    """Select the rope-free path not supported by AITER sparse MLA.
 
     The ragged Triton kernel indexes metadata per query token, so multi-token
     speculative verification rows have the same capability requirements as
-    plain decode rows.
+    plain decode rows. It also dequantizes FP8 KV in registers. AITER's
+    precompiled kernels assume a 576-element DeepSeek row (512 latent + 64
+    RoPE), so they cannot serve a 512-element NoPE row.
     """
-    return (
-        not kv_cache_dtype.startswith("fp8")
-        and head_size == kv_lora_rank
-        and (num_prefills > 0 or num_decodes > 0)
-    )
+    del kv_cache_dtype  # NoPE routing is geometry-based for every KV dtype.
+    return head_size == kv_lora_rank
 
 
 @triton.jit
@@ -916,6 +915,11 @@ class ROCMAiterMLASparseImpl(
                     q.shape[1],
                 ).reshape(-1)
             kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
+            kv_scale = (
+                float(layer._k_scale_float)
+                if self.kv_cache_dtype.startswith("fp8")
+                else 1.0
+            )
             decode_num_splits = (
                 rocm_sparse_decode_bf16_num_splits(
                     num_tokens,
@@ -938,6 +942,7 @@ class ROCMAiterMLASparseImpl(
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
                     num_splits=decode_num_splits,
+                    kv_scale=kv_scale,
                 )
             else:
                 rocm_sparse_attn_prefill(
@@ -953,6 +958,7 @@ class ROCMAiterMLASparseImpl(
                     output=output,
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
+                    kv_scale=kv_scale,
                 )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None
@@ -1141,9 +1147,22 @@ class ROCMAiterMLASparseImpl(
         # MQA 576/512 approach for both prefill and decode
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        head_size = sum(t.shape[-1] for t in q) if isinstance(q, tuple) else q.shape[-1]
+        # The AITER sparse MLA opt-in takes precedence and reads FP8 Q.
+        use_triton_sparse = not self.use_aiter_sparse_mla and _use_rocm_sparse_triton(
+            kv_cache_dtype=self.kv_cache_dtype,
+            head_size=head_size,
+            kv_lora_rank=self.kv_lora_rank,
+            num_prefills=attn_metadata.num_prefills,
+            num_decodes=attn_metadata.num_decodes,
+            num_decode_tokens=attn_metadata.num_decode_tokens,
+            max_query_len=attn_metadata.max_query_len,
+        )
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            if fp8_attention:
+            # FP8 Q is an AITER asm input convention. The Triton NoPE path
+            # consumes model-dtype Q and dequantizes only the KV cache.
+            if fp8_attention and not use_triton_sparse:
                 q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
                     ql_nope, q_pe, layer._q_scale
                 )
@@ -1181,7 +1200,7 @@ class ROCMAiterMLASparseImpl(
         # write the latent and rope to kv cache
         if fp8_attention:
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
-            if q.dtype != current_platform.fp8_dtype():
+            if not use_triton_sparse and q.dtype != current_platform.fp8_dtype():
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
