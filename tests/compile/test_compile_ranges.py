@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from typing import Any
 
 import torch
@@ -108,9 +109,11 @@ def test_compile_ranges(disable_vllm_compile_cache):
         assert post_grad_range_checker.num_calls == 6
 
 
-def test_compile_config_get_compile_ranges():
+def _compilation_config_with_endpoints(
+    endpoints: list[int],
+) -> CompilationConfig:
     compilation_config = CompilationConfig(
-        compile_ranges_endpoints=[8, 32],
+        compile_ranges_endpoints=endpoints,
     )
     VllmConfig(
         scheduler_config=SchedulerConfig(
@@ -120,11 +123,66 @@ def test_compile_config_get_compile_ranges():
         ),
         compilation_config=compilation_config,
     )
+    return compilation_config
+
+
+def _no_ignored_compile_ranges_warning(caplog_vllm) -> None:
+    assert not any(
+        record.levelno == logging.WARNING
+        and "compile_ranges_endpoints" in record.getMessage()
+        and "ignored" in record.getMessage()
+        for record in caplog_vllm.records
+    )
+
+
+def test_compile_config_get_compile_ranges():
+    compilation_config = _compilation_config_with_endpoints([8, 32])
     assert compilation_config.get_compile_ranges() == [
         Range(start=1, end=8),
         Range(start=9, end=32),
         Range(start=33, end=8192),
     ]
+
+
+def test_compile_ranges_endpoints_above_cap_warns(caplog_vllm):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm.config.vllm"):
+        compilation_config = _compilation_config_with_endpoints([8, 8192, 16384])
+    assert compilation_config.compile_ranges_endpoints == [8, 8192]
+    warning_records = [
+        record
+        for record in caplog_vllm.records
+        if record.levelno == logging.WARNING
+        and "compile_ranges_endpoints" in record.getMessage()
+    ]
+    assert len(warning_records) == 1
+    message = warning_records[0].getMessage()
+    assert "[16384]" in message
+    assert "max_num_batched_tokens=8192" in message
+
+
+def test_compile_ranges_endpoints_all_valid_does_not_warn(caplog_vllm):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm.config.vllm"):
+        compilation_config = _compilation_config_with_endpoints([8, 32])
+    _no_ignored_compile_ranges_warning(caplog_vllm)
+    assert compilation_config.get_compile_ranges() == [
+        Range(start=1, end=8),
+        Range(start=9, end=32),
+        Range(start=33, end=8192),
+    ]
+
+
+def test_compile_ranges_endpoint_equal_to_cap_is_noop(caplog_vllm):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm.config.vllm"):
+        compilation_config = _compilation_config_with_endpoints([8192])
+    _no_ignored_compile_ranges_warning(caplog_vllm)
+    assert compilation_config.compile_ranges_endpoints == [8192]
+
+
+def test_compile_ranges_endpoint_equal_to_one_is_noop(caplog_vllm):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm.config.vllm"):
+        compilation_config = _compilation_config_with_endpoints([1])
+    _no_ignored_compile_ranges_warning(caplog_vllm)
+    assert compilation_config.compile_ranges_endpoints == [8192]
 
 
 class PostGradStaticShapeChecker(InductorPass):
