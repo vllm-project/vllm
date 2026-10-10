@@ -11,8 +11,9 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
+import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheConfig, CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -37,6 +38,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     kv_cache_dtype_str_to_dtype,
 )
@@ -62,6 +64,7 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
+from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 
 
 class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
@@ -568,6 +571,30 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if isinstance(metadata, list):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
+            # Profiling/dummy run: the indexer allocates its selection scratch
+            # on demand, so touch its peak here for the memory profiler (as
+            # sparse_attn_indexer does): the prefill logits budget or the
+            # worst-case decode logits [decode tokens, compressed columns],
+            # plus the top-k workspace.
+            logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+            cfg = get_current_vllm_config_or_none()
+            if cfg is not None:
+                spec = cfg.speculative_config
+                num_spec = spec.num_speculative_tokens if spec is not None else 0
+                decode_tokens = min(
+                    cfg.scheduler_config.max_num_seqs * (num_spec + 1),
+                    cfg.scheduler_config.max_num_batched_tokens,
+                )
+                block_size = cfg.cache_config.block_size
+                columns = cdiv(cfg.model_config.max_model_len, block_size) * cdiv(
+                    block_size, self.indexer.compress_ratio
+                )
+                logits_bytes = max(logits_bytes, decode_tokens * columns * 4)
+            _ = torch.empty(
+                logits_bytes + _TOPK_WORKSPACE_BYTES,
+                dtype=torch.uint8,
+                device=output.device,
+            )
             output.zero_()
             return
         main_metadata = cast(FlashAttentionMetadata, metadata[self.layer_name])
