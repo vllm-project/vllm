@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +10,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
@@ -24,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 
@@ -44,6 +48,60 @@ def _is_aiter_capable() -> bool:
 MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
+
+
+@pytest.mark.parametrize(
+    "pcp_size,use_all2all", [(1, False), (2, False), (4, False), (2, True)]
+)
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_pcp_routing_padding_is_gathered_and_restored(
+    pcp_size, use_all2all, raise_error, monkeypatch
+):
+    """Routing uses the gathered mask and restores local padding on every exit."""
+    runner = SimpleNamespace(
+        do_naive_dispatch_combine=False,
+        moe_config=SimpleNamespace(
+            pcp_size=pcp_size,
+            moe_parallel_config=SimpleNamespace(use_all2all_kernels=use_all2all),
+        ),
+    )
+    padding_gathers = 0
+
+    def all_gather(tensor, dim):
+        nonlocal padding_gathers
+        if tensor.dtype == torch.uint8:
+            padding_gathers += 1
+            return torch.cat([tensor] + [1 - tensor] * (pcp_size - 1), dim=dim)
+        return torch.cat([tensor + rank * 100 for rank in range(pcp_size)], dim=dim)
+
+    monkeypatch.setattr(
+        moe_runner, "get_pcp_group", lambda: SimpleNamespace(all_gather=all_gather)
+    )
+    padding = torch.tensor([False, True])
+    hidden = torch.tensor([[3.0], [7.0]])
+    context = ForwardContext({}, {}, {}, is_padding=padding)
+    dispatched = pcp_size > 1 and not use_all2all
+    expected = (
+        [False, True] + [True, False] * (pcp_size - 1) if dispatched else [False, True]
+    )
+    with override_forward_context(context):
+        for _ in range(2):
+            error_context = (
+                pytest.raises(RuntimeError, match="routing failed")
+                if raise_error
+                else nullcontext()
+            )
+            with error_context, moe_runner.MoERunner._sequence_parallel_context(runner):
+                states, logits = moe_runner.MoERunner._maybe_dispatch(
+                    runner, hidden, hidden + 4
+                )
+                assert context.is_padding.tolist() == expected
+                assert context.is_padding.numel() == states.shape[0]
+                torch.testing.assert_close(logits, states + 4)
+                if raise_error:
+                    raise RuntimeError("routing failed")
+            assert context.is_padding is padding
+        assert padding_gathers == int(dispatched)
 
 
 def test_degenerate_grouped_config_uses_standard_topk() -> None:
