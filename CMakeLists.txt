@@ -1536,6 +1536,32 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/moe_q_gemm_rdna3.cu")
   endif()
 
+  # The kernel assumes wave32 and RDNA3.5 DPP, so it is built as its own object
+  # library restricted to those targets. A multi-arch build that also names,
+  # say, gfx1100 then never compiles device code that cannot run there, and the
+  # source needs no portable fallback to stay compilable.
+  set(VLLM_ROCM_HAS_RDNA35_GDN_CHUNKED OFF)
+  set(VLLM_GDN_ARCHES ${VLLM_GPU_ARCHES})
+  list(FILTER VLLM_GDN_ARCHES INCLUDE REGEX "gfx115[0-3]")
+  if(VLLM_GDN_ARCHES)
+    set(VLLM_ROCM_HAS_RDNA35_GDN_CHUNKED ON)
+    message(STATUS "Building rdna35_gdn_chunked for archs: ${VLLM_GDN_ARCHES}")
+    hipify_sources_target(VLLM_GDN_HIP_SRCS _rocm_C_gdn
+      "csrc/rocm/rdna35_gdn_chunked.cu")
+    unset(_VLLM_LAST_HIPIFY_TARGET)
+    add_library(_rocm_C_gdn OBJECT ${VLLM_GDN_HIP_SRCS})
+    add_dependencies(_rocm_C_gdn hipify_all)
+    set_source_files_properties(${VLLM_GDN_HIP_SRCS} PROPERTIES LANGUAGE ${VLLM_GPU_LANG})
+    set_target_properties(_rocm_C_gdn PROPERTIES
+      ${VLLM_GPU_LANG}_ARCHITECTURES "${VLLM_GDN_ARCHES}"
+      POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(_rocm_C_gdn PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+    target_compile_options(_rocm_C_gdn PRIVATE
+      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
+    target_compile_definitions(_rocm_C_gdn PRIVATE "-DTORCH_EXTENSION_NAME=_rocm_C")
+    target_link_libraries(_rocm_C_gdn PRIVATE torch)
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1552,8 +1578,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
   endif()
 
+  if(TARGET _rocm_C_gdn)
+    target_link_libraries(_rocm_C PRIVATE _rocm_C_gdn)
+  endif()
+
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
+  if(VLLM_ROCM_HAS_RDNA35_GDN_CHUNKED)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA35_GDN_CHUNKED)
   endif()
 endif()
 
