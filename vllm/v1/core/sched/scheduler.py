@@ -2845,13 +2845,15 @@ class Scheduler(SchedulerInterface):
         preempted and moved to the waiting queue.
         Otherwise, this method will only reset the KV prefix cache when there
         is no running requests taking KV cache.
+
+        In-flight KV transfers may still hold blocks after preemption, in which
+        case this method returns False and the caller may retry.
         """
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
-            # Invalidate all the current running requests KV's by pushing them to
-            # the waiting queue. In this case, we can reduce the ref count of all
-            # the kv blocks to 0 and thus we can make sure the reset is successful.
+            # Invalidate the running requests' KV by moving them to the
+            # waiting queue.
             # Preempt in reverse order so the requests will be added back to the
             # running queue in FIFO order.
             while self.running:
@@ -2866,12 +2868,7 @@ class Scheduler(SchedulerInterface):
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_running_requests and not reset_successful:
-            raise RuntimeError(
-                "Failed to reset KV cache even when all the running requests are "
-                "preempted and moved to the waiting queue. This is likely due to "
-                "the presence of running requests waiting for remote KV transfer, "
-                "which is not supported yet."
-            )
+            return False
 
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful
