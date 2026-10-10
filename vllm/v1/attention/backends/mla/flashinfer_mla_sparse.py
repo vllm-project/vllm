@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
@@ -30,6 +30,19 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
+from vllm.v1.attention.backends.mla.nvfp4_ds_mla_fp8_gather import (
+    FP8_STAGING_PAGE_SIZE,
+    FP8_STAGING_ROW_DIM,
+    NVFP4_DS_MLA_KV_LORA_RANK,
+    NVFP4_DS_MLA_ROPE_DIM,
+    NVFP4GatherPrefillMetadata,
+    build_nvfp4_gather_prefill_metadata,
+    gather_nvfp4_ds_mla_context_to_fp8,
+    gather_nvfp4_ds_mla_topk_to_fp8,
+    nvfp4_fp8_gather_unsupported_reason,
+    nvfp4_fp8_max_decode_tokens,
+    nvfp4_fp8_prefill_workspace_rows,
+)
 from vllm.v1.attention.backends.mla.sparse_utils import (
     align_blocks_to_rows,
     flat_kv_row_view,
@@ -38,9 +51,16 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.worker.workspace import current_workspace_manager
+
+# FlashInfer's native NVFP4 sparse MLA decode serves 16 query heads per rank on
+# SM100 and SM103 and was tested at these top-k widths.
+_NVFP4_NATIVE_DECODE_NUM_HEADS = 16
+_NVFP4_NATIVE_DECODE_TOPK_WIDTHS = (512, 1024, 2048)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -89,6 +109,8 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        # Native NVFP4 decode where supported; FP8 staging for prefill/fallback.
+        "nvfp4_ds_mla",
     ]
 
     @staticmethod
@@ -137,6 +159,10 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
             return (
                 "FLASHINFER_MLA_SPARSE SM10 does not support fp8_ds_mla kv-cache dtype"
             )
+        if kv_cache_dtype == "nvfp4_ds_mla":
+            reason = nvfp4_fp8_gather_unsupported_reason(vllm_config)
+            if reason is not None:
+                return reason
 
         # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
         if vllm_config.model_config is not None:
@@ -248,6 +274,10 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 class FlashInferMLASparseMetadata(SparseMLACommonMetadata):
     """Attention metadata for FlashInfer MLA Sparse backend."""
 
+    # nvfp4_ds_mla only: context-gather plan for the batch's prefill tokens.
+    # None without prefills.
+    nvfp4_prefill: NVFP4GatherPrefillMetadata | None = None
+
 
 class FlashInferMLASparseMetadataBuilder(
     SparseMLACommonMetadataBuilder[FlashInferMLASparseMetadata]
@@ -283,6 +313,7 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
     """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    use_nvfp4_gather: bool = False
 
     @classmethod
     def get_varlen_cudagraph_max_query_len(
@@ -317,6 +348,49 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
                     vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
             )
+
+        self.use_nvfp4_gather = vllm_config.cache_config.cache_dtype == "nvfp4_ds_mla"
+        if self.use_nvfp4_gather:
+            # Only single-token (and spec-decode) rows take the per-token top-k
+            # gather. Longer requests share one context gather per request,
+            # which keeps short prefills off the query_len * top-k gather path.
+            self._init_reorder_batch_threshold(
+                1,
+                supports_spec_as_decode=True,
+                supports_dcp_with_varlen=True,
+            )
+            scheduler_config = vllm_config.scheduler_config
+            self._nvfp4_request_ids = torch.empty(
+                scheduler_config.max_num_batched_tokens,
+                dtype=torch.int32,
+                device=device,
+            )
+            self._nvfp4_workspace_starts = torch.empty(
+                scheduler_config.max_num_seqs, dtype=torch.int32, device=device
+            )
+            self._nvfp4_workspace_rows = nvfp4_fp8_prefill_workspace_rows(
+                vllm_config.model_config.max_model_len
+            )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: "CommonAttentionMetadata",
+        fast_build: bool = False,
+    ) -> FlashInferMLASparseMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        # Planned for every batch with prefills (as FlashMLA does): whether the
+        # layer routes them to dense MHA is decided at forward time.
+        if self.use_nvfp4_gather and metadata.num_prefills > 0:
+            metadata.nvfp4_prefill = build_nvfp4_gather_prefill_metadata(
+                common_attn_metadata,
+                metadata.num_decodes,
+                metadata.num_prefills,
+                self._nvfp4_workspace_rows,
+                self._nvfp4_request_ids,
+                self._nvfp4_workspace_starts,
+            )
+        return metadata
 
 
 # Global workspace buffer (lazily initialized)
@@ -430,6 +504,9 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
     lse_base_on_e: bool = False
+    # nvfp4_ds_mla staging, enabled in __init__ for that dtype.
+    use_nvfp4_gather: bool = False
+    _nvfp4_inv_k_scale: float | None = None
 
     def __init__(
         self,
@@ -492,6 +569,85 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # for query and kv_cache (mixed bf16+fp8 is not supported).
         self.supports_quant_query_input = True
 
+        # nvfp4_ds_mla: prefill is staged to FP8 rows for the fp8 kernel; decode
+        # uses FlashInfer's native NVFP4 kernel where it applies and is staged
+        # otherwise.
+        self.use_nvfp4_gather = kv_cache_dtype == "nvfp4_ds_mla"
+        if self.use_nvfp4_gather:
+            self._init_nvfp4_staging()
+
+    def _init_nvfp4_staging(self) -> None:
+        if (self.kv_lora_rank, self.qk_rope_head_dim) != (
+            NVFP4_DS_MLA_KV_LORA_RANK,
+            NVFP4_DS_MLA_ROPE_DIM,
+        ):
+            raise ValueError(
+                "The nvfp4_ds_mla kv-cache dtype requires kv_lora_rank="
+                f"{NVFP4_DS_MLA_KV_LORA_RANK} and qk_rope_head_dim="
+                f"{NVFP4_DS_MLA_ROPE_DIM}, got {self.kv_lora_rank} and "
+                f"{self.qk_rope_head_dim}"
+            )
+        vllm_config = get_current_vllm_config()
+        topk_indices_buffer = self.topk_indices_buffer
+        topk_width = (
+            topk_indices_buffer.shape[1]
+            if topk_indices_buffer is not None
+            else vllm_config.model_config.hf_text_config.index_topk
+        )
+        if topk_width % FP8_STAGING_PAGE_SIZE:
+            raise ValueError(
+                f"nvfp4_ds_mla staging needs a top-k width divisible by "
+                f"{FP8_STAGING_PAGE_SIZE}, got {topk_width}"
+            )
+        self._nvfp4_max_decode_tokens = nvfp4_fp8_max_decode_tokens(vllm_config)
+        self._nvfp4_native_decode = self._supports_native_nvfp4_decode(topk_width)
+        if self._nvfp4_native_decode:
+            logger.info_once(
+                "FLASHINFER_MLA_SPARSE decodes nvfp4_ds_mla with FlashInfer's native "
+                "NVFP4 kernel; prefill is staged to FP8"
+            )
+        fp8_dtype = current_platform.fp8_dtype()
+        # Reserved up front (like FlashMLA's prefill workspace) so the memory
+        # profile sees it; every layer shares the same workspace views. The
+        # native decode kernel needs no decode staging.
+        workspace_shapes: list[tuple[tuple[int, ...], torch.dtype]] = [
+            (
+                (
+                    nvfp4_fp8_prefill_workspace_rows(
+                        vllm_config.model_config.max_model_len
+                    ),
+                    FP8_STAGING_ROW_DIM,
+                ),
+                fp8_dtype,
+            )
+        ]
+        if not self._nvfp4_native_decode:
+            workspace_shapes += [
+                (
+                    (self._nvfp4_max_decode_tokens * topk_width, FP8_STAGING_ROW_DIM),
+                    fp8_dtype,
+                ),
+                ((self._nvfp4_max_decode_tokens, topk_width), torch.int32),
+            ]
+        workspaces = current_workspace_manager().get_simultaneous(*workspace_shapes)
+        self._nvfp4_prefill_rows = workspaces[0]
+        if not self._nvfp4_native_decode:
+            self._nvfp4_decode_rows, self._nvfp4_decode_indices = workspaces[1:]
+
+    def _supports_native_nvfp4_decode(self, topk_width: int) -> bool:
+        """Whether FlashInfer's native NVFP4 kernel can serve this layer's decode."""
+        from vllm.utils.flashinfer import has_flashinfer_nvfp4_sparse_mla_decode
+
+        return (
+            self.num_heads == _NVFP4_NATIVE_DECODE_NUM_HEADS
+            and topk_width in _NVFP4_NATIVE_DECODE_TOPK_WIDTHS
+            and (
+                current_platform.is_device_capability(100)
+                or current_platform.is_device_capability(103)
+            )
+            and has_flashinfer_nvfp4_sparse_mla_decode()
+        )
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -512,6 +668,14 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         self._prepare_mqa_kernel(layer, q.device)
+
+        if self.use_nvfp4_gather:
+            return (
+                self._forward_mqa_nvfp4(
+                    q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                ),
+                None,
+            )
 
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
@@ -621,6 +785,160 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             seq_lens,
         )
 
+    def _forward_mqa_nvfp4(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashInferMLASparseMetadata,
+    ) -> torch.Tensor:
+        """Attend over an nvfp4_ds_mla cache with native decode when supported.
+
+        Decode tokens are at the front of ``q``; any tokens after them are
+        prefill tokens (present unless the layer routed them to dense MHA).
+        """
+        if q.dtype != current_platform.fp8_dtype():
+            raise ValueError(
+                "FLASHINFER_MLA_SPARSE runs the nvfp4_ds_mla kv-cache dtype with "
+                f"an fp8 query (quantized by the MLA layer), got {q.dtype}"
+            )
+        num_tokens = q.shape[0]
+        num_decode_tokens = min(attn_metadata.num_decode_tokens, num_tokens)
+        # The FlashInfer kernel writes bf16 output.
+        out = torch.empty(
+            (num_tokens, q.shape[1], self.kv_lora_rank),
+            dtype=torch.bfloat16,
+            device=q.device,
+        )
+        if num_decode_tokens > 0:
+            self._nvfp4_decode(
+                q[:num_decode_tokens],
+                kv_cache,
+                topk_indices[:num_decode_tokens],
+                attn_metadata,
+                out[:num_decode_tokens],
+            )
+        if num_tokens > num_decode_tokens:
+            self._nvfp4_prefill(
+                q[num_decode_tokens:],
+                kv_cache,
+                topk_indices[num_decode_tokens:],
+                attn_metadata,
+                out[num_decode_tokens:],
+                token_offset=num_decode_tokens,
+            )
+        return out
+
+    def _nvfp4_decode(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashInferMLASparseMetadata,
+        out: torch.Tensor,
+    ) -> None:
+        assert self._nvfp4_inv_k_scale is not None
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_cache, attn_metadata.block_size
+        )
+        physical_topk, valid_counts = self._convert_logical_to_physical_topk(
+            topk_indices,
+            attn_metadata,
+            block_stride_rows=block_stride_rows,
+            return_valid_counts=True,
+        )
+        if self._nvfp4_native_decode:
+            from flashinfer.mla import nvfp4_sparse_mla_decode
+
+            assert self.bmm1_scale is not None and self.bmm2_scale is not None
+            # The fp8 bmm scales carry k_scale because staged rows hold
+            # dequant / k_scale; the native kernel reads the exact values.
+            nvfp4_sparse_mla_decode(
+                q.contiguous(),
+                kv_rows,
+                physical_topk,
+                bmm1_scale=float(self.bmm1_scale) * self._nvfp4_inv_k_scale,
+                bmm2_scale=float(self.bmm2_scale) * self._nvfp4_inv_k_scale,
+                out=out,
+                backend="cuda",
+            )
+            return
+        topk = physical_topk.shape[1]
+        step = self._nvfp4_max_decode_tokens
+        for start in range(0, q.shape[0], step):
+            end = min(q.shape[0], start + step)
+            rows = self._nvfp4_decode_rows[: (end - start) * topk]
+            staging_indices = self._nvfp4_decode_indices[: end - start]
+            gather_nvfp4_ds_mla_topk_to_fp8(
+                kv_cache,
+                physical_topk[start:end],
+                rows,
+                staging_indices,
+                self._nvfp4_inv_k_scale,
+            )
+            self._run_mqa_kernel(
+                q[start:end],
+                rows.view(-1, FP8_STAGING_PAGE_SIZE, FP8_STAGING_ROW_DIM),
+                staging_indices,
+                valid_counts[start:end],
+                output=out[start:end],
+            )
+
+    def _nvfp4_prefill(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashInferMLASparseMetadata,
+        out: torch.Tensor,
+        token_offset: int,
+    ) -> None:
+        assert self._nvfp4_inv_k_scale is not None
+        plan = attn_metadata.nvfp4_prefill
+        if plan is None:
+            raise RuntimeError(
+                "Prefill tokens reached the nvfp4_ds_mla sparse MQA path without "
+                "a context-gather plan"
+            )
+        num_tokens = q.shape[0]
+        assert plan.request_ids.shape[0] == num_tokens, (
+            plan.request_ids.shape,
+            num_tokens,
+        )
+        # Top-k positions of prefill tokens map to their request's (chunk-local)
+        # workspace rows.
+        staging_indices, valid_counts = triton_convert_req_index_to_global_index(
+            attn_metadata.req_id_per_token[token_offset : token_offset + num_tokens],
+            attn_metadata.block_table,
+            topk_indices,
+            BLOCK_SIZE=attn_metadata.block_size,
+            NUM_TOPK_TOKENS=topk_indices.shape[1],
+            HAS_PREFILL_WORKSPACE=True,
+            prefill_workspace_request_ids=plan.request_ids,
+            prefill_workspace_starts=plan.workspace_starts,
+            return_valid_counts=True,
+        )
+        workspace = self._nvfp4_prefill_rows
+        workspace_pages = workspace.view(-1, FP8_STAGING_PAGE_SIZE, FP8_STAGING_ROW_DIM)
+        for chunk in plan.chunks:
+            gather_nvfp4_ds_mla_context_to_fp8(
+                kv_cache,
+                chunk.block_table,
+                chunk.workspace_starts,
+                chunk.num_rows,
+                chunk.search_steps,
+                workspace,
+                self._nvfp4_inv_k_scale,
+            )
+            tokens = chunk.tokens_slice
+            self._run_mqa_kernel(
+                q[tokens],
+                workspace_pages,
+                staging_indices[tokens],
+                valid_counts[tokens],
+                output=out[tokens],
+            )
+
     def _prepare_mqa_kernel(
         self,
         layer: AttentionLayer,
@@ -637,6 +955,10 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             self.bmm2_scale = 1.0
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
+        if self.use_nvfp4_gather and self._nvfp4_inv_k_scale is None:
+            # Staged rows hold dequant(x) / k_scale, so the fp8 bmm scales above
+            # apply unchanged.
+            self._nvfp4_inv_k_scale = 1.0 / layer._k_scale_float
 
     def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
         """Autotune the largest legal HiSparse decode batch."""
@@ -687,6 +1009,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         kv_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         seq_lens: torch.Tensor,
+        output: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self._workspace_buffer is not None
         assert self.bmm1_scale is not None
@@ -739,6 +1062,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             sparse_mla_top_k=sparse_topk_capacity,
+            out=None if output is None else output.unsqueeze(1),
             return_lse=self.need_to_return_lse_for_decode,
             **extra_kwargs,
         )

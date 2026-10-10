@@ -831,7 +831,12 @@ def test_sparse_backend_decode_correctness(
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
     # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
-    if kv_cache_dtype.startswith("fp8"):
+    # FlashInfer reads nvfp4_ds_mla with an fp8 query; prefill is staged to fp8.
+    fp8_error = kv_cache_dtype.startswith("fp8") or (
+        kv_cache_dtype == "nvfp4_ds_mla"
+        and backend_cls == FlashInferMLASparseTRTLLMBackend
+    )
+    if fp8_error:
         torch.testing.assert_close(
             backend_output, sdpa_reference, rtol=0.065, atol=0.05
         )

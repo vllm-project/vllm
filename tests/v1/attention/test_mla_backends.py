@@ -34,7 +34,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_quantized_kv_cache
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
@@ -703,6 +703,8 @@ class MockSparseMLAAttentionLayer:
         """Forward for sparse MLA - uses forward_mqa for all tokens."""
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
         fp8_attention = kv_cache_dtype.startswith("fp8")
+        # As in MLAAttention, every quantized cache is read with an fp8 query.
+        quant_query = is_quantized_kv_cache(kv_cache_dtype)
 
         # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
@@ -739,7 +741,7 @@ class MockSparseMLAAttentionLayer:
         # Convert from (N, B, L) to (B, N, L)
         mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-        if fp8_attention and self.impl.supports_quant_query_input:
+        if quant_query and self.impl.supports_quant_query_input:
             assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
             assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
             mqa_q = self._decode_concat_quant_fp8_op(

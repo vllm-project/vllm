@@ -276,3 +276,16 @@ def test_sm90_nope_fp8_ds_mla_resolves_to_flashmla():
     for name in order[: order.index("FLASHMLA_SPARSE")]:
         backend_cls = AttentionBackendEnum[name].get_class()
         assert not backend_cls.supports_kv_cache_dtype("fp8_ds_mla"), name
+
+
+@pytest.mark.parametrize("num_heads", [16, 32, 64])
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "expected"),
+    [
+        ("fp8", ["FLASHINFER_MLA_SPARSE", "FLASHMLA_SPARSE"]),
+        ("nvfp4_ds_mla", ["FLASHMLA_SPARSE", "FLASHINFER_MLA_SPARSE"]),
+    ],
+)
+def test_sm100_quantized_sparse_priority(kv_cache_dtype, expected, num_heads):
+    """Keep NVFP4 on FlashMLA by default pending backend comparisons."""
+    assert _sparse_order(kv_cache_dtype, 576, num_heads=num_heads) == expected
