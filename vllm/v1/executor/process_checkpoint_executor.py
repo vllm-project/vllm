@@ -97,8 +97,13 @@ class ProcessCheckpointExecutor(MultiprocExecutor):
             }
             if vllm_config.model_config.enable_nccl_comm_suspend:
                 # NCCL suspend releases P2P mappings while retaining addresses.
-                # NVLS keeps persistent shared allocations that CUDA driver
-                # checkpoint cannot offload on the tested driver 580.
+                # NVLS keeps persistent shared allocations whose multicast
+                # handling hits a confirmed 580 UMD defect (in our
+                # freeze/restore matrix the failure surfaces at restore;
+                # NVIDIA reports it fixed in 595 and above, see
+                # ai-dynamo/snapshot#510). These restrictions can be revisited
+                # once UMD >= 595 is validated with this executor's full
+                # sleep-then-checkpoint flow.
                 if os.environ.get("NCCL_DISABLE_MEM_MANAGER", "0") != "0":
                     raise ValueError("NCCL checkpoint requires the memory manager")
                 required.update(
