@@ -366,6 +366,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
         return IS_AITER_FOUND
 
+    def set_interleaved_v_cache(self):
+        # No-op override of RocmAttentionImpl: this backend
+        # decodes with the AITER triton unified-attention kernel
+        pass
+
     def do_qk_norm_rope_kvcache_update(
         self,
         layer: AttentionLayer,
@@ -402,6 +407,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=False,
+            return_kv=False,
         )
 
     def do_qk_norm_mrope_kvcache_update(
