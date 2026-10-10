@@ -164,6 +164,22 @@ def _expand_prompt_embeds_placeholders(
     return expanded
 
 
+def _validate_prompt_embeds_length(
+    token_ids: Sequence[int], max_model_len: int | None
+) -> None:
+    """Reject an expanded prompt before allocating its mixed embeddings."""
+    if max_model_len is None or len(token_ids) <= max_model_len:
+        return
+
+    raise VLLMValidationError(
+        f"This model's maximum context length is {max_model_len} tokens, "
+        f"but the expanded prompt contains {len(token_ids)} input tokens. "
+        "Please reduce the number or size of the `prompt_embeds` parts.",
+        parameter="input_tokens",
+        value=len(token_ids),
+    )
+
+
 def _build_prompt_embeds_positions(
     token_ids: list[int],
     num_tensors: int,
@@ -192,9 +208,13 @@ def _build_mixed_prompt_embeds(
     token_ids: list[int],
     prompt_embeds_tensors: Sequence[torch.Tensor],
     positions: list[tuple[int, int]],
+    *,
+    max_model_len: int | None = None,
 ) -> tuple[torch.Tensor, list[bool]]:
     """Build the full-length `prompt_embeds` tensor and the `is_token_ids`
     mask aligned to `token_ids`."""
+    _validate_prompt_embeds_length(token_ids, max_model_len)
+
     total_len = len(token_ids)
     hidden_size = prompt_embeds_tensors[0].shape[1]
     dtype = prompt_embeds_tensors[0].dtype
@@ -1111,6 +1131,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 prompt,
                 prompt_embeds_tensors,
                 prompt_embeds_placeholder_token_id,
+                max_model_len=model_config.max_model_len,
             )
 
         if mm_data is not None:
@@ -1212,6 +1233,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 prompt,
                 prompt_embeds_tensors,
                 prompt_embeds_placeholder_token_id,
+                max_model_len=model_config.max_model_len,
             )
 
         if mm_data is not None:
@@ -1291,6 +1313,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt: DictPrompt,
         prompt_embeds_tensors: list[torch.Tensor],
         placeholder_token_id: int,
+        *,
+        max_model_len: int | None,
     ) -> None:
         """Mutate `prompt` from `TokensPrompt` to `EmbedsPrompt` shape.
 
@@ -1324,7 +1348,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         embeds_prompt = cast(EmbedsPrompt, prompt)
         embeds_prompt["prompt_token_ids"] = expanded
         full_embeds, is_token_ids_mask = _build_mixed_prompt_embeds(
-            expanded, prompt_embeds_tensors, positions
+            expanded,
+            prompt_embeds_tensors,
+            positions,
+            max_model_len=max_model_len,
         )
         embeds_prompt["prompt_embeds"] = full_embeds
         embeds_prompt["prompt_is_token_ids"] = is_token_ids_mask

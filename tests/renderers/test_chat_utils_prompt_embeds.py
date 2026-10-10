@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import io
 from typing import Final
@@ -28,6 +29,8 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import TokenizeParams
+from vllm.renderers.base import BaseRenderer
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.renderers.hf import (
     _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR,
     _build_mixed_prompt_embeds,
@@ -36,6 +39,7 @@ from vllm.renderers.hf import (
     _ensure_prompt_embeds_placeholder_token,
     _expand_prompt_embeds_placeholders,
 )
+from vllm.utils.async_utils import make_async
 
 # Cover distinct tokenizer families:
 #   GPT2TokenizerFast  (BPE, OpenAI-style)
@@ -163,6 +167,64 @@ def test_parse_chat_messages_openai_format():
     ]
     assert mm_data is not None and "prompt_embeds" in mm_data
     assert torch.equal(mm_data["prompt_embeds"][0], t)
+
+
+def test_prompt_embeds_decode_budget_is_request_scoped(parse_fn, monkeypatch):
+    """All prompt_embeds parts share one pre-densification byte budget."""
+    tensor = torch.sparse_coo_tensor(
+        indices=torch.tensor([[0], [0]]),
+        values=torch.tensor([1.0], dtype=_MOCK_DTYPE),
+        size=(2, _MOCK_HIDDEN_SIZE),
+    ).coalesce()
+    per_part_bytes = tensor.numel() * tensor.element_size()
+    monkeypatch.setenv("VLLM_MAX_EMBED_DECODE_BYTES", str(per_part_bytes))
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "prompt_embeds", "data": _encode_tensor(tensor)},
+                {"type": "prompt_embeds", "data": _encode_tensor(tensor)},
+            ],
+        }
+    ]
+
+    with pytest.raises(VLLMValidationError, match="request limit"):
+        asyncio.run(
+            _maybe_await(
+                parse_fn,
+                messages,
+                _make_mock_model_config(),
+                content_format="openai",
+            )
+        )
+
+
+class _PromptEmbedsRenderer(BaseRenderer):
+    def __init__(self, model_config):
+        self.model_config = model_config
+        self._safe_load_prompt_embeds_async = make_async(safe_load_prompt_embeds)
+
+    def render_messages(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+def test_completion_prompt_embeds_decode_budget_is_request_scoped(monkeypatch):
+    """Completion batches share one budget across raw prompt_embeds prompts."""
+    tensor = torch.sparse_coo_tensor(
+        indices=torch.tensor([[0], [0]]),
+        values=torch.tensor([1.0], dtype=_MOCK_DTYPE),
+        size=(2, _MOCK_HIDDEN_SIZE),
+    ).coalesce()
+    per_prompt_bytes = tensor.numel() * tensor.element_size()
+    monkeypatch.setenv("VLLM_MAX_EMBED_DECODE_BYTES", str(per_prompt_bytes))
+    payload = _encode_tensor(tensor).encode()
+    renderer = _PromptEmbedsRenderer(_make_mock_model_config())
+
+    with pytest.raises(VLLMValidationError, match="request limit"):
+        renderer.render_prompts([payload, payload])
+    with pytest.raises(VLLMValidationError, match="request limit"):
+        asyncio.run(renderer.render_prompts_async([payload, payload]))
 
 
 # Each layout entry is one content part:
@@ -459,6 +521,24 @@ def test_build_mixed_prompt_embeds(stream):
 
     # Non-embed positions remain zero-filled.
     assert torch.all(embeds[expected_mask] == 0)
+
+
+def test_mixed_prompt_embeds_rejects_over_context_before_allocation(monkeypatch):
+    def fail_if_allocated(*args, **kwargs):
+        pytest.fail("combined prompt_embeds tensor should not be allocated")
+
+    monkeypatch.setattr(torch, "zeros", fail_if_allocated)
+
+    token_ids = [1, 2, 3, 4, 5]
+    tensor = torch.ones(3, _MOCK_HIDDEN_SIZE, dtype=_MOCK_DTYPE)
+
+    with pytest.raises(VLLMValidationError, match="maximum context length"):
+        _build_mixed_prompt_embeds(
+            token_ids,
+            [tensor],
+            [(0, tensor.shape[0])],
+            max_model_len=len(token_ids) - 1,
+        )
 
 
 # End-to-end tests: each runs both sync and async parse paths via the

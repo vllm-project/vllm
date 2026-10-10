@@ -76,6 +76,7 @@ from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.sparse_utils import TensorDecodeBudget
 
 if TYPE_CHECKING:
     import torch
@@ -609,6 +610,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
         self._modality_order = defaultdict[str, list[str]](list)
+        self._prompt_embeds_budget = TensorDecodeBudget()
 
     @cached_property
     def use_unified_vision_chunk_modality(self) -> bool:
@@ -641,6 +643,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     @property
     def allowed_media_domains(self):
         return self._model_config.allowed_media_domains
+
+    @property
+    def prompt_embeds_budget(self) -> TensorDecodeBudget:
+        return self._prompt_embeds_budget
 
     @property
     def mm_registry(self):
@@ -1071,7 +1077,11 @@ class MultiModalContentParser(BaseMultiModalContentParser):
                 _ENABLE_PROMPT_EMBEDS_ERROR, parameter="prompt_embeds"
             )
 
-        tensor = safe_load_prompt_embeds(self.model_config, data.encode())
+        tensor = safe_load_prompt_embeds(
+            self.model_config,
+            data.encode(),
+            budget=self._tracker.prompt_embeds_budget,
+        )
         self._tracker.add("prompt_embeds", (tensor, None))
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
@@ -1265,7 +1275,11 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     ) -> tuple[torch.Tensor, None]:
         # Second tuple slot fills the tracker's generic `(item, uuid | None)`
         # contract. prompt_embeds has no UUID concept, so it's always `None`.
-        tensor = await safe_load_prompt_embeds_async(self.model_config, data_bytes)
+        tensor = await safe_load_prompt_embeds_async(
+            self.model_config,
+            data_bytes,
+            budget=self._tracker.prompt_embeds_budget,
+        )
         return tensor, None
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):
