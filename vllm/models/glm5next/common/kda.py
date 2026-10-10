@@ -160,6 +160,29 @@ def _resolve_kda_prefill_backend(
     return "flashkda" if supported and backend != "triton" else "triton"
 
 
+def _merge_conv_weights(*convs: ColumnParallelLinear) -> torch.Tensor:
+    """Re-point the conv layers' weights at slices of one merged buffer.
+
+    The buffer is laid out like the checkpoint's conv1d weights (``[C, 1, K]``
+    per layer, concatenated along the channel dim), so the stock
+    ``ColumnParallelLinear`` loader fills it in place. Returns the ``[3*C, K]``
+    view the causal-conv kernels take.
+    """
+    weights = [conv.weight for conv in convs]
+    merged = torch.empty(
+        sum(weight.size(0) for weight in weights),
+        1,
+        weights[0].size(-1),
+        dtype=weights[0].dtype,
+        device=weights[0].device,
+    )
+    offset = 0
+    for weight in weights:
+        weight.data = merged[offset : offset + weight.size(0)]
+        offset += weight.size(0)
+    return merged.view(merged.size(0), merged.size(-1))
+
+
 class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
@@ -285,16 +308,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             params_dtype=torch.float32,
             prefix=f"{prefix}.v_conv1d",
         )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        # Can't do this in `weight_loader` since it already exists in
-        # `ColumnParallelLinear` and `set_weight_attrs`
-        # doesn't allow to override it
-        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
-        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
-        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
+        # The q|k|v conv weights are views into one merged buffer, so every
+        # path that rewrites them (initial load, RL refit through load_weights
+        # or the layerwise reload, kernel-format copy_) lands directly in the
+        # weight the conv kernels read: there is no cache to invalidate, and the
+        # buffer keeps its address so FULL cudagraphs captured with it stay
+        # valid across refits (#55087).
+        self.register_buffer(
+            "_merged_conv_weight",
+            _merge_conv_weights(self.q_conv1d, self.k_conv1d, self.v_conv1d),
+            persistent=False,
+        )
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -550,18 +574,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
+        # three calls. The q/k/v conv weights are views into _merged_conv_weight
+        # (see __init__) and conv_state is already stored as the merged q|k|v
+        # state, so both are used directly.
         conv_weights = self._merged_conv_weight
         conv_bias = self.q_conv1d.bias
 
