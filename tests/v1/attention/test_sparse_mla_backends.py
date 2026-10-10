@@ -47,13 +47,12 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
-# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
-# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
-# forward_mqa interface but needs validation on ROCm hardware.
-if not current_platform.is_cuda():
+# This module's end-to-end sparse-backend correctness test supports CUDA and
+# ROCm.  The remaining tests exercise CUDA-specific FlashMLA/FlashInfer APIs
+# and are skipped by the autouse fixture below when collecting on ROCm.
+if not (current_platform.is_cuda() or current_platform.is_rocm()):
     pytest.skip(
-        "Sparse MLA backend tests currently only support CUDA. "
-        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
+        "Sparse MLA backend tests require CUDA or ROCm.",
         allow_module_level=True,
     )
 
@@ -65,14 +64,16 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.attention.backends.mla import (
-    flashattn_mla_sparse as flashattn_sparse_module,
-)
 from vllm.v1.attention.backends.mla import index_group as index_group_module
-from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
-    FlashAttnMLASparseImpl,
-    FlashAttnMLASparseMetadataBuilder,
-)
+
+if current_platform.is_cuda():
+    from vllm.v1.attention.backends.mla import (
+        flashattn_mla_sparse as flashattn_sparse_module,
+    )
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseImpl,
+        FlashAttnMLASparseMetadataBuilder,
+    )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
@@ -111,9 +112,42 @@ from vllm.v1.hisparse.runtime import (
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
 
+if current_platform.is_rocm():
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseBackend,
+    )
+
+    SPARSE_BACKENDS = [ROCMAiterMLASparseBackend]
+    SPARSE_BACKEND_IDS = ["ROCMAiterMLA"]
+    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8"]
+    SPARSE_BLOCK_SIZES = [64]
+else:
+    SPARSE_BACKENDS = [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend]
+    SPARSE_BACKEND_IDS = ["FlashMLA", "FlashInferTRTLLM"]
+    SPARSE_KV_CACHE_DTYPES = ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"]
+    SPARSE_BLOCK_SIZES = [32, 64]
+
+
+@pytest.fixture(autouse=True)
+def _skip_cuda_specific_sparse_mla_tests_on_rocm(request):
+    """Skip tests whose helpers exercise CUDA-only sparse MLA APIs."""
+    rocm_portable_tests = {
+        "test_sparse_backend_decode_correctness",
+        "test_sparse_backend_prefill_correctness",
+        "test_rocm_fused_v32_dense_prefill_matches_mqa",
+    }
+    if (
+        current_platform.is_rocm()
+        and getattr(request.node, "originalname", request.node.name)
+        not in rocm_portable_tests
+    ):
+        pytest.skip("This sparse MLA test exercises a CUDA-specific API")
+
+
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
     for name in [
+        "small_decode",
         "mixed_small",
         "mixed_medium",
         "small_prefill",
@@ -127,6 +161,9 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_prefill"] = BatchSpec(
 )
 SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
     seq_lens=[256] * 2, query_lens=[256] * 2
+)
+SPARSE_BACKEND_BATCH_SPECS["large_decode_over_topk"] = BatchSpec(
+    seq_lens=[256, 384], query_lens=[1, 1]
 )
 
 DEVICE_TYPE = current_platform.device_type
@@ -403,16 +440,13 @@ def _quantize_dequantize_nvfp4_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
-    ids=["FlashMLA", "FlashInferTRTLLM"],
+    SPARSE_BACKENDS,
+    ids=SPARSE_BACKEND_IDS,
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
-@pytest.mark.parametrize(
-    "kv_cache_dtype",
-    ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"],
-)
+@pytest.mark.parametrize("kv_cache_dtype", SPARSE_KV_CACHE_DTYPES)
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
-@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize("block_size", SPARSE_BLOCK_SIZES)
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
     ("total_num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
@@ -525,6 +559,12 @@ def test_sparse_backend_decode_correctness(
             "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
         },
     )
+    # This shared correctness test constructs a sparse SDPA reference for every
+    # query token. ROCm normally routes short prefills to dense MHA, whose
+    # output intentionally differs from that sparse reference. Keep this test
+    # on the sparse-MQA path; dense-prefill routing has dedicated ROCm tests.
+    if current_platform.is_rocm():
+        vllm_config.attention_config.sparse_mla_force_mqa = True
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
         index_topk=topk_tokens,
@@ -737,7 +777,7 @@ def test_sparse_backend_decode_correctness(
         vllm_config=vllm_config,
     )
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend)
+        SimpleNamespace(prefill_backend=prefill_backend, impl=SimpleNamespace())
     )
 
     builder_cls = backend_cls.get_builder_cls()
@@ -1384,11 +1424,13 @@ PREFILL_BATCH_SPECS = {
 
 
 @pytest.mark.skipif(
-    torch.cuda.get_device_capability()[0] < 10,
+    current_platform.is_cuda() and torch.cuda.get_device_capability()[0] < 10,
     reason="Sparse MLA forward_mha requires FA4 (SM100+)",
 )
 @pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype", (["auto", "fp8"] if current_platform.is_rocm() else ["auto"])
+)
 @pytest.mark.parametrize(
     ("num_heads", "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
     [
@@ -1408,11 +1450,19 @@ def test_sparse_backend_prefill_correctness(
     v_head_dim,
     workspace_init,
 ):
-    """Test dense and masked MHA across supported sparse MLA dimensions."""
-    backend_cls = FlashMLASparseBackend
+    """Test the normal dense forward_mha path for sparse MLA short prefill."""
+    backend_cls = (
+        ROCMAiterMLASparseBackend
+        if current_platform.is_rocm()
+        else FlashMLASparseBackend
+    )
+    if current_platform.is_rocm() and (
+        batch_name.startswith("masked_mha") or qk_nope_head_dim != 128
+    ):
+        pytest.skip("ROCm dense prefill requires the DeepSeek MLA layout")
     batch_spec = PREFILL_BATCH_SPECS[batch_name]
 
-    device = torch.device("cuda")
+    device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
     block_size = 64
 
@@ -1579,7 +1629,7 @@ def test_sparse_backend_prefill_correctness(
         vllm_config=vllm_config,
     )
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend)
+        SimpleNamespace(prefill_backend=prefill_backend, impl=SimpleNamespace())
     )
 
     builder_cls = backend_cls.get_builder_cls()
@@ -1653,7 +1703,10 @@ def test_sparse_backend_prefill_correctness(
 
     assert out_buffer.shape == ref_output.shape
     assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
-    torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
+    if kv_cache_dtype.startswith("fp8"):
+        torch.testing.assert_close(out_buffer, ref_output, rtol=0.065, atol=0.05)
+    else:
+        torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
 
 
 @pytest.mark.parametrize(
@@ -3057,7 +3110,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
         vllm_config=vllm_config,
     )
     vllm_config.compilation_config.static_forward_context["placeholder"] = (
-        SimpleNamespace(prefill_backend=prefill_backend)
+        SimpleNamespace(prefill_backend=prefill_backend, impl=SimpleNamespace())
     )
 
     builder_cls = FlashMLASparseBackend.get_builder_cls()
@@ -4264,3 +4317,118 @@ def test_sparse_mla_common_impl_resolves_buffer_lazily():
     assert isinstance(SparseMLACommonImpl.topk_indices_buffer, property), (
         "topk_indices_buffer must stay a lazily-resolved property"
     )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm model implementation")
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_rocm_fused_v32_dense_prefill_matches_mqa(
+    tmp_path, vllm_runner, kv_cache_dtype
+):
+    """Fused normalization, RoPE and mixed dispatch preserve generation/logprobs.
+
+    Chunking unequal prompts exercises prefill alongside decode. The two long
+    prompts straddle the dense-prefill threshold. No pretrained weights or
+    tokenizer download is needed.
+    """
+    import json
+
+    from vllm import SamplingParams
+
+    config = {
+        "architectures": ["DeepseekV32ForCausalLM"],
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 0,
+        "eos_token_id": 1,
+        "ep_size": 1,
+        "first_k_dense_replace": 1,
+        "hidden_act": "silu",
+        "hidden_size": 2048,
+        "index_head_dim": 128,
+        "index_n_heads": 64,
+        "index_topk": 2048,
+        "initializer_range": 0.02,
+        "intermediate_size": 4096,
+        "kv_lora_rank": 512,
+        "max_position_embeddings": 8192,
+        "model_type": "deepseek_v32",
+        "moe_intermediate_size": 512,
+        "moe_layer_freq": 1,
+        "n_group": 1,
+        "n_routed_experts": 8,
+        "n_shared_experts": 1,
+        "norm_topk_prob": True,
+        "num_attention_heads": 32,
+        "num_experts_per_tok": 2,
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 32,
+        "num_nextn_predict_layers": 0,
+        "q_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": {
+            "beta_fast": 32,
+            "beta_slow": 1,
+            "factor": 40,
+            "mscale": 1.0,
+            "mscale_all_dim": 1.0,
+            "original_max_position_embeddings": 4096,
+            "type": "yarn",
+        },
+        "rope_theta": 10000,
+        "routed_scaling_factor": 2.5,
+        "scoring_func": "sigmoid",
+        "tie_word_embeddings": False,
+        "topk_group": 1,
+        "topk_method": "noaux_tc",
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.44.2",
+        "use_cache": True,
+        "v_head_dim": 128,
+        "vocab_size": 4096,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    prompts = [
+        {"prompt_token_ids": [2 + (i * 17 + j * 13) % 4000 for i in range(n)]}
+        for j, n in enumerate([64, 128, 2048, 2049])
+    ]
+    sampling = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True, logprobs=5)
+    results = []
+    for force_mqa in [True, False]:
+        with vllm_runner(
+            str(tmp_path),
+            load_format="dummy",
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            kv_cache_dtype=kv_cache_dtype,
+            seed=42,
+            max_model_len=4096,
+            max_num_seqs=4,
+            max_num_batched_tokens=256,
+            block_size=64,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            gpu_memory_utilization=0.25,
+            attention_config={
+                "backend": "ROCM_AITER_MLA_SPARSE",
+                "sparse_mla_force_mqa": force_mqa,
+            },
+        ) as runner:
+            outputs = runner.llm.generate(prompts, sampling, use_tqdm=False)
+            results.append([request.outputs[0] for request in outputs])
+
+    for reference, actual in zip(*results):
+        assert len(actual.token_ids) == 16
+        assert actual.token_ids == reference.token_ids
+        assert actual.logprobs is not None and reference.logprobs is not None
+        for token, expected, observed in zip(
+            actual.token_ids, reference.logprobs, actual.logprobs
+        ):
+            torch.testing.assert_close(
+                torch.tensor(observed[token].logprob),
+                torch.tensor(expected[token].logprob),
+                rtol=0.01,
+                atol=0.01,
+            )

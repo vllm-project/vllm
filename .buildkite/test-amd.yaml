@@ -2634,8 +2634,11 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
+  - vllm/models/deepseek_v32/amd/rocm.py
   commands:
-  - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s v1/attention --ignore=v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) Metrics, Tracing" # TBD
   timeout_in_minutes: 30
@@ -5646,10 +5649,11 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
+  - vllm/models/deepseek_v32/amd/rocm.py
   optional: true
   commands:
-  - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py --ignore=v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) CUDAGraph"
   timeout_in_minutes: 55
