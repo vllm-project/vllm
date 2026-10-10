@@ -4,6 +4,8 @@ import subprocess
 
 import pytest
 
+from vllm.benchmarks.startup import _collect_phase_metrics
+
 
 @pytest.mark.benchmark
 def test_bench_startup():
@@ -17,3 +19,7 @@ def test_bench_startup():
     print(result.stderr)
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
+
+
+def test_empty_startup_phase_has_no_metrics():
+    assert _collect_phase_metrics("cold", [], has_encoder=False) == []
