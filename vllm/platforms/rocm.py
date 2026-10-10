@@ -512,6 +512,15 @@ def _get_backend_priorities(
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
 
+    # On gfx1151 the ROCM_ATTN custom paged-attention kernel only covers
+    # head_size 128 with block_size 16, a GQA ratio of 3-16 and an unquantized
+    # KV cache (see use_rocm_custom_paged_attention); anything else falls back
+    # to its internal Triton path. Demote it below TRITON_ATTN there.
+    if on_gfx1151() and AttentionBackendEnum.ROCM_ATTN in backends:
+        backends.remove(AttentionBackendEnum.ROCM_ATTN)
+        triton_idx = backends.index(AttentionBackendEnum.TRITON_ATTN)
+        backends.insert(triton_idx + 1, AttentionBackendEnum.ROCM_ATTN)
+
     return backends
 
 
