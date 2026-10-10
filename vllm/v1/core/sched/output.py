@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 
 if TYPE_CHECKING:
     import numpy as np
@@ -54,6 +55,7 @@ class NewRequestData:
     prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    hidden_state_capture: HiddenStateCapturePlan | None = None
 
     @classmethod
     def from_request(
@@ -80,6 +82,11 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            hidden_state_capture=(
+                request.hidden_state_capture.plan
+                if request.hidden_state_capture is not None
+                else None
+            ),
         )
 
     @property
@@ -310,6 +317,9 @@ class SchedulerOutput:
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
+
+    # Completed capture windows; worker can release their request-local plans.
+    finished_hidden_capture_req_ids: set[str] | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

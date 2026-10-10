@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from dataclasses import replace
 from typing import Any
 
 import vllm.envs as envs
@@ -58,6 +59,10 @@ from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollec
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    validate_hidden_state_capture,
+)
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -398,6 +403,7 @@ class AsyncLLM(EngineClient):
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         kv_hints: KvHintsEnvelope | None = None,
+        hidden_state_capture: HiddenStateCapturePlan | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
         if self.errored:
@@ -421,6 +427,10 @@ class AsyncLLM(EngineClient):
             )
 
         if isinstance(prompt, AsyncGenerator):
+            if hidden_state_capture is not None:
+                raise ValueError(
+                    "Hidden-state capture does not support streaming input"
+                )
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
 
@@ -503,7 +513,18 @@ class AsyncLLM(EngineClient):
         if reasoning_parser_kwargs is not None:
             request.reasoning_parser_kwargs = reasoning_parser_kwargs
 
+        if hidden_state_capture is not None:
+            if request.hidden_state_capture is not None:
+                raise ValueError("Hidden-state capture plan was supplied twice")
+            request.hidden_state_capture = hidden_state_capture
+        if (plan := request.hidden_state_capture) is not None:
+            validate_hidden_state_capture(plan, request, params, self.vllm_config)
+
         self.input_processor.assign_request_id(request)
+        if request.hidden_state_capture is not None:
+            request.hidden_state_capture = replace(
+                request.hidden_state_capture, request_id=request.request_id
+            )
 
         # We start the output_handler on the first call to add_request() so
         # we can call __init__ before the event loop, which enables us
@@ -708,6 +729,7 @@ class AsyncLLM(EngineClient):
         kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: HiddenStateCapturePlan | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
@@ -750,6 +772,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                hidden_state_capture=hidden_state_capture,
             )
 
             # The output_handler task pushes items into the queue.

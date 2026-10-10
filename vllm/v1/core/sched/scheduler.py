@@ -235,6 +235,7 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+        self.finished_hidden_capture_req_ids: set[str] = set()
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
@@ -1512,6 +1513,7 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
+            finished_hidden_capture_req_ids=self.finished_hidden_capture_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
@@ -1645,6 +1647,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't just clear() here because it will also affect
         # the scheduler output.
         self.finished_req_ids = set()
+        self.finished_hidden_capture_req_ids = set()
         self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
@@ -2109,6 +2112,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            num_rejected = 0
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -2195,6 +2199,31 @@ class Scheduler(SchedulerInterface):
                 request.resumable = False
                 stopped = True
 
+            capture_result = None
+            if (
+                capture_buffer := request.hidden_state_capture
+            ) is not None and not output_is_stale:
+                accepted_end = request.num_prompt_tokens - 1 + request.num_output_tokens
+                accepted_start = accepted_end - len(new_token_ids)
+                capture_result, request.hidden_capture_skip_reason = (
+                    capture_buffer.update(
+                        (model_runner_output.hidden_state_capture or {}).get(req_id),
+                        accepted_start,
+                        accepted_end,
+                        stopped=stopped,
+                        error=(model_runner_output.hidden_capture_errors or {}).get(
+                            req_id
+                        ),
+                    )
+                )
+                if (
+                    request.hidden_capture_skip_reason is not None
+                    or capture_result is not None
+                ):
+                    request.hidden_state_capture = None
+                    self.finished_hidden_capture_req_ids.add(req_id)
+
+            capture_skip_reason = request.hidden_capture_skip_reason
             routed_experts = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
@@ -2282,8 +2311,11 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        hidden_state_capture=capture_result,
+                        hidden_capture_skip_reason=capture_skip_reason,
                     )
                 )
+                request.hidden_capture_skip_reason = None
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

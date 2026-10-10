@@ -40,6 +40,7 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 
 pytestmark = pytest.mark.cpu_test
 
@@ -511,3 +512,28 @@ def test_human_readable_int_parses_notation(input_str: str, expected: int):
 def test_human_readable_int_rejects_invalid(invalid: str):
     with pytest.raises((argparse.ArgumentTypeError, ValueError)):
         human_readable_int(invalid)
+
+
+@pytest.mark.asyncio
+async def test_hidden_capture_rejects_streaming_input_before_admission():
+    engine = SimpleNamespace(
+        errored=False,
+        vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
+        ),
+        _add_streaming_input_request=AsyncMock(),
+    )
+
+    async def prompt():
+        yield {"prompt_token_ids": [1]}
+
+    stream = prompt()
+    plan = HiddenStateCapturePlan.from_window("request", 1, 0, 1, "collection")
+    try:
+        with pytest.raises(ValueError, match="streaming input"):
+            await AsyncLLM.add_request(
+                engine, "request", stream, SamplingParams(), hidden_state_capture=plan
+            )
+        engine._add_streaming_input_request.assert_not_awaited()
+    finally:
+        await stream.aclose()

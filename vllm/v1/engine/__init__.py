@@ -16,6 +16,10 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    HiddenStateCaptureResult,
+)
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import (
     PrefillStats,
@@ -160,6 +164,8 @@ class EngineCoreRequest(
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
 
+    hidden_state_capture: HiddenStateCapturePlan | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -238,6 +244,8 @@ class EngineCoreOutput(
 
     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
     prompt_token_id_logprobs: torch.Tensor | None = None
+    hidden_state_capture: HiddenStateCaptureResult | None = None
+    hidden_capture_skip_reason: str | None = None
 
     @property
     def finished(self) -> bool:

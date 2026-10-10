@@ -1,0 +1,244 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCaptureBuffer,
+    HiddenStateCapturePlan,
+    capture_scheduled_hidden_states,
+    drop_incompatible_aux_plans,
+    hidden_state_capture_capability,
+    validate_hidden_state_capture,
+)
+
+
+def test_hidden_capture_window_uses_teacher_forcing_positions():
+    response = HiddenStateCapturePlan.from_window("req", 17, 1000, 2000, "collection")
+    absolute = HiddenStateCapturePlan.from_window(
+        "req", 17, 1016, 2016, "collection", coordinate="absolute"
+    )
+    assert (response.window_start_abs, response.window_end_abs) == (1016, 2016)
+    assert response == absolute
+    with pytest.raises(ValueError):
+        HiddenStateCapturePlan.from_window("req", 17, 2000, 1000, "collection")
+
+
+def test_hidden_capture_selects_only_each_requests_window_rows():
+    plans = {
+        "a": HiddenStateCapturePlan.from_window("a", 4, 0, 2, "a"),
+        "b": HiddenStateCapturePlan.from_window("b", 2, 1, 3, "b"),
+    }
+    hidden = torch.arange(18, dtype=torch.float32).reshape(9, 2)
+    chunks = capture_scheduled_hidden_states(
+        plans,
+        ["a", "b", "c"],
+        {"a": 4, "b": 3, "c": 2},
+        {"a": 0, "b": 2, "c": 8},
+        hidden,
+    )
+    np.testing.assert_array_equal(chunks["a"].positions, [3])
+    torch.testing.assert_close(chunks["a"].hidden_states, hidden[3:4])
+    np.testing.assert_array_equal(chunks["b"].positions, [2, 3])
+    torch.testing.assert_close(chunks["b"].hidden_states, hidden[4:6])
+    assert "c" not in chunks
+
+    after_window = capture_scheduled_hidden_states(
+        plans, ["a"], {"a": 2}, {"a": 5}, hidden
+    )
+    assert after_window == {}
+
+
+def test_hidden_capture_uses_prompt_logprob_batch_row_boundaries():
+    plan = HiddenStateCapturePlan.from_window("b", 2, 1, 3, "collection")
+    hidden = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+    chunks = capture_scheduled_hidden_states(
+        {"b": plan},
+        ["a", "b"],
+        {"a": 3, "b": 3},
+        {"a": 0, "b": 2},
+        hidden,
+        query_start_loc=np.array([0, 3, 6]),
+    )
+    np.testing.assert_array_equal(chunks["b"].positions, [2, 3])
+    torch.testing.assert_close(chunks["b"].hidden_states, hidden[3:5])
+
+
+def test_hidden_capture_rejects_mismatched_runner_row_boundaries():
+    plan = HiddenStateCapturePlan.from_window("a", 1, 0, 1, "collection")
+    with pytest.raises(ValueError, match="row boundaries"):
+        capture_scheduled_hidden_states(
+            {"a": plan},
+            ["a"],
+            {"a": 1},
+            {"a": 0},
+            torch.zeros(2, 1),
+            query_start_loc=np.array([0, 2]),
+        )
+
+
+def test_hidden_capture_discards_rejected_speculative_rows_and_short_samples():
+    plan = HiddenStateCapturePlan.from_window(
+        "req", 1, 10, 13, "collection", min_rows=2
+    )
+    hidden = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+    chunk = capture_scheduled_hidden_states(
+        {"req": plan}, ["req"], {"req": 3}, {"req": 10}, hidden
+    )["req"]
+
+    buffer = HiddenStateCaptureBuffer(plan)
+    result, reason = buffer.update(chunk, 10, 12, stopped=True)
+    assert reason is None
+    assert result is not None
+    np.testing.assert_array_equal(result.hidden_positions, [10, 11])
+    torch.testing.assert_close(result.hidden_states, hidden[:2])
+    assert (result.hidden_position_start, result.hidden_position_end) == (10, 12)
+    assert (result.hidden_window_start, result.hidden_window_end) == (10, 13)
+    assert result.layer_ids == ()
+    assert result.includes_final_layer
+
+    early_eos = HiddenStateCaptureBuffer(plan)
+    result, reason = early_eos.update(chunk, 10, 11, stopped=True)
+    assert result is None
+    assert reason == "insufficient_rows"
+
+
+def test_hidden_capture_preserves_aux_final_layout_and_deduplicates_retries():
+    plan = HiddenStateCapturePlan.from_window(
+        "req", 1, 0, 2, "collection", aux_layer_ids=(3,)
+    )
+    final = torch.tensor([[1.0], [2.0]])
+    aux = torch.tensor([[10.0], [20.0]])
+    chunk = capture_scheduled_hidden_states(
+        {"req": plan}, ["req"], {"req": 2}, {"req": 0}, final, [aux]
+    )["req"]
+    torch.testing.assert_close(
+        chunk.hidden_states, torch.tensor([[10.0, 1.0], [20.0, 2.0]])
+    )
+    buffer = HiddenStateCaptureBuffer(plan)
+    buffer.add(chunk)
+    buffer.add(chunk.accepted(1, 2))
+    result = buffer.finish()
+    assert result is not None
+    assert result.hidden_layout == "aux_final"
+    assert result.layer_ids == (3,)
+    assert result.includes_final_layer
+    np.testing.assert_array_equal(result.hidden_positions, [0, 1])
+    torch.testing.assert_close(result.hidden_states, chunk.hidden_states)
+
+
+def test_hidden_capture_dflash_layout_excludes_final_state():
+    plan = HiddenStateCapturePlan.from_window(
+        "req", 1, 0, 1, "collection", aux_layer_ids=(3,), hidden_layout="dflash_aux"
+    )
+    chunk = capture_scheduled_hidden_states(
+        {"req": plan},
+        ["req"],
+        {"req": 1},
+        {"req": 0},
+        torch.tensor([[1.0]]),
+        [torch.tensor([[10.0]])],
+    )["req"]
+    torch.testing.assert_close(chunk.hidden_states, torch.tensor([[10.0]]))
+    buffer = HiddenStateCaptureBuffer(plan)
+    buffer.add(chunk)
+    result = buffer.finish()
+    assert result is not None
+    assert result.layer_ids == (3,)
+    assert not result.includes_final_layer
+
+
+def test_hidden_capture_keeps_bfloat16_on_cpu():
+    plan = HiddenStateCapturePlan.from_window("req", 1, 0, 1, "collection")
+    hidden = torch.tensor([[1.0]], dtype=torch.bfloat16)
+    chunk = capture_scheduled_hidden_states(
+        {"req": plan}, ["req"], {"req": 1}, {"req": 0}, hidden
+    )["req"]
+    assert chunk.hidden_states.dtype == torch.bfloat16
+    buffer = HiddenStateCaptureBuffer(plan)
+    buffer.add(chunk)
+    result = buffer.finish()
+    assert result is not None
+    assert result.hidden_states.dtype == torch.bfloat16
+
+
+def test_hidden_capture_reports_sparse_positions_without_filling_gaps():
+    plan = HiddenStateCapturePlan.from_window(
+        "req", 1, 10, 13, "collection", min_rows=2
+    )
+    hidden = torch.tensor([[1.0], [2.0], [3.0]])
+    chunk = capture_scheduled_hidden_states(
+        {"req": plan}, ["req"], {"req": 3}, {"req": 10}, hidden
+    )["req"]
+    buffer = HiddenStateCaptureBuffer(plan)
+    buffer.add(chunk.accepted(10, 11))
+    buffer.add(chunk.accepted(12, 13))
+    result = buffer.finish()
+    assert result is not None
+    np.testing.assert_array_equal(result.hidden_positions, [10, 12])
+    torch.testing.assert_close(result.hidden_states, hidden[[0, 2]])
+
+
+def test_hidden_capture_aux_capability_is_request_local():
+    plan = HiddenStateCapturePlan.from_window(
+        "a", 1, 0, 1, "collection", aux_layer_ids=(3,)
+    )
+    plans = {"a": plan, "b": plan}
+    errors = drop_incompatible_aux_plans(plans, ["a"], (), None)
+    assert errors == {"a": "aux_layers_unavailable"}
+    assert plans == {"b": plan}
+
+
+def test_hidden_capture_fails_closed_for_unmapped_runners():
+    config = SimpleNamespace(
+        device_config=SimpleNamespace(device_type="cuda"),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
+        model_config=SimpleNamespace(is_encoder_decoder=False),
+        speculative_config=None,
+    )
+    assert hidden_state_capture_capability(config) is None
+    config.scheduler_config.async_scheduling = True
+    assert "async scheduling" in hidden_state_capture_capability(config)
+    config.scheduler_config.async_scheduling = False
+    config.device_config.device_type = "npu"
+    assert "CUDA" in hidden_state_capture_capability(config)
+
+
+def test_hidden_capture_rejects_unsupported_config_before_admission():
+    from vllm.sampling_params import SamplingParams
+
+    config = SimpleNamespace(
+        device_config=SimpleNamespace(device_type="npu"),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, decode_context_parallel_size=1
+        ),
+        model_config=SimpleNamespace(is_encoder_decoder=False),
+        speculative_config=None,
+    )
+    request = SimpleNamespace(
+        request_id="req", prompt_token_ids=[1, 2], prompt_embeds=None
+    )
+    plan = HiddenStateCapturePlan.from_window("req", 2, 0, 1, "collection")
+    with pytest.raises(ValueError, match="only the CUDA GPU"):
+        validate_hidden_state_capture(plan, request, SamplingParams(), config)
+
+
+@pytest.mark.parametrize("stop", ["stop", ["stop"]])
+def test_hidden_capture_rejects_frontend_stop_strings(stop):
+    """Frontend termination cannot return the scheduler's buffered partial window."""
+    from vllm.sampling_params import SamplingParams
+
+    request = SimpleNamespace(
+        request_id="req", prompt_token_ids=[1, 2], prompt_embeds=None
+    )
+    plan = HiddenStateCapturePlan.from_window("req", 2, 0, 4, "collection", min_rows=1)
+    with pytest.raises(ValueError, match="stop strings"):
+        validate_hidden_state_capture(plan, request, SamplingParams(stop=stop), None)

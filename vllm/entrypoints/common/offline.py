@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from typing import Any
 
 from tqdm import tqdm
@@ -34,6 +35,7 @@ from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 
 logger = init_logger(__name__)
 
@@ -295,6 +297,22 @@ class OfflineInferenceMixin:
 
         return [0] * num_requests
 
+    def _hidden_capture_to_seq(
+        self,
+        capture: HiddenStateCapturePlan
+        | Sequence[HiddenStateCapturePlan | None]
+        | None,
+        num_requests: int,
+    ) -> Sequence[HiddenStateCapturePlan | None]:
+        if isinstance(capture, Sequence):
+            if len(capture) != num_requests:
+                raise VLLMValidationError(
+                    f"The lengths of prompts ({num_requests}) and hidden-state "
+                    f"capture plans ({len(capture)}) must be the same."
+                )
+            return capture
+        return [capture] * num_requests
+
     def _add_completion_requests(
         self,
         prompts: PromptType | Sequence[PromptType],
@@ -307,11 +325,17 @@ class OfflineInferenceMixin:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: HiddenStateCapturePlan
+        | Sequence[HiddenStateCapturePlan | None]
+        | None = None,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
         seq_priority = self._priority_to_seq(priority, len(seq_prompts))
+        seq_capture = self._hidden_capture_to_seq(
+            hidden_state_capture, len(seq_prompts)
+        )
 
         return self._render_and_add_requests(
             prompts=(
@@ -329,6 +353,7 @@ class OfflineInferenceMixin:
             params=seq_params,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
+            hidden_state_captures=seq_capture,
         )
 
     def _run_completion(
@@ -344,6 +369,9 @@ class OfflineInferenceMixin:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: HiddenStateCapturePlan
+        | Sequence[HiddenStateCapturePlan | None]
+        | None = None,
     ):
         self._add_completion_requests(
             prompts=prompts,
@@ -353,6 +381,7 @@ class OfflineInferenceMixin:
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
+            hidden_state_capture=hidden_state_capture,
         )
         return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 
@@ -535,6 +564,7 @@ class OfflineInferenceMixin:
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
+        hidden_state_captures: Sequence[HiddenStateCapturePlan | None] | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
 
@@ -548,6 +578,11 @@ class OfflineInferenceMixin:
                         None if lora_requests is None else lora_requests[i],
                     ),
                     priority=0 if priorities is None else priorities[i],
+                    hidden_state_capture=(
+                        None
+                        if hidden_state_captures is None
+                        else hidden_state_captures[i]
+                    ),
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
@@ -563,12 +598,15 @@ class OfflineInferenceMixin:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        hidden_state_capture: HiddenStateCapturePlan | None = None,
     ) -> str:
         if isinstance(params, SamplingParams):
             # We only care about the final output
             params.output_kind = RequestOutputKind.FINAL_ONLY
 
         request_id = str(next(self.request_counter))
+        if hidden_state_capture is not None:
+            hidden_state_capture = replace(hidden_state_capture, request_id=request_id)
 
         return self.llm_engine.add_request(
             request_id,
@@ -576,6 +614,7 @@ class OfflineInferenceMixin:
             params,
             lora_request=lora_request,
             priority=priority,
+            hidden_state_capture=hidden_state_capture,
         )
 
     def _run_engine(

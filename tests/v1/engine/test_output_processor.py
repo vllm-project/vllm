@@ -44,6 +44,51 @@ from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
 
 
+def test_capture_skip_with_first_token_preserves_prefill_and_ttft_statistics():
+    processor = OutputProcessor(tokenizer=None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="capture",
+        external_req_id="capture",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False),
+        pooling_params=None,
+    )
+    processor.add_request(request, prompt=None)
+    state = processor.request_states[request.request_id]
+    stats = IterationStats()
+    processed = processor.process_outputs(
+        [], engine_core_timestamp=1, iteration_stats=stats
+    )
+    assert not processed.request_outputs
+    assert state.is_prefilling
+    assert state.stats.first_token_ts == 0
+    assert stats.time_to_first_tokens_iter == []
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[42],
+                hidden_capture_skip_reason="aux_layers_unavailable",
+            )
+        ],
+        engine_core_timestamp=2,
+        iteration_stats=stats,
+    )
+    assert (
+        processed.request_outputs[0].hidden_capture_skip_reason
+        == "aux_layers_unavailable"
+    )
+    assert not state.is_prefilling
+    assert state.stats.first_token_ts == 2
+    assert len(stats.time_to_first_tokens_iter) == 1
+
+
 @pytest.mark.parametrize("flat_logprobs", [False, True])
 def test_delta_output_without_new_tokens_returns_empty_logprobs(
     flat_logprobs: bool,

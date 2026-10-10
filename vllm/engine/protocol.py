@@ -26,6 +26,7 @@ from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
+    from vllm.v1.hidden_state_capture import HiddenStateCapturePlan
 
 
 @dataclass
@@ -106,6 +107,7 @@ class EngineClient(ABC):
         kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: "HiddenStateCapturePlan | None" = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
