@@ -1865,6 +1865,7 @@ async def test_send_state_answers_every_pull_once(monkeypatch, events, pull_ok, 
                 elif event == "short-timeout":
                     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "1")
                 elif event == "answered":
+                    assert pull is not None
                     await asyncio.wait([pull], timeout=3)
                 elif event == "free":
                     worker._send_slots.release()

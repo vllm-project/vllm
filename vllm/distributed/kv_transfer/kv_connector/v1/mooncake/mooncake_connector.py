@@ -1718,7 +1718,7 @@ class MooncakeConnectorWorker:
         timeout = max(deadline - time.perf_counter(), 0)
         try:
             await asyncio.wait_for(self._send_slots.acquire(), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             admitted = False
         else:
             # The event loop may resume this task past the deadline.
