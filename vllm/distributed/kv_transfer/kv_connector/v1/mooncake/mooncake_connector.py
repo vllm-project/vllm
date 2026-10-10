@@ -593,6 +593,24 @@ def _pp_mismatch_hides_packed_layers(
     )
 
 
+def _block_size_mismatch_error(
+    local_block_size: int, remote_block_size: int
+) -> str | None:
+    """Block IDs name the same tokens only when both sides use one block size.
+
+    A hybrid model sizes its blocks from the per-rank state, so prefill and
+    decode instances at different TP sizes can pick different block sizes.
+    A remote size of 0 means the peer did not send the field.
+    """
+    if remote_block_size in (0, local_block_size):
+        return None
+    return (
+        "Mooncake requires the same KV cache block size on prefill and decode, "
+        f"but prefill uses {local_block_size} tokens and decode uses "
+        f"{remote_block_size}. Set --block-size to the same value on both."
+    )
+
+
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     is_dense = getattr(tensor, "is_non_overlapping_and_dense", None)
     if callable(is_dense):
@@ -622,6 +640,9 @@ class MooncakeXferMetadata(
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
+    # Logical KV cache block size of the consumer. 0 means the peer did not
+    # send the field.
+    remote_block_size: int = 0
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1514,6 +1535,17 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
+        block_size_err = _block_size_mismatch_error(
+            self.cache_config.block_size, meta.remote_block_size
+        )
+        if block_size_err is not None:
+            logger.error(block_size_err)
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=block_size_err,
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
         if _pp_mismatch_hides_packed_layers(
             self.pp_size,
             meta.remote_pp_size,
@@ -2317,6 +2349,7 @@ class MooncakeConnectorWorker:
             remote_tp_size=self.tp_size,
             remote_tp_rank=self.tp_rank,
             remote_pp_size=self.pp_size,
+            remote_block_size=self.cache_config.block_size,
             req_blocks={
                 req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
                 for req_id, pull_meta in pull_metas.items()
