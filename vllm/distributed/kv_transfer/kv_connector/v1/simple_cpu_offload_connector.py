@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     SupportsHMA,
@@ -30,6 +31,7 @@ from vllm.v1.simple_kv_offload.manager import (
     SimpleCPUOffloadScheduler,
 )
 from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadHandshake,
     SimpleCPUOffloadMetadata,
 )
 from vllm.v1.simple_kv_offload.metrics import (
@@ -114,6 +116,16 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
         )
 
+        cpu_offload_shared = extra_config.get("cpu_offload_shared", False)
+        if not isinstance(cpu_offload_shared, bool):
+            raise ValueError("cpu_offload_shared must be a JSON boolean.")
+        if cpu_offload_shared:
+            from vllm.v1.simple_kv_offload.shared_offload import validate_shared_config
+
+            validate_shared_config(vllm_config, kv_offload_backend, lazy_offload)
+            if cpu_capacity_per_rank <= 0:
+                raise ValueError("cpu_offload_shared requires positive CPU capacity.")
+
         disk_path = extra_config.get("disk_path", None) or None
         disk_capacity_bytes = int(
             extra_config.get("disk_capacity_bytes", 100 * (1024**3))
@@ -177,6 +189,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 lazy_offload=lazy_offload,
                 disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
                 use_page_cache=use_page_cache if disk_mode else False,
+                cpu_offload_shared=cpu_offload_shared,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -188,7 +201,27 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
+                cpu_offload_shared=cpu_offload_shared,
             )
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        if self.worker_handler is not None:
+            return self.worker_handler.handshake_metadata
+        return None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        if self.scheduler_manager is not None:
+            shared = metadata.get(0)
+            if isinstance(shared, SimpleCPUOffloadHandshake):
+                self.scheduler_manager.set_shared_pool(shared)
+
+    def shutdown(self) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.shutdown()
+        if self.scheduler_manager is not None:
+            self.scheduler_manager.shutdown()
 
     # --- Worker-side methods ---
 

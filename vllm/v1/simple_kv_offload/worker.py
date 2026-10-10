@@ -9,10 +9,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadHandshake,
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
@@ -36,6 +38,7 @@ class SimpleCPUOffloadWorker:
         disk_capacity_bytes: int = 0,
         disk_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        cpu_offload_shared: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -45,6 +48,9 @@ class SimpleCPUOffloadWorker:
         self.disk_buffer_slots = disk_buffer_slots
         self.use_page_cache = use_page_cache
         self.disk_mode = kv_offload_backend == "disk"
+        self.cpu_offload_shared = cpu_offload_shared
+        self.shared_region: SharedOffloadRegion | None = None
+        self.handshake_metadata: SimpleCPUOffloadHandshake | None = None
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -223,17 +229,21 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.cpu_kv_caches = {}
-        for name, gpu_tensor in unique_gpu_caches.items():
-            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
-            # Allocate non-pinned first, then pin via cudaHostRegister to
-            # bypass PyTorch's CUDACachingHostAllocator which rounds up to
-            # the next power of 2 (e.g. 100 GB -> 128 GB).
-            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
-            if pin_memory:
-                pin_tensor(tensor)
-            self.cpu_kv_caches[name] = tensor
+        if self.cpu_offload_shared:
+            self._init_shared_cpu_mode(unique_gpu_caches, pin_memory)
+        else:
+            self.cpu_kv_caches = {}
+            for name, gpu_tensor in unique_gpu_caches.items():
+                cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
+                # Allocate non-pinned first, then pin via cudaHostRegister to
+                # bypass PyTorch's CUDACachingHostAllocator which rounds up to
+                # the next power of 2 (e.g. 100 GB -> 128 GB).
+                tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
+                if pin_memory:
+                    pin_tensor(tensor)
+                self.cpu_kv_caches[name] = tensor
 
+        assert self.cpu_kv_caches is not None
         self._backend = DmaCopyBackend()
         self._backend.init(
             unique_gpu_caches,
@@ -242,6 +252,47 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
         )
+
+    def _init_shared_cpu_mode(
+        self, gpu_caches: dict[str, torch.Tensor], pin_memory: bool
+    ) -> None:
+        from vllm.v1.simple_kv_offload.shared_offload import allocate_shared_offload
+
+        assert self.kv_cache_config is not None
+        if self.num_cpu_blocks < 2:
+            raise ValueError("Shared CPU offload needs at least two slots per DP rank.")
+        self.shared_region, self.cpu_kv_caches, self.handshake_metadata = (
+            allocate_shared_offload(
+                self.vllm_config,
+                self.kv_cache_config,
+                gpu_caches,
+                self.num_cpu_blocks,
+            )
+        )
+        if pin_memory:
+            pin_tensor(self.shared_region.base_tensor)
+            self.shared_region.is_pinned = True
+        self.num_cpu_blocks *= self.handshake_metadata.local_size
+
+    def shutdown(self) -> None:
+        if self._backend is not None:
+            self._backend.shutdown()
+            # DmaCopyBackend's timed join may leave a busy submission thread.
+            # Keep the mmap alive in that case until process teardown.
+            if (
+                isinstance(self._backend, DmaCopyBackend)
+                and self._backend._thread is not None
+                and self._backend._thread.is_alive()
+            ):
+                return
+        if self.shared_region is not None:
+            if self.load_stream is not None:
+                self.load_stream.synchronize()
+            if self.store_stream is not None:
+                self.store_stream.synchronize()
+            self.cpu_kv_caches = None
+            self.shared_region.cleanup()
+            self.shared_region = None
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata

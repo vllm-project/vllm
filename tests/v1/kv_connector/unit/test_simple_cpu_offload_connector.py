@@ -93,6 +93,58 @@ def test_disk_mode_rejects_non_positive_capacity() -> None:
         )
 
 
+@pytest.mark.parametrize("setting", ["true", 1, None])
+def test_shared_offload_requires_boolean_option(setting):
+    with pytest.raises(ValueError, match="JSON boolean"):
+        _make_connector(extra_config={"cpu_offload_shared": setting})
+
+
+def test_shared_offload_rejects_disk_backend():
+    with pytest.raises(ValueError, match="requires kv_offload_backend='cpu'"):
+        _make_connector(
+            extra_config={
+                "cpu_offload_shared": True,
+                "kv_offload_backend": "disk",
+                "disk_path": "/tmp/unused",
+            }
+        )
+
+
+def test_shared_offload_rejects_lazy_mode():
+    with pytest.raises(ValueError, match="requires eager offloading"):
+        _make_connector(extra_config={"cpu_offload_shared": True, "lazy_offload": True})
+
+
+def test_shared_offload_waits_for_worker_handshake():
+    """Shared workers must never receive IDs from the private scheduler pool."""
+    connector = _make_connector(extra_config={"cpu_offload_shared": True})
+    with pytest.raises(RuntimeError, match="worker handshake has not completed"):
+        connector.reset_cache()
+
+
+def test_shared_offload_allows_tensor_parallelism():
+    """TP shards use separate DP groups and can share matching KV shards."""
+    connector = _make_connector(extra_config={"cpu_offload_shared": True})
+    config = connector.scheduler_manager.vllm_config
+    config.parallel_config.tensor_parallel_size = 2
+
+    from vllm.v1.simple_kv_offload.shared_offload import validate_shared_config
+
+    validate_shared_config(config, "cpu", lazy_offload=False)
+
+
+@pytest.mark.parametrize("algorithm", ["xxhash", "xxhash_cbor"])
+def test_shared_offload_rejects_random_prefix_hashes(monkeypatch, algorithm):
+    from vllm.v1.simple_kv_offload.shared_offload import shared_hash_signature
+
+    monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+    connector = _make_connector()
+    config = connector.scheduler_manager.vllm_config
+    config.cache_config.prefix_caching_hash_algo = algorithm
+    with pytest.raises(ValueError, match="reproducible prefix hashes"):
+        shared_hash_signature(config)
+
+
 def _make_ring_kv_cache_config(num_blocks: int = 16) -> KVCacheConfig:
     """A paged full-attention group beside a per-request ring group."""
     full = FullAttentionSpec(
