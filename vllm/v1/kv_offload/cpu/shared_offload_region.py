@@ -105,7 +105,6 @@ class SharedOffloadRegion(ABC):
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
-        self.rank = getattr(self, "rank", None)
         self._views: list[torch.Tensor] = []
         self.is_pinned = False
         self.pinned_addresses: list[int] = []
@@ -302,7 +301,6 @@ class DirectRankRegion(TensorViewRegion):
         *,
         creator_memory_check: Callable[[int], None] | None = None,
     ) -> None:
-        self.rank = rank
         self._cpu_page_size = cpu_page_size
         self._worker_offset = rank * cpu_page_size
         self._worker_area_end = (rank + 1) * cpu_page_size
@@ -313,6 +311,7 @@ class DirectRankRegion(TensorViewRegion):
             barrier=barrier,
             creator_memory_check=creator_memory_check,
         )
+        self._rank = rank
 
     def get_view(self, tensor_page_size: int) -> torch.Tensor:
         new_offset = self._worker_offset + tensor_page_size
@@ -332,11 +331,10 @@ class DirectRankRegion(TensorViewRegion):
         return view
 
     def populate(self) -> None:
-        assert self.rank is not None
         page_size = self.page_size
         ranges = []
         for chunk in range(self.num_chunks):
-            raw_offset = chunk * self._row_stride + self.rank * self._cpu_page_size
+            raw_offset = chunk * self._row_stride + self._rank * self._cpu_page_size
             aligned_offset = (raw_offset // page_size) * page_size
             end = raw_offset + self._cpu_page_size
             ranges.append((aligned_offset, end - aligned_offset))
@@ -361,7 +359,6 @@ class ReplicatedRegion(TensorViewRegion):
         *,
         creator_memory_check: Callable[[int], None] | None = None,
     ) -> None:
-        self.rank = 0
         self._cpu_page_size = cpu_page_size
         self._worker_offset = 0
         self._worker_area_end = cpu_page_size
@@ -440,7 +437,6 @@ class CanonicalRegion(TensorViewRegion):
         *,
         creator_memory_check: Callable[[int], None] | None = None,
     ) -> None:
-        self.rank = rank
         self._cpu_page_size = cpu_page_size
         self._canonical_offset = 0
         super().__init__(
@@ -450,6 +446,7 @@ class CanonicalRegion(TensorViewRegion):
             barrier=barrier,
             creator_memory_check=creator_memory_check,
         )
+        self._rank = rank
 
     def get_view(self, tensor_page_size: int) -> torch.Tensor:
         new_offset = self._canonical_offset + tensor_page_size
@@ -465,11 +462,10 @@ class CanonicalRegion(TensorViewRegion):
         return view
 
     def populate(self) -> None:
-        assert self.rank is not None
         page_size = self.page_size
         ranges = []
         for chunk in range(self.num_chunks):
-            raw_offset = chunk * self._row_stride + self.rank * self._cpu_page_size
+            raw_offset = chunk * self._row_stride + self._rank * self._cpu_page_size
             aligned_offset = (raw_offset // page_size) * page_size
             end = raw_offset + self._cpu_page_size
             ranges.append((aligned_offset, end - aligned_offset))
@@ -495,7 +491,6 @@ class HiSparseRegion(TensorViewRegion):
         *,
         creator_memory_check: Callable[[int], None] | None = None,
     ) -> None:
-        self.rank = 0
         self._registration_ranges = registration_ranges
         self._canonical_offset = 0
         super().__init__(

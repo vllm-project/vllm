@@ -203,7 +203,6 @@ MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register row-aligned chunks, rolling back on failure."""
-    rank = region.rank
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
     # Chunks end on block-row boundaries, which are page aligned, so neither the
@@ -222,9 +221,8 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
             addresses.append(address)
             continue
         logger.warning(
-            "host_register failed for rank=%d at %.2f of %.2f GB; "
+            "host_register failed for mmap region at %.2f of %.2f GB; "
             "the offload region stays pageable",
-            rank,
             offset / 1e9,
             total_size / 1e9,
         )
@@ -235,8 +233,7 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
     region.pinned_addresses.extend(addresses)
     region.is_pinned = True
     logger.debug(
-        "Host-registered mmap region rank=%d %.2f GB in %d chunk(s)",
-        rank,
+        "Host-registered mmap region %.2f GB in %d chunk(s)",
         total_size / 1e9,
         len(addresses),
     )
