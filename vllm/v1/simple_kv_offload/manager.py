@@ -4,6 +4,7 @@
 
 import contextlib
 from collections.abc import Iterable
+from copy import copy
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
@@ -304,11 +305,11 @@ class SimpleCPUOffloadScheduler:
             for t in gpu_config.kv_cache_tensors
         ]
 
-        return replace(
-            gpu_config,
-            num_blocks=num_cpu_blocks,
-            kv_cache_tensors=cpu_tensors,
-        )
+        # Hardware plugins attach coordinator metadata outside dataclass fields.
+        cpu_config = copy(gpu_config)
+        cpu_config.num_blocks = num_cpu_blocks
+        cpu_config.kv_cache_tensors = cpu_tensors
+        return cpu_config
 
     @staticmethod
     def _estimate_lazy_target_blocks(
@@ -763,6 +764,11 @@ class SimpleCPUOffloadScheduler:
                 continue
 
             block_ids_by_group = state.block_ids
+            # SWA recycling and CoW can invalidate append-only placement state.
+            if block_state is not None:
+                current_blocks = block_state.get_block_ids(req_id)
+                if current_blocks is not None:
+                    block_ids_by_group = current_blocks
             if not block_ids_by_group:
                 continue
 

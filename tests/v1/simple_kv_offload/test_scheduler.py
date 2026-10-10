@@ -62,6 +62,31 @@ from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
 pytestmark = pytest.mark.skip_global_cleanup
 
 
+def test_derived_cpu_config_preserves_coordinator_role_and_capacity():
+    class PluginKVCacheConfig(KVCacheConfig):
+        kv_transfer_config: KVTransferConfig
+
+    gpu = PluginKVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4096, layers=["probe"], layer_stride=4096, block_stride=256
+            )
+        ],
+        kv_cache_groups=[],
+    )
+    role = KVTransferConfig(kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both")
+    gpu.kv_transfer_config = role
+    cpu = SimpleCPUOffloadScheduler._derive_cpu_config(gpu, 8192)
+    assert cpu is not gpu
+    assert cpu.num_blocks == 32
+    assert cpu.kv_cache_tensors[0].size == 8192
+    assert isinstance(cpu, PluginKVCacheConfig)
+    assert cpu.kv_transfer_config is role
+    assert gpu.num_blocks == 16
+    assert gpu.kv_cache_tensors[0].size == 4096
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -462,6 +487,39 @@ def _alloc_and_register(
 # ---------------------------------------------------------------------------
 # Test 1a: Eager store-and-load roundtrip
 # ---------------------------------------------------------------------------
+def test_eager_store_uses_current_table_after_swa_page_reuse() -> None:
+    """A recycled SWA slot must not store another request's unconfirmed page."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=4, num_groups=2)
+    sched = fix.scheduler
+    request = make_request(num_blocks=2)
+    attention = _allocate_gpu_blocks(fix.gpu_block_pool, request, 1, group_id=0)
+    window = _allocate_gpu_blocks(fix.gpu_block_pool, request, 1, group_id=1)
+    stale_table = ([attention[0].block_id], [window[0].block_id])
+    sched.update_state_after_alloc(
+        request, KVCacheBlocks(blocks=(attention, window)), 0
+    )
+    fix.gpu_block_pool.free_blocks(window)
+    other = make_request(num_blocks=2)
+    replacement = _allocate_gpu_blocks(fix.gpu_block_pool, other, 2)
+    assert window[0].block_id in [block.block_id for block in replacement]
+    assert other.num_computed_tokens == 0
+    request.num_computed_tokens = BLOCK_SIZE
+    current_table = ([attention[0].block_id], [fix.gpu_block_pool.null_block.block_id])
+    output = make_scheduler_output(
+        {request.request_id: 1}, new_reqs={request.request_id: stale_table}
+    )
+    output.kv_connector_block_state = KVConnectorBlockState(
+        req_ids={request.request_id},
+        resolve_block_ids=lambda _: current_table,
+        boundary_state_offloads={},
+    )
+    meta = sched.build_connector_meta(output)
+    assert meta.store_gpu_blocks == [attention[0].block_id]
+    simulate_store_completion(sched, meta.store_event)
+    assert sched.cpu_block_pool.get_cached_block(other.block_hashes[0], [0]) is None
+    assert sched.cpu_block_pool.get_cached_block(other.block_hashes[1], [0]) is None
+
+
 def test_eager_store_and_load_roundtrip() -> None:
     """Eager mode: store blocks on compute, complete store, verify cache hit."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
