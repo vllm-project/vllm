@@ -92,6 +92,7 @@ def _run_prepare(
         seeds=seeds,
         hidden_states=torch.zeros(4, 1, device=device),
         prepare_context_anchor=lambda *args: None,
+        _copy_draft_sampling_params=lambda: None,
         query_cudagraph_manager=None,
         dp_size=1,
         dp_rank=0,

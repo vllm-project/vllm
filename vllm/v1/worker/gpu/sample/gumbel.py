@@ -227,6 +227,7 @@ def gumbel_block_argmax(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
+    logits_threshold_ptr=None,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     is_valid_req = req_state_idx >= 0
@@ -246,6 +247,12 @@ def gumbel_block_argmax(
             logits_cache_source_ptr + token_idx * logits_cache_source_stride + block,
             mask=mask,
         )
+        if logits_threshold_ptr is not None:
+            # Cache the same thresholded logits that are sampled from.
+            threshold = tl.load(logits_threshold_ptr + token_idx)
+            cached_logits = tl.where(
+                cached_logits < threshold, float("-inf"), cached_logits
+            )
         tl.store(
             logits_cache_ptr
             + req_state_idx * logits_cache_stride_0
@@ -289,6 +296,7 @@ def _gumbel_sample_kernel(
     seeds_ptr,
     pos_ptr,
     temp_ptr,
+    logits_threshold_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
@@ -306,6 +314,11 @@ def _gumbel_sample_kernel(
         other=float("-inf"),
     )
     logits = logits.to(tl.float32)
+    if logits_threshold_ptr is not None:
+        # Drop logits below the row's threshold; gumbel_block_argmax does the same
+        # for the cached logits.
+        threshold = tl.load(logits_threshold_ptr + token_idx)
+        logits = tl.where(logits < threshold, float("-inf"), logits)
 
     value, idx = gumbel_block_argmax(
         logits,
@@ -327,6 +340,7 @@ def _gumbel_sample_kernel(
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
+        logits_threshold_ptr=logits_threshold_ptr,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
@@ -345,6 +359,8 @@ def gumbel_sample(
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
+    # [num_tokens] float32; logits below it are treated as -inf, also in the cache
+    logits_threshold: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -396,6 +412,7 @@ def gumbel_sample(
         seed,
         pos,
         temperature,
+        logits_threshold,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_DRAFTING=is_drafting,
