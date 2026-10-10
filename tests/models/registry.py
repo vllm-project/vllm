@@ -260,7 +260,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
     ),
     "DoryForCausalLM": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16-10_05_26",
+        "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16",
         use_original_num_layers=True,
         max_model_len=128,
         hf_overrides={
