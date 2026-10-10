@@ -943,9 +943,8 @@ def combine_topk_swa_indices(
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
     if out is None:
-        combined_indices = torch.full(
+        combined_indices = torch.empty(
             (num_tokens, combined_topk),
-            fill_value=-1,
             dtype=torch.int32,
             device=topk_indices.device,
         )
@@ -954,6 +953,9 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
+
+    if num_tokens == 0:
+        return combined_indices, combined_lens
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
@@ -971,7 +973,10 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-_COMBINE_TOPK_SWA_NUM_WORKERS = 256
+def _combine_topk_swa_block_t(topk: int) -> int:
+    # Top-k rows carry the selected indices as well as the SWA window;
+    # give each row a program while retaining two rows for SWA-only work.
+    return 1 if topk > 0 else 2
 
 
 # Representative pointer alignment variants for Triton pointer specialization.
@@ -1035,7 +1040,7 @@ class CombineTopkSwaIndicesKernel(
         TOP_K: int
         COMPRESS_RATIO: int
         WINDOW_SIZE: int
-        PADDED_TOP_K: int
+        PADDED_WIDTH: int
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -1045,6 +1050,8 @@ class CombineTopkSwaIndicesKernel(
             "topk_indices_stride",
             "M",
             "N",
+            "num_tokens",
+            "num_reqs",
         ]
     )
     def kernel(
@@ -1058,80 +1065,89 @@ class CombineTopkSwaIndicesKernel(
         gather_lens_ptr,
         M,
         N,
+        num_tokens,
+        num_reqs,
         TOP_K: tl.constexpr,
         COMPRESS_RATIO: tl.constexpr,
         WINDOW_SIZE: tl.constexpr,
-        PADDED_TOP_K: tl.constexpr,
+        PADDED_WIDTH: tl.constexpr,
+        BLOCK_T: tl.constexpr,
     ):
-        batch_idx = tl.program_id(0)
-        worker_id = tl.program_id(1)
-        num_workers = tl.num_programs(1)
-
-        # query_start_loc is a global tensor; rebase to chunk-local offsets
-        # by subtracting the chunk's starting value.
+        # Token-parallel scheduling follows SGLang PR #41658. Keep the
+        # V4.1 logical-index and replay-window semantics of this kernel.
+        token = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+        valid_token = token < num_tokens
         base = tl.load(query_start_loc_ptr)
-        query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-        query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-        query_len = query_end - query_start
-        seq_len = tl.load(seq_lens_ptr + batch_idx)
-        gather_len = tl.load(gather_lens_ptr + batch_idx)
-        start_pos = seq_len - query_len
-        # The SWA portion of the gathered buffer starts from position
-        # (seq_len - gather_len), not position 0. We need this offset
-        # to correctly index into the gathered buffer.
+
+        # Upper bound, including repeated starts from zero-query requests.
+        # Runtime search keeps request count out of the compilation key.
+        lo = tl.zeros((BLOCK_T,), tl.int32)
+        hi = tl.full((BLOCK_T,), 0, tl.int32) + num_reqs
+        while tl.sum((lo < hi).to(tl.int32), 0) > 0:
+            active = lo < hi
+            mid = (lo + hi + 1) // 2
+            start = tl.load(query_start_loc_ptr + mid, mask=active, other=0) - base
+            go_right = active & (start <= token)
+            lo = tl.where(go_right, mid, lo)
+            hi = tl.where(active & ~go_right, mid - 1, hi)
+
+        batch_idx = tl.minimum(lo, num_reqs - 1)
+        total_queries = tl.load(query_start_loc_ptr + num_reqs) - base
+        owned = valid_token & (token < total_queries)
+        query_start = (
+            tl.load(query_start_loc_ptr + batch_idx, mask=owned, other=0) - base
+        )
+        query_end = (
+            tl.load(query_start_loc_ptr + batch_idx + 1, mask=owned, other=0) - base
+        )
+        seq_len = tl.load(seq_lens_ptr + batch_idx, mask=owned, other=0)
+        gather_len = tl.load(gather_lens_ptr + batch_idx, mask=owned, other=0)
+        pos = seq_len - (query_end - query_start) + token - query_start
         gather_start = seq_len - gather_len
+        if COMPRESS_RATIO > 0:
+            topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
+        else:
+            topk_len = tl.full((BLOCK_T,), 0, tl.int32)
+        topk_len = tl.where(owned, topk_len, 0)
+        swa_start = tl.maximum(tl.maximum(pos - (WINDOW_SIZE - 1), 0), gather_start)
+        swa_len = tl.where(owned, tl.maximum(pos - swa_start + 1, 0), 0)
 
-        for token_idx in range(query_start + worker_id, query_end, num_workers):
-            # topk_len is fully determined by the query token's absolute position:
-            # the indexer emits min((pos + 1) // compress_ratio, topk_tokens)
-            # valid entries. Caller passes TOP_K=0 for SWA-only layers to zero
-            # this out.
-            token_idx_in_query = token_idx - query_start
-            pos = start_pos + token_idx_in_query
-            if COMPRESS_RATIO > 0:
-                # Warmup batches can put pos below zero; keep the length >= 0.
-                topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
-            else:
-                # SWA-only layers pass TOP_K=0; skip the division entirely
-                # (integer div by constexpr 0 is UB and yields garbage, which
-                # turns the store index below negative).
-                topk_len = 0
-            swa_start = tl.maximum(pos - (WINDOW_SIZE - 1), 0)
-            # gather_len already excludes context below the request's replay
-            # start (SWA bounded replay), so the window cannot start before
-            # the gathered buffer does.
-            swa_start = tl.maximum(swa_start, gather_start)
-            swa_len = tl.maximum(pos - swa_start + 1, 0)
-
-            offset = tl.arange(0, PADDED_TOP_K)
-            mask = offset < topk_len
-            topk_indices = tl.load(
-                topk_indices_ptr + token_idx * topk_indices_stride + offset,
-                mask=mask,
-            )
-            # A failed (-1) or out-of-pool candidate stays -1 instead of landing
-            # in the previous request's rows or this request's SWA rows.
-            valid = (topk_indices >= 0) & (topk_indices < N)
-            tl.store(
-                combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                tl.where(valid, topk_indices + M * batch_idx, -1),
-                mask=mask,
-            )
-            # Index into gathered buffer: N + (position - gather_start)
-            # For positions [swa_start, pos], the buffer indices are:
-            # [N + swa_start - gather_start, N + pos - gather_start]
-            swa_offset = tl.arange(0, WINDOW_SIZE)
-            tl.store(
-                combined_indices_ptr
-                + token_idx * combined_indices_stride
-                + topk_len
-                + swa_offset,
-                M * batch_idx + N + swa_start + swa_offset - gather_start,
-                mask=swa_offset < swa_len,
-            )
-
-            combined_len = topk_len + swa_len
-            tl.store(combined_lens_ptr + token_idx, combined_len)
+        # Write the full logical row, including -1 tails on reused buffers.
+        # Like the original kernel, invalid top-k slots keep their position
+        # and count toward combined_lens; they are never compacted.
+        width: tl.constexpr = (TOP_K + WINDOW_SIZE + 127) // 128 * 128
+        offset = tl.arange(0, PADDED_WIDTH)[None, :]
+        in_topk = offset < topk_len[:, None]
+        topk_values = tl.load(
+            topk_indices_ptr
+            + token.to(tl.int64)[:, None] * topk_indices_stride
+            + offset,
+            mask=owned[:, None] & in_topk,
+            other=-1,
+        )
+        valid_topk = (topk_values >= 0) & (topk_values < N)
+        topk_values = tl.where(valid_topk, topk_values + M * batch_idx[:, None], -1)
+        swa_values = (
+            M * batch_idx[:, None]
+            + N
+            + swa_start[:, None]
+            + offset
+            - topk_len[:, None]
+            - gather_start[:, None]
+        )
+        values = tl.where(
+            in_topk,
+            topk_values,
+            tl.where(offset < (topk_len + swa_len)[:, None], swa_values, -1),
+        )
+        tl.store(
+            combined_indices_ptr
+            + token.to(tl.int64)[:, None] * combined_indices_stride
+            + offset,
+            values,
+            mask=valid_token[:, None] & (offset < width),
+        )
+        tl.store(combined_lens_ptr + token, topk_len + swa_len, mask=valid_token)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -1145,7 +1161,7 @@ class CombineTopkSwaIndicesKernel(
         compress_ratio: int,
         WINDOW_SIZE: int,
     ) -> CompileKey:
-        padded_topk = next_power_of_2(topk_width)
+        padded_topk = next_power_of_2((topk + WINDOW_SIZE + 127) // 128 * 128)
         input_variant = TritonPointerInputVariant.from_alignment(
             topk_indices=topk_indices,
             query_start_loc=query_start_loc,
@@ -1156,7 +1172,7 @@ class CombineTopkSwaIndicesKernel(
             TOP_K=topk,
             COMPRESS_RATIO=compress_ratio,
             WINDOW_SIZE=WINDOW_SIZE,
-            PADDED_TOP_K=padded_topk,
+            PADDED_WIDTH=padded_topk,
             input_variant=input_variant,
         )
 
@@ -1187,11 +1203,15 @@ class CombineTopkSwaIndicesKernel(
             input_variant.pointer("gather_lens", torch.int32),
             1,  # do not specialize M
             1,  # do not specialize N
+            1,  # do not specialize num_tokens
+            1,  # do not specialize num_reqs
             TOP_K=compile_key.TOP_K,
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
-            PADDED_TOP_K=compile_key.PADDED_TOP_K,
-            grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
+            PADDED_WIDTH=compile_key.PADDED_WIDTH,
+            BLOCK_T=_combine_topk_swa_block_t(compile_key.TOP_K),
+            num_warps=2,
+            grid=(1,),
         )
 
     def __call__(
@@ -1210,7 +1230,9 @@ class CombineTopkSwaIndicesKernel(
         WINDOW_SIZE: int,
     ) -> None:
         num_reqs = seq_lens.shape[0]
-        self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
+        num_tokens = topk_indices.shape[0]
+        block_t = _combine_topk_swa_block_t(TOP_K)
+        self.kernel[(cdiv(num_tokens, block_t),)](
             combined_indices,
             combined_indices.stride(0),
             combined_lens,
@@ -1221,10 +1243,14 @@ class CombineTopkSwaIndicesKernel(
             gather_lens,
             M,
             N,
+            num_tokens,
+            num_reqs,
             TOP_K=TOP_K,
             COMPRESS_RATIO=COMPRESS_RATIO,
             WINDOW_SIZE=WINDOW_SIZE,
-            PADDED_TOP_K=next_power_of_2(topk_indices.shape[-1]),
+            PADDED_WIDTH=next_power_of_2((TOP_K + WINDOW_SIZE + 127) // 128 * 128),
+            BLOCK_T=block_t,
+            num_warps=2,
         )
 
 

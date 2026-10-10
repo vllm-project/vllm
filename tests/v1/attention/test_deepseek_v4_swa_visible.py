@@ -450,6 +450,85 @@ def test_v41_combine_topk_swa_stops_at_replay_start(cfg, query_len):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("compress_ratio", [0, 1, 2])
+def test_v41_combine_replayed_ragged_requests(compress_ratio):
+    """Request boundaries and full-row sentinels follow replayed metadata."""
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        combine_topk_swa_indices as combine_v41,
+    )
+
+    seq_lens, gather_lens = [7, 9, 12, 10, 6], [2, 3, 4, 3, 1]
+    window, topk, M, N = 4, 4 if compress_ratio else 0, 16, 8
+    query_lens = [0, 1, 3, 0, 1]
+    topk_cpu = torch.tensor([[0, -1, 7, 8]] * 5, dtype=torch.int32)
+    topk_indices = topk_cpu.cuda()
+    starts = torch.tensor([37, 37, 38, 41, 41, 42], device="cuda")
+    starts = starts.to(torch.int32)
+    seq = torch.tensor(seq_lens, device="cuda", dtype=torch.int32)
+    gather = torch.tensor(gather_lens, device="cuda", dtype=torch.int32)
+    storage = torch.full((7, 130), 41, device="cuda", dtype=torch.int32)
+    lengths = torch.full((7,), 41, device="cuda", dtype=torch.int32)
+    out = (storage[:5, 1:129], lengths[:5])
+
+    def run():
+        return combine_v41(
+            topk_indices,
+            starts,
+            seq,
+            gather,
+            window,
+            compress_ratio,
+            topk,
+            M,
+            N,
+            out=out,
+        )
+
+    run()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+
+    for queries, base, values in (
+        (query_lens, 37, topk_cpu),
+        ([1, 0, 1, 3, 0], 56, topk_cpu.flip(-1)),
+        (query_lens, 37, topk_cpu),
+    ):
+        boundaries = [base]
+        for query_len in queries:
+            boundaries.append(boundaries[-1] + query_len)
+        starts.copy_(torch.tensor(boundaries, device="cuda", dtype=torch.int32))
+        topk_indices.copy_(values)
+        storage.fill_(41)
+        lengths.fill_(41)
+        graph.replay()
+
+        rows: list[list[int]] = []
+        expected_lens: list[int] = []
+        for request, (seq_len, query_len, gather_len) in enumerate(
+            zip(seq_lens, queries, gather_lens)
+        ):
+            for pos in range(seq_len - query_len, seq_len):
+                count = min((pos + 1) // compress_ratio, topk) if topk else 0
+                gather_start = seq_len - gather_len
+                first = max(pos - window + 1, 0, gather_start)
+                row = [-1] * 128
+                for j in range(count):
+                    index = int(values[len(rows), j])
+                    row[j] = request * M + index if 0 <= index < N else -1
+                for j in range(pos - first + 1):
+                    row[count + j] = request * M + N + first + j - gather_start
+                rows.append(row)
+                expected_lens.append(count + pos - first + 1)
+        assert out[0].cpu().tolist() == rows
+        assert out[1].cpu().tolist() == expected_lens
+        assert torch.all(storage[:, [0, -1]] == 41)
+        assert torch.all(storage[5:] == 41)
+        assert torch.all(lengths[5:] == 41)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_without_image_unchanged(cfg):
     """left_visible=None must reproduce the plain causal combined indices."""
