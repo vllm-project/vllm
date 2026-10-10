@@ -10,6 +10,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.device_allocator import alloc_conf
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
@@ -469,6 +470,17 @@ class CustomAllreduce:
         `register_graph_buffers` call at the end of the context.
         It records all the buffer addresses used in the CUDA graph.
         """
+        if (
+            not self.disabled
+            and self._capture_registered
+            and alloc_conf.conf_flag_enabled(
+                alloc_conf.current_alloc_conf(), alloc_conf.EXPANDABLE_SEGMENTS
+            )
+        ):
+            # cudaIpcGetMemHandle cannot export expandable segments. Once
+            # observed, keep staging even if the setting changes: existing
+            # expandable allocations can survive.
+            self._capture_registered = False
         try:
             self._IS_CAPTURING = True
             yield
@@ -520,8 +532,9 @@ class CustomAllreduce:
 
         If registered is True, this assumes inp's pointer is already
         IPC-registered. Otherwise, inp is first copied into a pre-registered
-        buffer.
+        buffer. Disabling direct graph-buffer registration forces this copy.
         """
+        registered = registered and self._capture_registered
         if out is None:
             out = torch.empty_like(inp)
         chunk_numel = self.max_size // inp.element_size()
