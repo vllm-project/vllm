@@ -567,6 +567,21 @@ steps:
   commands:
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py
 
+- label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
+  key: kernels-minimax-m3-sparse-prefill-h100
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/minimax_m3/common/ops/sparse_attn.py
+  - vllm/models/minimax_m3/common/sparse_attention.py
+  - vllm/models/minimax_m3/nvidia/ops/sparse_prefill.py
+  - tests/v1/attention/utils.py
+  - tests/kernels/attention/test_minimax_m3.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k prefill_sparse_attention_correctness
+
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
   timeout_in_minutes: 30

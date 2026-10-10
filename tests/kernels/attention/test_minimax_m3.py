@@ -43,6 +43,15 @@ if not (current_platform.is_cuda() or current_platform.is_rocm()):
     )
 
 
+PREFILL_KERNELS = [pytest.param(minimax_m3_sparse_attn, id="scalar")]
+if current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn as minimax_m3_sparse_attn_tiled,
+    )
+
+    PREFILL_KERNELS.append(pytest.param(minimax_m3_sparse_attn_tiled, id="query_tiled"))
+
+
 @pytest.fixture
 def kv_layout(request) -> KVCacheLayout:
     """Resolve the requested layout name (legacy NHD/HND aliases included)."""
@@ -1587,6 +1596,7 @@ def _reference_sparse_attn(
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("sparse_attn", PREFILL_KERNELS)
 @pytest.mark.parametrize(
     ("q_lens", "kv_lens"),
     [
@@ -1595,6 +1605,7 @@ def _reference_sparse_attn(
     ],
 )
 def test_prefill_sparse_attention_correctness(
+    sparse_attn,
     kv_layout: KVCacheLayout,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
@@ -1652,7 +1663,7 @@ def test_prefill_sparse_attention_correctness(
         q_start += q_len
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn(
+    sparse_attn(
         q,
         kv_cache,
         topk_idx,
