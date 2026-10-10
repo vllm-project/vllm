@@ -26,6 +26,9 @@ def should_pin_memory() -> bool:
     Combines the platform capability check with the user override env var.
     On unified-memory systems (e.g. GH200) pinned memory eats into GPU
     memory, so users can disable it via VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY.
+    The UVA offload path only consults this when
+    VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN is set; by default it allocates
+    exact-size pinned memory itself.
     """
     return (
         is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY

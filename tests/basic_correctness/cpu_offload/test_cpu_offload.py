@@ -41,6 +41,18 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
     )
 
 
+def test_cpu_offload_uva_caching_pin():
+    # Opt-in: UVA offload pinned through the CachingHostAllocator instead of
+    # the default exact-size cudaHostAlloc. Outputs must match either way.
+    compare_two_settings(
+        model="hmellor/tiny-random-LlamaForCausalLM",
+        arg1=[],
+        arg2=["--cpu-offload-gb", "1"],
+        env1=None,
+        env2={"VLLM_WEIGHT_OFFLOADING_UVA_CACHING_PIN": "1"},
+    )
+
+
 @pytest.mark.parametrize(
     ("offload_kwargs", "offloader_type"),
     [
