@@ -904,20 +904,24 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
     return error is None
 
 
-def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
-    """Register prefaulted huge pages, or return None for pinned-memory fallback."""
+def _allocate_registered_storage(
+    num_bytes: int, huge_pages: bool
+) -> torch.Tensor | None:
+    """Register exact-size host memory, or return None for pinned-memory fallback."""
     try:
         mapping = mmap.mmap(-1, num_bytes, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
-        mapping.madvise(mmap.MADV_HUGEPAGE)
+        if huge_pages:
+            mapping.madvise(mmap.MADV_HUGEPAGE)
     except OSError as exc:
         logger.warning(
-            "Engram huge-page allocation failed (%s); using pinned memory.", exc
+            "Engram host table allocation failed (%s); using pinned memory.", exc
         )
         return None
 
     owner = np.frombuffer(mapping, dtype=np.uint8)
-    # Fault the pages in before CUDA pins them, so they can be huge.
-    owner[:: mmap.PAGESIZE] = 0
+    if huge_pages:
+        # Fault the pages in before CUDA pins them, so they can be huge.
+        owner[:: mmap.PAGESIZE] = 0
     tensor = torch.from_numpy(owner)
     pointer = tensor.data_ptr()
     result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
@@ -1050,13 +1054,15 @@ class ParallelEngramEmbedding(nn.Module):
                 ),
                 torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
             )
-        if self.use_thp:
+        if self.use_thp or current_platform.is_cuda():
             weight_bytes = self.part_num_embeddings * self.dim
-            packed = _allocate_huge_page_storage(
-                weight_bytes + weight_bytes // self.block_size
+            packed = _allocate_registered_storage(
+                weight_bytes + weight_bytes // self.block_size, huge_pages=self.use_thp
             )
             if packed is not None:
-                self._packed = packed
+                # Only huge pages skip the sorted lookup.
+                if self.use_thp:
+                    self._packed = packed
                 return (
                     packed[:weight_bytes].view(torch.float8_e4m3fn).view(-1, self.dim),
                     packed[weight_bytes:].view(-1, scale_dim),
