@@ -812,6 +812,9 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
 
     def _make_state(self, kwargs: dict[str, Any]) -> _NixlEPV2State:
         from nixl.runtime.ep import ElasticBuffer  # type: ignore[import-not-found]
+        from nixl.runtime.ep.utils.nixl_bootstrap import (  # type: ignore[import-not-found]
+            NixlBootstrap,
+        )
 
         from vllm.distributed.elastic_ep.elastic_execute import (
             nixl_ep_v2_domain_size,
@@ -820,11 +823,29 @@ class NixlEPV2All2AllManager(All2AllManagerBase):
 
         parallel_config = get_current_vllm_config().parallel_config
         max_num_ep_ranks = nixl_ep_v2_max_ep_size(parallel_config)
+        domain_size = nixl_ep_v2_domain_size(parallel_config)
+        if 0 < domain_size < self.world_size:
+            # A domain smaller than the NVLink domain makes nixl_ep_v2 treat
+            # NVLink neighbours as remote and send to them the scale-out
+            # (RDMA) way, but UCX carries that traffic over NVLink (cuda_ipc),
+            # where the kernels' flag-after-payload ordering does not hold:
+            # corrupted tokens or hangs. Allow it again once nixl_ep_v2 fixes
+            # it. Every rank gets the same records, so all raise together.
+            nvlink_domain_size = NixlBootstrap(
+                self.tcp_store_group.store,
+                self.rank,
+                self.world_size,
+                namespace="nixl_ep_v2/nvlink_domain",
+            ).num_scaleup_ranks
+            if domain_size < nvlink_domain_size:
+                raise ValueError(
+                    f"nixl_ep_v2: VLLM_NIXL_EP_V2_DOMAIN_SIZE={domain_size} is "
+                    f"smaller than the NVLink domain of {nvlink_domain_size} "
+                    "GPUs; set it to that or 0. A smaller domain sends NVLink "
+                    "traffic the RDMA way, which can corrupt tokens or hang."
+                )
         world = _nixl_ep_v2_world_args(
-            self.rank,
-            self.world_size,
-            max_num_ep_ranks,
-            nixl_ep_v2_domain_size(parallel_config),
+            self.rank, self.world_size, max_num_ep_ranks, domain_size
         )
         buffer = ElasticBuffer(
             rank_idx=self.rank,

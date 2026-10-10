@@ -42,6 +42,11 @@ def _nixl_ep_v2_manager_worker(
         use_fp8_dispatch=False,
         num_local_experts=4,
     )
+    if 0 < domain_size < world:
+        # Domains smaller than the node's NVLink domain: every rank refuses.
+        with pytest.raises(ValueError, match="smaller than the NVLink domain"):
+            mgr.get_handle(kw)
+        return
     buf = mgr.get_handle(kw)
     assert buf.rank_idx in buf.get_active_ranks()
     assert mgr.max_num_ep_ranks == world
@@ -78,11 +83,13 @@ def _nixl_ep_v2_manager_worker(
     [
         (2, 0),  # inferred: one domain of 2, direct mode
         (2, 2),  # one declared domain (the elastic EP default): direct mode
-        (4, 2),  # two declared domains of 2: hybrid, NVLink inside, RDMA across
+        (4, 2),  # two declared domains of 2 in one NVLink domain: refused
     ],
 )
 def test_nixl_ep_v2_manager(world: int, domain_size: int) -> None:
     """One nixl_ep_v2 buffer per process, built once and kept by a new manager.
+
+    Assumes one node whose GPUs share one NVLink domain.
 
     Args:
         world: GPUs, one EP rank each.

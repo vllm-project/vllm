@@ -2047,7 +2047,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
     ),
     # NIXL EP v2: GPUs per NVLink domain. 0 lets nixl_ep_v2 infer the domains
-    # (fixed EP size only); with elastic EP, 0 means one domain.
+    # (fixed EP size only); with elastic EP, 0 means one domain. Must not be
+    # smaller than the physical NVLink domain.
     "VLLM_NIXL_EP_V2_DOMAIN_SIZE": lambda: int(
         os.getenv("VLLM_NIXL_EP_V2_DOMAIN_SIZE", "0")
     ),
