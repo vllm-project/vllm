@@ -11,6 +11,7 @@ import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
+from vllm.entrypoints.launchers.api_server.rust_frontend import run_rust_frontend
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
     propagate_flash_late_interaction,
@@ -148,7 +149,9 @@ class ServeSubcommand(CLISubcommand):
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
-        elif args.api_server_count > 1 or rust_frontend_path:
+        elif rust_frontend_path:
+            run_rust_frontend(args)
+        elif args.api_server_count > 1:
             run_multi_api_server(args)
         else:
             # Single API server (this process).
