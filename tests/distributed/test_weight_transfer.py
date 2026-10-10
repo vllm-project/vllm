@@ -826,6 +826,30 @@ class TestIPCEngineParsing:
             MagicMock(spec=torch.nn.Module),
         )
 
+    @pytest.mark.parametrize("dtype,shape", [("float32", [2]), ("bfloat16", [3])])
+    def test_unpacked_actual_tensor_must_match_metadata(
+        self, monkeypatch, dtype, shape
+    ):
+        """A misleading IPC header must fail before any model weight is loaded."""
+        engine = self._make_engine()
+        engine.model.load_weights = MagicMock()
+        monkeypatch.setattr(
+            torch.cuda, "get_device_properties", lambda _: MagicMock(uuid="gpu-uuid")
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.ipc_engine.rebuild_cuda_tensor",
+            lambda *args: torch.zeros(2, dtype=torch.bfloat16),
+        )
+        info = IPCWeightTransferUpdateInfo(
+            names=["w"],
+            dtype_names=[dtype],
+            shapes=[shape],
+            ipc_handles=[{"gpu-uuid": (None,) * 15}],
+        )
+        with pytest.raises(ValueError, match="declared shape/dtype"):
+            engine.receive_weights(info)
+        engine.model.load_weights.assert_not_called()
+
     def test_parse_update_info_valid(self):
         if torch.accelerator.device_count() < 1:
             pytest.skip("Need at least 1 GPU for this test")

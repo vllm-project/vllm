@@ -133,12 +133,14 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     for name, param in restore_params.items():
         if name not in SKIP_TENSORS:
-            param = restore_layer_refs(param, layer)
+            # Live loaders may bind the layer or acquire closures during reload.
+            # Keep those references out of the cached metadata's weak-key value.
+            param = restore_layer_refs(to_meta_tensor(param), layer)
             layer.register_parameter(name, param)
 
     for name, buffer in restore_buffers.items():
         if name not in SKIP_TENSORS:
-            buffer = restore_layer_refs(buffer, layer)
+            buffer = restore_layer_refs(to_meta_tensor(buffer), layer)
             layer.register_buffer(name, buffer, persistent=name not in non_persistent)
 
 

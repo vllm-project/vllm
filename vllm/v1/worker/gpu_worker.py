@@ -5,8 +5,10 @@
 import gc
 import os
 import time
+import weakref
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from copy import deepcopy
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -17,7 +19,13 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    ParallelConfig,
+    VllmConfig,
+    replace,
+    set_current_vllm_config,
+)
 from vllm.config.compilation import CompilationMode
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
@@ -48,6 +56,7 @@ from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
     get_tp_group,
+    get_world_group,
     resume_device_comms,
     suspend_device_comms,
 )
@@ -80,6 +89,13 @@ from vllm.utils.mem_utils import (
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.engine.layout_transition import (
+    LayoutTransitionPhase,
+    LayoutTransitionRejected,
+    LayoutTransitionRequest,
+    agree_layout_transition,
+    run_layout_stage,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
@@ -87,6 +103,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.layout_checkpoint import LayoutCheckpoint
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -216,6 +233,10 @@ class Worker(WorkerBase):
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
         self._weight_update_is_draft = False
+        self._layout_transition: LayoutTransitionRequest | None = None
+        self._layout_transition_target: ParallelConfig | None = None
+        self._layout_transition_phase: LayoutTransitionPhase | None = None
+        self._layout_checkpoint: LayoutCheckpoint | None = None
 
         # Worker profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -503,7 +524,20 @@ class Worker(WorkerBase):
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
         )
 
-        # Construct the model runner
+        self._init_model_runner()
+
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
+
+    def _init_model_runner(self) -> None:
+        """Construct a runner after its device and parallel groups are ready.
+
+        Runner construction is separate from device initialization so a future
+        drained layout transition can replace layout-dependent execution state
+        without reinitializing the worker process or its CUDA device. The caller
+        must release any existing runner and its execution resources first.
+        """
         if self.use_v2_model_runner:
             if self.vllm_config.is_mm_encoder_only:
                 from vllm.v1.worker.mm_encoder_model_runner import (
@@ -524,10 +558,6 @@ class Worker(WorkerBase):
             )
 
             self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
-
-        if self.rank == 0:
-            # If usage stat is enabled, collect relevant info.
-            report_usage_stats(self.vllm_config)
 
     def handle_ft_command(self, ft_request):
         assert self.worker_sentinel is not None
@@ -561,9 +591,11 @@ class Worker(WorkerBase):
         set_torch_threads_for_runtime()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
+        self._require_no_layout_transition()
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        self._require_no_layout_transition()
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
@@ -1209,6 +1241,7 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        self._require_no_layout_transition()
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
@@ -1216,6 +1249,7 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self._require_no_layout_transition()
         # Wait for the previous step's sends so this forward pass cannot
         # overwrite buffers they are still reading.
         if self._pp_send_work:
@@ -1361,6 +1395,7 @@ class Worker(WorkerBase):
                     self.profiler = None
 
     def execute_dummy_batch(self) -> None:
+        self._require_no_layout_transition()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
@@ -1417,6 +1452,7 @@ class Worker(WorkerBase):
             init_info: Dictionary containing backend-specific initialization info
 
         """
+        self._require_no_layout_transition()
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
         # Parse dict into backend-specific typed dataclass
@@ -1441,6 +1477,7 @@ class Worker(WorkerBase):
             self._start_weight_update(is_draft=True)
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
+        self._require_no_layout_transition()
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1466,6 +1503,343 @@ class Worker(WorkerBase):
         self._weight_update_active = True
         self._weight_update_is_draft = is_draft
 
+    def _require_no_layout_transition(self) -> None:
+        if getattr(self, "_layout_transition", None) is not None:
+            raise RuntimeError("A layout transition has reserved this worker")
+
+    def prepare_layout_transition(
+        self, request: LayoutTransitionRequest, engine_reasons: list[str]
+    ) -> None:
+        """Validate locally, then reserve only after every physical rank agrees."""
+        previous = self._layout_transition
+        if previous is None:
+            self._layout_transition = request
+        reasons = list(engine_reasons)
+        target = None
+        current_layout = None
+        try:
+            if previous is not None:
+                reasons.append("a worker layout transition is already active")
+            if self._weight_update_active:
+                reasons.append("a native weight update is active")
+            cfg = self.vllm_config
+            pc = cfg.parallel_config
+            current_layout = (pc.tensor_parallel_size, pc.data_parallel_size)
+            mc = cfg.model_config
+            world = get_world_group()
+            if pc.distributed_executor_backend != "external_launcher":
+                reasons.append("requires external_launcher")
+            if world.world_size != 2 or pc.nnodes != 1:
+                reasons.append("requires two physical ranks on one node")
+            if world.rank != self.rank or pc.world_size != world.world_size:
+                reasons.append("physical worker rank or world size is inconsistent")
+            if not isinstance(request, LayoutTransitionRequest):
+                raise ValueError("requires a LayoutTransitionRequest")
+            if not request.transition_id or not isinstance(request.transition_id, str):
+                reasons.append("transition_id must be a nonempty string")
+            if not request.weight_version or not isinstance(
+                request.weight_version, str
+            ):
+                reasons.append("weight_version must be a nonempty string")
+            tp = request.tensor_parallel_size
+            if type(tp) is not int or tp not in (1, 2):
+                raise ValueError("target TP must be 1 or 2")
+            if pc.pipeline_parallel_size != 1 or (
+                pc.prefill_context_parallel_size != 1
+                or pc.decode_context_parallel_size != 1
+            ):
+                reasons.append("PP and CP must be 1")
+            if pc.enable_expert_parallel or pc.enable_eplb or pc.enable_elastic_ep:
+                reasons.append("expert parallelism and elastic EP are unsupported")
+            if pc.use_ubatching or pc.enable_fault_tolerance:
+                reasons.append(
+                    "microbatching and worker fault tolerance are unsupported"
+                )
+            if not self.use_v2_model_runner or not mc.enforce_eager:
+                reasons.append("requires the eager V2 model runner")
+            if mc.is_moe or mc.dtype != torch.bfloat16:
+                reasons.append("requires a dense BF16 model")
+            if mc.quantization is not None or cfg.quant_config is not None:
+                reasons.append("quantization is unsupported")
+            if cfg.lora_config is not None or cfg.speculative_config is not None:
+                reasons.append("LoRA and speculation are unsupported")
+            if cfg.kv_transfer_config is not None or cfg.ec_transfer_config is not None:
+                reasons.append("KV and encoder connectors are unsupported")
+            offload = cfg.offload_config
+            if mc.enable_sleep_mode or (
+                offload.uva.cpu_offload_gb
+                or offload.prefetch.offload_group_size
+                or cfg.cache_config.kv_offloading_size is not None
+            ):
+                reasons.append("sleep and offload are unsupported")
+            transfer = cfg.weight_transfer_config
+            if transfer is None or transfer.backend != "ipc":
+                reasons.append("requires native IPC weight transfer")
+            if self.weight_transfer_engine is None or getattr(
+                self.weight_transfer_engine, "packed", True
+            ):
+                reasons.append("requires an unpacked IPC receiver")
+            target = replace(
+                deepcopy(pc),
+                tensor_parallel_size=tp,
+                data_parallel_size=2 // tp,
+                data_parallel_size_local=2 // tp,
+                data_parallel_rank=self.rank // tp,
+            )
+            target.rank = self.rank
+            mc.verify_with_parallel_config(target)
+        except Exception as error:
+            reasons.append(f"worker preflight failed: {type(error).__name__}: {error}")
+        try:
+            agree_layout_transition(
+                request, reasons, phase="prepare", current_layout=current_layout
+            )
+        except LayoutTransitionRejected:
+            self._layout_transition = previous
+            raise
+        # A device failure is not a reusable-layout rejection. Keep every rank
+        # reserved if synchronization fails, even though teardown has not begun.
+        reasons = []
+        try:
+            self.synchronize_device()
+        except Exception as error:
+            reasons.append(f"device synchronization failed: {error}")
+        try:
+            agree_layout_transition(
+                request, reasons, phase="synchronize", current_layout=current_layout
+            )
+        except LayoutTransitionRejected as error:
+            raise RuntimeError(
+                "Layout transition synchronization failed; "
+                f"engine remains reserved: {error}"
+            ) from error
+        self._layout_transition_target = target
+        self._layout_transition_phase = LayoutTransitionPhase.PREPARED
+
+    def cancel_layout_transition(
+        self, request: LayoutTransitionRequest, engine_reasons: list[str]
+    ) -> None:
+        """Cancel only a collectively owned, non-destructive preparation."""
+        reasons = list(engine_reasons)
+        if self._layout_transition != request:
+            reasons.append("worker does not own this transition")
+        if self._layout_transition_target is None:
+            reasons.append("worker preparation did not complete; recovery is required")
+        elif self._layout_transition_phase != LayoutTransitionPhase.PREPARED:
+            reasons.append("cannot cancel after layout installation has begun")
+        agree_layout_transition(request, reasons, phase="cancel")
+        self._layout_transition = None
+        self._layout_transition_target = None
+        self._layout_transition_phase = None
+        self._layout_checkpoint = None
+
+    def _agree_layout_phase(
+        self,
+        request: LayoutTransitionRequest,
+        expected: LayoutTransitionPhase,
+        operation: str,
+        reasons: list[str],
+        details: object = None,
+    ) -> None:
+        if self._layout_transition != request:
+            reasons.append("worker does not own this transition")
+        if self._layout_transition_phase != expected:
+            reasons.append(f"worker requires transition phase {expected.value}")
+        agree_layout_transition(request, reasons, phase=operation, details=details)
+
+    def begin_layout_install(
+        self, request: LayoutTransitionRequest, engine_reasons: list[str]
+    ) -> None:
+        """Validate the full checkpoint contract before authorizing teardown."""
+        from vllm.model_executor.models.llama import LlamaForCausalLM
+
+        reasons = list(engine_reasons)
+        checkpoint = None
+        try:
+            model = self.model_runner.get_model()
+            if type(model) is not LlamaForCausalLM:
+                raise ValueError(
+                    "Layout installation currently requires LlamaForCausalLM"
+                )
+            checkpoint = LayoutCheckpoint(self.vllm_config.model_config.hf_config)
+            checkpoint.validate_model_parameters(set(dict(model.named_parameters())))
+        except Exception as error:
+            reasons.append(f"checkpoint preflight failed: {error}")
+        self._agree_layout_phase(
+            request,
+            LayoutTransitionPhase.PREPARED,
+            "install preflight",
+            reasons,
+            details=tuple(sorted(checkpoint.shapes.items())) if checkpoint else None,
+        )
+        self._layout_checkpoint = checkpoint
+        self._layout_transition_phase = LayoutTransitionPhase.INSTALLING
+
+    def _release_layout_model(self) -> None:
+        from vllm.model_executor.model_loader.reload import discard_layerwise_reload
+        from vllm.v1.engine.llm_engine import LLMEngine
+
+        old_model = weakref.ref(self.model_runner.get_model())
+        old_layers = [
+            weakref.ref(layer) for layer in self.model_runner.get_model().modules()
+        ]
+        LLMEngine._cleanup_instance_caches(old_model)
+        gc.unfreeze()
+        assert self.weight_transfer_engine is not None
+        self.weight_transfer_engine.shutdown()
+        self.weight_transfer_engine = None
+        discard_layerwise_reload(self.model_runner.get_model())
+        self.model_runner.shutdown()
+        del self.model_runner
+        torch.compiler.reset()
+        gc.collect()
+        self.synchronize_device()
+        if any(layer() is not None for layer in old_layers):
+            raise RuntimeError(
+                "Old model layers remain referenced after runner teardown"
+            )
+
+    def _rebuild_layout_groups(self) -> None:
+        from vllm.distributed.parallel_state import (
+            destroy_model_parallel,
+            initialize_model_parallel,
+        )
+
+        target = self._layout_transition_target
+        assert target is not None
+        world = get_world_group()
+        destroy_model_parallel()
+        self.vllm_config.parallel_config = target
+        self.parallel_config = target
+        with set_current_vllm_config(self.vllm_config):
+            initialize_model_parallel(
+                tensor_model_parallel_size=target.tensor_parallel_size,
+                pipeline_model_parallel_size=1,
+            )
+            init_workspace_manager(
+                self.device,
+                num_ubatches=1,
+                num_lanes=_num_workspace_lanes(self.vllm_config, True),
+            )
+        if get_world_group() is not world:
+            raise RuntimeError("Layout rebuild replaced the physical bootstrap world")
+
+    def _load_layout_model(self) -> None:
+        with set_current_vllm_config(self.vllm_config):
+            self.init_snapshot = MemorySnapshot(device=self.device)
+            self.requested_memory = request_memory(
+                self.init_snapshot, self.cache_config
+            )
+            self._init_model_runner()
+            self.load_model(load_dummy_weights=True)
+            assert self.weight_transfer_engine is not None
+            self.weight_transfer_engine.init_transfer_engine(
+                self.weight_transfer_engine.parse_init_info({"packed": False})
+            )
+            self.weight_transfer_engine.start_weight_update()
+            self._weight_update_active = True
+            self._weight_update_is_draft = False
+
+    def install_layout_transition(self, request: LayoutTransitionRequest) -> None:
+        """Replace layout-dependent state, keeping the worker and physical world."""
+        self._agree_layout_phase(
+            request, LayoutTransitionPhase.INSTALLING, "install", []
+        )
+        try:
+            run_layout_stage(request, "release model", self._release_layout_model)
+            run_layout_stage(request, "rebuild groups", self._rebuild_layout_groups)
+            run_layout_stage(request, "load target model", self._load_layout_model)
+        except Exception:
+            self._layout_transition_phase = LayoutTransitionPhase.FAILED
+            raise
+        self._layout_transition_phase = LayoutTransitionPhase.REFITTING
+
+    def update_layout_weights(
+        self,
+        request: LayoutTransitionRequest,
+        update_info: dict,
+        engine_reasons: list[str],
+    ) -> None:
+        """Collectively check and receive one full-checkpoint IPC chunk."""
+        reasons = list(engine_reasons)
+        payload = None
+        checkpoint = self._layout_checkpoint
+        try:
+            if checkpoint is None or not self._weight_update_active:
+                raise ValueError("No transition refit is active")
+            payload = checkpoint.validate_chunk(update_info)
+        except Exception as error:
+            reasons.append(f"checkpoint chunk rejected: {error}")
+        self._agree_layout_phase(
+            request,
+            LayoutTransitionPhase.REFITTING,
+            "refit chunk preflight",
+            reasons,
+            details=(
+                tuple(zip(payload["names"], payload["dtype_names"], payload["shapes"]))
+                if payload is not None
+                else None
+            ),
+        )
+        assert payload is not None and checkpoint is not None
+
+        def receive() -> None:
+            assert self.weight_transfer_engine is not None
+            with set_current_vllm_config(self.vllm_config):
+                self.weight_transfer_engine.update_weights(payload)
+
+        try:
+            run_layout_stage(request, "receive checkpoint chunk", receive)
+        except Exception:
+            self._layout_transition_phase = LayoutTransitionPhase.FAILED
+            raise
+        checkpoint.commit_chunk(payload)
+
+    def finish_layout_refit(
+        self, request: LayoutTransitionRequest, engine_reasons: list[str]
+    ) -> None:
+        reasons = list(engine_reasons)
+        try:
+            if self._layout_checkpoint is None or not self._weight_update_active:
+                raise ValueError("No transition refit is active")
+            self._layout_checkpoint.require_complete()
+        except Exception as error:
+            reasons.append(f"checkpoint finalization rejected: {error}")
+        self._agree_layout_phase(
+            request, LayoutTransitionPhase.REFITTING, "refit finish preflight", reasons
+        )
+
+        def finalize() -> None:
+            assert self.weight_transfer_engine is not None
+            with set_current_vllm_config(self.vllm_config):
+                self.weight_transfer_engine.finish_weight_update()
+                self.weight_transfer_engine.reset_weight_update_target()
+                self.model_runner.reset_lora_state()
+                self.synchronize_device()
+            self._weight_update_active = False
+
+        try:
+            run_layout_stage(request, "finalize checkpoint", finalize)
+        except Exception:
+            self._layout_transition_phase = LayoutTransitionPhase.FAILED
+            raise
+        self._layout_transition_phase = LayoutTransitionPhase.WEIGHTS_READY
+
+    def complete_layout_transition(
+        self, request: LayoutTransitionRequest, engine_reasons: list[str]
+    ) -> None:
+        """Open admission only after core and frontend readiness on all ranks."""
+        self._agree_layout_phase(
+            request,
+            LayoutTransitionPhase.WEIGHTS_READY,
+            "ready",
+            list(engine_reasons),
+        )
+        self._layout_transition = None
+        self._layout_transition_target = None
+        self._layout_transition_phase = None
+        self._layout_checkpoint = None
+
     def update_weights(self, update_info: dict | list[dict]) -> None:
         """Receive one weight update chunk from the trainer.
 
@@ -1479,6 +1853,7 @@ class Worker(WorkerBase):
                 global worker rank across data parallel replicas.
 
         """
+        self._require_no_layout_transition()
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1505,6 +1880,7 @@ class Worker(WorkerBase):
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
+        self._require_no_layout_transition()
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 
@@ -1532,6 +1908,13 @@ class Worker(WorkerBase):
             ensure_ec_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
+
+        if (
+            getattr(self, "_layout_transition", None) is not None
+            and getattr(self, "model_runner", None) is not None
+            and getattr(self, "weight_transfer_engine", None) is not None
+        ):
+            self._release_layout_model()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()

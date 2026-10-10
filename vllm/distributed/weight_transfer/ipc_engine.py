@@ -216,8 +216,10 @@ class IPCWeightTransferEngine(
         else:
             assert isinstance(update_info.ipc_handles, list)
             weights = []
-            for name, ipc_handle in zip(
+            for name, dtype_name, shape, ipc_handle in zip(
                 update_info.names,
+                update_info.dtype_names,
+                update_info.shapes,
                 update_info.ipc_handles,
             ):
                 props = torch.cuda.get_device_properties(device_index)
@@ -236,6 +238,12 @@ class IPCWeightTransferEngine(
                 # We need to overwrite it with the receiver's device index.
                 list_args[6] = device_index
                 weight = rebuild_cuda_tensor(*list_args)
+                if tuple(weight.shape) != tuple(shape) or weight.dtype != getattr(
+                    torch, dtype_name, None
+                ):
+                    raise ValueError(
+                        f"IPC tensor {name} does not match its declared shape/dtype"
+                    )
                 weights.append((name, weight))
 
         from vllm.model_executor.model_loader.mtp_validation import (

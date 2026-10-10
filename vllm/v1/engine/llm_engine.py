@@ -29,8 +29,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest, PauseMode
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import EngineCoreClient, InprocClient
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.engine.layout_transition import LayoutTransitionRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
@@ -220,6 +221,80 @@ class LLMEngine:
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
+    def prepare_layout_transition(self, request: LayoutTransitionRequest) -> None:
+        """Collectively reserve a drained offline external-launcher engine."""
+        if not isinstance(self.engine_core, InprocClient):
+            raise ValueError("Layout transitions require an in-process engine")
+        reasons = []
+        try:
+            if self.output_processor.has_unfinished_requests():
+                reasons.append("frontend still has unfinished requests")
+            if self.should_execute_dummy_batch:
+                reasons.append("frontend has a pending dummy batch")
+        except Exception as error:
+            reasons.append(
+                f"frontend preflight failed: {type(error).__name__}: {error}"
+            )
+        self.engine_core.engine_core.prepare_layout_transition(request, reasons)
+
+    def cancel_layout_transition(self, request: LayoutTransitionRequest) -> None:
+        """Release preparation on all ranks while retaining the current layout."""
+        if not isinstance(self.engine_core, InprocClient):
+            raise ValueError("Layout transitions require an in-process engine")
+        self.engine_core.engine_core.cancel_layout_transition(request)
+
+    def install_layout_transition(self, request: LayoutTransitionRequest) -> None:
+        """Replace a prepared layout and start its full native IPC refit.
+
+        All physical ranks must call in the same order. Cancellation is no
+        longer possible once installation begins. Failure keeps admission closed.
+        """
+        if not isinstance(self.engine_core, InprocClient):
+            raise ValueError("Layout transitions require an in-process engine")
+
+        def release() -> None:
+            if finalizer := getattr(self, "_finalizer", None):
+                finalizer.detach()
+            self.dp_group = None
+            self.should_execute_dummy_batch = False
+
+        self.engine_core.engine_core.install_layout_transition(request, release)
+
+    def update_layout_weights(
+        self, request: LayoutTransitionRequest, update_info: dict
+    ) -> None:
+        """Receive a rank-local, unpacked IPC chunk for the reserved checkpoint.
+
+        Ranks send the same ordered tensor names/shapes, with handles for their
+        physical GPU. Keep publisher exports alive through successful
+        finish_layout_transition, including across partial fused-layer chunks.
+        """
+        if not isinstance(self.engine_core, InprocClient):
+            raise ValueError("Layout transitions require an in-process engine")
+        self.engine_core.engine_core.update_layout_weights(request, update_info)
+
+    def finish_layout_transition(self, request: LayoutTransitionRequest) -> None:
+        """Restore generation only after the full checkpoint and all ranks are ready."""
+        if not isinstance(self.engine_core, InprocClient):
+            raise ValueError("Layout transitions require an in-process engine")
+        core = self.engine_core.engine_core
+
+        def rebind() -> None:
+            self.external_launcher_dp = (
+                core.vllm_config.parallel_config.data_parallel_size > 1
+            )
+            self.dp_group = (
+                get_dp_group().cpu_group if self.external_launcher_dp else None
+            )
+            self.should_execute_dummy_batch = False
+            model = self._get_driver_model_for_cleanup()
+            if model is not None:
+                self._finalizer = weakref.finalize(
+                    self, LLMEngine._cleanup_instance_caches, weakref.ref(model)
+                )
+
+        core.finish_layout_transition(request, rebind)
+
     def add_request(
         self,
         request_id: str,
@@ -234,6 +309,8 @@ class LLMEngine:
         prompt_text: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> str:
+        if isinstance(self.engine_core, InprocClient):
+            self.engine_core.engine_core._require_no_layout_transition()
         # Validate the request_id type.
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
