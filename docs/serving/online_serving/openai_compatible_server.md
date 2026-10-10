@@ -192,6 +192,38 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-extra-params"
     ```
 
+#### Prompt truncation
+
+`truncate_prompt_tokens` limits the rendered prompt to the requested number of
+tokens (`-1` uses the model's input-token budget). It slices the token sequence,
+which can remove instructions or cut through a chat message. The tokenizer's
+`truncation_side` determines which end is removed unless the request sets
+`truncation_side` explicitly. `left` keeps the last tokens; `right` keeps the
+first tokens.
+
+For text-only requests to `/v1/chat/completions`, a message can instead opt in
+to `"truncate": true`:
+
+```json
+{"role": "user", "content": "Long candidate response...", "truncate": true}
+```
+
+If the prompt is too long, vLLM shortens the end of that message's text and
+renders the chat template again. Other messages and chat-template markers are
+preserved. At most one plain-text message may be marked; system and developer
+messages cannot be marked. If no tested prefix fits, the request fails with
+HTTP 400. The search is bounded, so it may keep less text than the longest
+possible prefix with content-dependent chat templates. Without the marker,
+overflow behavior is unchanged.
+`truncate` cannot be combined with `truncate_prompt_tokens`.
+The `/v1/chat/completions/batch` endpoint does not support this marker.
+
+Clients can also send chat messages to `/tokenize` to get the rendered prompt's
+`count` and `max_model_len` before generation. `/tokenize` does not enforce the
+model's context limit or apply the per-message `truncate` marker; it reports
+the original prompt's count. Reserve room for output tokens when budgeting a
+request.
+
 ### Responses API
 
 Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
