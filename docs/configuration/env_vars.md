@@ -10,3 +10,19 @@ vLLM uses the following environment variables to configure the system:
 ```python
 --8<-- "vllm/envs.py:env-vars-definition"
 ```
+
+## Model-specific environment variables
+
+Variables that only affect one model live next to it in `vllm/models/<model>/envs.py`.
+
+### Kimi-K3
+
+```python
+--8<-- "vllm/models/kimi_k3/envs.py:env-vars-definition"
+```
+
+### DeepSeek-V4
+
+```python
+--8<-- "vllm/models/deepseek_v4/envs.py:env-vars-definition"
+```

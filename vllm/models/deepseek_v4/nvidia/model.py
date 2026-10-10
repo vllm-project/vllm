@@ -80,6 +80,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4 import envs as deepseek_v4_envs
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
@@ -828,7 +829,7 @@ class DeepseekV4MoE(nn.Module):
         # remains tensor-sharded, so retain the serial path.
         fuse_shared_experts = bool(
             self.shared_experts is not None
-            and not envs.VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION
+            and not deepseek_v4_envs.VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION
             and (self.use_sequence_parallel or self.tp_size == 1)
         )
 

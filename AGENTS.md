@@ -125,6 +125,11 @@ Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#3
 - Match existing code style
 - Minimize use of comments. Eliminate comments which are redundant, preferring legible and self-documenting code. When used, keep docstrings and comments brief and direct.
 - Assume the reader is familiar with vLLM.
+- Env vars read by only one model under `vllm/models/<model>/` go in that
+  model's `envs.py`, not `vllm/envs.py`. Copy an existing one: stdlib-only
+  imports, with its own `environment_variables` dict, which `vllm.envs` merges.
+  Read them through `from vllm.models.<model> import envs`, and add the file to
+  `docs/configuration/env_vars.md`.
 
 ### Commit messages
 

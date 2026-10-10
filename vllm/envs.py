@@ -213,9 +213,6 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
-    VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
-    VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
-    VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -300,7 +297,6 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
-    VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
@@ -1649,28 +1645,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
-    # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
-    # are replicated on every rank, so each rank streams the whole weight to
-    # serve its own token shard. Shard them across TP instead: the MLP then
-    # all-gathers the full token set, computes this rank's partial, and
-    # reduce-scatters (which both sums across TP and restores the sequence
-    # sharding). Trades weight bandwidth and resident memory for two collectives
-    # per layer, so it only wins at low token counts: intended for decode
-    # instances in a P/D disaggregated deployment, not for prefill or unified
-    # serving.
-    "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": lambda: bool(
-        int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
-    ),
-    # Kimi K3 only, and unrelated to the MoE flags above. Tap the pre-norm
-    # AttnRes mixture, rather than the post-mixture sum, as the auxiliary
-    # hidden state handed to a DFlash drafter. This changes the numerics the
-    # speculator sees, so it is off by default while the effect is measured.
-    "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
-        int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
-    ),
-    # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
-    # attention projections. All TP ranks must belong to one NVLink domain.
-    "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP
@@ -2089,12 +2063,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
     ),
-    # Emergency rollback for the DeepSeek-V4 NVIDIA MegaMoE path. By default,
-    # DeepGEMM computes replicated FP8 shared experts in the same persistent
-    # SM100 kernel as the routed FP4 experts.
-    "VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
-    ),
     # Limits when we run shared_experts in a separate stream.
     # We found out that for large batch sizes, the separate stream
     # execution is not beneficial (most likely because of the input clone)
@@ -2261,6 +2229,35 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
 
 # --8<-- [end:env-vars-definition]
+
+
+def _register_model_environment_variables() -> None:
+    """Merge each ``vllm/models/<model>/envs.py`` into `environment_variables`.
+
+    The files are loaded by path so the (heavy) model package ``__init__`` does
+    not run; the module is still registered under its package name so model
+    code can ``from vllm.models.<model> import envs``.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    models_dir = Path(__file__).parent / "models"
+    for path in sorted(models_dir.glob("*/envs.py")):
+        name = f"vllm.models.{path.parent.name}.envs"
+        module = sys.modules.get(name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(name, path)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        model_envs = module.environment_variables
+        duplicates = environment_variables.keys() & model_envs.keys()
+        assert not duplicates, f"{name} redefines {sorted(duplicates)}"
+        environment_variables.update(model_envs)
+
+
+_register_model_environment_variables()
 
 
 def __getattr__(name: str):
