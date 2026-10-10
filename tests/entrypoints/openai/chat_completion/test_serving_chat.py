@@ -758,6 +758,7 @@ async def test_synthetic_stream_skips_output_parser():
 @pytest.mark.parametrize(
     ("request_options", "expected_error"),
     [
+        ({"use_beam_search": True}, "Beam search"),
         ({"response_format": {"type": "json_object"}}, "Structured output"),
         ({"logprobs": True}, "Chat logprobs"),
         ({"echo": True}, "Prompt echo"),

@@ -128,6 +128,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         if self.synthetic_output:
+            if request.use_beam_search:
+                return self.create_error_response(
+                    "Beam search is unsupported with synthetic acceptance"
+                )
             if request.extract_structured_outputs() is not None:
                 return self.create_error_response(
                     "Structured output is unsupported with synthetic acceptance"

@@ -282,6 +282,10 @@ class OpenAIServingChat(GenerateBaseServing):
                     "Synthetic acceptance output is only supported by the OpenAI "
                     "Chat Completions and Completions endpoints"
                 )
+            if request.use_beam_search:
+                return self.create_error_response(
+                    "Beam search is unsupported with synthetic acceptance"
+                )
             if request.extract_structured_outputs() is not None:
                 return self.create_error_response(
                     "Structured output is unsupported with synthetic acceptance"

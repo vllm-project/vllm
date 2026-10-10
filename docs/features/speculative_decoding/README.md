@@ -102,7 +102,8 @@ content. This mode is for throughput measurements, not content evaluation.
 Use server-reported usage for token counts: retokenizing the placeholder does
 not recover the number of generated tokens. Structured output, required or
 named tool calls, generated-output API logprobs, and prompt echo are unsupported
-in this mode.
+in this mode. Beam search and the speech-to-text endpoints, including realtime
+transcription, are also unsupported.
 Other text-serving adapters are outside this output contract; the token API
 still supports token-only output.
 
