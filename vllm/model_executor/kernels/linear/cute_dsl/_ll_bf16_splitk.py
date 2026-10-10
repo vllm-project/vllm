@@ -357,6 +357,19 @@ class LLBf16SplitK:
             consumer_group=consumer_group,
         )
 
+        num_elems: cutlass.Constexpr = self.num_epilogue_elems
+        elems_per_thread: cutlass.Constexpr = self.epilogue_elems_per_thread
+        partials = cute.make_tensor(
+            cute.arch.alloc_smem(
+                cutlass.Float32, num_elems * self.split_k, alignment=16
+            ),
+            cute.make_layout((self.split_k, num_elems), stride=(num_elems, 1)),
+        )
+        cta_rank = cute.arch.block_idx_in_cluster()
+        # A peer's DSMEM may be accessed only after that CTA has started.
+        cute.arch.cluster_arrive()
+        cute.arch.cluster_wait()
+
         # Round-robin split-K: split z handles tiles z, z+split_k, ...
         K_total = cute.size(mA, mode=[1])
         k_tile_count = cute.size(gA, mode=[2])
@@ -497,8 +510,6 @@ class LLBf16SplitK:
 
             # Cluster reduction epilogue.
             # Reduce per-warp accumulators within this CTA.
-            num_elems: cutlass.Constexpr = self.num_epilogue_elems
-            elems_per_thread: cutlass.Constexpr = self.epilogue_elems_per_thread
             # Map MMA threads to linear CTA output elements.
             epilogue_thread_layout = cute.make_layout(
                 (elems_per_thread, self.num_mma_threads),
@@ -519,16 +530,8 @@ class LLBf16SplitK:
             )
             tCsC_partial = thr_mma.partition_C(smem_warp)
             cute.autovec_copy(tCrC, tCsC_partial)
-            cute.arch.sync_threads()
-
-            # Layout: (split-K rank, linear MN element).
-            partials = cute.make_tensor(
-                cute.arch.alloc_smem(
-                    cutlass.Float32, num_elems * self.split_k, alignment=16
-                ),
-                cute.make_layout((self.split_k, num_elems), stride=(num_elems, 1)),
-            )
-            cta_rank = cute.arch.block_idx_in_cluster()
+            # DMA warps drain the copy pipeline independently of MMA reduction.
+            cute.arch.barrier(barrier_id=1, number_of_threads=self.num_mma_threads)
 
             for ei in cutlass.range_constexpr(elems_per_thread):
                 elem_idx = epilogue_slots[ei, mma_tidx]
@@ -547,7 +550,7 @@ class LLBf16SplitK:
                     total = total * scale
                 partials[cta_rank, elem_idx] = total
 
-            cute.arch.sync_threads()
+            cute.arch.barrier(barrier_id=1, number_of_threads=self.num_mma_threads)
 
             # Broadcast this CTA's partials to peer DSMEM.
             for ei in cutlass.range_constexpr(elems_per_thread):
@@ -558,28 +561,31 @@ class LLBf16SplitK:
                     remote = set_block_rank(my_slot, cutlass.Int32(peer))
                     st_shared_remote_f32(remote, my_val)
 
-            cute.arch.cluster_arrive()
-            cute.arch.cluster_wait()  # peer DSMEM stores are now visible
+        # All producer and consumer warps participate. No CTA can exit while a
+        # peer still writes its partials into that CTA's distributed shared memory.
+        cute.arch.cluster_arrive()
+        cute.arch.cluster_wait()
 
+        if not is_dma_warp:
             if const_expr(self.use_pdl) and mma_tidx == 0:
                 cute.arch.griddepcontrol_launch_dependents()
-            cute.arch.sync_threads()
 
-            # Reduce split-K partials and write global output.
-            for ei in cutlass.range_constexpr(elems_per_thread):
-                elem_idx = epilogue_slots[ei, mma_tidx]
-                local_coord = cute.select(epilogue_slot_coords[elem_idx], mode=[1, 0])
-                global_coord = cC[local_coord]
-                if cute.elem_less(global_coord, mC.shape):
-                    acc = (
-                        partials[None, elem_idx]
-                        .load()
-                        .reduce(
-                            cute.ReductionOp.ADD,
-                            init_val=cutlass.Float32(0.0),
-                            reduction_profile=0,
+            # One CTA owns each global output; peer CTAs must not race its stores.
+            if cta_rank == 0:
+                for ei in cutlass.range_constexpr(elems_per_thread):
+                    elem_idx = ei * self.num_mma_threads + mma_tidx
+                    local_coord = (elem_idx // bN, elem_idx % bN)
+                    global_coord = cC[local_coord]
+                    if cute.elem_less(global_coord, mC.shape):
+                        acc = (
+                            partials[None, elem_idx]
+                            .load()
+                            .reduce(
+                                cute.ReductionOp.ADD,
+                                init_val=cutlass.Float32(0.0),
+                                reduction_profile=0,
+                            )
                         )
-                    )
-                    gC[local_coord] = acc
+                        gC[local_coord] = acc
 
         cute.arch.sync_threads()
