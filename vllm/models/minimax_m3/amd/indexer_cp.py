@@ -2,246 +2,205 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Indexer-only context parallelism for MiniMax M3 (AMD MSA indexer).
 
-Inverts the tensor-parallel split for the lightning indexer: instead of each
-rank owning one index head and scoring every 128-token block, every rank
-projects all index heads and scores ``1/P`` of the blocks, then one small
-exchange gives each rank every shard's candidates for the heads it owns. Both
-caches, the sparse attend, the block tables and the MoE are untouched -- this
-shards indexer *work*, not state.
+Inverts the tensor-parallel split for the lightning indexer. Normally a rank
+owns ``H/P`` index heads and scores every 128-token block of the context;
+under CP it projects all ``H`` heads and scores ``1/P`` of the blocks, then
+one exchange hands each rank every shard's candidates for the heads it owns.
+Only indexer *work* is sharded. Both caches, the sparse attend, the block
+tables and the MoE are untouched, which is what separates this from
+``decode_context_parallel_size`` -- that shards the KV cache itself and is
+refused alongside this.
 
-That is why it is not ``decode_context_parallel_size``, which shards the KV
-cache itself (virtual block size, slot-mapping routing, LSE-merged output) and
-is rejected below. The index cache is already replicated on every rank, so at
-long context each rank re-reads the whole of it every step; sharding the block
-axis is what turns that into ``1/P`` of the reads, and it is the only thing
-here that scales with context.
+What makes it worth doing is that the index cache is replicated, so every
+rank re-reads the whole of it every step, and that read is the only part of
+the indexer that grows with context. Sharding the block axis turns it into
+``1/P`` of the reads: measured at TP4, scoring a 128K context goes from 91us
+to 34us at batch 32 and from 364us to 97us at batch 128.
 
-Blocks go round-robin, ``owner(b) = b % P``, rather than in contiguous runs:
-under causal masking contiguous shards would leave rank 0 with always-full
-blocks and the last rank with mostly-empty tails, while round-robin keeps the
-valid counts even at every sequence length.
+Two things change outside this module. The model projects ``index_q``
+replicated rather than split (``replicate_index_q`` in the qkv layer), and
+the indexer's head count becomes the model's total rather than this rank's.
+Both are decided from one gate answer before any layer is built, which is why
+the gate is a branch of ``msa_indexer_unsupported_reason`` and not something
+the impl discovers later. For this model it allows ``P <= 4``: there are 4
+index heads to go round, and 4 x top-16 is exactly the 64 candidates the
+merge holds.
 
-Selection stays exact. Each rank cuts its shard to its own top-k -- the full
-``k``, never ``k/P``, since the global winners may all live in one shard -- and
-the merge takes the top-k of the ``P * k`` gathered candidates. Candidates
-travel as the packed ``(score, global block id)`` sort keys the single-GPU
-selector already uses to merge across chunks, so nothing on the wire has to say
-which rank a candidate came from, and the payload is ``P * k * 8`` bytes per
-token no matter how long the context is.
+Blocks go round-robin, ``owner(b) = b % P``, with ``global = local * P +
+rank``. Contiguous shards would be cheaper to index but worse balanced --
+under causal masking rank 0 would get always-full blocks and the last rank
+mostly-empty tails, while round-robin keeps the valid counts even at every
+sequence length.
+
+Selection stays exact rather than approximate. Each rank cuts its shard to
+the full ``k``, never ``k/P``, because the global winners may all live in one
+shard; the merge then takes the top-k of the ``P * k`` that arrive. A block
+in the global top-k necessarily won its own shard's, so re-selecting over
+what arrived reproduces what a rank scoring everything would have picked.
+
+Nominate, exchange and merge are one kernel, ``pa_sparse_block_topk_cp``.
+Candidates travel as the packed ``(score, global block id)`` uint64 sort keys
+the single-GPU selector already uses to merge across chunks, so nothing on
+the wire says which rank a candidate came from and the payload is ``P * k *
+8`` bytes per token whatever the context length. They are written straight
+into the peer that owns those heads over the IPC mapping set up here, not
+all-gathered: at this size a collective costs the same 13us carrying 4KB as
+256KB, so what it would spend is launch and synchronisation, and shrinking
+the payload never helped.
+
+The buffer is ``[2, P, owned_heads, rows, k]`` int64 on every rank. The shard
+axis is the one peers fill, so each writes a disjoint slice and the merge
+reads its own buffer with nothing to gather. The leading axis is generation
+parity: a call writes the half the previous call is not reading, which is
+what lets consecutive layers run back to back without a barrier between them.
+Rows are strided by the buffer's own ``cand_rows`` and never by the live
+batch, or a short batch would address a different slot than the capture did.
+
+There is no barrier inside the kernel either. A merge has to be told its
+peers' nominations landed, and the cheapest way to be told is for the payload
+to say so: the id half of each candidate carries the generation that wrote it
+in its top 8 bits, and a merging lane re-reads the slot it wants until the
+tag matches the generation it is on. The arrival flag is the data, so there
+is no flag to clear and no second round trip to publish one, a lane unblocks
+as soon as its own candidate lands rather than when the slowest peer
+finishes, and an early row's merge overlaps a peer still nominating a late
+one. Zero is "not arrived", which is why ``_ipc_alloc`` zeroes once and
+nothing ever re-zeroes.
+
+The tag costs 8 bits out of the block id, capping context at ``2**24``
+blocks, and the double buffer costs twice the candidates -- both cheap next
+to the barrier they replace, which at batch 64 cost more than the whole merge
+does.
+
+Generations are counted per launch block in ``cp_gen``, a rank-local int32
+array that is never mapped to anyone: a candidate carries its own generation,
+so the only shared state is the candidates. That makes the one hard rule
+here: every rank must reach this module, and the kernel, the same number of
+times with the same shapes. Ranks that disagree are comparing tags from
+different calls, and because the merge waits rather than checks, the failure
+is a hang and not a wrong answer. The same reasoning fixes the kernel's grid
+to the candidate extent instead of the batch.
 """
 
-import torch
-import torch.distributed as dist
+from dataclasses import dataclass
 
-from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+import torch
+
+from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# The block size the scoring and merge kernels are written against.
-INDEXER_CP_SPARSE_BLOCK_SIZE = 128
-
-
-def minimax_m3_indexer_cp_unsupported_reason(
-    vllm_config: VllmConfig,
-) -> str | None:
-    """Return why this config cannot context-parallelize the indexer, or None.
-
-    Deliberately includes the MSA indexer's own gate: the platform-neutral
-    Triton indexer has no CP path, so a config that falls back to it must fall
-    back on the head count too. Resolving that here rather than after the
-    impl probe is what keeps the two from having to be re-decided against each
-    other -- the probe below runs once, at whichever head count this returns.
-    """
-    from vllm.models.minimax_m3.amd.indexer_msa import (
-        msa_indexer_unsupported_reason,
-    )
-    from vllm.models.minimax_m3.common.sparse_attention import (
-        minimax_m3_use_aiter_sparse_pa,
-    )
-
-    if not vllm_config.attention_config.indexer_cp:
-        return "not requested (--attention-config '{\"indexer_cp\": true}')"
-
-    config = vllm_config.model_config.hf_text_config
-    sparse_cfg = getattr(config, "sparse_attention_config", None)
-    if sparse_cfg is None:
-        return "the model has no sparse_attention_config (not MiniMax-M3)"
-
-    dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-    if dcp_size > 1:
-        # The two features both claim the context axis, but DCP claims it in
-        # the cache: virtual block size, slot mappings that drop non-owned
-        # tokens, an LSE-merged attend. Layering this on top would shard an
-        # already-sharded context.
-        return (
-            f"decode_context_parallel_size={dcp_size} > 1 (KV-cache DCP owns "
-            "the context axis; indexer CP replaces it, it does not extend it)"
-        )
-
-    total_index_heads = int(sparse_cfg["sparse_num_index_heads"])
-    tp_size = get_tensor_model_parallel_world_size()
-    if tp_size > total_index_heads or total_index_heads % tp_size:
-        # Every rank scores every head, so what the exchange routes is a
-        # contiguous run of heads per rank; that run has to be the same width
-        # on all of them, and it has to be the same run the tensor-parallel
-        # split already gave this rank its KV heads from.
-        return (
-            f"needs sparse_num_index_heads divisible by tensor_parallel_size, "
-            f"got tp_size={tp_size}, num_index_heads={total_index_heads}"
-        )
-
-    block_size = int(sparse_cfg["sparse_block_size"])
-    if block_size != INDEXER_CP_SPARSE_BLOCK_SIZE:
-        return (
-            f"needs sparse_block_size={INDEXER_CP_SPARSE_BLOCK_SIZE}, got {block_size}"
-        )
-
-    # The MSA indexer is only kept if the AITER attend is also taken, since
-    # the page table it emits is the one that attend reads; when it is not,
-    # the model drops to the platform-neutral indexer and CP would have no
-    # impl to run on. Same call the model makes, with the same argument -- a
-    # MSA indexer is by definition one that emits the table.
-    if not minimax_m3_use_aiter_sparse_pa(1, emits_sparse_block_table=True):
-        return "the AITER sparse attend is not enabled, so the indexer is Triton's"
-
-    # Probed at the CP head count, since that is the width this rank projects.
-    # It is a weaker check than it was: both passes are Triton now, so what is
-    # left is the shape contract, which CP does not change.
-    reason = msa_indexer_unsupported_reason(
-        topk_blocks=int(sparse_cfg["sparse_topk_blocks"]),
-        sparse_block_size=block_size,
-        num_index_heads=total_index_heads,
-        index_head_dim=int(sparse_cfg["sparse_index_dim"]),
-        indexer_kv_dtype=vllm_config.attention_config.resolve_indexer_kv_dtype("bf16"),
-        max_model_len=vllm_config.model_config.max_model_len,
-        score_type=sparse_cfg.get("sparse_score_type", "max"),
-    )
-    if reason is not None:
-        return f"the MSA indexer is unusable at {total_index_heads} heads ({reason})"
-    return None
-
-
-def minimax_m3_indexer_cp_enabled(vllm_config: VllmConfig) -> bool:
-    """Whether this config runs the indexer context-parallel.
-
-    Recomputed rather than cached: every input is a config or topology value
-    that is fixed for the process, so the answer is stable, and a module-level
-    cache would only make it survive across the configs a test builds.
-    """
-    reason = minimax_m3_indexer_cp_unsupported_reason(vllm_config)
-    if reason is not None:
-        if vllm_config.attention_config.indexer_cp:
-            logger.info_once("MiniMax M3 indexer CP: disabled (%s)", reason)
-        return False
-    world = get_tensor_model_parallel_world_size()
-    logger.info_once(
-        "MiniMax M3 indexer CP: enabled over %d ranks (each scores 1/%d of "
-        "the blocks for every index head)",
-        world,
-        world,
-    )
-    return True
-
 
 def get_indexer_cp_group():
-    """The group the candidate exchange runs over.
-
-    No ``new_group`` here: the gate requires ``tp_size`` to divide the index
-    heads, so the CP group is exactly the TP group, and rank ``r``'s TP
-    position already fixes the run of heads it owns. That is what lets the
-    exchange skip a mapping table -- the all-gather keeps that run, and the
-    all-to-all's implicit "chunk j goes to group rank j" lands it -- and it is
-    also why the AITER allreduce object built for the TP group is the right one
-    to borrow the IPC buffers from.
-    """
+    """The group the candidate exchange runs over."""
     return get_tp_group()
 
 
-def _aiter_all_gather(keys: torch.Tensor) -> torch.Tensor | None:
-    """AITER's IPC all-gather over the CP group, or None if unavailable.
+# Granularity an uncached allocation under 2MB has to be a whole number of
+# for the IPC export to succeed. At or above 2MB it is backed coarse-grained
+# and exports regardless, but rounding up is free.
+_HIP_PAGE = 4096
 
-    Reaches for the tensor-parallel group's AITER allreduce object, which is
-    the right one precisely because the gate forces the CP group to *be* the
-    TP group. Returns None whenever anything about the build, the topology or
-    this payload makes the custom path ineligible, leaving the caller on the
-    portable collective.
+
+def _ipc_alloc(nbytes: int, group) -> torch.Tensor:
+    """Allocate ``nbytes`` on every rank and return all their addresses.
+
+    Comes back as a ``[world]`` int64 CPU tensor, entry ``r`` being rank
+    ``r``'s buffer as addressed from here -- this rank's own at its own index,
+    an IPC mapping everywhere else. That is the form the kernel's peer table
+    takes, and it is read on the host at launch, so a replay of a captured
+    graph needs the addresses to still be valid: nothing frees them.
+
+    ``create_shared_buffer`` is the custom all-reduce's own allocator, reused
+    rather than reimplemented. It wants the same three things this does: a
+    plain device address outside torch's caching allocator, since under
+    expandable segments a torch pointer lives in a ``hipMallocAsync`` pool and
+    cannot be exported over IPC at all; uncached memory, since the merge spins
+    on candidates a peer wrote and has to read them past this device's caches,
+    which its C++ gets from ``hipExtMallocWithFlags`` on ROCm; and the handle
+    exchanged over the gloo group, because the device group is NCCL.
+
+    It also zeroes the buffer, which is load-bearing and happens only here. A
+    candidate carries the generation that wrote it and no generation is ever
+    0, so zero is what the merge reads as "has not arrived". Re-zeroing later
+    would not just be unnecessary, it would race a peer that had not yet read
+    the previous round.
     """
-    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 
-    comm = rocm_aiter_ops.get_aiter_allreduce()
-    if comm is None or comm.disabled:
-        return None
-    # Narrowed to int32 on the way in. A gather is a bitwise concatenation, so
-    # the element type is only ever a label here -- but AITER relabels an
-    # integer input as float of the same width before handing it to its pybind
-    # layer, and that layer has no float64, so an int64 buffer dies there on a
-    # dtype AITER chose itself. Two int32s per key over a contiguous last axis,
-    # so this is a reinterpretation and not a copy.
-    packed = keys.view(torch.int32)
-    if not comm.should_custom_ag(packed):
-        return None
-    gathered = comm.custom_all_gather(packed, dim=0)
-    if gathered is None:
-        return None
-    return gathered.view(torch.int64)
+    nbytes = (nbytes + _HIP_PAGE - 1) // _HIP_PAGE * _HIP_PAGE
+    peers = CustomAllreduce.create_shared_buffer(nbytes, group=group.cpu_group)
+    return torch.tensor(peers, dtype=torch.int64, device="cpu")
 
 
-def exchange_candidates(keys: torch.Tensor) -> torch.Tensor:
-    """Give this rank every shard's candidates for the heads it owns.
+@dataclass(frozen=True)
+class IndexerCpPeers:
+    """The buffers the CP selector exchanges through.
 
-    ``keys`` is ``[heads, tokens, topk]`` packed sort keys, head-major, holding
-    every index head because every rank scored every one of them over its own
-    shard. Comes back as ``[world, owned, tokens, topk]``: entry ``r`` is rank
-    ``r``'s candidates for the heads *this* rank owns, which are the same
-    contiguous run the tensor-parallel split assigned it.
-
-    The payload does not grow with the context -- it is a few hundred bytes
-    per token however long the context is -- which is the whole reason the
-    shards trade candidates rather than raw block scores. That also decides
-    *which* collective: at this size neither one moves enough to matter and
-    both cost only their launch, so the cheaper primitive wins even though it
-    is the one that moves more. AITER's IPC all-gather hands every rank all
-    ``P`` shards of all ``P`` heads and lets this rank keep the single column
-    it owns, discarding ``P-1`` of every ``P`` rows; the all-to-all below
-    sends only the rows that are actually wanted. Measured per layer per
-    decode step at P=4, the wasteful one takes 5.8us and the tidy one 14.6us.
-
-    Falls back to the all-to-all when the custom path is unavailable -- an
-    AITER without it, a non-fully-connected topology, a payload outside its
-    IPC buffer -- so this stays correct off the fast path, just slower.
-
-    Neither collective is ever a capture's first, which would hang on the peer
-    setup NCCL defers to it: every captured shape is run eagerly first
-    (``cudagraph_num_of_warmups``, forced to 1 wherever capture happens), and
-    the transport is a function of that shape, so the warmup takes the same
-    branch the capture will.
+    ``cand_ptrs`` is a ``[world]`` int64 CPU tensor of device addresses, which
+    is what ``pa_sparse_block_topk_cp`` takes: it builds the kernel's peer
+    table on the host so the pointers arrive in registers rather than behind a
+    load. ``cp_gen`` is this rank's own, not mapped to anyone -- a candidate
+    carries the generation that wrote it, so the only shared state is the
+    candidates themselves.
     """
+
+    cand_ptrs: torch.Tensor
+    cp_gen: torch.Tensor
+
+
+_PEERS: dict[tuple[int, int, int, int], IndexerCpPeers] = {}
+
+
+def get_indexer_cp_peers(owned_heads: int, max_rows: int, topk: int) -> IndexerCpPeers:
+    """The buffers the CP selector exchanges through, allocated once.
+
+    Persistent and shared by every layer rather than allocated per launch. The
+    addresses are what make that necessary: they are read on the host and baked
+    into captured graphs, so a replay has to find the same buffer, and nothing
+    is ever freed. Fifty-odd layers each mapping their own would be fifty-odd
+    IPC mappings per rank for buffers only one layer at a time is inside.
+
+    What lets one buffer serve the whole stack is the generation in each
+    candidate. A layer's writes land in the half of the buffer the previous
+    layer is not reading, and carry a tag saying which call produced them, so
+    consecutive layers never have to be separated by a barrier.
+
+    Keyed by shape because the buffers are sized to it, and by head count
+    because the generation counters are indexed by the launch's head extent --
+    two head counts sharing a counter array would be comparing tags across
+    different calls. Every rank must reach this with the same key; they are
+    allocating against each other.
+
+    ``max_rows`` is the widest decode batch, not the current one, for the same
+    capture reason: the size has to be the one every captured batch addresses,
+    and a short batch simply leaves the tail unused.
+    """
+    from aiter.ops.msa_block_select import CP_MAX_BLOCKS, topk_cp_candidate_numel
+
     group = get_indexer_cp_group()
-    world = group.world_size
-    heads = keys.shape[0]
-    assert keys.is_contiguous(), "the candidate exchange needs a contiguous send buffer"
-    assert heads % world == 0, (
-        f"candidate exchange expects the index heads to divide over the group, "
-        f"got {heads} heads over {world} ranks"
+    key = (group.world_size, owned_heads, max_rows, topk)
+    peers = _PEERS.get(key)
+    if peers is not None:
+        return peers
+
+    numel = topk_cp_candidate_numel(group.world_size, owned_heads, max_rows, topk)
+    peers = IndexerCpPeers(
+        cand_ptrs=_ipc_alloc(numel * 8, group),
+        # Not IPC and not zeroed again after this: the counter is read only by
+        # the rank that owns it, and a stale value is exactly what the next
+        # call distinguishes itself from.
+        cp_gen=torch.zeros(CP_MAX_BLOCKS, dtype=torch.int32, device="cuda"),
     )
-    owned = heads // world
-    lo = group.rank_in_group * owned
-
-    gathered = _aiter_all_gather(keys)
-    if gathered is not None:
-        # [world, heads, tokens, topk], source rank major since the gather
-        # concatenates along dim 0. Every rank holds every head, so this rank
-        # keeps the run the tensor-parallel split gave it and drops the rest.
-        # Left as the strided view it is: the merge takes the candidate strides
-        # explicitly, so compacting it here would only add a copy.
-        return gathered.view(world, *keys.shape)[:, lo : lo + owned]
-
-    # The all-to-all needs no such slice: it splits dim 0 into `world` chunks
-    # and sends chunk j to rank j, and chunk j is exactly rank j's run of
-    # heads, so each rank is sent only what it keeps. What comes back is
-    # source-rank major over that run.
-    received = torch.empty_like(keys)
-    dist.all_to_all_single(received, keys, group=group.device_group)
-    return received.view(world, owned, *keys.shape[1:])
+    _PEERS[key] = peers
+    logger.info_once(
+        "MiniMax M3 indexer CP: %d KiB candidate buffer per rank mapped over "
+        "%d ranks [owned_heads=%d, rows=%d, topk=%d, generations=2]",
+        numel * 8 // 1024,
+        group.world_size,
+        owned_heads,
+        max_rows,
+        topk,
+    )
+    return peers

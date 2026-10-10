@@ -88,10 +88,10 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
-from vllm.models.minimax_m3.amd.indexer_cp import minimax_m3_indexer_cp_enabled
 from vllm.models.minimax_m3.amd.indexer_msa import (
     MiniMaxM3IndexerMSAImpl,
     MiniMaxM3MSAIndexer,
+    msa_indexer_cp_enabled,
     select_msa_indexer_impl_cls,
 )
 from vllm.models.minimax_m3.amd.ops import (
@@ -1406,14 +1406,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.msa_indexer_impl_cls: type[MiniMaxM3IndexerMSAImpl] | None = None
         self.sparse_bt_buffer: torch.Tensor | None = None
         self.sparse_ctx_buffer: torch.Tensor | None = None
-        # Resolved once here and handed to every layer. The gate reads only
-        # config and topology, so re-asking per layer would give the same
-        # answer -- but the projection's shard layout, the indexer's head count
-        # and the probe below all have to be decided off one answer, and one
-        # call site is what guarantees that.
         self.indexer_cp = False
         if sparse_cfg is not None:
-            self.indexer_cp = minimax_m3_indexer_cp_enabled(vllm_config)
             tp_size = get_tensor_model_parallel_world_size()
             num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -1430,21 +1424,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             )
             # The only MSA indexer probe. It has to live here rather than in
             # the layer because the buffers it gates are one allocation shared
-            # by all of them, so the answer is needed before any layer exists.
-            # Probed with the head count the layer's own geometry uses --
-            # num_kv_heads normally, every index head under CP, since CP
-            # projects all of them on every rank -- and the impl itself is kept
-            # rather than collapsed to a bool so the layer has nothing left to
-            # re-derive.
-            probe_index_heads = (
-                sparse_cfg["sparse_num_index_heads"]
-                if self.indexer_cp
-                else num_kv_heads
-            )
+            # by all of them, so the answer is needed before any layer exists,
+            # and the impl itself is kept rather than collapsed to a bool so
+            # the layer has nothing left to re-derive. Asked before the CP
+            # question and not after, because CP is a choice about how to run
+            # this indexer and there is no such choice until it exists; the
+            # probe owes nothing to CP in return, since what it checks is the
+            # platform and the kernels' shape contract, neither of which a
+            # head count enters.
             impl_cls = select_msa_indexer_impl_cls(
                 topk_blocks=sparse_cfg["sparse_topk_blocks"],
                 sparse_block_size=sparse_cfg["sparse_block_size"],
-                num_index_heads=probe_index_heads,
                 index_head_dim=sparse_cfg["sparse_index_dim"],
                 indexer_kv_dtype=indexer_kv_dtype,
                 score_type=sparse_cfg.get("sparse_score_type", "max"),
@@ -1465,13 +1455,19 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     dtype=torch.int32,
                 )
                 self.sparse_ctx_buffer = torch.empty(rows, dtype=torch.int32)
-            # CP has no tensor-parallel fallback to offer: the qkv projection
-            # is built with index_q replicated, so an indexer that did not take
-            # this path would read its own heads out of a replicated tensor and
-            # unselect them rather than use the wrong ones. The CP gate already
-            # required this exact selection, so a miss means the two disagree.
-            assert not (self.indexer_cp and self.msa_indexer_impl_cls is None), (
-                "indexer CP was gated on, but the MSA indexer was not selected"
+            # Resolved once here and handed to every layer. The gate reads
+            # only config, topology and the selection above, so re-asking per
+            # layer would give the same answer -- but the projection's shard
+            # layout and the indexer's head count have to be decided off one
+            # answer, and one call site is what guarantees that. The selection
+            # is handed in rather than looked up: CP has no tensor-parallel
+            # fallback to offer, since the qkv projection is built with
+            # index_q replicated and an indexer that did not take this path
+            # would read its own heads out of a replicated tensor, so the two
+            # cannot be allowed to disagree.
+            self.indexer_cp = msa_indexer_cp_enabled(
+                vllm_config,
+                msa_indexer_selected=self.msa_indexer_impl_cls is not None,
             )
         else:
             self.topk_indices_buffer = None
