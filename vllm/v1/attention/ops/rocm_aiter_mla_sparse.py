@@ -867,9 +867,10 @@ def fp8_mqa_logits_torch(
     # naked ``score * scale`` would align ``scale``'s leading dim with
     # ``score``'s M dim and raise a shape mismatch. Flatten to ``[N]`` so
     # broadcasting lines up with the last dim of ``score``.
-    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale.reshape(-1)
-    logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
-    logits = logits.masked_fill(~mask, float("-inf"))
+    score = torch.einsum("mhd,nd->hmn", q, k).float()
+    score.mul_(scale.reshape(-1)).relu_()
+    logits = score.mul_(weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
+    logits.masked_fill_(~mask, float("-inf"))
 
     return logits
 
