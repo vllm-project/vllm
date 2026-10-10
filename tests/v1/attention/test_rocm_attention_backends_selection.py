@@ -181,7 +181,9 @@ def test_segmented_triton_cache_survives_standalone_compilation(
         RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
         assert os.environ["TRITON_CACHE_DIR"] == str(expected)
         assert expected.is_dir()
-        InductorStandaloneAdaptor("binary").initialize_cache(str(tmp_path / model))
+        InductorStandaloneAdaptor(
+            use_aot_compile=True, save_format="binary"
+        ).initialize_cache(str(tmp_path / model))
         assert os.environ["TRITON_CACHE_DIR"] == str(expected)
 
 
