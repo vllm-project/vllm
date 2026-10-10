@@ -16,7 +16,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import (
     SingleDirectionOffloadingHandler,
-    _build_copy_plan,
+    _build_run_plans,
     _canonical_block_sizes,
     _canonical_page_ids,
     pin_mmap_region,
@@ -41,21 +41,17 @@ def _nhd_mapping() -> CanonicalPageMapping:
     return CanonicalPageMapping(4096, 1024, runs, 1, 0, True)
 
 
-def test_copy_plan_unrolls_runs():
-    plan = _build_copy_plan(_ref(_nhd_mapping()), gpu_to_cpu=True)
-    k_dst = [256, 768, 1280, 1792]
-    assert plan.frag_offsets_src.tolist() == [0, 128, 256, 384, 512, 640, 768, 896]
-    assert plan.frag_offsets_dst.tolist() == k_dst + [2048 + o for o in k_dst]
-    assert plan.frag_sizes.tolist() == [128] * 8
-    assert plan.num_frags == 8
+def test_build_run_plans_preserves_structured_mapping():
+    mapping = _nhd_mapping()
+    assert _build_run_plans(_ref(mapping)) == mapping.runs
 
 
-def test_load_direction_swaps_offsets():
-    store = _build_copy_plan(_ref(_nhd_mapping()), gpu_to_cpu=True)
-    load = _build_copy_plan(_ref(_nhd_mapping()), gpu_to_cpu=False)
-    assert np.array_equal(store.frag_offsets_src, load.frag_offsets_dst)
-    assert np.array_equal(store.frag_offsets_dst, load.frag_offsets_src)
-    assert np.array_equal(store.frag_sizes, load.frag_sizes)
+def test_build_run_plans_uses_whole_page_for_direct_layout():
+    mapping = _nhd_mapping()
+    ref = _ref(mapping)
+    page_size = mapping.local_page_size_bytes
+    expected = (CopyRun(0, 0, page_size, 1, page_size, page_size),)
+    assert _build_run_plans(ref, canonical_layout=False) == expected
 
 
 def test_writer_rotation_matches_is_writer():

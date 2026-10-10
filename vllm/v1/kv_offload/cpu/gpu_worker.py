@@ -1,19 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 import time
 from collections import deque
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import NamedTuple
 
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
@@ -21,48 +16,20 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalPageMapping,
+    CopyRun,
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingWorker,
     TransferResult,
 )
+from vllm.v1.kv_offload.cpu.copy_backend import (
+    CopyBackendAdapter,
+    CopyRunDescriptor,
+)
 from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
-    THRESHOLD_BYTES,
-    swap_blocks_batch,
-)
 
 logger = init_logger(__name__)
-
-
-def _select_swap_blocks_fn(
-    layer_refs_per_group: list[list[CanonicalKVCacheRef]],
-    gpu_to_cpu: bool,
-    host_memory_is_pinned: bool = True,
-):
-    """Resolve the swap_blocks function for a handler at init time."""
-    # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
-    # The Triton kernel dereferences CPU pointers on the GPU, which is only
-    # valid for pinned host memory.
-    if gpu_to_cpu or not host_memory_is_pinned:
-        return ops.swap_blocks_batch
-    # Fall back to the C++ DMA path on platforms where Triton isn't usable
-    # (e.g. ROCm host mappings) or where GPU kernels cannot directly
-    # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
-    # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
-    if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
-        return ops.swap_blocks_batch
-    page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
-    # Triton wins only on small, 8-byte-aligned payloads.
-    if (
-        not page_sizes
-        or max(page_sizes) >= THRESHOLD_BYTES
-        or any(s % 8 for s in page_sizes)
-    ):
-        return ops.swap_blocks_batch
-    chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
-    return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
 
 
 @dataclass
@@ -72,9 +39,6 @@ class Transfer:
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
-    batch_src: torch.Tensor
-    batch_dst: torch.Tensor
-    batch_sizes: torch.Tensor
 
 
 def compute_sub_block_ptrs(
@@ -127,40 +91,18 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
-class CopyPlan(NamedTuple):
-    """Precomputed fragment-copy template for one data ref under the canonical
-    CPU layout, unrolled from the ref's mapped runs. Offsets are relative to
-    the per-block base pointers on each side."""
+def _build_run_plans(
+    ref: CanonicalKVCacheRef, canonical_layout: bool = True
+) -> tuple[CopyRun, ...]:
+    """Build structured copy runs for one data ref."""
+    mapping = ref.mapping if canonical_layout else None
+    if mapping is None:
+        page_size = ref.page_size_bytes
+        return (CopyRun(0, 0, page_size, 1, page_size, page_size),)
 
-    frag_offsets_src: np.ndarray
-    frag_offsets_dst: np.ndarray
-    frag_sizes: np.ndarray
-    total_bytes: int
-
-    @property
-    def num_frags(self) -> int:
-        return len(self.frag_sizes)
-
-
-def _build_copy_plan(ref: CanonicalKVCacheRef, gpu_to_cpu: bool) -> CopyPlan:
-    """Unroll one data ref's mapped runs into a per-fragment CopyPlan."""
-    mapping = ref.mapping
-    assert mapping is not None
-    local: list[int] = []
-    canonical: list[int] = []
-    sizes: list[int] = []
     for run in mapping.runs:
-        for i in range(run.num_fragments):
-            local.append(run.local_offset + i * run.local_stride)
-            canonical.append(run.canonical_offset + i * run.canonical_stride)
-            sizes.append(run.fragment_size)
-    src, dst = (local, canonical) if gpu_to_cpu else (canonical, local)
-    return CopyPlan(
-        frag_offsets_src=np.asarray(src, dtype=np.uint64),
-        frag_offsets_dst=np.asarray(dst, dtype=np.uint64),
-        frag_sizes=np.asarray(sizes, dtype=np.int64),
-        total_bytes=sum(sizes),
-    )
+        assert run.num_fragments >= 0
+    return mapping.runs
 
 
 def _canonical_page_ids(
@@ -239,19 +181,6 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
     )
 
 
-def _new_descriptor_buffers(
-    num_copy_ops: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pin = PIN_MEMORY
-    # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
-    ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
-    return (
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
-    )
-
-
 class SingleDirectionOffloadingHandler:
     """Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
     Transfers are guaranteed to be executed in order of their submission.
@@ -319,31 +248,28 @@ class SingleDirectionOffloadingHandler:
             cpu_tensors if gpu_to_cpu else gpu_tensors
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
+        self._canonical_layout = canonical_layout
         self.layer_refs_per_group = layer_refs_per_group
-        self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
-        )
 
         # GPU blocks may be smaller
         # cpu_page_size = gpu_page_size * blocks_per_chunk.
         self.src_blocks_per_chunk = 1 if self.gpu_to_cpu else blocks_per_chunk
         self.dst_blocks_per_chunk = blocks_per_chunk if self.gpu_to_cpu else 1
 
-        # Per (group, ref) static copy plans for the canonical layout
-        self._canonical_copy_plans: list[list[CopyPlan]] | None = (
-            [
-                [_build_copy_plan(ref, gpu_to_cpu) for ref in layer_refs]
-                for layer_refs in layer_refs_per_group
-            ]
-            if canonical_layout
-            else None
+        # Keep canonical runs structured until the backend consumes them.
+        # Non-canonical refs use one whole-page run per layer.
+        self._copy_runs: list[list[tuple[CopyRun, ...]]] = [
+            [_build_run_plans(ref, canonical_layout) for ref in layer_refs]
+            for layer_refs in layer_refs_per_group
+        ]
+        self._backend = CopyBackendAdapter(
+            layer_refs_per_group=layer_refs_per_group,
+            gpu_to_cpu=gpu_to_cpu,
+            host_memory_is_pinned=host_memory_is_pinned,
+            copy_runs=self._copy_runs,
         )
-        self._fill_group_ops = (
-            self._fill_canonical_ops if canonical_layout else self._fill_direct_ops
-        )
-        # Reusable per-block base-pointer scratch for the canonical fill,
-        # sized to the largest possible group (grown on demand)
-        num_scratch_blocks = gpu_tensors[0].shape[0] if canonical_layout else 0
+        # Reusable per-block base-pointer scratch for structured run filling.
+        num_scratch_blocks = gpu_tensors[0].shape[0]
         self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
         self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
 
@@ -355,27 +281,8 @@ class SingleDirectionOffloadingHandler:
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
-        # list of pinned descriptor buffer sets available for re-use
-        self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
-    def _estimate_max_copy_ops(self, group_sizes: Sequence[int]) -> int:
-        """Upper bound on the number of copy descriptors for a transfer.
-
-        Exact for the direct layout. The canonical path may fill fewer:
-        writer rotation later drops the blocks this rank does not write."""
-        num_copy_ops = 0
-        for g_idx, (group_size, layer_refs) in enumerate(
-            zip(group_sizes, self.layer_refs_per_group)
-        ):
-            if self._canonical_copy_plans is None:
-                num_copy_ops += group_size * len(layer_refs)
-            else:
-                num_copy_ops += group_size * sum(
-                    plan.num_frags for plan in self._canonical_copy_plans[g_idx]
-                )
-        return num_copy_ops
-
-    def _fill_direct_ops(
+    def _fill_run_ops(
         self,
         g_idx: int,
         group_src: np.ndarray,
@@ -383,76 +290,20 @@ class SingleDirectionOffloadingHandler:
         group_size: int,
         src_skip_count: int,
         dst_skip_count: int,
-        all_src: np.ndarray,
-        all_dst: np.ndarray,
-        all_sizes: np.ndarray,
-        op_idx: int,
-    ) -> tuple[int, int]:
-        """Fill one group's copy descriptors for the direct (worker-private)
-        layout: one whole-page copy per (block, ref).
-
-        Returns (op_idx past the filled descriptors, bytes added)."""
-        num_bytes = 0
-        for data_ref in self.layer_refs_per_group[g_idx]:
-            t_idx = data_ref.tensor_idx
-            end_idx = op_idx + group_size
-
-            compute_sub_block_ptrs(
-                group_src,
-                self.src_blocks_per_chunk,
-                all_src[op_idx:end_idx],
-                self.src_tensors[t_idx],
-                skip_count=src_skip_count,
-            )
-            compute_sub_block_ptrs(
-                group_dst,
-                self.dst_blocks_per_chunk,
-                all_dst[op_idx:end_idx],
-                self.dst_tensors[t_idx],
-                skip_count=dst_skip_count,
-            )
-
-            all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
-            num_bytes += group_size * data_ref.page_size_bytes
-            op_idx = end_idx
-        return op_idx, num_bytes
-
-    def _fill_canonical_ops(
-        self,
-        g_idx: int,
-        group_src: np.ndarray,
-        group_dst: np.ndarray,
-        group_size: int,
-        src_skip_count: int,
-        dst_skip_count: int,
-        all_src: np.ndarray,
-        all_dst: np.ndarray,
-        all_sizes: np.ndarray,
-        op_idx: int,
-    ) -> tuple[int, int]:
-        """Fill one group's copy descriptors for the canonical layout:
-        scatter each block through the ref's precomputed CopyPlan, keeping
-        only the blocks this rank writes.
-
-        Returns (op_idx past the filled descriptors, bytes added)."""
-        assert self._canonical_copy_plans is not None
-        # Zero-copy reinterpretation for pointer arithmetic: uint64 and the
-        # buffers' int64 are bit-equivalent for addresses
-        all_src_u64 = all_src.view(np.uint64)
-        all_dst_u64 = all_dst.view(np.uint64)
+    ) -> tuple[list[CopyRunDescriptor], int]:
+        """Build logical runs and defer tensor materialization to the adapter."""
         if group_size > len(self._scratch_bases_src):
             self._scratch_bases_src = np.empty(group_size, dtype=np.uint64)
             self._scratch_bases_dst = np.empty(group_size, dtype=np.uint64)
 
+        run_descs: list[CopyRunDescriptor] = []
         num_bytes = 0
-        for plan, data_ref in zip(
-            self._canonical_copy_plans[g_idx], self.layer_refs_per_group[g_idx]
+        for runs, data_ref in zip(
+            self._copy_runs[g_idx], self.layer_refs_per_group[g_idx]
         ):
-            if plan.num_frags == 0:
+            if not runs:
                 continue
             t_idx = data_ref.tensor_idx
-
-            # 1. Base byte pointer of every block on each side
             block_bases_src = self._scratch_bases_src[:group_size]
             block_bases_dst = self._scratch_bases_dst[:group_size]
             compute_sub_block_ptrs(
@@ -470,10 +321,8 @@ class SingleDirectionOffloadingHandler:
                 skip_count=dst_skip_count,
             )
 
-            # 2. On store, keep only the blocks this rank is elected to write
-            mapping = data_ref.mapping
-            assert mapping is not None
-            if self.gpu_to_cpu and mapping.num_writers > 1:
+            mapping = data_ref.mapping if self._canonical_layout else None
+            if self.gpu_to_cpu and mapping is not None and mapping.num_writers > 1:
                 block_bases_src, block_bases_dst = self._filter_writer_blocks(
                     block_bases_src,
                     block_bases_dst,
@@ -484,31 +333,30 @@ class SingleDirectionOffloadingHandler:
                 )
             num_active_blocks = len(block_bases_src)
 
-            # 3. Expand (block base + fragment offset) into one descriptor
-            #    per (block, fragment), writing straight into the descriptor
-            #    buffers: reshaping a contiguous 1D slice is a view, so the
-            #    broadcasts below allocate nothing
-            end_idx = op_idx + num_active_blocks * plan.num_frags
-            np.add(
-                block_bases_src[:, None],
-                plan.frag_offsets_src[None, :],
-                out=all_src_u64[op_idx:end_idx].reshape(
-                    num_active_blocks, plan.num_frags
-                ),
-            )
-            np.add(
-                block_bases_dst[:, None],
-                plan.frag_offsets_dst[None, :],
-                out=all_dst_u64[op_idx:end_idx].reshape(
-                    num_active_blocks, plan.num_frags
-                ),
-            )
-            all_sizes[op_idx:end_idx].reshape(num_active_blocks, plan.num_frags)[:] = (
-                plan.frag_sizes
-            )
-            num_bytes += num_active_blocks * plan.total_bytes
-            op_idx = end_idx
-        return op_idx, num_bytes
+            for run in runs:
+                if self.gpu_to_cpu:
+                    src_offset = run.local_offset
+                    dst_offset = run.canonical_offset
+                    src_stride = run.local_stride
+                    dst_stride = run.canonical_stride
+                else:
+                    src_offset = run.canonical_offset
+                    dst_offset = run.local_offset
+                    src_stride = run.canonical_stride
+                    dst_stride = run.local_stride
+                run_descs.extend(
+                    CopyRunDescriptor(
+                        src_base=int(src_base) + src_offset,
+                        dst_base=int(dst_base) + dst_offset,
+                        fragment_size=run.fragment_size,
+                        num_fragments=run.num_fragments,
+                        src_stride=src_stride,
+                        dst_stride=dst_stride,
+                    )
+                    for src_base, dst_base in zip(block_bases_src, block_bases_dst)
+                )
+                num_bytes += num_active_blocks * run.fragment_size * run.num_fragments
+        return run_descs, num_bytes
 
     def _filter_writer_blocks(
         self,
@@ -574,27 +422,9 @@ class SingleDirectionOffloadingHandler:
         block_indices = gpu_spec.block_indices
         assert len(block_indices) == len(self.layer_refs_per_group)
 
-        num_copy_ops = self._estimate_max_copy_ops(group_sizes)
-
-        # reuse a pooled buffer set, growing it if this transfer needs more room
-        batch_src, batch_dst, batch_sizes = (
-            self._buffer_pool.pop()
-            if self._buffer_pool
-            else _new_descriptor_buffers(num_copy_ops)
-        )
-        if batch_src.numel() < num_copy_ops:
-            batch_src, batch_dst, batch_sizes = _new_descriptor_buffers(num_copy_ops)
-
-        src = batch_src[:num_copy_ops]
-        dst = batch_dst[:num_copy_ops]
-        sizes = batch_sizes[:num_copy_ops]
-        all_src = src.numpy()
-        all_dst = dst.numpy()
-        all_sizes = sizes.numpy()
-
         src_offset = 0
         dst_offset = 0
-        op_idx = 0
+        run_descs: list[CopyRunDescriptor] = []
         # count total number of bytes copied
         num_transfer_bytes = 0
         for g_idx, (group_size, block_idx) in enumerate(
@@ -616,18 +446,15 @@ class SingleDirectionOffloadingHandler:
             src_end_offset = src_offset + src_blocks_count
             assert src_end_offset <= num_src_blocks
 
-            op_idx, group_bytes = self._fill_group_ops(
+            group_run_descs, group_bytes = self._fill_run_ops(
                 g_idx,
                 group_src=src_blocks[src_offset:src_end_offset],
                 group_dst=dst_blocks[dst_offset:dst_end_offset],
                 group_size=group_size,
                 src_skip_count=src_logical_blocks_to_skip,
                 dst_skip_count=dst_logical_blocks_to_skip,
-                all_src=all_src,
-                all_dst=all_dst,
-                all_sizes=all_sizes,
-                op_idx=op_idx,
             )
+            run_descs.extend(group_run_descs)
             num_transfer_bytes += group_bytes
 
             src_offset = src_end_offset
@@ -635,13 +462,6 @@ class SingleDirectionOffloadingHandler:
 
         assert src_offset == num_src_blocks
         assert dst_offset == num_dst_blocks
-        # Writer rotation may skip non-writer blocks, leaving op_idx below
-        # the sized upper bound
-        assert op_idx <= num_copy_ops
-        src = src[:op_idx]
-        dst = dst[:op_idx]
-        sizes = sizes[:op_idx]
-
         stream = (
             self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
         )
@@ -674,16 +494,9 @@ class SingleDirectionOffloadingHandler:
         # from the live GPU KV cache, which the compute stream keeps
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
-        is_src_access_order_any = not self.gpu_to_cpu
         with current_platform.stream(stream):
             start_event.record(stream)
-            if op_idx > 0:
-                self._swap_blocks_batch(
-                    src,
-                    dst,
-                    sizes,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
+            self._backend.submit(job_id, run_descs)
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
@@ -694,9 +507,6 @@ class SingleDirectionOffloadingHandler:
                 start_event=start_event,
                 end_event=end_event,
                 num_bytes=num_transfer_bytes,
-                batch_src=batch_src,
-                batch_dst=batch_dst,
-                batch_sizes=batch_sizes,
             )
         )
 
@@ -721,9 +531,7 @@ class SingleDirectionOffloadingHandler:
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
-            self._buffer_pool.append(
-                (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
-            )
+            self._backend.finish_transfer(transfer.job_id)
             del self._transfer_events[transfer.job_id]
         return results
 
@@ -754,7 +562,7 @@ class SingleDirectionOffloadingHandler:
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
-        self._buffer_pool.clear()
+        self._backend.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
         if sync_error is not None:
