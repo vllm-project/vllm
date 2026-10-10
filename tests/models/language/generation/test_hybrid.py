@@ -432,6 +432,24 @@ def _owned_vllm_runner(vllm_runner, kwargs):
         yield runner
 
 
+def _get_chosen_token_logprobs(output) -> list[float]:
+    completion = output.outputs[0]
+    assert completion.logprobs is not None
+    assert len(completion.token_ids) == len(completion.logprobs)
+
+    values = []
+    for index, (token_id, candidates) in enumerate(
+        zip(completion.token_ids, completion.logprobs, strict=True)
+    ):
+        assert candidates is not None, f"missing logprobs at output position {index}"
+        assert token_id in candidates, (
+            f"generated token {token_id} missing from logprobs "
+            f"at output position {index}"
+        )
+        values.append(float(candidates[token_id].logprob))
+    return values
+
+
 def _get_vLLM_output(
     vllm_runner,
     kwargs,
@@ -458,6 +476,61 @@ def _get_vLLM_output(
             outs.append(vllm_output)
 
     return outs, vllm_model
+
+
+@multi_gpu_test(num_gpus=2)
+def test_zamba2_mamba2_align_apc_tp2_cache_hit(vllm_runner) -> None:
+    """Verify a real Mamba2 prefix-cache hit produces correct TP2 output."""
+    model = "Zyphra/Zamba2-1.2B-instruct"
+    try:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+        model_info.check_available_online(on_fail="skip")
+        model_info.check_transformers_version(on_fail="skip")
+    except ValueError:
+        pass
+
+    prompt = "The president of the United States is " * APC_MULTIPLY_BY
+    max_tokens = 16
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=max_tokens,
+        logprobs=5,
+    )
+    bypass_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=max_tokens,
+        logprobs=5,
+        skip_reading_prefix_cache=True,
+    )
+    runner_kwargs = _get_vllm_runner_params(
+        model,
+        4096,
+        tensor_parallel_size=2,
+    )
+    runner_kwargs["enable_prefix_caching"] = True
+    runner_kwargs["mamba_cache_mode"] = "align"
+    runner_kwargs["mamba_ssm_cache_dtype"] = "float32"
+
+    with vllm_runner(**runner_kwargs) as runner:
+        llm = runner.get_llm()
+        (cold,) = llm.generate([prompt], sampling_params)
+        (warm,) = llm.generate([prompt], sampling_params)
+        (bypass,) = llm.generate([prompt], bypass_params)
+
+    assert cold.num_cached_tokens == 0
+    assert warm.num_cached_tokens is not None
+    assert warm.num_cached_tokens > 0
+    assert warm.num_cached_tokens <= len(warm.prompt_token_ids)
+    assert bypass.num_cached_tokens == 0
+
+    warm_completion = warm.outputs[0]
+    bypass_completion = bypass.outputs[0]
+    assert list(warm_completion.token_ids) == list(bypass_completion.token_ids)
+    assert _get_chosen_token_logprobs(warm) == pytest.approx(
+        _get_chosen_token_logprobs(bypass),
+        abs=1e-5,
+        rel=1e-5,
+    )
 
 
 @pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
