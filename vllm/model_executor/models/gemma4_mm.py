@@ -98,6 +98,32 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _get_tower_quant_config(
+    tower_config: Any,
+    quant_config: "QuantizationConfig | None",
+) -> "QuantizationConfig | None":
+    """Return the quantization config when a tower supports its kernels.
+
+    Vision and audio towers can have different dimensions. A quantization
+    decision made for one tower must not disable quantization for the other.
+    """
+    if quant_config is None:
+        return None
+
+    # These methods support arbitrary tower dimensions.
+    if quant_config.get_name() in ("bitsandbytes", "torchao", "compressed-tensors"):
+        return quant_config
+
+    intermediate_size = getattr(tower_config, "intermediate_size", None)
+    if tower_config.hidden_size % 64 != 0 or (
+        intermediate_size is not None and intermediate_size % 64 != 0
+    ):
+        return None
+
+    return quant_config
+
+
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
@@ -1071,25 +1097,9 @@ class Gemma4ForConditionalGeneration(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
 
-        # Only quantize towers when the quant method supports their
-        # dimensions.  BNB/torchao handle arbitrary sizes; other methods
-        # (Marlin, FP8, …) require dimensions divisible by 64, which
-        # the vision tower (intermediate_size=4304) does not satisfy.
-        # TODO(mgoin): remove this by fixing kernel padding.
-        tower_quant: QuantizationConfig | None
-        if quant_config and quant_config.get_name() in [
-            "bitsandbytes",
-            "torchao",
-            "compressed-tensors",
-        ]:
-            tower_quant = quant_config
-        else:
-            vision_cfg = config.vision_config
-            quantizable = (
-                vision_cfg.hidden_size % 64 == 0
-                and vision_cfg.intermediate_size % 64 == 0
-            )
-            tower_quant = quant_config if quantizable else None
+        # Apply the dimension check independently because the vision and audio
+        # towers do not necessarily have the same hidden and intermediate sizes.
+        vision_tower_quant = _get_tower_quant_config(config.vision_config, quant_config)
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -1097,18 +1107,21 @@ class Gemma4ForConditionalGeneration(
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
-                quant_config=tower_quant,
+                quant_config=vision_tower_quant,
                 prefix=maybe_prefix(prefix, "embed_vision"),
             )
             recursive_replace_linear(
                 self.vision_tower,
-                tower_quant,
+                vision_tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
         # ---- Audio tower (variants with audio_config) ----
         self.embed_audio: Gemma4MultimodalEmbedder | None
         if config.audio_config is not None:
+            audio_tower_quant = _get_tower_quant_config(
+                config.audio_config, quant_config
+            )
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_tower = AutoModel.from_config(config=config.audio_config)
                 # AutoModel.from_config does NOT call post_init(),
@@ -1119,12 +1132,12 @@ class Gemma4ForConditionalGeneration(
                 self.embed_audio = Gemma4MultimodalEmbedder(
                     config.audio_config,
                     config.text_config,
-                    quant_config=tower_quant,
+                    quant_config=audio_tower_quant,
                     prefix=maybe_prefix(prefix, "embed_audio"),
                 )
                 recursive_replace_linear(
                     self.audio_tower,
-                    tower_quant,
+                    audio_tower_quant,
                     prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
