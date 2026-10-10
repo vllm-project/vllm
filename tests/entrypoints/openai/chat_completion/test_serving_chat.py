@@ -1283,6 +1283,53 @@ async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
     assert streamed_tokens == expected_tokens
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "include_reasoning", [True, False], ids=["with_reasoning", "no_reasoning"]
+)
+async def test_non_streaming_reasoning_gated_but_usage_unconditional(
+    include_reasoning,
+):
+    """``include_reasoning=False`` nulls ``message.reasoning``, not the usage count."""
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    serving._include_reasoning_tokens_details = True
+    serving.model_config = None
+
+    parser = MagicMock()
+    parser.parse.return_value = ("careful reasoning", "42", None)
+    parser.count_reasoning_tokens.return_value = 5
+
+    output = _make_metrics_request_output(metrics=None, token_ids=(10, 11, 12))
+    output.outputs[0].text = "<think>careful reasoning</think>42"
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        include_reasoning=include_reasoning,
+    )
+
+    response = await serving.chat_completion_full_generator(
+        request,
+        _single_request_output(output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=parser,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert response.usage.completion_tokens_details.reasoning_tokens == 5
+
+    message = response.choices[0].message
+    if include_reasoning:
+        assert message.reasoning == "careful reasoning"
+    else:
+        assert message.reasoning is None
+
+
 @dataclass
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
