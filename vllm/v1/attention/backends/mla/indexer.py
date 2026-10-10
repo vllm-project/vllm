@@ -898,6 +898,8 @@ def _supports_native_decode(next_n: int) -> bool:
     instead of flattening to one single-token row per query, which re-reads
     the KV tile once per row.
     """
+    if current_platform.is_rocm():
+        return next_n <= envs.VLLM_ROCM_INDEXER_NATIVE_DECODE_MAX_NEXT_N
     if not (current_platform.is_cuda() and has_deep_gemm()):
         return next_n in (1, 2)
     if current_platform.is_device_capability_family(100):
