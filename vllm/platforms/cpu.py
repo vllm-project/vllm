@@ -25,6 +25,30 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
+
+def filter_numa_topology_by_affinity(
+    numa_core_list: list[list[int]],
+    allowed_cores: set[int] | frozenset[int] | None = None,
+) -> list[list[int]]:
+    """Drop CPUs outside the process cpuset from each NUMA node list.
+
+    When ``allowed_cores`` is omitted, use ``os.sched_getaffinity(0)`` if
+    available; otherwise return ``numa_core_list`` unchanged. Nodes with no
+    remaining CPUs are omitted.
+    """
+    if allowed_cores is None:
+        if not hasattr(os, "sched_getaffinity"):
+            return numa_core_list
+        allowed_cores = os.sched_getaffinity(0)
+
+    filtered: list[list[int]] = []
+    for node_cores in numa_core_list:
+        allowed_in_node = [c for c in node_cores if c in allowed_cores]
+        if allowed_in_node:
+            filtered.append(allowed_in_node)
+    return filtered
+
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.attention.backends.mla.prefill.base import (
@@ -551,6 +575,10 @@ class CpuPlatform(Platform):
     def discover_numa_topology(cls) -> list[list[int]]:
         """Discover NUMA topology and keep the last physical core of each numa
         into one core group list for nixl start_kv_load()
+
+        Host sysfs lists can include CPUs outside a container cgroup cpuset.
+        When ``sched_getaffinity`` is available, intersect each node so callers
+        never ``sched_setaffinity`` to an illegal core (``EINVAL``).
         """
         SYS_NODE = "/sys/devices/system/node"
         SYS_CPU = "/sys/devices/system/cpu"
@@ -599,7 +627,7 @@ class CpuPlatform(Platform):
             if len(seen_phys) > 0:
                 core_rsv_for_kv.append(list(seen_phys))
 
-        return core_rsv_for_kv
+        return filter_numa_topology_by_affinity(core_rsv_for_kv)
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

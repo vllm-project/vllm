@@ -702,6 +702,7 @@ class NixlBaseConnectorWorker:
         if self.device_type == "cpu":
             numa_core_list = current_platform.discover_numa_topology()
             # setup one last core in each numa for kv transfer.
+            # discover_numa_topology already intersects cgroup cpuset.
             rsv_cores_for_kv = [
                 max(each_numa_core_list) for each_numa_core_list in numa_core_list
             ]
