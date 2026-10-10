@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -9,7 +10,7 @@ import torch
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
-from vllm.model_executor.warmup import deep_gemm_warmup
+from vllm.model_executor.warmup import deep_gemm_warmup, kernel_warmup
 
 
 def _block_fp8_layer(n: int, k: int, scale_name: str = "weight_scale"):
@@ -88,3 +89,52 @@ def test_kernel_registers_itself_as_warmup_provider(is_bmm) -> None:
 
     provider = getattr(layer, "deep_gemm_warmup_provider", None)
     assert provider is (None if is_bmm else kernel)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("has_draft", [False, True])
+@pytest.mark.parametrize(
+    "supported, mode", [(True, "relax"), (True, "skip"), (False, "relax")]
+)
+def test_kernel_warmup_covers_draft_model(monkeypatch, has_draft, supported, mode):
+    """Draft-model kernels must be warmed before serving, just like the target's."""
+    target = torch.nn.Module()
+    draft = torch.nn.Module() if has_draft else None
+    worker = Mock(use_v2_model_runner=True)
+    worker.get_model.return_value = target
+    worker.get_draft_model.return_value = draft
+    worker.scheduler_config.max_num_batched_tokens = 16
+    worker.vllm_config.kernel_config.enable_jit_warmup = False
+    worker.vllm_config.kernel_config.enable_cutedsl_warmup = False
+    worker.vllm_config.kernel_config.enable_flashinfer_autotune = False
+    worker.vllm_config.compilation_config.cudagraph_capture_sizes = []
+    worker.model_runner.attn_groups = []
+
+    for name in (
+        "qwen_triton_warmup",
+        "qwen_vl_triton_warmup",
+        "mamba_triton_warmup",
+        "_warmup_gemm_rs_ar",
+        "flashinfer_sparse_mla_decode_autotune_warmup",
+        "deepseek_v4_sparse_mla_attention_warmup",
+        "b12x_warmup",
+    ):
+        monkeypatch.setattr(kernel_warmup, name, Mock())
+    platform = Mock()
+    platform.has_device_capability.return_value = False
+    platform.is_rocm.return_value = False
+    monkeypatch.setattr(kernel_warmup, "current_platform", platform)
+    monkeypatch.setattr(kernel_warmup, "is_deep_gemm_supported", lambda: supported)
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", mode)
+    monkeypatch.setenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0")
+    warm_models = Mock()
+    monkeypatch.setattr(kernel_warmup, "deep_gemm_warmup", warm_models)
+
+    kernel_warmup.kernel_warmup(worker)
+
+    expected = []
+    if supported and mode != "skip":
+        expected = [call(target, 16)]
+        if has_draft:
+            expected.append(call(draft, 16))
+    assert warm_models.call_args_list == expected

@@ -239,6 +239,9 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+        draft_model = worker.get_draft_model()
+        if draft_model is not None:
+            deep_gemm_warmup(draft_model, max_tokens)
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
