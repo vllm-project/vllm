@@ -103,6 +103,54 @@ def make_vllm_config() -> VllmConfig:
     )
 
 
+class _ToyKernelA:
+    pass
+
+
+class _ToyKernelB:
+    pass
+
+
+class _ToyQuantMethod:
+    def __init__(self, kernel: object):
+        self.fp8_linear = kernel
+
+
+class _ToyScheme:
+    def __init__(self, linear_method: _ToyQuantMethod):
+        self.linear_method = linear_method
+
+
+def _set_toy_kernel(layer: torch.nn.Module, kernel_cls: type, selection_path: str):
+    method = _ToyQuantMethod(kernel_cls())
+    if selection_path == "direct":
+        layer.quant_method = method
+    elif selection_path == "scheme":
+        layer.quant_method = _ToyQuantMethod(None)
+        layer.scheme = method
+    else:
+        layer.quant_method = _ToyQuantMethod(None)
+        layer.quant_method.scheme = _ToyScheme(method)
+
+
+@support_torch_compile
+class KernelSwitchMod(torch.nn.Module):
+    """Model with constructor-selected kernels on multiple layers."""
+
+    def __init__(self, kernel_classes: tuple[type, ...], **kwargs):
+        super().__init__()
+        self.projections = torch.nn.ModuleList(
+            [torch.nn.Linear(10, 10, bias=False) for _ in kernel_classes]
+        )
+        for layer, kernel_cls in zip(self.projections, kernel_classes):
+            _set_toy_kernel(layer, kernel_cls, "direct")
+
+    def forward(self, x: torch.Tensor):
+        for layer in self.projections:
+            x = layer(x)
+        return x
+
+
 @contextmanager
 def use_vllm_config(vllm_config: VllmConfig):
     with set_forward_context({}, vllm_config), set_current_vllm_config(vllm_config):
@@ -190,6 +238,104 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
                 "Expected was_aot_compile_fn_loaded_from_disk to be True"
             )
             assert torch.allclose(ret, expected)
+
+
+@pytest.mark.parametrize("selection_path", ["direct", "scheme", "nested"])
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        ((_ToyKernelA,), (_ToyKernelB,)),
+        ((_ToyKernelA, _ToyKernelB), (_ToyKernelB, _ToyKernelA)),
+        (
+            (_ToyKernelA, _ToyKernelA, _ToyKernelB),
+            (_ToyKernelA, _ToyKernelB, _ToyKernelB),
+        ),
+    ],
+)
+def test_kernel_selection_hash_key(selection_path, before, after):
+    """Track each layer's direct or wrapped kernel without instance identity."""
+    from vllm.compilation.decorators import _kernel_selection_hash_key
+
+    def build(kernel_classes: tuple[type, ...]) -> torch.nn.Module:
+        mod = torch.nn.Module()
+        mod.projections = torch.nn.ModuleList(
+            [torch.nn.Linear(10, 10, bias=False) for _ in kernel_classes]
+        )
+        for layer, kernel_cls in zip(mod.projections, kernel_classes):
+            _set_toy_kernel(layer, kernel_cls, selection_path)
+        return mod
+
+    assert _kernel_selection_hash_key(build(before)) == (
+        _kernel_selection_hash_key(build(before))
+    )
+    assert _kernel_selection_hash_key(build(before)) != (
+        _kernel_selection_hash_key(build(after))
+    )
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_aot_cache_key_tracks_kernel_selection(monkeypatch: pytest.MonkeyPatch):
+    """Kernel selection happens at layer-construction time and is invisible
+    to the traced source files, so the AOT cache key must include it.
+    Switching kernels with an unchanged vLLM version/env/config must not
+    load the stale artifact baked for the previous kernel."""
+    with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
+        args = (torch.randn(10, 10),)
+        m.setenv("VLLM_CACHE_ROOT", tmpdirname)
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+        m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+
+        vllm_config = make_vllm_config()
+        with (
+            use_vllm_config(vllm_config),
+            compilation_counter.expect(
+                num_aot_compiles=1,
+                num_aot_artifacts_saved=1,
+                num_aot_artifacts_loaded=0,
+            ),
+        ):
+            KernelSwitchMod(
+                kernel_classes=(_ToyKernelA, _ToyKernelB), vllm_config=vllm_config
+            )(*args)
+
+        disable_envs_cache()
+        torch._dynamo.reset()
+
+        # Both kernels remain present, but their layer assignments change.
+        vllm_config = make_vllm_config()
+        with (
+            use_vllm_config(vllm_config),
+            compilation_counter.expect(
+                num_aot_compiles=1,
+                num_aot_artifacts_saved=1,
+                num_aot_artifacts_loaded=0,
+            ),
+        ):
+            compiled_mod = KernelSwitchMod(
+                kernel_classes=(_ToyKernelB, _ToyKernelA), vllm_config=vllm_config
+            )
+            expected = compiled_mod(*args)
+
+        disable_envs_cache()
+        torch._dynamo.reset()
+        m.setenv("VLLM_FORCE_AOT_LOAD", "1")
+        vllm_config = make_vllm_config()
+        with (
+            use_vllm_config(vllm_config),
+            compilation_counter.expect(
+                num_aot_compiles=0,
+                num_aot_artifacts_saved=0,
+                num_aot_artifacts_loaded=1,
+            ),
+        ):
+            cached_mod = KernelSwitchMod(
+                kernel_classes=(_ToyKernelB, _ToyKernelA), vllm_config=vllm_config
+            )
+            cached_mod.load_state_dict(compiled_mod.state_dict())
+            actual = cached_mod(*args)
+        assert cached_mod.was_aot_compile_fn_loaded_from_disk
+        torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(

@@ -7,7 +7,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast, overload
 from unittest.mock import patch
 
 import torch
@@ -260,6 +260,46 @@ def _model_hash_key(fn: Callable[..., Any]) -> str:
     sha256_hash.update(vllm.__version__.encode())
     sha256_hash.update(fn.__qualname__.encode())
     sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
+    return sha256_hash.hexdigest()
+
+
+def _kernel_selection_hash_key(model: torch.nn.Module) -> str:
+    """Hash the quantization kernel selected by each layer of `model`.
+
+    Kernels are chosen at layer-construction time, which dynamo never
+    traces, so a same-version change in selection (a source patch, a new
+    hardware branch, etc.) is invisible to both the env/config hash factors
+    and the load-time traced-source check, and would silently load a stale
+    AOT artifact baked for the previous kernel.
+
+    Keep each layer's association with its kernel: a set of kernel types
+    cannot distinguish changes within a model that uses multiple kernels.
+    Pipeline-parallel ranks may produce different hashes; AOT artifacts
+    are already stored separately for each rank.
+    """
+    sha256_hash = hashlib.sha256()
+    for name, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if quant_method is None:
+            continue
+        quant_scheme = getattr(quant_method, "scheme", None)
+        for path, method in (
+            ("quant_method", quant_method),
+            ("scheme", getattr(module, "scheme", None)),
+            ("quant_method.scheme", quant_scheme),
+            (
+                "quant_method.scheme.linear_method",
+                getattr(quant_scheme, "linear_method", None),
+            ),
+        ):
+            if method is None:
+                continue
+            method_type = f"{type(method).__module__}.{type(method).__qualname__}"
+            attrs = tuple(
+                f"{attr}={type(value).__module__}.{type(value).__qualname__}"
+                for attr, value in sorted(vars(method).items())
+            )
+            sha256_hash.update(str((name, path, method_type, attrs)).encode())
     return sha256_hash.hexdigest()
 
 
@@ -560,6 +600,7 @@ def _support_torch_compile(
 
             factors: list[str] = aot_compile_hash_factors(self.vllm_config)
 
+            factors.append(_kernel_selection_hash_key(cast(nn.Module, self)))
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
