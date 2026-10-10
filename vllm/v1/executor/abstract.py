@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from functools import cached_property
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -289,12 +289,15 @@ class Executor(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
-        kwargs: dict[str, int] = {}
+        kwargs: dict[str, Any] = {}
         if delay_iterations is not None:
             kwargs["delay_iterations"] = delay_iterations
         if max_iterations is not None:
             kwargs["max_iterations"] = max_iterations
+        if profiler_kwargs is not None:
+            kwargs["profiler_kwargs"] = profiler_kwargs
         if kwargs:
             # Reject before dispatch: a failing collective_rpc may leave
             # unread worker replies queued.

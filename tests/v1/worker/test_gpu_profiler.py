@@ -300,6 +300,7 @@ def test_worker_creates_platform_torch_profiler(device_type, activities, expecte
         worker_name="rank0",
         local_rank=0,
         activities=expected,
+        profiler_kwargs=None,
     )
 
 

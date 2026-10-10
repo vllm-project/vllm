@@ -1336,6 +1336,7 @@ class Worker(WorkerBase):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
@@ -1366,6 +1367,7 @@ class Worker(WorkerBase):
                     self.profiler_config,
                     worker_name=trace_name,
                     local_rank=self.local_rank,
+                    profiler_kwargs=profiler_kwargs,
                 )
 
             self.profiler.set_output_name(trace_name)
@@ -1380,11 +1382,12 @@ class Worker(WorkerBase):
             try:
                 self.profiler.stop()
             finally:
-                if self.profiler_config.profiler == "proton" and not (
+                if self.profiler_config.profiler in ("proton", "torch") and not (
                     self.profiler.has_cuda_graph_session
                 ):
-                    # Proton output names are fixed when the wrapper is constructed.
-                    # Recreate it so the next profile_prefix is honored.
+                    # Output names and profiler_kwargs are fixed when the wrapper
+                    # is constructed. Recreate it so the next profile_prefix and
+                    # profiler_kwargs are honored.
                     self.profiler = None
 
     @property

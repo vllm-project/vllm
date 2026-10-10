@@ -109,7 +109,11 @@ curl -X POST http://localhost:8000/start_profile \
     -d '{
         "profile_prefix": "sharegpt_run_1",
         "delay_iterations": 5000,
-        "max_iterations": 20
+        "max_iterations": 20,
+        "profiler_kwargs": {
+            "record_shapes": true,
+            "with_stack": true
+        }
     }'
 ```
 

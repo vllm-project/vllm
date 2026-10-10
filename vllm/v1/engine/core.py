@@ -833,12 +833,14 @@ class EngineCore:
         profile_prefix: str | None = None,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict | None = None,
     ):
         self.model_executor.profile(
             is_start,
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def reset_mm_cache(self):
