@@ -70,7 +70,7 @@ pub async fn completions(
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
     let tokenizer = state.chat.text().tokenizer();
-    let prepared = match prepare_completion_request(
+    let mut prepared = match prepare_completion_request(
         body,
         &lora_resolution,
         request_context,
@@ -87,6 +87,10 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
+    if api_server_options.enable_force_include_usage {
+        prepared.options.include_usage = true;
+        prepared.options.include_continuous_usage = true;
+    }
     let text_stream = match state
         .chat
         .text()

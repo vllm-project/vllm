@@ -67,7 +67,7 @@ pub async fn chat_completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
+    let mut prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
@@ -79,6 +79,10 @@ pub async fn chat_completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
+    if api_server_options.enable_force_include_usage {
+        prepared.options.include_usage = true;
+        prepared.options.include_continuous_usage = true;
+    }
 
     let chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {

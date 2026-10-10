@@ -199,6 +199,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_force_include_usage: false,
+                        no_enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
@@ -607,6 +609,78 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
 }
 
 #[test]
+fn serve_passes_enable_force_include_usage_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-force-include-usage",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.api_server_options.enable_force_include_usage);
+}
+
+#[test]
+fn serve_no_enable_force_include_usage_alias_disables_it() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--no-enable-force-include-usage",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(!config.api_server_options.enable_force_include_usage);
+}
+
+#[test]
+fn serve_force_include_usage_flags_follow_last_occurrence() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-force-include-usage",
+        "--no-enable-force-include-usage",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(
+        !args
+            .to_frontend_config("tcp://127.0.0.1:62100".to_string())
+            .api_server_options
+            .enable_force_include_usage
+    );
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--no-enable-force-include-usage",
+        "--enable-force-include-usage",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string())
+            .api_server_options
+            .enable_force_include_usage
+    );
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -761,6 +835,29 @@ fn frontend_args_json_passes_enable_request_id_headers_into_config() {
     };
     let config = args.into_config();
     assert!(config.api_server_options.enable_request_id_headers);
+}
+
+#[test]
+fn frontend_args_json_passes_enable_force_include_usage_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_force_include_usage":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.api_server_options.enable_force_include_usage);
 }
 
 #[test]
@@ -1069,6 +1166,8 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_force_include_usage: false,
+                        no_enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
@@ -1742,6 +1841,8 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
+                        enable_force_include_usage: false,
+                        no_enable_force_include_usage: false,
                         enable_request_id_headers: false,
                         enable_scale_out: false,
                         sse_keep_alive_interval: 0,
@@ -1901,6 +2002,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_force_include_usage: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
@@ -1997,6 +2099,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_force_include_usage: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,
@@ -2137,6 +2240,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
+                enable_force_include_usage: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 sse_keep_alive_interval: None,

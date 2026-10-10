@@ -56,6 +56,8 @@ pub struct ApiServerOptions {
     pub enable_log_requests: bool,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
+    /// When `true`, force usage reporting on every streaming request.
+    pub enable_force_include_usage: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
