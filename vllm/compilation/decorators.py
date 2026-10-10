@@ -556,7 +556,7 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            from .caching import aot_compile_hash_factors
+            from .caching import aot_compile_hash_factors, make_compile_cache_dir
 
             factors: list[str] = aot_compile_hash_factors(self.vllm_config)
 
@@ -571,8 +571,9 @@ def _support_torch_compile(
 
             # Hash-level dir; shared across ranks on the same node.
             self.compilation_config.local_cache_dir = cache_dir
-            inductor_cache = os.path.join(cache_dir, "inductor_cache")
-            os.makedirs(inductor_cache, exist_ok=True)
+            inductor_cache = make_compile_cache_dir(
+                os.path.join(cache_dir, "inductor_cache")
+            )
             # Process-wide: post-load execution, CUDA-graph capture, and later
             # autotune/recompile all need to write under {hash}/inductor_cache/.
             # Unconditional because torch's cache_dir() may have pre-filled the

@@ -35,6 +35,30 @@ assert isinstance(SerializableCallable, type)
 logger = init_logger(__name__)
 
 
+def make_compile_cache_dir(path: str) -> str:
+    """Create a compile-cache directory, naming the fix if it cannot be.
+
+    The engine's own output for a bare ``PermissionError`` from these calls is
+    "Engine core initialization failed ... Failed core proc(s): {}", with the
+    cause in a subprocess's traceback, so the message says which directory is
+    at fault and which variable controls it.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as e:
+        # The three-argument form keeps errno and filename, which the
+        # single-argument one drops.
+        raise type(e)(
+            e.errno,
+            f"{e.strerror}: cannot create the compile cache directory {path}. "
+            f"Set VLLM_CACHE_ROOT to a writable directory, or make the "
+            f"existing one writable by this user (an earlier run under a "
+            f"different user can leave it unwritable)",
+            e.filename,
+        ) from e
+    return path
+
+
 class StandaloneCompiledArtifacts:
     """Storage for standalone compiled artifacts with content-based deduplication.
 

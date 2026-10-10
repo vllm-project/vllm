@@ -1077,12 +1077,14 @@ class VllmBackend:
             self.compilation_config.cache_dir = cache_dir
 
         cache_dir = self.compilation_config.cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
+        from .caching import make_compile_cache_dir
+
+        make_compile_cache_dir(cache_dir)
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_index
         local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}", self.prefix)
-        os.makedirs(local_cache_dir, exist_ok=True)
+        make_compile_cache_dir(local_cache_dir)
         self.compilation_config.local_cache_dir = local_cache_dir
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
