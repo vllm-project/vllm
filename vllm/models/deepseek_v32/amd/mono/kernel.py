@@ -14,11 +14,12 @@ the final norm) adds nothing.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -45,12 +46,15 @@ logger = init_logger(__name__)
 
 def refuse_config(vllm_config: VllmConfig) -> None:
     """Config-stage refusal, before weights load: raises with every reason."""
-    on_gfx950 = False
+    on_gfx950, compute_units = False, 0
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx950 as _on_gfx950
 
         on_gfx950 = _on_gfx950()
-    reasons = spec.refuse_config(vllm_config, on_gfx950)
+        compute_units = torch.cuda.get_device_properties(
+            torch.cuda.current_device()
+        ).multi_processor_count
+    reasons = spec.refuse_config(vllm_config, on_gfx950, compute_units)
     if reasons:
         raise ValueError(
             "VLLM_ROCM_MONO_DECODE cannot run GLM-5 here: " + "; ".join(reasons) + "."
@@ -97,6 +101,7 @@ class GlmMono:
         self._runtimes: dict[int, list[Glm5MonoKernel]] = {}
         self._launch_index: list[int] = []
         self._cache_key: tuple | None = None
+        self._health: _HealthWatch | None = None
         self._index_options: dict = {}
         self.active = False
         self._rows = 0
@@ -151,11 +156,12 @@ class GlmMono:
         )
         logger.info_once(
             "GLM-5 MonoKernel: %d layers (%d dense, %d with the fused indexer), "
-            "decode steps of %s tokens.",
+            "decode steps of %s tokens; numerics: %s.",
             len(layers),
             self._num_dense,
             sum(self._fused),
             "/".join(map(str, spec.STEP_TOKENS)),
+            "; ".join(spec.NUMERICS),
         )
 
     def _refuse_model(self) -> None:
@@ -215,7 +221,8 @@ class GlmMono:
             return False
         n = hidden_states.shape[0]
         ctx = get_forward_context()
-        if spec.step_reason(n, ctx.attn_metadata, self._layer_name) is not None:
+        piecewise = ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        if spec.step_reason(n, ctx.attn_metadata, self._layer_name, piecewise):
             return False
         md = ctx.attn_metadata[self._layer_name]
         if not self._ops:
@@ -318,6 +325,8 @@ class GlmMono:
                     runtime=runtimes[f],
                     native_fp4_mfma=True,
                     dense_experts=w.physical_experts if d else 0,
+                    poll_limit=spec.POLL_LIMIT,
+                    poll_early_out=False,
                     **(self._index_options if f else {}),
                 )
                 runtimes[f] = runtimes[f] or op
@@ -325,6 +334,15 @@ class GlmMono:
             self._ops[chunk] = ops
             self._runtimes[chunk] = [r for r in runtimes.values() if r is not None]
         assert len(self._ops[spec.width_for(1)]) == len(layers)
+        self._health = _HealthWatch(
+            [r for chunk in sorted(self._runtimes) for r in self._runtimes[chunk]],
+            self._rank,
+        )
+
+    def after_step(self) -> None:
+        """Once per engine step, outside any CUDA graph: fail-stop on expired polls."""
+        if self._health is not None:
+            self._health.after_step()
 
     def _index_options_from(self, md) -> dict:
         attn = next(layer.self_attn for layer, f in zip(self._layers, self._fused) if f)
@@ -379,3 +397,86 @@ class GlmMono:
                 "VLLM_ROCM_MONO_DECODE caches changed layout: " + "; ".join(reasons)
             )
         self._cache_key = key
+
+
+# Seconds the output rank lives on after a fail-stop, so its error reaches the engine.
+_FAILSTOP_EXIT_GRACE_S = 30.0
+
+
+def _fail_stop(msg: str, rank: int) -> None:
+    """Non-output ranks exit their worker (their exception never reaches the engine);
+    the output rank raises and exits after a grace period, so no worker is left
+    spinning in a collective."""
+    if rank != 0:
+        logger.critical("%s; terminating this worker", msg)
+        os._exit(70)
+    import faulthandler
+
+    logger.error("%s; this worker exits in %.0f s", msg, _FAILSTOP_EXIT_GRACE_S)
+    faulthandler.dump_traceback_later(_FAILSTOP_EXIT_GRACE_S, exit=True)
+    raise RuntimeError(msg)
+
+
+class _HealthWatch:
+    """Non-blocking check of the kernels' expired-poll words, one step late: each
+    step copies the words to pinned memory and checks the previous copy once its
+    event has completed. Words are sticky; nothing clears them before the decision,
+    except under the test-only ``VLLM_MONO_UNSAFE_WARN=1``."""
+
+    def __init__(self, runtimes: list[Glm5MonoKernel], rank: int) -> None:
+        from vllm.models.deepseek_v32.amd.ops.mono.glm.layout import POLL_STAGES
+
+        self._stages = POLL_STAGES
+        self._rank = rank
+        n = len(POLL_STAGES)
+        first = runtimes[0]
+        device = first.scratch.device
+        self._words = torch.zeros(len(runtimes) * n, dtype=torch.int32, device=device)
+        xrank_addr = int(first.peers[0]) + first.sym_layout["poll_xrank"] + 4 * rank
+        for i, runtime in enumerate(runtimes):
+            runtime.set_poll_targets(self._words[i * n : (i + 1) * n], xrank_addr)
+        # rank 0 holds every rank's flag in the first runtime's peer buffer
+        self._xrank = first.poll_xrank if rank == 0 else None
+        self._host = torch.zeros_like(self._words, device="cpu").pin_memory()
+        self._host_x = (
+            None
+            if self._xrank is None
+            else torch.zeros_like(self._xrank, device="cpu").pin_memory()
+        )
+        self._event: torch.cuda.Event | None = None
+        self._unsafe_warn = os.environ.get("VLLM_MONO_UNSAFE_WARN") == "1"
+
+    def after_step(self) -> None:
+        if self._event is not None and self._event.query():
+            self._check()
+        self._host.copy_(self._words, non_blocking=True)
+        if self._xrank is not None:
+            self._host_x.copy_(self._xrank, non_blocking=True)
+        if self._event is None:
+            self._event = torch.cuda.Event()
+        self._event.record()
+
+    def _check(self) -> None:
+        n = len(self._stages)
+        bad = sorted(
+            {self._stages[i % n] for i, w in enumerate(self._host.tolist()) if w}
+        )
+        peers = (
+            []
+            if self._host_x is None
+            else [r for r, w in enumerate(self._host_x.tolist()) if w]
+        )
+        if not bad and not peers:
+            return
+        msg = (
+            f"GLM-5 MonoKernel rank {self._rank}: expired mailbox waits"
+            f"{' in ' + ', '.join(bad) if bad else ''}"
+            f"{'; ranks flagging an expiry: ' + str(peers) if peers else ''}"
+            "; tokens of the affected steps are wrong"
+        )
+        if not self._unsafe_warn:
+            _fail_stop(msg, self._rank)
+        logger.error("%s [VLLM_MONO_UNSAFE_WARN=1: continuing]", msg)
+        self._words.zero_()
+        if self._xrank is not None:
+            self._xrank.zero_()

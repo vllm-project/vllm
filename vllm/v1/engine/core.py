@@ -760,10 +760,12 @@ class EngineCore:
             self.log_error_detail(scheduler_output),
         ):
             model_output = future.result()
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
+            if exec_model_fut is not future:
+                # Raise a failed execute_model()'s exception: sample_tokens() after
+                # it can return an empty (not None) output, whose missing request ids
+                # would otherwise surface as a KeyError in update_from_output().
                 exec_model_fut.result()
+            if model_output is None:
                 raise RuntimeError("unexpected error")
 
         # Before processing the model output, process any aborts that happened

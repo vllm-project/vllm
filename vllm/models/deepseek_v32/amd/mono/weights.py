@@ -137,10 +137,19 @@ def _fp4_storage(tensor: torch.Tensor) -> torch.Tensor:
 def _moe_weights(moe: DeepseekV2MoE, cfg) -> tuple[dict[str, torch.Tensor], int]:
     experts = moe.experts.routed_experts
     physical = cfg.n_experts + cfg.num_shared_experts
-    if experts.w13_weight.shape[0] != physical:
-        raise ValueError(
-            f"expects {physical} physical experts, got {experts.w13_weight.shape[0]}."
-        )
+    for name, weight, shape in (
+        ("w13_weight", experts.w13_weight, (physical, 2 * cfg.inter, cfg.hidden // 2)),
+        ("w2_weight", experts.w2_weight, (physical, cfg.hidden, cfg.inter // 2)),
+    ):
+        if (
+            weight.element_size() != 1
+            or tuple(weight.shape) != shape
+            or not weight.is_contiguous()
+        ):
+            raise ValueError(
+                f"needs {name} as contiguous MXFP4 bytes {shape} (the TP shard with "
+                f"the shared expert last), got {weight.dtype} {tuple(weight.shape)}"
+            )
     tensors = {
         "w_r": moe.gate.weight.to(torch.bfloat16).contiguous(),
         "bias": moe.gate.e_score_correction_bias.float().contiguous(),

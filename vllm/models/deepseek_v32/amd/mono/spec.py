@@ -14,13 +14,22 @@ SPARSE_TOPK = 2048
 # Decode steps of these token counts take the kernel; one token runs as a
 # two-row launch with a pad row.
 STEP_TOKENS = (1, 2, 4, 8)
+# One workgroup per CU, all resident: fewer CUs (a partitioned GPU) deadlocks.
+GRID = 256
+# Re-polls of one mailbox wait before it expires (about 4 s).
+POLL_LIMIT = 20_000_000
+# Where the kernel's arithmetic differs from vLLM's layers.
+NUMERICS = (
+    "expert inputs quantized to MXFP8 (vLLM: MXFP4)",
+    "TP all-reduces in BF16 inside the launch",
+)
 
 
 def width_for(tokens: int) -> int:
     return max(tokens, 2)
 
 
-def refuse_config(vllm_config: Any, on_gfx950: bool) -> list[str]:
+def refuse_config(vllm_config: Any, on_gfx950: bool, compute_units: int) -> list[str]:
     """Every reason this deployment cannot run the kernel (empty: supported)."""
     from vllm import envs
     from vllm.config.compilation import CUDAGraphMode
@@ -33,6 +42,10 @@ def refuse_config(vllm_config: Any, on_gfx950: bool) -> list[str]:
     decode_graphs = cc.cudagraph_mode.decode_mode() if cc.cudagraph_mode else None
     checks = (
         (on_gfx950, "needs gfx950"),
+        (
+            compute_units >= GRID,
+            f"needs {GRID} compute units, the GPU has {compute_units}",
+        ),
         (getattr(hf, "model_type", None) == "glm_moe_dsa", "needs glm_moe_dsa"),
         (pc.tensor_parallel_size in TP_SIZES, "needs tensor parallel size 4 or 8"),
         (pc.pipeline_parallel_size == 1, "pipeline parallel"),
@@ -73,9 +86,14 @@ def refuse_config(vllm_config: Any, on_gfx950: bool) -> list[str]:
     return [reason for ok, reason in checks if not ok]
 
 
-def step_reason(tokens: int, metadata: Any, layer_name: str) -> str | None:
+def step_reason(
+    tokens: int, metadata: Any, layer_name: str, piecewise: bool = False
+) -> str | None:
     """Why this forward is not a kernel step, or None. Depends only on what every
-    TP rank builds alike from the scheduler output."""
+    TP rank builds alike from the scheduler output. A piecewise CUDA graph is
+    replayed for mixed batches, so it never records a kernel launch."""
+    if piecewise:
+        return "piecewise CUDA graph"
     if tokens not in STEP_TOKENS:
         return f"{tokens} tokens"
     if not isinstance(metadata, dict) or layer_name not in metadata:

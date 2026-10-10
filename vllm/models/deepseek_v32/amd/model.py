@@ -390,7 +390,17 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
 
     def process_weights_after_loading(self) -> None:
         if envs.VLLM_ROCM_MONO_DECODE:
+            if self.model.mono is not None:
+                raise ValueError(
+                    "VLLM_ROCM_MONO_DECODE holds packed weight copies; reloading "
+                    "weights is not supported."
+                )
             self.model.mono = mono.GlmMono(self.model, self.vllm_config)
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        if self.model.mono is not None:
+            self.model.mono.after_step()
+        return super().compute_logits(hidden_states)
 
     def set_moe_parameters(self):
         self.num_expert_groups = getattr(self.config, "n_group", 1)

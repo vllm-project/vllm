@@ -37,6 +37,23 @@ INDEX_Q_ROWS = INDEX_HEADS * INDEX_DIM
 INDEX_TILE = 16
 INDEX_KEYS_PER_TASK = 64
 DCP_SUMMARY_PAIRS = KV_LORA // 2 + 2
+# Stages a bounded mailbox poll can expire in, one error word each.
+POLL_STAGES = (
+    "qkv_a",
+    "q_norm",
+    "cache",
+    "q_b",
+    "index_q",
+    "uk",
+    "index_score",
+    "index_select",
+    "split",
+    "uv",
+    "o",
+    "router",
+    "ug",
+    "down",
+)
 
 
 def split_acc_head(head_group, lane_group: int, element: int):
@@ -180,6 +197,10 @@ def layout(
             ("indices", samples * sparse_attention_topk * 4),
             ("indices_ready", samples * pair_bytes),
         ]
+    # Appended last so no other offset moves: the step + 1 of this rank's first
+    # expired poll (early-out mark), and the addresses the expiry path writes
+    # to: this runtime's error words and this rank's flag on rank 0.
+    items += [("poll_abort", 4), ("poll_err_addr", 8), ("poll_xrank_addr", 8)]
 
     offset, scratch = 0, {}
     for name, size in items:
@@ -200,7 +221,9 @@ def layout(
         "dcp": 2 * region,
         "_part_stride": part,
         "_dcp_part_stride": dcp_part,
-        "_bytes": 2 * region + 2 * dcp_part,
+        # one word per source rank, set on rank 0 by a rank whose poll expired
+        "poll_xrank": 2 * region + 2 * dcp_part,
+        "_bytes": 2 * region + 2 * dcp_part + _align(4 * npes),
     }
     return scratch, symmetric
 

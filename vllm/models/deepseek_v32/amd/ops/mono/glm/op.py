@@ -38,6 +38,7 @@ from vllm.models.deepseek_v32.amd.ops.mono.config import (
 from vllm.models.deepseek_v32.amd.ops.mono.glm.kernel import build_glm5_monokernel
 from vllm.models.deepseek_v32.amd.ops.mono.glm.layout import (
     INDEX_DIM,
+    POLL_STAGES,
     layout,
     stage_tasks,
 )
@@ -150,6 +151,8 @@ class Glm5MonoKernel:
         block_table_stride: int = 0,
         index_k_bf16: bool = False,
         dense_experts: int = 0,
+        poll_limit: int | None = None,
+        poll_early_out: bool = False,
     ):
         expected_config = glm5_tp_config(npes)
         if W.config != expected_config:
@@ -297,6 +300,13 @@ class Glm5MonoKernel:
         self.sym_storage = self.peer_buffer.storage
         self.sym = self.peer_buffer.local_address
         self.peers = self.peer_buffer.addresses
+        ox = self.sym_layout["poll_xrank"]
+        self.poll_xrank = self.sym_storage[ox : ox + 4 * npes].view(torch.int32)
+        if runtime is None:
+            self.poll_err = torch.zeros(len(POLL_STAGES), dtype=torch.int32, device=dev)
+            self.set_poll_targets(self.poll_err, int(self.peers[0]) + ox + 4 * rank)
+        else:
+            self.poll_err = runtime.poll_err
         self.launch = build_glm5_monokernel(
             samples,
             W.heads,
@@ -328,6 +338,8 @@ class Glm5MonoKernel:
             block_table_stride=block_table_stride,
             index_k_bf16=index_k_bf16,
             dense_experts=dense_experts,
+            poll_limit=poll_limit,
+            poll_early_out=poll_early_out,
         )
 
     def debug(
@@ -549,6 +561,26 @@ class Glm5MonoKernel:
 
     def advance_step(self):
         self.step.add_(1)
+
+    def set_poll_targets(self, error_words: torch.Tensor, xrank_addr: int) -> None:
+        """Point this runtime's expired-poll stores at ``error_words`` (int32, one
+        per ``POLL_STAGES`` entry) and at the flag address on rank 0."""
+        if error_words.dtype is not torch.int32 or error_words.numel() != len(
+            POLL_STAGES
+        ):
+            raise ValueError("poll error words must be int32, one per poll stage")
+        for name, addr in (
+            ("poll_err_addr", error_words.data_ptr()),
+            ("poll_xrank_addr", xrank_addr),
+        ):
+            off = self.scr_layout[name]
+            self.scratch[off : off + 8].view(torch.int64).fill_(addr)
+        self.poll_err = error_words
+
+    def poll_errors(self) -> tuple[str, ...]:
+        """Stages whose bounded polls expired (a host sync; for tests and incidents)."""
+        words = self.poll_err.tolist()
+        return tuple(name for name, word in zip(POLL_STAGES, words) if word)
 
     def close(self):
         """Release this rank's remote HIP IPC mappings."""

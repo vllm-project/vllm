@@ -51,6 +51,8 @@ TileRT shared/reuse MonoKernel reference (fusion-boundary comparison):
 https://github.com/SemiAnalysisAI/InferenceX/tree/8ac98344b038a3f2da20a565fe9b974772a67ef9
 """
 
+import os
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
@@ -90,6 +92,7 @@ from vllm.models.deepseek_v32.amd.ops.mono.glm.layout import (
     N_QKV_A,
     N_ROUTER,
     N_ROW_TILES,
+    POLL_STAGES,
     Q_B_TILE,
     QKV_A_TILE,
     ROUTER_TILE,
@@ -201,8 +204,16 @@ def build_glm5_monokernel(
     block_table_stride: int = 0,
     index_k_bf16: bool = False,
     dense_experts: int = 0,
+    poll_limit: int | None = None,
+    poll_early_out: bool = False,
 ):
     """Return the ``@flyc.jit`` launcher for one rank's whole layer.
+
+    ``poll_limit`` bounds the re-polls of every mailbox wait. An expired wait
+    stores 1 into its stage's error word (``poll_err_addr``) and, with TP peers,
+    into this rank's flag on rank 0 (``poll_xrank_addr``), then continues, so a
+    stalled peer finishes the launch with wrong values instead of hanging. With
+    ``poll_early_out`` every later wait of the same step returns at its first retry.
 
     ``timeline=True`` records ``s_memrealtime`` (100 MHz) at the start and end of
     every task, and once its inputs have arrived, into the ``timeline`` buffer:
@@ -257,6 +268,18 @@ def build_glm5_monokernel(
     H = heads
     L = H if output_heads is None else output_heads
     W = npes
+    assert poll_limit is None or poll_limit > 0
+    # Test only: VLLM_MONO_FAULT_INJECT="rank=R,step=N,us=D" stalls rank R for D us
+    # at the start of layer 0 of kernel step N. Unset: no code is generated.
+    fault_spec = os.environ.get("VLLM_MONO_FAULT_INJECT")
+    FAULT = (
+        None
+        if not fault_spec
+        else tuple(
+            int(dict(kv.split("=") for kv in fault_spec.split(","))[k])
+            for k in ("rank", "step", "us")
+        )
+    )
     D = dcp_size
     expert_inter = inter
     SHARED = 0 if dense_experts else SHARED_EXPERT
@@ -463,6 +486,11 @@ def build_glm5_monokernel(
         peer_dst = (fx.Int64(_uniform(pv[1])) << 32) | fx.Int64(
             fx.Uint32(_uniform(pv[0]))
         )
+        if const_expr(FAULT is not None):
+            if (rank == FAULT[0]) & (step_value == FAULT[1]) & (layer == 0):
+                t_fault = mem_realtime()
+                while mem_realtime() - t_fault < fx.Int64(FAULT[2] * 100):
+                    spin_pause()
 
         # ------------------------------------------------------------ helpers
         def ld_f32(r, i):
@@ -632,6 +660,31 @@ def build_glm5_monokernel(
                 _qptr(addr), memory_order=fx.AtomicOrdering.Monotonic, syncscope=scope
             )
 
+        stage_now = ["qkv_a"]  # trace-time stage name; names an expired poll
+
+        def addr_at(name):
+            w = fx.Vector(bo.buffer_load(_rsrc(mb(name)), 0, vec_width=2, dtype=T.i32))
+            return (fx.Int64(w[1]) << 32) | fx.Int64(fx.Uint32(w[0]))
+
+        def store_flag(addr):
+            fx.generic_store(
+                fx.inttoptr(
+                    fx.PointerType.get(fx.Int32.ir_type, fx.AddressSpace.Global, 4),
+                    addr,
+                ),
+                fx.Int32(1),
+                memory_order=fx.AtomicOrdering.Monotonic,
+            )
+
+        def poll_expired():
+            """Set this stage's error word and, with TP peers, this rank's flag on
+            rank 0, fenced before anything derived from the expired wait is posted."""
+            stage_index = POLL_STAGES.index(stage_now[0])
+            store_flag(addr_at("poll_err_addr") + fx.Int64(4 * stage_index))
+            if const_expr(W > 1):
+                store_flag(addr_at("poll_xrank_addr"))
+                fx.memory_fence(ordering=fx.AtomicOrdering.Release)
+
         def poll(specs, scope="agent", batch=POLL_MAX):
             """Batched poll of mailbox pairs: ``specs`` = [(base_addr, pair index, npairs in {1, 2})].
 
@@ -673,9 +726,38 @@ def build_glm5_monokernel(
                 return bad
 
             v = load_all()
-            while pending(v):
-                spin_pause()
-                v = load_all()
+            if const_expr(poll_limit is None):
+                while pending(v):
+                    spin_pause()
+                    v = load_all()
+            else:
+                retries = fx.Int32(0)
+                if const_expr(poll_early_out):
+                    abort_mark = step_value + 1
+                    r_abort = _rsrc(mb("poll_abort"))
+                    ab = fx.Int32(0)
+                    while pending(v) & (retries < poll_limit) & (ab != abort_mark):
+                        spin_pause()
+                        v = load_all()
+                        retries = retries + 1
+                        ab = fx.Int32(
+                            bo.buffer_load(
+                                r_abort,
+                                0,
+                                vec_width=1,
+                                dtype=T.i32,
+                                cache_modifier=CM_DEV,
+                            )
+                        )
+                else:
+                    while pending(v) & (retries < poll_limit):
+                        spin_pause()
+                        v = load_all()
+                        retries = retries + 1
+                if pending(v):
+                    poll_expired()
+                    if const_expr(poll_early_out):
+                        bo.buffer_store(abort_mark, r_abort, 0, cache_modifier=CM_DEV)
             outs_, e = [], 0
             for _, _, n in specs:
                 outs_.append([v[e + 2 * q] for q in range(n)])
@@ -1683,6 +1765,7 @@ def build_glm5_monokernel(
             return (bid + (G - base[name])) & (G - 1)
 
         def stamp(name, t, which, lead=0):
+            stage_now[0] = name
             if const_expr(timeline):
                 if tid == lead:
                     now = mem_realtime()
