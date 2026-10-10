@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Admission policy adapting the per-tier backpressure detectors (#50045).
+"""Admission policy adapting the per-tier backpressure detectors.
 
-This is the RFC #53485 deliverable: instead of a second detector framework,
-the existing ``BackpressureDetector`` on each secondary tier is reused
+The existing ``BackpressureDetector`` on each secondary tier is reused
 behind the ``TieringAdmissionPolicy`` interface:
 
-- Cascades consult ``detector.should_store(len(keys))``; rejections are
-  recorded by the detector's drop policy exactly as before.
-- Promotions are always admitted, preserving #50045 behavior.
+- Cascades consult the detector policy; admission and rejection accounting
+  happen in the corresponding lifecycle hooks.
+- Promotions are always admitted, preserving existing behavior.
 - Only successful cascade completions feed latency samples back into the
   detector (via ``detector.update``).
 - The pressure activate/clear transition log, drop metrics, and detector
-  reset behavior are unchanged from #50045; only the wiring moved.
+  reset behavior are unchanged; only the wiring moved.
 """
 
 from collections.abc import Collection
@@ -68,7 +67,27 @@ class BackpressureAdmissionPolicy(TieringAdmissionPolicy):
         detector = self._tiers[tier_idx].bp_detector
         if detector is None:
             return True
-        return detector.should_store(len(keys))
+        return detector.policy.should_store(detector)
+
+    def on_rejected(
+        self,
+        keys: Collection[OffloadKey],
+        tier_idx: int,
+        *,
+        is_promotion: bool,
+    ) -> None:
+        if is_promotion:
+            return
+        detector = self._tiers[tier_idx].bp_detector
+        if detector is not None:
+            detector.policy.on_store_skipped(len(keys))
+
+    def on_admitted(self, metadata: "JobMetadata") -> None:
+        transfer_job = metadata.transfer_job
+        if not transfer_job.is_promotion:
+            detector = self._tiers[metadata.tier_idx].bp_detector
+            if detector is not None:
+                detector.policy.on_store_admitted()
 
     def on_completed(self, metadata: "JobMetadata", result: JobResult) -> None:
         transfer_job = metadata.transfer_job

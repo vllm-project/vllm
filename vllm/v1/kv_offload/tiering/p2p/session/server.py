@@ -611,16 +611,16 @@ class ServerRole:
         ``TransferJob`` carries parallel ``keys``/``chunk_ids``. Rejected
         pins are reported back as MISS.
         """
-        meta = parent.create_store_job(keys, lookup.ctx)
-        if meta is None:
+        transfer_job = parent.create_store_job(keys, lookup.ctx)
+        if transfer_job is None:
             for h in keys:
                 lookup.resolved[h] = False
             return []
         self.add_stored_blocks(
             lookup.kv_request_id,
-            list(meta.keys),
-            meta.chunk_ids.tolist(),
-            meta.job_id,
+            list(transfer_job.keys),
+            transfer_job.chunk_ids.tolist(),
+            transfer_job.job_id,
             round_seq=lookup.round_seq,
             from_lookup=True,
         )

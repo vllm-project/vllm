@@ -15,6 +15,10 @@ class BackpressurePolicy(ABC):
     @abstractmethod
     def on_store_skipped(self, num_blocks: int) -> None: ...
 
+    def on_store_admitted(self) -> None:
+        """Record an admitted store if the policy needs admission state."""
+        return
+
     @abstractmethod
     def pop_stores_dropped(self) -> tuple[int, int]:
         """Return and reset (stores_dropped, blocks_dropped)."""
@@ -110,6 +114,13 @@ class ThrottledDropPolicy(DropAccountingPolicy):
             return False
         return True
 
+    def on_store_admitted(self) -> None:
+        self._call_count += 1
+
+    def on_store_skipped(self, num_blocks: int) -> None:
+        super().on_store_skipped(num_blocks)
+        self._call_count += 1
+
     def reset(self) -> None:
         """Clear the drop accumulator and dropped store and block counts."""
         super().reset()
@@ -152,10 +163,11 @@ class BackpressureDetector(ABC):
         self.on_store_completed(elapsed, num_bytes)
 
     def should_store(self, num_blocks: int) -> bool:
-        """Check policy and record skip if rejected."""
+        """Check policy and record the result."""
         if not self._policy.should_store(self):
             self._policy.on_store_skipped(num_blocks)
             return False
+        self._policy.on_store_admitted()
         return True
 
     @classmethod

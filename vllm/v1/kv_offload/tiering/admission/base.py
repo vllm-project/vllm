@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 class TieringAdmissionPolicy(ABC):
     """Decides whether a tiering transfer may be submitted.
 
-    The manager consults the policy at two points:
+    The manager consults the policy at five lifecycle points:
 
     1. ``should_admit`` — before any primary-tier pinning, job-ID
        allocation, or transfer submission. A ``False`` return means the
@@ -28,6 +28,10 @@ class TieringAdmissionPolicy(ABC):
        giving the policy the job metadata (job ID, chunk IDs, tier index).
     3. ``on_completed`` — for every finished job, so the policy can feed
        completion signals (e.g. latency) back into its detectors.
+    4. ``on_rejected`` — after a candidate is rejected, for accounting that
+       must not be performed by ``should_admit``.
+    5. ``on_reserved`` — after promotion storage is reserved and before the
+       batched transfer is submitted.
 
     ``JobMetadata`` is referenced under ``TYPE_CHECKING`` only; it stays
     defined in ``manager.py``.
@@ -53,6 +57,26 @@ class TieringAdmissionPolicy(ABC):
 
     def on_admitted(self, metadata: "JobMetadata") -> None:
         """Record a transfer that passed admission and was registered."""
+        return
+
+    def on_rejected(
+        self,
+        keys: Collection[OffloadKey],
+        tier_idx: int,
+        *,
+        is_promotion: bool,
+    ) -> None:
+        """Record a candidate rejected by the admission policy."""
+        return
+
+    def on_reserved(
+        self,
+        keys: Collection[OffloadKey],
+        tier_idx: int,
+        *,
+        is_promotion: bool,
+    ) -> None:
+        """Record resources reserved after admission and before submission."""
         return
 
     def on_completed(self, metadata: "JobMetadata", result: JobResult) -> None:
