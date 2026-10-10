@@ -555,6 +555,43 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode AL PARD-2 Nightly"
+  key: spec-decode-pard2-nightly
+  timeout_in_minutes: 60
+  device: h200_35gb
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/config/speculative.py
+    - vllm/model_executor/models/pard2_base.py
+    - vllm/model_executor/models/llama_pard2.py
+    - vllm/model_executor/models/qwen3_pard2.py
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/pard2/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode AL PARD-2 Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/v1/attention/
+      - vllm/v1/sample/
+      - vllm/config/speculative.py
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/model_executor/models/llama.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/pard2_base.py
+      - vllm/model_executor/models/llama_pard2.py
+      - vllm/model_executor/models/qwen3_pard2.py
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly"
   key: spec-decode-mtp-other-acceptance-nightly
   timeout_in_minutes: 35
