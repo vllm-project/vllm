@@ -87,6 +87,9 @@ def test_commit_plan_keeps_boundary_state_in_last_computed_block(
         block_table.stride(0),
         block_table.stride(1),
         computed.stride(0),
+        None,
+        None,
+        0,
         SPEC_QUERY_LEN=SPEC_QUERY_LEN,
         num_warps=1,
     )

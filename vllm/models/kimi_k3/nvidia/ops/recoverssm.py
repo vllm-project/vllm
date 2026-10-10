@@ -819,6 +819,9 @@ class KDARecoverSSMCommitContext:
             block_table_stride[0],
             block_table_stride[1],
             num_computed_stride,
+            None,  # one KV cache group: no per-group tables
+            None,
+            0,
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
@@ -837,6 +840,9 @@ class KDARecoverSSMCommitContext:
             conv_dim,
             self.conv_history_len,
             state_indices.stride(0),
+            None,  # one KV cache group: no per-group tables
+            None,
+            0,
             BLOCK_D=256,
             BLOCK_HISTORY=block_history,
             ALIGN_MODE=block_table is not None,

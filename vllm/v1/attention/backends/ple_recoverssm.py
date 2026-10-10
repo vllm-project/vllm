@@ -164,6 +164,9 @@ class _PleConvCommit:
             bt[0],
             bt[1],
             0 if num_computed_tokens is None else num_computed_tokens.stride(0),
+            None,  # one KV cache group: no per-group tables
+            None,
+            0,
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
@@ -184,6 +187,9 @@ class _PleConvCommit:
             self.conv_dim,
             self.hist,
             state_indices.stride(0),
+            None,  # one KV cache group: no per-group tables
+            None,
+            0,
             BLOCK_D=256,
             BLOCK_HISTORY=triton.next_power_of_2(self.hist),
             ALIGN_MODE=block_table is not None,
