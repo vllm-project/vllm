@@ -391,11 +391,25 @@ steps:
   - tests/kernels/attention/test_flashmla.py
   - tests/kernels/attention/test_flashmla_sparse.py
   - tests/kernels/attention/test_mla_cross_layer_kernel_equivalence.py
+  - vllm/models/deepseek_v41/nvidia/fewhead_prefill.py
+  - vllm/models/deepseek_v41/nvidia/model.py
+  - vllm/models/deepseek_v41/nvidia/paired_decode.py
+  - vllm/models/deepseek_v41/nvidia/triton_sparse.py
+  - vllm/models/deepseek_v41/nvidia/ops/small_head_decode_warmup.py
+  - vllm/models/deepseek_v41/nvidia/ops/small_head_paired_decode.py
+  - vllm/models/deepseek_v41/nvidia/ops/small_head_query_union.py
+  - vllm/models/deepseek_v41/nvidia/ops/small_head_sparse_decode.py
+  - vllm/models/deepseek_v41/nvidia/flashmla.py
+  - vllm/models/deepseek_v41/nvidia/triton_fewhead_sparse_prefill.py
+  - vllm/v1/attention/backends/registry.py
+  - tests/models/test_fewhead_prefill_gate.py
+  - tests/kernels/attention/test_fewhead_sparse_prefill.py
   commands:
     - pytest -v -s kernels/attention/test_flashmla.py
     - pytest -v -s kernels/attention/test_flashmla_sparse.py
     - pytest -v -s kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
+    - pytest -v -s models/test_fewhead_prefill_gate.py kernels/attention/test_fewhead_sparse_prefill.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) MLA Kernels"

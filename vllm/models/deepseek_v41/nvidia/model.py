@@ -205,6 +205,13 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
+    if backend is AttentionBackendEnum.TRITON_MLA_SPARSE_DSV41:
+        from vllm.models.deepseek_v41.nvidia.triton_sparse import (
+            DeepseekV41TritonSparseAttention,
+        )
+
+        DeepseekV41TritonSparseAttention.validate_config(vllm_config)
+        return DeepseekV41TritonSparseAttention
     if backend in (
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
