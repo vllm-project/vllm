@@ -551,6 +551,7 @@ def make_nixl_scheduler(
     sched._has_mamba = has_mamba
     sched._bounded_replay = bounded_replay
     sched._is_hma_required = is_hma_required
+    sched.kv_recompute_threshold = 0
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,
