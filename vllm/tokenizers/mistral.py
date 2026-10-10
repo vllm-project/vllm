@@ -178,14 +178,6 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-def mistral_common_tekkenizer(tokenizer: object) -> "Tekkenizer | None":
-    """Return the underlying `Tekkenizer` for a `MistralCommonBackend`."""
-    mistral = getattr(tokenizer, "tokenizer", None)
-    instruct = getattr(mistral, "instruct_tokenizer", None)
-    tekken = getattr(instruct, "tokenizer", None)
-    return tekken if isinstance(tekken, Tekkenizer) else None
-
-
 def tekken_convert_ids_to_tokens(
     tokenizer: "Tekkenizer", ids: Sequence[int]
 ) -> list[str | bytes]:
