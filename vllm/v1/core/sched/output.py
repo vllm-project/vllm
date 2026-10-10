@@ -279,7 +279,8 @@ class SchedulerOutput:
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
 
-    # Used for adjusting acceptance rate calculation.
+    # How many trailing scheduled drafts per request are grammar-invalid. Used
+    # for adjusting acceptance rate calculation and the grammar bitmask.
     num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
@@ -335,5 +336,8 @@ class GrammarOutput:
     # Per request, ordered as structured_output_request_ids: how many leading
     # drafts the bitmask constrained. `grammar_bitmask` fills every row after
     # the first -1 placeholder with the all-permissive `_full_mask`, so drafts
-    # from this index on must not be accepted. None invalidates every draft.
+    # from this index on must not be accepted. For sampled drafts, except under
+    # synthetic acceptance or after the grammar terminated, this counts the
+    # first grammar-invalid draft, which its row masks out. None invalidates
+    # every draft.
     num_acceptable_drafts: list[int] | None = None

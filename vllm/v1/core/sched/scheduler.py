@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
@@ -75,6 +75,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output.backend_types import StructuredOutputGrammar
 from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -610,6 +611,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        num_invalid_spec_tokens: dict[str, int] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
         # Whether any scheduled request has a synchronous connector KV load.
@@ -808,6 +810,7 @@ class Scheduler(SchedulerInterface):
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            num_invalid_spec_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
                             )
@@ -858,6 +861,10 @@ class Scheduler(SchedulerInterface):
                     spec_token_ids = request.spec_token_ids
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
                         spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+                    elif request.num_invalid_spec_tokens:
+                        num_invalid_spec_tokens[request_id] = (
+                            request.num_invalid_spec_tokens
+                        )
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
@@ -1503,6 +1510,7 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            num_invalid_spec_tokens=num_invalid_spec_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
             num_common_prefix_blocks=num_common_prefix_blocks,
@@ -2008,18 +2016,49 @@ class Scheduler(SchedulerInterface):
         if not structured_output_request_ids:
             return None
 
-        bitmask = self.structured_output_manager.grammar_bitmask(
-            self.requests,
-            structured_output_request_ids,
-            scheduler_output.scheduled_spec_decode_tokens,
-        )
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_invalid = scheduler_output.num_invalid_spec_tokens or {}
+        if num_invalid:
+            # Fill the rows of grammar-invalid drafts as cut slots, without
+            # advancing the grammar through a draft it rejected.
+            spec_tokens = spec_tokens | {
+                req_id: spec_tokens[req_id][:-n] + [-1] * n
+                for req_id, n in num_invalid.items()
+            }
+        bitmask = self.structured_output_manager.grammar_bitmask(
+            self.requests, structured_output_request_ids, spec_tokens
+        )
         num_acceptable_drafts = [
             len(strip_speculative_padding(spec_tokens.get(req_id, [])))
+            + (
+                req_id in num_invalid
+                and self._verifies_grammar_rejected_drafts(self.requests[req_id])
+            )
             for req_id in structured_output_request_ids
         ]
         return GrammarOutput(
             structured_output_request_ids, bitmask, num_acceptable_drafts
+        )
+
+    def _verifies_grammar_rejected_drafts(self, request: Request) -> bool:
+        """Whether the first draft the grammar rejected goes to verification.
+
+        Its row masks it out, so verification rejects it and resamples that
+        position from the residual. For a greedy draft that residual is the
+        target distribution, so only sampled drafts need this. Synthetic
+        acceptance ignores the row, so it must not see that draft. A
+        terminated grammar rejects no draft, and its rows mask nothing.
+        """
+        spec_config = self.vllm_config.speculative_config
+        structured_req = request.structured_output_request
+        if TYPE_CHECKING:
+            assert structured_req is not None
+            assert isinstance(structured_req.grammar, StructuredOutputGrammar)
+        return (
+            spec_config is not None
+            and spec_config.draft_sample_method == "probabilistic"
+            and spec_config.rejection_sample_method != "synthetic"
+            and not structured_req.grammar.is_terminated()
         )
 
     def update_from_output(
@@ -2563,9 +2602,19 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            request.spec_token_ids = self.structured_output_manager.validate_tokens(
+            valid_token_ids = self.structured_output_manager.validate_tokens(
                 request, spec_token_ids
             )
+            request.num_invalid_spec_tokens = 0
+            if (
+                request.use_structured_output
+                and len(valid_token_ids)
+                < len(strip_speculative_padding(spec_token_ids))
+                and self._verifies_grammar_rejected_drafts(request)
+            ):
+                valid_token_ids.append(spec_token_ids[len(valid_token_ids)])
+                request.num_invalid_spec_tokens = 1
+            request.spec_token_ids = valid_token_ids
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput

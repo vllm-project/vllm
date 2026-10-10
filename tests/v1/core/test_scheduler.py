@@ -7370,6 +7370,169 @@ def test_update_draft_token_ids_in_output_strips_padding():
     assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
 
 
+@pytest.mark.parametrize(
+    "rejection_sample_method,expected", [("standard", 2), ("synthetic", 1)]
+)
+def test_num_acceptable_drafts_after_a_grammar_rejected_draft(
+    rejection_sample_method, expected
+):
+    """The draft the grammar rejected must reach verification, which rejects it
+    and resamples from the residual. Masking it samples that position from the
+    target distribution only when the draft broke the grammar (#60451).
+    Synthetic acceptance ignores the target, so it must never see that draft."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    spec_config = scheduler.vllm_config.speculative_config
+    spec_config.draft_sample_method = "probabilistic"
+    spec_config.rejection_sample_method = rejection_sample_method
+    request = _decode_ready_request(scheduler)
+    rid = request.request_id
+    request.structured_output_request = SimpleNamespace(
+        grammar=SimpleNamespace(
+            validate_tokens=lambda tokens: tokens[:1], is_terminated=lambda: False
+        ),
+        reasoning_ended=True,
+    )
+    scheduler_output = SimpleNamespace(
+        has_structured_output_requests=True,
+        num_scheduled_tokens={rid: 5},
+        scheduled_spec_decode_tokens={rid: [-1] * 4},
+    )
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([rid], [[10, 11, 12, 13]]), scheduler_output
+    )
+    assert scheduler_output.scheduled_spec_decode_tokens[rid] == [10, -1, -1, -1]
+
+    with patch.object(
+        scheduler.structured_output_manager,
+        "grammar_bitmask",
+        return_value=np.zeros((5, 1), dtype=np.int32),
+    ):
+        grammar_output = scheduler.get_grammar_bitmask(scheduler_output)
+
+    # Draft 10 is valid and draft 11 was rejected.
+    assert grammar_output.num_acceptable_drafts == [expected]
+
+
+@pytest.mark.parametrize(
+    "draft_sample_method,rejection_sample_method,expected",
+    [
+        ("probabilistic", "standard", [10, 11]),
+        ("probabilistic", "synthetic", [10]),
+        ("greedy", "standard", [10]),
+    ],
+)
+def test_update_draft_token_ids_after_a_grammar_rejected_draft(
+    draft_sample_method, rejection_sample_method, expected
+):
+    """Sync scheduling must also send the draft the grammar rejected to
+    verification. Dropping it samples its position as the bonus token, from the
+    target distribution, only when the draft broke the grammar (#60451). The
+    bitmask fill must not advance the grammar through it. A greedy draft is
+    one-hot, so dropping it is already exact."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    spec_config = scheduler.vllm_config.speculative_config
+    spec_config.draft_sample_method = draft_sample_method
+    spec_config.rejection_sample_method = rejection_sample_method
+    request = _decode_ready_request(scheduler)
+    rid = request.request_id
+    request.structured_output_request = SimpleNamespace(
+        grammar=SimpleNamespace(
+            validate_tokens=lambda tokens: tokens[:1], is_terminated=lambda: False
+        ),
+        reasoning_ended=True,
+    )
+    scheduler.update_draft_token_ids(DraftTokenIds([rid], [[10, 11, 12, 13]]))
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.scheduled_spec_decode_tokens[rid] == expected
+    num_invalid = len(expected) - 1
+    invalid_counts = scheduler_output.num_invalid_spec_tokens or {}
+    assert invalid_counts.get(rid, 0) == num_invalid
+
+    with patch.object(
+        scheduler.structured_output_manager,
+        "grammar_bitmask",
+        return_value=np.zeros((len(expected) + 1, 1), dtype=np.int32),
+    ) as fill:
+        grammar_output = scheduler.get_grammar_bitmask(scheduler_output)
+
+    assert fill.call_args.args[2][rid] == [10] + [-1] * num_invalid
+    assert grammar_output.num_acceptable_drafts == [len(expected)]
+
+
+def test_priority_preemption_drops_num_invalid_spec_tokens():
+    """A request preempted after it was scheduled in the same step must not
+    keep its num_invalid_spec_tokens entry, or get_grammar_bitmask fails."""
+    scheduler = create_scheduler_with_priority(num_speculative_tokens=3, num_blocks=3)
+    scheduler.vllm_config.speculative_config.draft_sample_method = "probabilistic"
+    # The low-priority request decodes within its block. The high-priority
+    # request after it needs a second block, so the low one is preempted.
+    (low,) = create_requests_with_priority(1, [1], num_tokens=5, max_tokens=64)
+    (high,) = create_requests_with_priority(
+        1, [0], arrival_times=[1.0], num_tokens=15, max_tokens=64, starting_idx=1
+    )
+    for request in (low, high):
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+        req_ids = list(output.num_scheduled_tokens)
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={r: i for i, r in enumerate(req_ids)},
+                sampled_token_ids=[[0]] * len(req_ids),
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+    for request in (low, high):
+        request.structured_output_request = SimpleNamespace(
+            grammar=SimpleNamespace(
+                validate_tokens=lambda tokens: tokens[:1], is_terminated=lambda: False
+            ),
+            reasoning_ended=True,
+        )
+    scheduler.update_draft_token_ids(
+        DraftTokenIds(["0", "1"], [[10, 11, 12], [20, 21, 22]])
+    )
+    output = scheduler.schedule()
+    assert output.preempted_req_ids == {"0"}
+    assert output.num_invalid_spec_tokens == {"1": 1}
+
+
+def test_no_draft_is_kept_after_the_grammar_terminated():
+    """A terminated grammar rejects no draft and its rows mask nothing, so a
+    kept draft could be accepted while it is counted as grammar-invalid."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    scheduler.vllm_config.speculative_config.draft_sample_method = "probabilistic"
+    request = _decode_ready_request(scheduler)
+    rid = request.request_id
+    request.structured_output_request = SimpleNamespace(
+        grammar=SimpleNamespace(
+            validate_tokens=lambda tokens: [], is_terminated=lambda: True
+        ),
+        reasoning_ended=True,
+    )
+    scheduler.update_draft_token_ids(DraftTokenIds([rid], [[10, 11, 12, 13]]))
+    assert request.spec_token_ids == []
+
+    scheduler_output = SimpleNamespace(
+        has_structured_output_requests=True,
+        num_scheduled_tokens={rid: 5},
+        scheduled_spec_decode_tokens={rid: [-1] * 4},
+    )
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([rid], [[10, 11, 12, 13]]), scheduler_output
+    )
+    with patch.object(
+        scheduler.structured_output_manager,
+        "grammar_bitmask",
+        return_value=np.zeros((5, 1), dtype=np.int32),
+    ):
+        grammar_output = scheduler.get_grammar_bitmask(scheduler_output)
+    assert grammar_output.num_acceptable_drafts == [0]
+
+
 def test_diffusion_canvas_width_defaults_to_the_served_canvas():
     def req(extra):
         return SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra))
