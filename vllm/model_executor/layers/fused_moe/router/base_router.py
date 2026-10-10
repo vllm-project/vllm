@@ -291,7 +291,15 @@ class BaseRouter(FusedMoERouter):
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
+        return self._finish_routing(topk_weights, topk_ids, topk_indices_dtype)
 
+    def _finish_routing(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Steps 3-4 of _select_experts, shared by routers that fuse the gate."""
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
