@@ -23,6 +23,84 @@ def _is_sm120() -> bool:
 
 
 @lru_cache(maxsize=1)
+def _fp8_as_bits() -> bool:
+    """True below sm_89, where Triton has no fp8e4nv pointer type.
+
+    There the e4m3 pages are loaded as raw uint8 and decoded by
+    _e4m3_bits_to_scaled_fp16.
+    """
+    return not current_platform.has_device_capability(89)
+
+
+# _e4m3_bits_to_scaled_fp16 returns x * 2^-8; the host folds 2^8 into the
+# K (softmax) and V (output) scales, so the decode needs no multiply.
+E4M3_AS_FP16_SCALE = 256.0
+
+
+@triton.jit
+def _e4m3_bits_to_scaled_fp16(bits):
+    """Exact e4m3fn -> fp16 decode of x * 2^-8 from raw uint8 bits.
+
+    Moving the sign to bit 15 and the 4 exponent + 3 mantissa bits to bits
+    13..7 gives an fp16 whose exponent field is the e4m3 one, so bias 7 reads
+    as bias 15 and the value is exactly x * 2^-8 for every finite code, normal
+    and subnormal (every such value is representable in fp16).
+
+    The two NaN codes 0x7F and 0xFF decode to +-1.875 (+-480 after the host
+    scale) instead of NaN. Restoring NaN with a select doubled the kernel time
+    on sm_80, and the cache only holds a NaN code if a NaN was written.
+    """
+    code = bits.to(tl.uint16)
+    return (((code & 0x80) << 8) | ((code & 0x7F) << 7)).to(tl.float16, bitcast=True)
+
+
+@lru_cache(maxsize=1)
+def _is_sm80() -> bool:
+    """True on sm_80 (A100/A30): wide FP8 byte-decode tiles and the packed decode."""
+    return current_platform.get_device_capability() == (8, 0)
+
+
+@triton.jit
+def _e4m3_bits_to_scaled_fp16_packed(bits):
+    """_e4m3_bits_to_scaled_fp16, bit for bit, on four bytes per 32-bit word.
+
+    For the word w = [b3 b2 b1 b0], r_rot = w rotated right by 1 holds each
+    b[k] bits 6..1 in its byte k bits 5..0 and b[k] bit 0 in byte k-1 bit 7
+    (cyclic). r_high takes the sign from w, so its byte k is the high byte of
+    fp16 k except bit 6 (a sign copy). One prmt per two values places the
+    high and low bytes, and the final mask clears bit 14 and low bits 6..0.
+    Six instructions per four values; the byte order is preserved.
+    """
+    return tl.inline_asm_elementwise(
+        asm="""
+        {
+        .reg .b32 r_rot, r_high;
+        shf.r.wrap.b32 r_rot, $2, $2, 1;
+        lop3.b32 r_high, $2, r_rot, 0x80808080, 0xE4;
+        prmt.b32 $0, r_rot, r_high, 0x5043;
+        prmt.b32 $1, r_rot, r_high, 0x7261;
+        and.b32 $0, $0, 0xBF80BF80;
+        and.b32 $1, $1, 0xBF80BF80;
+        }
+        """,
+        constraints="=r,=r,r",
+        args=[bits],
+        dtype=tl.float16,
+        is_pure=True,
+        pack=4,
+    )
+
+
+@triton.jit
+def _decode_e4m3_bits(bits, PACKED: tl.constexpr):
+    """Byte-path e4m3 decode: the packed PTX form or the reference."""
+    if PACKED:
+        return _e4m3_bits_to_scaled_fp16_packed(bits)
+    else:
+        return _e4m3_bits_to_scaled_fp16(bits)
+
+
+@lru_cache(maxsize=1)
 def _is_sm90() -> bool:
     """True on sm_90 (H100/H200/H20): selects the sm_90 tuning table."""
     return current_platform.get_device_capability() == (9, 0)
@@ -70,6 +148,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_FP8: tl.constexpr,
+    FP8_AS_BITS: tl.constexpr = False,
+    FP8_PACKED_DECODE: tl.constexpr = False,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -132,15 +212,31 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
-        keys = tl.load(
-            k_cache_ptr
-            + safe_page[None, :] * stride_k_block
-            + page_offset[None, :] * stride_k_token
-            + kv_head * stride_k_head
-            + dim_offsets[:, None],
-            mask=valid[None, :],
-            other=0.0,
-        )
+        if FP8_AS_BITS:
+            # Keep each token's byte row contiguous for the SM80 load. Convert
+            # before the transpose that gives the QK dot its [D, N] keys.
+            key_bits = tl.load(
+                k_cache_ptr
+                + safe_page[:, None] * stride_k_block
+                + page_offset[:, None] * stride_k_token
+                + kv_head * stride_k_head
+                + dim_offsets[None, :],
+                mask=valid[:, None],
+                other=0,
+            )
+            keys = tl.trans(_decode_e4m3_bits(key_bits, FP8_PACKED_DECODE)).to(
+                query.dtype
+            )
+        else:
+            keys = tl.load(
+                k_cache_ptr
+                + safe_page[None, :] * stride_k_block
+                + page_offset[None, :] * stride_k_token
+                + kv_head * stride_k_head
+                + dim_offsets[:, None],
+                mask=valid[None, :],
+                other=0.0,
+            )
         values = tl.load(
             v_cache_ptr
             + safe_page[:, None] * stride_v_block
@@ -150,9 +246,10 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[:, None],
             other=0.0,
         )
-        if IS_FP8:
+        if IS_FP8 and not FP8_AS_BITS:
             # e4m3 -> Q dtype is exact; keep the QK dot in Q's dtype (fp8 QK
-            # measured slower here and less accurate).
+            # measured slower here and less accurate). The byte path already
+            # decoded and cast the keys above.
             keys = keys.to(query.dtype)
         scores = tl.dot(query, keys)
         # Scaling scores avoids re-quantizing a scaled query to BF16; for fp8
@@ -169,7 +266,10 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             # Dequant V to fp16 (not bf16) for the PV dot: P <= 1 (online
             # softmax) so fp16 has the range, its wider mantissa is more
             # accurate, and the fp8->fp16 upcast with an fp16 PV dot is faster.
-            values = values.to(tl.float16)
+            if FP8_AS_BITS:
+                values = _decode_e4m3_bits(values, FP8_PACKED_DECODE)
+            else:
+                values = values.to(tl.float16)
         accumulator = tl.dot(
             probabilities.to(values.dtype),
             values,
@@ -556,7 +656,8 @@ def _select_config(
     on use_prefill_config (capture-stable: at FULL-graph capture max_query_len is
     the uniform decode/verify length). This default table was tuned on GB300;
     sm_120 (RTX PRO 6000 Blackwell) dispatches to _select_sm120_config instead,
-    and sm_90 (Hopper) to _select_sm90_config.
+    and sm_90 (Hopper) to _select_sm90_config. On sm_80 the FP8 byte path
+    uses 128 columns and four warps with the table's splits.
     """
     base_programs = num_rows * num_kv_heads
     if _is_sm120():
@@ -585,6 +686,11 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = 64, 4, 2
     else:
         BLOCK_N, target_splits, num_warps = 64, 1, 2
+    if is_fp8 and _is_sm80():
+        # The byte-decode path is faster with wide tiles at every row count
+        # measured on A100 (8 to 2048 rows); keep the table's splits. Not
+        # measured on sm_86, which keeps the table's tiles.
+        BLOCK_N, num_warps = 128, 4
     num_tiles = triton.cdiv(num_columns, BLOCK_N)
     # Never more splits than tiles, never empty.
     num_splits = min(target_splits, num_tiles)
@@ -643,6 +749,10 @@ def qsa_sparse_paged_attention(
         # and pass V's dequant scale as the kernel's output scale.
         softmax_scale = (head_dim**-0.5) * float(k_scale)
         output_scale = float(v_scale)
+        if _fp8_as_bits():
+            k_cache, v_cache = k_cache.view(torch.uint8), v_cache.view(torch.uint8)
+            softmax_scale *= E4M3_AS_FP16_SCALE
+            output_scale *= E4M3_AS_FP16_SCALE
     else:
         assert k_cache.dtype == torch.bfloat16
         softmax_scale = head_dim**-0.5
@@ -732,6 +842,8 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         IS_FP8=is_fp8,
+        FP8_AS_BITS=is_fp8 and _fp8_as_bits(),
+        FP8_PACKED_DECODE=is_fp8 and _is_sm80(),
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -770,7 +882,8 @@ def warmup_qsa_sparse_paged_attention(
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 and viewed as e4m3 at attention time.
     is_fp8 = kv_cache.dtype == torch.uint8
-    cache_dtype = torch.float8_e4m3fn if is_fp8 else key_cache.dtype
+    fp8_dtype = torch.uint8 if _fp8_as_bits() else torch.float8_e4m3fn
+    cache_dtype = fp8_dtype if is_fp8 else key_cache.dtype
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
@@ -875,6 +988,8 @@ def warmup_qsa_sparse_paged_attention(
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             IS_FP8=is_fp8,
+            FP8_AS_BITS=is_fp8 and _fp8_as_bits(),
+            FP8_PACKED_DECODE=is_fp8 and _is_sm80(),
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),
