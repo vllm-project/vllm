@@ -1889,10 +1889,16 @@ _AITER_SITUV2_ACT_ENV = {
 def _resolve_situv2_activation() -> str:
     """VLLM_ROCM_USE_AITER_MOE_SITUV2 -> a4w4 | a8w4 | a16w4.
 
-    auto (default) and the legacy 1 mean a4w4; legacy 0 means a16w4.
+    auto (default) and the legacy 1 mean a4w4, except on gfx1250 (no tuned
+    a4w4 FlyDSL configs there) where they mean a8w4; legacy 0 means a16w4.
     """
     value = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2.lower()
     if value in ("auto", "1"):
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            if on_gfx1250():
+                return "a8w4"
         return "a4w4"
     if value == "0":
         return "a16w4"
@@ -1900,15 +1906,29 @@ def _resolve_situv2_activation() -> str:
 
 
 def _sync_aiter_situv2_moe_env() -> None:
-    """Set the AITER_SITUV2_* env matching VLLM_ROCM_USE_AITER_MOE_SITUV2.
+    """Set the AITER_SITUV2_*/AITER_FORCE_A8W4 env matching
+    VLLM_ROCM_USE_AITER_MOE_SITUV2.
 
     AITER reads AITER_SITUV2_A8W4 / AITER_SITUV2_A4W4 and defaults to a16w4,
     so exactly one is set for a8w4/a4w4 and both are cleared for a16w4.
+    gfx1250 is the exception: its fused_moe path only reads AITER_FORCE_A8W4,
+    so a8w4 there is dispatched via that env instead of AITER_SITUV2_A8W4.
     """
     import os
 
-    selected = _AITER_SITUV2_ACT_ENV.get(_resolve_situv2_activation())
-    for name in _AITER_SITUV2_ACT_ENV.values():
+    activation = _resolve_situv2_activation()
+    selected = _AITER_SITUV2_ACT_ENV.get(activation)
+
+    gfx1250 = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        gfx1250 = on_gfx1250()
+
+    if gfx1250 and activation == "a8w4":
+        selected = "AITER_FORCE_A8W4"
+
+    for name in (*_AITER_SITUV2_ACT_ENV.values(), "AITER_FORCE_A8W4"):
         if name == selected:
             os.environ[name] = "1"
         else:

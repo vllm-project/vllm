@@ -614,6 +614,51 @@ def test_aiter_moe_situv2_activation_syncs_aiter_env(
             assert os.environ.get(name) == expected_env.get(name)
 
 
+@pytest.mark.parametrize(
+    "value,expected_act,expected_env",
+    [
+        # gfx1250 has no tuned a4w4 configs, so auto/1 mean a8w4 there.
+        (None, "a8w4", {"AITER_FORCE_A8W4": "1"}),
+        ("auto", "a8w4", {"AITER_FORCE_A8W4": "1"}),
+        ("1", "a8w4", {"AITER_FORCE_A8W4": "1"}),
+        ("a8w4", "a8w4", {"AITER_FORCE_A8W4": "1"}),
+        ("0", "a16w4", {}),
+        # Explicit a4w4 is not overridden even on gfx1250.
+        ("a4w4", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+    ],
+)
+def test_aiter_moe_situv2_activation_gfx1250_defaults_to_a8w4(
+    value: str | None,
+    expected_act: str,
+    expected_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """gfx1250 dispatches a8w4 via AITER_FORCE_A8W4, not AITER_SITUV2_A8W4."""
+    import os
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.setattr("vllm.platforms.rocm.on_gfx1250", lambda: True)
+        mp.delenv("AITER_SITUV2_A8W4", raising=False)
+        mp.delenv("AITER_SITUV2_A4W4", raising=False)
+        mp.delenv("AITER_FORCE_A8W4", raising=False)
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        if value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", value)
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.get_fused_moe_situv2_activation() == expected_act
+        for name in ("AITER_SITUV2_A8W4", "AITER_SITUV2_A4W4", "AITER_FORCE_A8W4"):
+            assert os.environ.get(name) == expected_env.get(name)
+
+
 def test_aiter_moe_situv2_rejects_unknown_activation(
     monkeypatch: pytest.MonkeyPatch,
 ):
