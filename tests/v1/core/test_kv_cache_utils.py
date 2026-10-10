@@ -2903,8 +2903,12 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
-def test_packed_groups_glm5_like_hybrid():
-    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
+@pytest.mark.parametrize(
+    ("conv_dim", "max_model_len", "num_mamba_groups"),
+    [(6144, 8192, 3), (12288, 8192, 3), (12288, 32768, 4)],
+)
+def test_packed_groups_glm5_like_hybrid(conv_dim, max_model_len, num_mamba_groups):
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
     kpool, block_size = 4, 1024
     kv_cache_spec: dict[str, KVCacheSpec] = {}
@@ -2933,7 +2937,7 @@ def test_packed_groups_glm5_like_hybrid():
         )
     for i in range(34):
         kv_cache_spec[f"layers.{i}.kda"] = MambaSpec(
-            shapes=((3, 6144), (16, 128, 128)),
+            shapes=((3, conv_dim), (16, 128, 128)),
             dtypes=(torch.bfloat16, torch.float32),
             block_size=block_size,
         )
@@ -2960,8 +2964,10 @@ def test_packed_groups_glm5_like_hybrid():
     ]
     assert len(attn) == 1 and len(attn[0].layer_names) == 22
     assert len(rings) == 1 and len(rings[0].layer_names) == 11
-    # 11 * (1.18 MB MLA + 34 KB indexer) per block fits 12 fp32-SSM KDA states.
-    assert len(mamba) == 3
+    # 11 * (1.18 MB MLA + 34 KB indexer) per block fits 12 KDA states of 1.09 MB
+    # or 11 of 1.12 MB. Widening the block stride by 3% to fit 12 of those saves
+    # a Mamba group, which needs fewer bytes per request at 8k tokens but not 32k.
+    assert len(mamba) == num_mamba_groups
     assert sum(len(g.layer_names) for g in mamba) == 34
 
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(

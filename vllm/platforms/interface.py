@@ -942,7 +942,8 @@ class Platform:
         backend_cls: "type[AttentionBackend]",
     ) -> None:
         """For hybrid attention/mamba models, ensure that the attention page
-        size is >= the mamba page size, and pad the mamba page size to match.
+        size is >= the mamba page size, and pad the mamba page size to match
+        unless the backends only support block-outermost layouts.
         """
         from math import lcm
 
@@ -951,11 +952,13 @@ class Platform:
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
+        from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
         from vllm.v1.kv_cache_interface import (
             FullAttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
             get_kv_quant_mode,
+            get_mla_state_content_bytes,
         )
 
         cache_config = vllm_config.cache_config
@@ -978,6 +981,9 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                state_content_bytes=get_mla_state_content_bytes(
+                    cache_config.cache_dtype
+                ),
             ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
@@ -1059,6 +1065,8 @@ class Platform:
 
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
+            backends = cls._find_non_ssm_backends(vllm_config)
+            layouts = get_supported_kv_cache_layouts(backends)
             kernel_block_alignment_size = max(
                 min(
                     s.base if isinstance(s, MultipleOf) else s
@@ -1070,7 +1078,7 @@ class Platform:
             backend_block_alignment = lcm(
                 *(
                     min(s.base if isinstance(s, MultipleOf) else s for s in sizes)
-                    for b in cls._find_non_ssm_backends(vllm_config)
+                    for b in backends
                     if (sizes := b.get_supported_kernel_block_sizes())
                 )
             )
@@ -1102,11 +1110,15 @@ class Platform:
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
 
-        # Pad mamba page size to exactly match attention page size
+        # Pad mamba page size to exactly match attention page size, unless the
+        # backends only support block-outermost layouts, which pack Mamba states
+        # at their own size (see _get_packed_kv_cache_groups).
         attn_page_size = cache_config.block_size * attn_page_size_1_token
         assert attn_page_size >= mamba_page_size
 
-        if attn_page_size == mamba_page_size:
+        if attn_page_size == mamba_page_size or all(
+            layout.is_block_outermost for layout in layouts
+        ):
             return
 
         if (

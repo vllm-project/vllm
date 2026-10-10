@@ -1868,7 +1868,8 @@ def _get_packed_kv_cache_groups(
     per page size) and split into groups covering the same number of pattern
     repeats (picked by ``_approximate_gcd`` to minimize padding), so all
     groups pack into the same per-block layout. Mamba buckets are additionally
-    split to fit the block the attention buckets already need.
+    split to fit the block the attention buckets already need, or widen it by
+    up to one state if that saves a group and bytes per request.
     Returns None when the layout is not block-outermost or all layers already
     share one page size.
     """
@@ -1958,31 +1959,53 @@ def _get_packed_kv_cache_groups(
         default=0,
     )
 
-    groups = []
-    for spec, page_size_layers, balanced in bucketed:
-        num_groups = num_groups_for(spec, balanced)
-        # Cap a state group at the states a block already fits rather than let
-        # it widen the block.
-        if anchor_bytes and is_state_bucket(spec):
-            states_per_block = max(anchor_bytes // spec.first_spec.page_size_bytes, 1)
-            num_groups = max(
-                num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
-            )
-        if num_groups == 1:
-            groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
-            continue
+    def build_groups(widen: bool) -> list[KVCacheGroupSpec]:
+        groups = []
+        for spec, page_size_layers, balanced in bucketed:
+            num_groups = num_groups_for(spec, balanced)
+            # Cap a state group at the states a block already fits; with widen,
+            # a Mamba group takes one more state and widens the block.
+            if anchor_bytes and is_state_bucket(spec):
+                states_per_block = max(
+                    anchor_bytes // spec.first_spec.page_size_bytes, 1
+                )
+                if widen and isinstance(spec.first_spec, MambaSpec):
+                    states_per_block += 1
+                num_groups = max(
+                    num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
+                )
+            if num_groups == 1:
+                groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
+                continue
 
-        pattern_repeats = list(zip(*page_size_layers.values()))
-        for i in range(num_groups):
-            group_layer_names = [
-                name for repeat in pattern_repeats[i::num_groups] for name in repeat
-            ]
-            group_layer_specs = {
-                name: spec.kv_cache_specs[name] for name in group_layer_names
-            }
-            group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
-            assert group_spec is not None
-            groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
+            pattern_repeats = list(zip(*page_size_layers.values()))
+            for i in range(num_groups):
+                group_layer_names = [
+                    name for repeat in pattern_repeats[i::num_groups] for name in repeat
+                ]
+                group_layer_specs = {
+                    name: spec.kv_cache_specs[name] for name in group_layer_names
+                }
+                group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
+                assert group_spec is not None
+                groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
+        return groups
+
+    def bytes_per_request(groups: list[KVCacheGroupSpec]) -> int:
+        blocks = sum(
+            cdiv(
+                group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+                group.kv_cache_spec.page_size_bytes,
+            )
+            for group in groups
+        )
+        return blocks * _get_kv_cache_bytes_per_block(groups, layout)
+
+    groups, widened = build_groups(False), build_groups(True)
+    if len(widened) < len(groups) and (
+        bytes_per_request(widened) < bytes_per_request(groups)
+    ):
+        groups = widened
 
     _annotate_eagle_groups(
         vllm_config,
