@@ -55,6 +55,51 @@ The server returns a 400 for:
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
 
+## Multimodal inputs
+
+A request can carry media in two ways, and can use both at once:
+
+- `content_parts`: raw media (`image_url`, `audio_url` or `video_url`, each with an optional `uuid`). `token_ids` holds one placeholder token per item, and the server expands it.
+- `features`: items whose placeholders are already expanded in `token_ids`, at the ranges given in `mm_placeholders`. Pass the processed tensors in `kwargs_data`, or omit them to look the items up in the processor cache by `mm_hashes`.
+
+When both are set, every `content_parts` placeholder must come after the last `features` range. Only the tokens after that range are processed, so the expanded runs before it are left as they are.
+
+This fits multi-turn rollouts. Each turn resends the previous prompt with its images already expanded, adds the new turn with one placeholder per new image, and sends the earlier images as `features`:
+
+```python
+import httpx
+
+url = "http://localhost:8000/inference/v1/generate"
+
+# Turn 1: turn1_ids holds one <|image_pad|> for image A.
+turn1 = httpx.post(url, json={
+    "token_ids": turn1_ids,
+    "content_parts": [{"type": "image_url", "url": url_a, "uuid": "img-a"}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+
+# Turn 2: image A is expanded in turn1["prompt_token_ids"];
+# turn2_ids appends one <|image_pad|> for image B.
+turn2 = httpx.post(url, json={
+    "token_ids": (
+        turn1["prompt_token_ids"] + turn1["choices"][0]["token_ids"] + turn2_ids
+    ),
+    "features": {
+        "mm_hashes": {"image": ["img-a"]},
+        "mm_placeholders": turn1["mm_placeholders"],
+    },
+    "content_parts": [{"type": "image_url", "url": url_b, "uuid": "img-b"}],
+    "sampling_params": {"max_tokens": 256},
+    "return_token_ids": True,
+}).json()
+```
+
+Here `"img-a"` finds image A in the processor cache because turn 1 sent it with that `uuid`. Two cases need a different approach:
+
+- If the server sets `--mm-processor-kwargs` or `--media-io-kwargs`, the `uuid` is hashed with them and is no longer the cache key. Take `features` from a [render](renderer.md) response instead.
+- If the item has been evicted from the cache, the request fails. Resend the item with `kwargs_data`.
+
 ## Aborting requests
 
 `POST /inference/v1/abort_requests` aborts in-flight requests. It is registered wherever `/inference/v1/generate` is and requires the API key when `--api-key` is set, like `/inference/v1/generate`.

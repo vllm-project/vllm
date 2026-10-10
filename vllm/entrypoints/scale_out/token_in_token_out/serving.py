@@ -7,7 +7,8 @@ import math
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
-from typing import Any
+from dataclasses import replace
+from typing import Any, cast
 
 import msgspec
 from fastapi import Request
@@ -37,7 +38,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
-from vllm.inputs import EngineInput, TokensPrompt, mm_input
+from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
@@ -242,7 +243,12 @@ class ServingTokens(GenerateBaseServing):
             return self.create_error_response(e)
 
         engine_input: EngineInput
+        features = request.features
         if request.content_parts:
+            # Items in features are already expanded; render every token
+            # after the last of them, so new placeholders must lie there.
+            ranges = features.mm_placeholders.values() if features else ()
+            start = max((p.offset + p.length for rs in ranges for p in rs), default=0)
             tracker = AsyncMultiModalItemTracker(self.model_config)
             mm_parser = tracker.create_parser()
             for part in request.content_parts:
@@ -256,7 +262,7 @@ class ServingTokens(GenerateBaseServing):
                 elif ptype == "video_url":
                     mm_parser.parse_video(url, uuid)
             mm_data, mm_uuids = await tracker.resolve_items()
-            prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+            prompt = TokensPrompt(prompt_token_ids=request.token_ids[start:])
             if request.cache_salt is not None:
                 prompt["cache_salt"] = request.cache_salt
             if mm_data:
@@ -266,7 +272,7 @@ class ServingTokens(GenerateBaseServing):
             (engine_input,) = await self.online_renderer.renderer.render_cmpl_async(
                 [prompt]
             )
-        elif features := request.features:
+        if features:
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [
@@ -281,14 +287,27 @@ class ServingTokens(GenerateBaseServing):
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
 
+            token_ids = request.token_ids
+            if request.content_parts:
+                rendered = cast(MultiModalInput, engine_input)
+                token_ids = token_ids[:start] + rendered["prompt_token_ids"]
+                for m, ps in rendered.get("mm_placeholders", {}).items():
+                    mm_placeholders.setdefault(m, []).extend(
+                        replace(p, offset=p.offset + start) for p in ps
+                    )
+                    mm_kwargs.setdefault(m, []).extend(rendered["mm_kwargs"][m])
+                    features.mm_hashes.setdefault(m, []).extend(
+                        rendered["mm_hashes"][m]
+                    )
+
             engine_input = mm_input(
-                prompt_token_ids=request.token_ids,
+                prompt_token_ids=token_ids,
                 mm_kwargs=MultiModalKwargsItems(mm_kwargs),
                 mm_hashes=features.mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
             )
-        else:
+        elif not request.content_parts:
             (engine_input,) = await self.online_renderer.preprocess_completion(
                 request,
                 prompt_input=request.token_ids,

@@ -188,14 +188,9 @@ class GenerateRequest(BaseModel):
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
     content_parts: list[dict[str, Any]] | None = None
-    """Raw multimodal input; server resolves media. Mutually exclusive
-    with `features`."""
-
-    @model_validator(mode="after")
-    def _check_mm_fields_exclusive(self) -> "GenerateRequest":
-        if self.content_parts and self.features:
-            raise ValueError("content_parts and features are mutually exclusive")
-        return self
+    """Raw multimodal input; server resolves media and expands its
+    placeholders. With `features`, these placeholders must follow the
+    last `features` range, which is left as is."""
 
     @model_validator(mode="after")
     def _require_ec_for_metadata_only(self) -> "GenerateRequest":

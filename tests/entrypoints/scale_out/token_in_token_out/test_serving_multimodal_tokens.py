@@ -175,7 +175,7 @@ def _collapse_placeholders(
     return collapsed
 
 
-async def _render_image_prompt(client, data_url: str) -> dict:
+async def _render_image_prompt(client, *data_urls: str) -> dict:
     render_resp = await client.post(
         RENDER_ENDPOINT,
         json={
@@ -184,7 +184,10 @@ async def _render_image_prompt(client, data_url: str) -> dict:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
+                        *(
+                            {"type": "image_url", "image_url": {"url": u}}
+                            for u in data_urls
+                        ),
                         {"type": "text", "text": "What color is this?"},
                     ],
                 }
@@ -223,6 +226,54 @@ async def test_content_parts_generates_tokens(client, test_image):
     assert len(choice["token_ids"]) > 0
     assert gen_data["prompt_token_ids"] == expanded
     assert gen_data["mm_placeholders"] == mm_placeholders
+
+
+@pytest.mark.asyncio
+async def test_features_with_content_parts(client, test_image):
+    """Earlier items as features plus a new raw item must match /render."""
+    old_url = encode_image_url(test_image, format="PNG")
+    new_url = encode_image_url(Image.new("RGB", (224, 224)), format="PNG")
+    render_data = await _render_image_prompt(client, old_url, new_url)
+    expanded = render_data["token_ids"]
+    features = render_data["features"]
+    new = features["mm_placeholders"]["image"][1]
+
+    gen_resp = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": _collapse_placeholders(expanded, {"image": [new]}),
+            "features": {
+                k: {"image": v["image"][:1]} for k, v in features.items() if v
+            },
+            "content_parts": [{"type": "image_url", "url": new_url}],
+            "sampling_params": {"max_tokens": 1},
+            "return_token_ids": True,
+        },
+    )
+    gen_resp.raise_for_status()
+    assert gen_resp.json()["prompt_token_ids"] == expanded
+    assert gen_resp.json()["mm_placeholders"] == features["mm_placeholders"]
+
+
+@pytest.mark.asyncio
+async def test_content_parts_before_features_is_rejected(client, test_image):
+    """A content_parts placeholder before the last features range is a 400."""
+    data_url = encode_image_url(test_image, format="PNG")
+    render_data = await _render_image_prompt(client, data_url, data_url)
+    features = render_data["features"]
+
+    gen_resp = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "token_ids": render_data["token_ids"],
+            "features": {
+                k: {"image": v["image"][1:]} for k, v in features.items() if v
+            },
+            "content_parts": [{"type": "image_url", "url": data_url}],
+            "sampling_params": {"max_tokens": 1},
+        },
+    )
+    assert gen_resp.status_code == 400
 
 
 @pytest.mark.asyncio
