@@ -20,7 +20,11 @@ from flashinfer import (
 )
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
+from flashinfer.utils import (
+    FP4Tensor,
+    get_device_sm_count,
+    get_trtllm_gen_multi_ctas_kv_counter_bytes,
+)
 from typing_extensions import override
 
 from vllm import _custom_ops as custom_ops
@@ -144,6 +148,21 @@ def _get_trtllm_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_workspace_buffer
+
+
+trtllm_counter_buffer = None
+
+
+def _get_trtllm_counter_buffer(num_bytes: int | None) -> torch.Tensor | None:
+    # trtllm-gen resets its multi-CTA-KV counters at the end of each launch, so
+    # one zeroed buffer can be reused instead of FlashInfer zeroing a fresh one
+    # per call. None falls back to FlashInfer's per-call buffer.
+    global trtllm_counter_buffer
+    if num_bytes is None:
+        return None
+    if trtllm_counter_buffer is None or trtllm_counter_buffer.numel() < num_bytes:
+        trtllm_counter_buffer = torch.zeros(num_bytes, dtype=torch.uint8, device="cuda")
+    return trtllm_counter_buffer
 
 
 def _pack_draft_block_bool_mask(
@@ -2037,6 +2056,16 @@ class FlashInferImpl(AttentionImpl):
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 
+        # Worst-case size, so the shared counter never grows after graph capture.
+        # DCP decode all-gathers the query heads.
+        self._counter_bytes: int | None = None
+        if vllm_config is not None:
+            self._counter_bytes = get_trtllm_gen_multi_ctas_kv_counter_bytes(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                num_heads * vllm_config.parallel_config.decode_context_parallel_size,
+                get_device_sm_count(torch.device("cuda")),
+            )
+
     def fused_output_quant_supported(self, quant_key: QuantKey):
         if quant_key == kNvfp4Dynamic and self.is_kvcache_nvfp4:
             logger.warning_once(
@@ -2491,6 +2520,9 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_cache_sf=prefill_kv_block_scales,
+                    multi_ctas_kv_counter_buffer=_get_trtllm_counter_buffer(
+                        self._counter_bytes
+                    ),
                 )
 
                 if needs_fp8_out:
@@ -2718,6 +2750,9 @@ class FlashInferImpl(AttentionImpl):
                     ),
                     lse=lse,
                     return_lse=self.need_to_return_lse_for_decode,
+                    multi_ctas_kv_counter_buffer=_get_trtllm_counter_buffer(
+                        self._counter_bytes
+                    ),
                 )
 
                 if use_dcp:
