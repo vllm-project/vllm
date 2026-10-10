@@ -238,6 +238,16 @@ __forceinline__ __device__ void st32_cs(int* addr, int val) {
 #endif
 }
 
+// 64-bit cache-streaming (.cs) store.
+// Falls back to a plain store on ROCm (no .cs hint).
+__forceinline__ __device__ void st64_cs(int64_t* addr, int64_t val) {
+#ifndef USE_ROCM
+  asm volatile("st.global.cs.b64 [%0], %1;" ::"l"(addr), "l"(val));
+#else
+  *addr = val;
+#endif
+}
+
 // 128-bit cache-streaming (.cs) load / store.
 // Falls back to ld128/st128 on ROCm (no .cs hint).
 __forceinline__ __device__ int4 ld128_cs(const int4* addr) {
