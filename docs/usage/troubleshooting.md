@@ -369,6 +369,39 @@ export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
 export PATH="${CUDA_HOME}/bin:$PATH"
 ```
 
+## Attention backend errors
+
+vLLM automatically selects an attention backend based on the model, data
+types, and enabled features. If the selected backend does not support a
+feature your configuration uses (for example decode context parallelism,
+MLA, or sparse attention), startup fails with an error listing the
+unsupported requirements. You may also see warnings such as:
+
+```text
+FlashInfer XQA decode does not support returning LSE and therefore does not
+support DCP, reverting to native FlashInfer decode.
+```
+
+To resolve backend incompatibilities, explicitly select a compatible backend
+with the `--attention-backend` argument:
+
+```shell
+vllm serve <model> --attention-backend FLASH_ATTN
+```
+
+Available backends include `FLASH_ATTN`, `FLASHINFER`, `TRITON_ATTN`,
+`ROCM_ATTN`, and MLA variants such as `FLASHINFER_MLA`. Run
+`vllm serve --help=all` and search for `attention-backend` for the full list
+and defaults. See [Attention backends](../design/attention_backends.md) for
+the backend design and selection logic, and start vLLM with
+`VLLM_LOGGING_LEVEL=DEBUG` to see which backend was selected.
+
+!!! warning
+    Older guides and issues recommend setting the `VLLM_ATTENTION_BACKEND`
+    environment variable to switch attention backends. This environment
+    variable has been removed from vLLM; use the `--attention-backend`
+    argument instead.
+
 ## Known Issues
 
 - In `v0.5.2`, `v0.5.3`, and `v0.5.3.post1`, there is a bug caused by [zmq](https://github.com/zeromq/pyzmq/issues/2000) , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of `vllm` to include the [fix](https://github.com/vllm-project/vllm/pull/6759).
