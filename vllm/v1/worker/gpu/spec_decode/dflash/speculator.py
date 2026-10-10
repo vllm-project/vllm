@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -30,6 +31,10 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+# Trimming the draft context to its window costs a few fixed launches per step,
+# so it is only worth it once the step skips enough context rows to outweigh them.
+MIN_TRIMMED_CONTEXT_ROWS = 2048
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -112,6 +117,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+        self._kept_context_len = self.max_num_tokens
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -221,6 +227,22 @@ class DFlashSpeculator(DraftModelSpeculator):
             dtype=torch.int64,
             device=self.device,
         )
+
+        # A windowed draft reads only the trailing context rows of each request,
+        # unless prefix caching, KV transfer or a context anchor reads older ones.
+        caching = self.vllm_config.cache_config.enable_prefix_caching
+        specs = [g[0].kv_cache_spec for g in self.attn_groups if g]
+        windows = [get_kv_cache_spec_sliding_window(s) or 0 for s in specs]
+        if (
+            min(windows) > self.num_speculative_steps
+            and not (caching and any(s.prefix_cacheable for s in specs))
+            and self.vllm_config.kv_transfer_config is None
+            and type(self).prepare_context_anchor
+            is DFlashSpeculator.prepare_context_anchor
+        ):
+            # The query block may shift the window when it is clamped at max_model_len.
+            self._kept_context_len = max(windows) + self.num_query_per_req
+            self._kept_lens = UvaBufferPool(self.max_num_reqs, torch.int64)
 
         # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
         # of the kv-cache group its cache belongs to. Models that share a single group
@@ -374,6 +396,27 @@ class DFlashSpeculator(DraftModelSpeculator):
         # number of rejected tokens, we maintain the size of input_ids and
         # hidden_states the same as the target model's. This means, we pad each
         # request's query length to include any rejected positions.
+        kept_rows = None
+        if not dummy_run and num_target_tokens > MIN_TRIMMED_CONTEXT_ROWS:
+            query_lens = input_batch.num_scheduled_tokens[:num_reqs]
+            kept_lens = query_lens.clip(max=self._kept_context_len)
+            if query_lens.sum() - kept_lens.sum() >= MIN_TRIMMED_CONTEXT_ROWS:
+                # Rows end at device query_start_loc, which adaptive verification
+                # may shorten for decodes.
+                num_target_tokens = int(kept_lens.sum())
+                kept_lens_uva = self._kept_lens.copy_to_uva(kept_lens)
+                kept_rows = torch.arange(num_target_tokens, device=self.device)
+                kept_rows += (
+                    input_batch.query_start_loc[1 : num_reqs + 1]
+                    - kept_lens_uva.cumsum(0)
+                ).repeat_interleave(kept_lens_uva, output_size=num_target_tokens)
+                kept_rows.clamp_min_(0)
+                if aux_hidden_states:
+                    aux_hidden_states = [
+                        h.index_select(0, kept_rows) for h in aux_hidden_states
+                    ]
+                else:
+                    last_hidden_states = last_hidden_states.index_select(0, kept_rows)
         if aux_hidden_states:
             hidden_states = self.model.combine_hidden_states(
                 torch.cat(aux_hidden_states, dim=-1)
@@ -444,6 +487,10 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_model_len,
                 self.sample_from_anchor,
             )
+        if kept_rows is not None:
+            positions, slots = self.context_positions, self._context_slot_mappings
+            positions[:num_target_tokens] = positions.index_select(0, kept_rows)
+            slots[:, :num_target_tokens] = slots.index_select(1, kept_rows)
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
