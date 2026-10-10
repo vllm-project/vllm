@@ -4,6 +4,7 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -14,9 +15,11 @@ from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorTransferResults,
     SupportsHMA,
     supports_hma,
 )
@@ -33,9 +36,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
-from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
+from vllm.v1.outputs import (
+    KVConnectorOutput,
+    KVConnectorWorkerMetadata,
+    ModelRunnerOutput,
+)
+from vllm.v1.request import RequestStatus
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -154,13 +163,11 @@ KVConnectorFactory.register_connector(
 )
 
 
-def test_register_finished_partial_tail_notifies_every_connector():
-    connector = object.__new__(MultiConnector)
-    first = MagicMock(spec_set=KVConnectorBase_V1)
-    second = MagicMock(spec_set=KVConnectorBase_V1)
+def test_register_finished_partial_tail_notifies_every_connector(mc):
+    connector = mc
+    first, second = connector.sub_connectors
     first.register_finished_partial_tail.return_value = True
     second.register_finished_partial_tail.return_value = False
-    connector._connectors = [first, second]
     request = MagicMock()
     block_ids = ([1], [2])
     offloads = [(1, 2, 12)]
@@ -215,6 +222,522 @@ def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
     assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
     assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
     mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
+@pytest.fixture
+def async_saves(mc):
+    """Two save owners whose two worker ranks may finish in different steps."""
+    for child in mc.sub_connectors:
+        child.get_finished_count.return_value = None
+        child.request_finished.return_value = True, None
+        child.build_connector_worker_meta.return_value = None
+    mc._world_size = 2
+    return mc
+
+
+def _send_step(
+    connector, notifications=(), *, receiving=None, failed_receiving=(), scheduler=None
+):
+    outputs = []
+    for rank in range(2):
+        metadata = MultiKVConnectorWorkerMetadata(
+            metadata=(None, None),
+            finished_sending=tuple(
+                {"r": {rank}} if (child, rank) in notifications else {}
+                for child in range(2)
+            ),
+        )
+        outputs.append(
+            ModelRunnerOutput.with_kv_conn_output_only(
+                KVConnectorOutput(kv_connector_worker_meta=metadata)
+            )
+        )
+    output = KVOutputAggregator(2).aggregate(outputs).kv_connector_output
+    assert output is not None
+    output.finished_recving = receiving
+    output.failed_recving = set(failed_receiving)
+    if scheduler is None:
+        connector.update_connector_output(output)
+    else:
+        scheduler._update_from_kv_xfer_finished(output)
+    return output
+
+
+def _scheduler_with_request(connector, status):
+    request = SimpleNamespace(request_id="r", status=status)
+    request.is_finished = lambda: RequestStatus.is_finished(request.status)
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = connector
+    scheduler.requests = {request.request_id: request}
+    scheduler.finished_recving_kv_req_ids = set()
+    scheduler._kv_fetch_stages = None
+    scheduler._free_request_blocks = MagicMock()
+    connector.on_new_request(request)
+    return scheduler, request
+
+
+def _start_async_receive(connector, request):
+    first, second = connector.sub_connectors
+    first.get_num_new_matched_tokens.return_value = 16, True
+    second.get_num_new_matched_tokens.return_value = 0, False
+    assert connector.get_num_new_matched_tokens(request, 0) == (16, True)
+    connector.update_state_after_alloc(request, MagicMock(), 16)
+
+
+def _finish_with_async_saves(connector):
+    request = SimpleNamespace(request_id="r")
+    connector.on_new_request(request)
+    assert connector.request_finished(request, [1])[0]
+
+
+def _assert_save_state_cleared(connector):
+    assert not connector._partial_tail_owners
+    assert not connector._async_load_candidates
+    assert not connector._async_load_owners
+    assert not connector._requests_to_connector
+    assert not connector._async_save_owners
+    assert not connector._completed_async_saves
+    assert not any(connector._send_workers)
+
+
+def test_send_completion_requires_each_child_and_distinct_rank(async_saves):
+    """A different child or a duplicate rank cannot satisfy a missing ACK."""
+    _finish_with_async_saves(async_saves)
+    assert _send_step(async_saves, [(0, 0), (1, 1)]).finished_sending is None
+    assert _send_step(async_saves, [(0, 0), (1, 0)]).finished_sending is None
+    assert _send_step(async_saves, [(0, 1)]).finished_sending == {"r"}
+    _assert_save_state_cleared(async_saves)
+    assert (
+        _send_step(async_saves, [(0, 0), (0, 1), (1, 0), (1, 1)]).finished_sending
+        is None
+    )
+    _assert_save_state_cleared(async_saves)
+
+
+def test_non_owner_cannot_filter_other_connector_send_completion(async_saves):
+    first = async_saves.sub_connectors[0]
+    first.request_finished.return_value = False, None
+    seen = []
+
+    def filter_completion(output):
+        seen.append(output.finished_sending)
+        output.finished_sending = None
+
+    first.update_connector_output.side_effect = filter_completion
+    _finish_with_async_saves(async_saves)
+    assert _send_step(async_saves, [(1, 0), (1, 1)]).finished_sending == {"r"}
+    assert seen == [None]
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.fixture(params=[False, True], ids=["direct-first", "nested-first"])
+def nested_mc(request):
+    child = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+    }
+    children = [
+        child,
+        {
+            "kv_connector": "MultiConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"connectors": [child]},
+        },
+    ]
+    if request.param:
+        children.reverse()
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={"connectors": children},
+    )
+    connector = MultiConnector(
+        config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+    nested_first = request.param
+    direct = connector.sub_connectors[int(nested_first)]
+    nested = connector.sub_connectors[int(not nested_first)]
+    for leaf in [direct, *nested.sub_connectors]:
+        leaf.get_num_new_matched_tokens.return_value = 0, False
+        leaf.get_finished_count.return_value = 1
+        leaf.request_finished.return_value = False, None
+    return connector, direct, nested, int(nested_first)
+
+
+def test_nested_nonowner_does_not_swallow_receive_completion(nested_mc):
+    """A nested non-loader must not strand the selected child's request."""
+    nested_mc, direct, nested, direct_index = nested_mc
+    direct.get_num_new_matched_tokens.return_value = 16, True
+    request = SimpleNamespace(request_id="r")
+    nested_mc.on_new_request(request)
+    assert nested_mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    nested_mc.update_state_after_alloc(request, MagicMock(), 16)
+
+    leaf_meta = MagicMock(spec=KVConnectorWorkerMetadata)
+    nested_meta = MultiKVConnectorWorkerMetadata(metadata=(leaf_meta,))
+    child_metadata: list[KVConnectorWorkerMetadata | None] = [nested_meta, nested_meta]
+    child_metadata[direct_index] = None
+    metadata = MultiKVConnectorWorkerMetadata(metadata=tuple(child_metadata))
+    output = KVConnectorOutput(
+        finished_recving={"r"}, kv_connector_worker_meta=metadata
+    )
+    nested_mc.update_connector_output(output)
+
+    assert output.finished_recving == {"r"}
+    assert output.finished_sending is None
+    assert output.kv_connector_worker_meta is metadata
+    assert metadata.metadata[1 - direct_index] is nested_meta
+    leaf_output = nested.sub_connectors[0].update_connector_output.call_args.args[0]
+    assert leaf_output.kv_connector_worker_meta is leaf_meta
+    assert not nested_mc.request_finished(request, [1])[0]
+
+
+def test_child_output_updates_survive_receive_isolation(nested_mc):
+    """Copying completions must not discard child error or auxiliary updates."""
+    nested_mc, direct, nested, direct_index = nested_mc
+    direct.get_num_new_matched_tokens.return_value = 16, True
+    request = SimpleNamespace(request_id="r")
+    nested_mc.on_new_request(request)
+    assert nested_mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    nested_mc.update_state_after_alloc(request, MagicMock(), 16)
+    stats, events = MagicMock(), MagicMock()
+
+    def report_errors(output):
+        output.finished_recving.clear()
+        output.invalid_block_ids = output.invalid_block_ids | {2}
+        output.failed_recving = output.failed_recving | {"r"}
+        output.kv_connector_stats = stats
+        output.kv_cache_events = events
+        output.expected_finished_count = 3
+
+    def report_more_errors(output):
+        output.invalid_block_ids.add(3)
+        output.failed_recving.add("other")
+
+    direct.update_connector_output.side_effect = report_errors
+    nested.sub_connectors[0].update_connector_output.side_effect = report_more_errors
+    output = KVConnectorOutput(finished_recving={"r"}, invalid_block_ids={1})
+    nested_mc.update_connector_output(output)
+
+    assert output.finished_recving == {"r"}
+    assert output.invalid_block_ids == {1, 2, 3}
+    assert output.failed_recving == {"r", "other"}
+    assert output.kv_connector_stats is stats
+    assert output.kv_cache_events is events
+    assert output.expected_finished_count == 3
+
+
+@pytest.mark.parametrize("receive_first", [True, False])
+def test_cancelled_nested_loader_waits_for_other_save_owner(nested_mc, receive_first):
+    """Cancellation releases once, after both the nested load and sibling save."""
+    nested_mc, direct, nested, direct_index = nested_mc
+    direct.request_finished.return_value = True, None
+    nested.sub_connectors[0].get_num_new_matched_tokens.return_value = 16, True
+    scheduler, request = _scheduler_with_request(
+        nested_mc, RequestStatus.FINISHED_ABORTED
+    )
+    assert nested_mc.get_num_new_matched_tokens(request, 0) == (16, True)
+    nested_mc.update_state_after_alloc(request, MagicMock(), 16)
+    assert nested_mc.request_finished(request, [1])[0]
+
+    steps = [{"receiving": {"r"}}, {"notifications": [(direct_index, 0)]}]
+    if not receive_first:
+        steps.reverse()
+    first = _send_step(nested_mc, scheduler=scheduler, **steps[0])
+    assert first.finished_recving is None
+    assert first.finished_sending is None
+    scheduler._free_request_blocks.assert_not_called()
+
+    last = _send_step(nested_mc, scheduler=scheduler, **steps[1])
+    assert last.finished_recving is None
+    assert last.finished_sending == {"r"}
+    scheduler._free_request_blocks.assert_called_once_with(request)
+
+    duplicate = _send_step(
+        nested_mc, [(direct_index, 0)], receiving={"r"}, scheduler=scheduler
+    )
+    assert duplicate.finished_recving is None
+    assert duplicate.finished_sending is None
+    scheduler._free_request_blocks.assert_called_once_with(request)
+
+
+def test_scheduler_child_completion_waits_for_other_save_owner(async_saves):
+    """A child may finish in update_connector_output, without a worker ACK."""
+    _finish_with_async_saves(async_saves)
+
+    def finish_first(output):
+        output.finished_sending = {"r"}
+
+    async_saves.sub_connectors[0].update_connector_output.side_effect = finish_first
+    assert _send_step(async_saves).finished_sending is None
+    assert _send_step(async_saves, [(1, 0), (1, 1)]).finished_sending == {"r"}
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("early_children", [(0,), (0, 1)])
+def test_send_completion_before_request_finished_is_reconciled(
+    async_saves, early_children
+):
+    request = SimpleNamespace(request_id="r")
+    async_saves.on_new_request(request)
+    early = [(child, rank) for child in early_children for rank in range(2)]
+    assert _send_step(async_saves, early).finished_sending is None
+    pending, _ = async_saves.request_finished(request, [1])
+    assert pending == (early_children == (0,))
+    if pending:
+        assert _send_step(async_saves, [(1, 0), (1, 1)]).finished_sending == {"r"}
+    _assert_save_state_cleared(async_saves)
+
+
+def test_send_completion_uses_child_finished_count(async_saves):
+    async_saves.sub_connectors[0].get_finished_count.return_value = 1
+    _finish_with_async_saves(async_saves)
+    assert _send_step(async_saves, [(0, 0), (1, 0)]).finished_sending is None
+    assert _send_step(async_saves, [(1, 1)]).finished_sending == {"r"}
+
+
+def test_unexpected_send_does_not_create_tracking(async_saves):
+    # Unregistered ACKs must not create persistent request state.
+    assert _send_step(async_saves, [(0, 0), (1, 1)]).finished_sending is None
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("receiver_saves", [False, True])
+@pytest.mark.parametrize("first_completion", ["receive", "send", "both"])
+def test_aborted_receive_waits_for_another_send_owner(
+    async_saves, receiver_saves, first_completion
+):
+    """Finishing a cancelled load must not free another child's save source."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    async_saves.sub_connectors[0].request_finished.return_value = (
+        receiver_saves,
+        None,
+    )
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert async_saves.request_finished(request, [1])[0]
+
+    send_acks = [(1, 0), (1, 1)]
+    if receiver_saves:
+        send_acks += [(0, 0), (0, 1)]
+    completions: dict[str, dict[str, set[str] | list[tuple[int, int]]]] = {
+        "receive": {"receiving": {"r"}},
+        "send": {"notifications": send_acks},
+        "both": {"receiving": {"r"}, "notifications": send_acks},
+    }
+    output = _send_step(
+        async_saves, scheduler=scheduler, **completions[first_completion]
+    )
+    if first_completion != "both":
+        scheduler._free_request_blocks.assert_not_called()
+        assert output.finished_recving is None
+        assert output.finished_sending is None
+        assert "r" in scheduler.requests
+        remaining = "send" if first_completion == "receive" else "receive"
+        _send_step(async_saves, scheduler=scheduler, **completions[remaining])
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    assert not scheduler.requests
+    _assert_save_state_cleared(async_saves)
+    # Duplicate terminal notifications cannot trigger a second block release.
+    _send_step(async_saves, scheduler=scheduler, **completions["both"])
+    scheduler._free_request_blocks.assert_called_once_with(request)
+
+
+def test_aborted_receive_only_releases_once_and_allows_request_id_reuse(
+    async_saves,
+):
+    async_saves.sub_connectors[0].request_finished.return_value = False, None
+    async_saves.sub_connectors[1].request_finished.return_value = False, None
+    for _ in range(2):
+        scheduler, request = _scheduler_with_request(
+            async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+        )
+        _start_async_receive(async_saves, request)
+        request.status = RequestStatus.FINISHED_ABORTED
+        assert async_saves.request_finished(request, [1])[0]
+        _send_step(async_saves, receiving={"r"}, scheduler=scheduler)
+        scheduler._free_request_blocks.assert_called_once_with(request)
+        assert not scheduler.requests
+        _assert_save_state_cleared(async_saves)
+
+
+def test_receiving_child_save_is_independent_of_its_receive(async_saves):
+    """A receiver may still be saving blocks from an earlier prefill."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(1, 0), (1, 1)], receiving={"r"}, scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 0), (0, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_normal_receive_keeps_tracking_for_later_saves(async_saves, failed):
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    output = _send_step(
+        async_saves,
+        receiving={"r"},
+        failed_receiving={"r"} if failed else (),
+        scheduler=scheduler,
+    )
+    assert output.finished_recving == {"r"}
+    assert output.failed_recving == ({"r"} if failed else set())
+    assert scheduler.finished_recving_kv_req_ids == {"r"}
+    scheduler._free_request_blocks.assert_not_called()
+    request.status = RequestStatus.FINISHED_STOPPED
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(1, 0), (1, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 0), (0, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("allocate_zero_tokens", [False, True])
+def test_async_lookup_without_external_allocation_does_not_create_a_receive_wait(
+    async_saves, allocate_zero_tokens
+):
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.FINISHED_ABORTED
+    )
+    first, second = async_saves.sub_connectors
+    first.get_num_new_matched_tokens.return_value = 16, True
+    second.get_num_new_matched_tokens.return_value = 0, False
+    assert async_saves.get_num_new_matched_tokens(request, 0) == (16, True)
+    if allocate_zero_tokens:
+        async_saves.update_state_after_alloc(request, MagicMock(), 0)
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(0, 0), (0, 1), (1, 0), (1, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+def test_partial_tail_owner_releases_after_its_send_ack(async_saves):
+    """Scheduler must hear completion even if only the tail hook delays free."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.FINISHED_STOPPED
+    )
+    first, second = async_saves.sub_connectors
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    for child in async_saves.sub_connectors:
+        child.request_finished.return_value = False, None
+    partial_tail_delay = async_saves.register_finished_partial_tail(
+        request, ([1],), [(0, 1, 12)]
+    )
+    delay_free, _ = async_saves.request_finished(request, [1])
+    assert partial_tail_delay or delay_free
+    _send_step(async_saves, [(0, 0)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    assert not scheduler.requests
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("early_ranks", [(0,), (0, 1)])
+def test_partial_tail_requires_new_acks_after_earlier_saves(async_saves, early_ranks):
+    """A newly accepted tail must not reuse earlier full-block send ACKs."""
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.FINISHED_STOPPED
+    )
+    first, second = async_saves.sub_connectors
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    first.request_finished.return_value = False, None
+    _send_step(async_saves, [(0, rank) for rank in early_ranks], scheduler=scheduler)
+    assert async_saves.register_finished_partial_tail(request, ([1],), [(0, 1, 12)])
+    assert async_saves.request_finished(request, [1])[0]
+    _send_step(async_saves, [(0, 1), (1, 0), (1, 1)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, [(0, 0)], scheduler=scheduler)
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    _assert_save_state_cleared(async_saves)
+
+
+@pytest.mark.parametrize("receive_first", [False, True])
+def test_partial_tail_and_receive_from_same_child_both_delay_free(
+    async_saves, receive_first
+):
+    scheduler, request = _scheduler_with_request(
+        async_saves, RequestStatus.WAITING_FOR_REMOTE_KVS
+    )
+    _start_async_receive(async_saves, request)
+    first, second = async_saves.sub_connectors
+    first.register_finished_partial_tail.return_value = True
+    second.register_finished_partial_tail.return_value = False
+    for child in async_saves.sub_connectors:
+        child.request_finished.return_value = False, None
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert async_saves.register_finished_partial_tail(request, ([1],), [(0, 1, 12)])
+    assert async_saves.request_finished(request, [1])[0]
+    receive = {"receiving": {"r"}}
+    send = {"notifications": [(0, 0), (0, 1)]}
+    _send_step(async_saves, scheduler=scheduler, **(receive if receive_first else send))
+    scheduler._free_request_blocks.assert_not_called()
+    _send_step(async_saves, scheduler=scheduler, **(send if receive_first else receive))
+    scheduler._free_request_blocks.assert_called_once_with(request)
+    assert not scheduler.requests
+    _assert_save_state_cleared(async_saves)
+
+
+def test_no_async_saves_release_tracking(async_saves):
+    request = SimpleNamespace(request_id="r")
+    async_saves.on_new_request(request)
+    for child in async_saves.sub_connectors:
+        child.request_finished.return_value = False, None
+    assert not async_saves.request_finished(request, [1])[0]
+    _assert_save_state_cleared(async_saves)
+
+
+def test_worker_preserves_send_identity_and_receive_failures(async_saves, monkeypatch):
+    from vllm.distributed.kv_transfer.kv_connector.v1 import multi_connector
+
+    monkeypatch.setattr(
+        multi_connector, "get_world_group", lambda: SimpleNamespace(rank=1)
+    )
+    async_saves.sub_connectors[
+        0
+    ].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_sending={"r"}
+    )
+    async_saves.sub_connectors[
+        1
+    ].get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_recving={"recv"}, failed_recving={"recv"}
+    )
+    result = async_saves.get_transfer_results(set())
+    assert not result.finished_sending
+    assert result.finished_recving == result.failed_recving == {"recv"}
+    metadata = async_saves.build_connector_worker_meta()
+    assert isinstance(metadata, MultiKVConnectorWorkerMetadata)
+    assert metadata.finished_sending == ({"r": {1}}, {})
+    assert async_saves.build_connector_worker_meta() is None
+
+
+def test_worker_send_metadata_merge_preserves_inputs_and_deduplicates_ranks():
+    first = MultiKVConnectorWorkerMetadata(
+        metadata=(None, None), finished_sending=({"r": {0}}, {"r": {1}})
+    )
+    second = MultiKVConnectorWorkerMetadata(
+        metadata=(None, None), finished_sending=({"r": {0, 1}}, {})
+    )
+    result = first.aggregate(second)
+    assert result.finished_sending == ({"r": {0, 1}}, {"r": {1}})
+    assert first.finished_sending == ({"r": {0}}, {"r": {1}})
+    assert second.finished_sending == ({"r": {0, 1}}, {})
 
 
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
