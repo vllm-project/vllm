@@ -615,8 +615,18 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
+        from vllm.utils.flashinfer import (
+            has_flashinfer_sparse_mla_sm120_config,
+            has_flashinfer_sparse_mla_sm120_runtime_page_size,
+        )
 
+        if not has_flashinfer_sparse_mla_sm120_runtime_page_size():
+            raise RuntimeError(
+                "FLASHINFER_MLA_SPARSE_DSV41 on SM120 requires FlashInfer >= 0.7.1 "
+                "(flashinfer-ai/flashinfer#5197). The installed build decodes "
+                "only 64-token pages, but DeepSeek-V4.1 uses 128-token kernel "
+                "blocks and 32-token SWA pages."
+            )
         required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
         if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):
             raise RuntimeError(

@@ -474,6 +474,24 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 
 @functools.cache
+def has_flashinfer_sparse_mla_sm120_runtime_page_size() -> bool:
+    """Return whether FlashInfer's SM120 DSV4 decode takes any page size.
+
+    Older builds instantiate only 64-token pages, which cannot serve the
+    128-token kernel blocks and 32-token SWA pages vLLM allocates for
+    DeepSeek-V4.1 (flashinfer-ai/flashinfer#5197, FlashInfer >= 0.7.1).
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    mod = _get_submodule("flashinfer.mla")
+    get_configs = getattr(mod, "supported_sparse_mla_sm120_configs", None)
+    if get_configs is None:
+        return False
+    config = get_configs().get("dsv4")
+    return bool(getattr(config, "page_block_size_is_runtime", False))
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
