@@ -6,11 +6,11 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
+DEEPGEMM_GIT_REPO="https://github.com/cleonard530/DeepGEMM.git"
 # NOTE: This targets the vLLM fork's dev branch, which carries the sm120
 # and sm90 paged-MQA ports plus the SwiGLU alpha/beta and SiTU Mega MoE
 # activations, plus the CUDA 12.x layout header fix from vllm-project/DeepGEMM#12.
-DEEPGEMM_GIT_REF="1e1842a833699298f7afc02eefb2ed168fff6938"
+DEEPGEMM_GIT_REF="4907ca90d525e8b81156dc410627c7b60acbeb82"
 WHEEL_DIR=""
 
 # Parse command line arguments
