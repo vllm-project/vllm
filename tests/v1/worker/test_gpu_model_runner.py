@@ -1765,6 +1765,56 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     assert _is_req_state_block_table_match(runner, req_id)
 
 
+def _decode_graph_eligible(
+    rows: list[tuple[int, int, int]],
+    drafts: dict[str, list[int]] | None = None,
+) -> bool:
+    """Run the eligibility check over `(computed, prompt_len, scheduled)` rows."""
+    num_reqs = len(rows)
+    runner = SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_computed_tokens_cpu=np.array([r[0] for r in rows], dtype=np.int32),
+            num_prompt_tokens=np.array([r[1] for r in rows], dtype=np.int32),
+            req_ids=[f"req-{i}" for i in range(num_reqs)],
+        )
+    )
+    return GPUModelRunner._is_decode_graph_eligible(
+        runner,
+        num_reqs,
+        np.array([r[2] for r in rows], dtype=np.int32),
+        SimpleNamespace(scheduled_spec_decode_tokens=drafts or {}),
+    )
+
+
+def test_decode_graph_rejects_a_still_prefilling_row() -> None:
+    """A one-token prompt has a decode batch's shape, so shape-based full-graph
+    dispatch would replay a graph holding only the decode kernels. Those update
+    recurrent state in place and nothing has seeded it yet, which is how a
+    one-token prompt came back garbled and differently each run (#57720)."""
+    assert _decode_graph_eligible([(8, 8, 1), (5, 5, 1)])
+    assert not _decode_graph_eligible([(0, 1, 1)])
+    assert not _decode_graph_eligible([(8, 8, 1), (0, 1, 1)])
+    # Same story for a chunk that is neither the whole prompt nor one token.
+    assert not _decode_graph_eligible([(4, 20, 4)])
+
+
+def test_decode_graph_keeps_a_one_token_prompt_tail() -> None:
+    """One new token over existing context is what the recurrent backends run
+    as a decode themselves, so the batch keeps its full graph."""
+    assert _decode_graph_eligible([(8, 8, 1), (10, 11, 1)])
+
+
+def test_decode_graph_eligibility_discounts_draft_tokens() -> None:
+    """A one-token prompt tail padded with placeholder drafts up to the uniform
+    `1 + num_spec_tokens` shape is still a single new token, while a first
+    prompt chunk of that shape is not."""
+    assert _decode_graph_eligible(
+        [(16, 16, 4), (10, 11, 4)],
+        drafts={"req-0": [1, 2, 3], "req-1": [4, 5, 6]},
+    )
+    assert not _decode_graph_eligible([(0, 8, 4)], drafts={"req-0": [1, 2, 3]})
+
+
 def test_is_uniform_decode() -> None:
     # Normal
     assert GPUModelRunner._is_uniform_decode(

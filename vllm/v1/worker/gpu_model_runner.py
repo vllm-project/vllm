@@ -3884,6 +3884,40 @@ class GPUModelRunner(
                     return False
         return True
 
+    def _is_decode_graph_eligible(
+        self,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+        scheduler_output: "SchedulerOutput",
+    ) -> bool:
+        """Whether a batch shaped like a decode may replay a decode graph.
+
+        Full-graph dispatch is shape-based, so a prompt chunk of
+        `uniform_decode_query_len` tokens looks like a decode step. The graph
+        was captured over a decode batch, and replaying it runs only the
+        kernels that branch took: for the recurrent backends those update
+        Mamba state in place instead of seeding it. One new token over
+        existing context is safe, since those backends run such a row as a
+        decode as well (`BaseMambaAttentionMetadataBuilder`), but a first
+        prompt chunk has no state to update yet and must not take a full
+        graph. Mirrors `decode_graph_eligible` in the V2 runner.
+        """
+        computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        is_prefilling = computed < self.input_batch.num_prompt_tokens[:num_reqs]
+        if not is_prefilling.any():
+            return True
+        num_new_tokens = num_scheduled_tokens_np[:num_reqs]
+        drafts = scheduler_output.scheduled_spec_decode_tokens
+        if drafts:
+            req_ids = self.input_batch.req_ids[:num_reqs]
+            num_new_tokens = num_new_tokens - np.fromiter(
+                (len(drafts.get(req_id, ())) for req_id in req_ids),
+                dtype=np.int32,
+                count=num_reqs,
+            )
+        runs_as_decode = (num_new_tokens == 1) & (computed > 0)
+        return bool((runs_as_decode | ~is_prefilling).all())
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -3891,6 +3925,7 @@ class GPUModelRunner(
         num_scheduled_tokens_np: np.ndarray,
         max_num_scheduled_tokens: int,
         use_cascade_attn: bool,
+        decode_graph_eligible: bool = True,
         allow_microbatching: bool = True,
         force_eager: bool = False,
         # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
@@ -3938,7 +3973,10 @@ class GPUModelRunner(
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens, disable_full=use_cascade_attn or has_encoder_output
+            num_tokens_padded,
+            disable_full=use_cascade_attn
+            or has_encoder_output
+            or not decode_graph_eligible,
         )
         num_tokens_padded = batch_descriptor.num_tokens
 
@@ -4212,6 +4250,9 @@ class GPUModelRunner(
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
+                decode_graph_eligible=self._is_decode_graph_eligible(
+                    num_reqs, num_scheduled_tokens_np, scheduler_output
+                ),
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 allow_microbatching=self._allow_microbatching(
                     num_reqs, num_scheduled_tokens_np
