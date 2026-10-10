@@ -19,11 +19,6 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    has_non_text_content,
-)
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaMessage,
@@ -44,6 +39,11 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    has_non_text_content,
+)
 from vllm.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,
