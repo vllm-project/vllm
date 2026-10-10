@@ -48,7 +48,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.reqs_to_recv.items():
+        for req_id, meta in metadata.reqs_to_recv_by_priority():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )

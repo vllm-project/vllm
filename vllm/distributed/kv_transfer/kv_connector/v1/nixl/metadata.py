@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -261,12 +262,19 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Copied from Request.priority. Lower number = higher priority (same
+    # convention as the scheduler). Default 0 keeps existing behavior.
+    priority: int = 0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
+        # Distinct priorities added to reqs_to_recv / reqs_to_save, so workers
+        # can skip sorting when they all match (the default).
+        self._recv_priorities: set[int] = set()
+        self._save_priorities: set[int] = set()
         self.reqs_to_send: dict[ReqId, float] = {}
         # The scheduler process's time.perf_counter() when this metadata was
         # built. reqs_to_send deadlines are stamped with the scheduler's
@@ -291,6 +299,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        priority: int = 0,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -302,6 +311,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
             awaiting_kvs=awaiting_kvs,
+            priority=priority,
         )
 
     def add_new_req_to_save(
@@ -309,10 +319,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        priority: int = 0,
     ):
         self.reqs_to_save[request_id] = self._add_new_req(
-            local_block_ids, kv_transfer_params
+            local_block_ids, kv_transfer_params, priority=priority
         )
+        self._save_priorities.add(priority)
 
     def add_new_req_to_recv(
         self,
@@ -321,12 +333,14 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        priority: int = 0,
     ):
         req = self._add_new_req(
             local_block_ids,
             kv_transfer_params,
             local_num_computed_blocks,
             awaiting_kvs,
+            priority=priority,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
@@ -338,3 +352,22 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
         )
         self.reqs_to_recv[request_id] = req
+        self._recv_priorities.add(priority)
+
+    def reqs_to_recv_by_priority(self) -> Iterable[tuple[ReqId, ReqMeta]]:
+        """``reqs_to_recv`` ordered by ``Request.priority`` (lower first)."""
+        return self._order_by_priority(self.reqs_to_recv, self._recv_priorities)
+
+    def reqs_to_save_by_priority(self) -> Iterable[tuple[ReqId, ReqMeta]]:
+        """``reqs_to_save`` ordered by ``Request.priority`` (lower first)."""
+        return self._order_by_priority(self.reqs_to_save, self._save_priorities)
+
+    @staticmethod
+    def _order_by_priority(
+        reqs: dict[ReqId, ReqMeta],
+        priorities: set[int],
+    ) -> Iterable[tuple[ReqId, ReqMeta]]:
+        # With a single distinct priority, insertion order is already correct.
+        if len(priorities) <= 1:
+            return reqs.items()
+        return sorted(reqs.items(), key=lambda item: item[1].priority)
