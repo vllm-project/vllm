@@ -189,6 +189,14 @@ class FusedMoEPrepareAndFinalize(ABC):
     * FusedMoEPrepareAndFinalizeMonolithic - the operates on router_logits
     """
 
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ) -> None:
+        self.moe_config = moe_config
+        self.quant_config = quant_config
+
     def post_init_setup(self, fused_experts: "FusedMoEExperts"):
         """Initialize FusedMoEPrepareAndFinalizeModular settings that depend on
         FusedMoEExpertsModular experts object.

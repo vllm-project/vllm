@@ -13,8 +13,15 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
+from vllm.model_executor.layers.fused_moe.config import (
+    FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEQuantConfig,
+)
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
+
+from .utils import make_test_moe_config
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -157,11 +164,21 @@ def make_deepep_ht_a2a(
         low_latency_mode=low_latency_mode,
         num_qps_per_rank=num_qps_per_rank,
     )
+    num_experts = ht_args.num_local_experts * pgi.world_size
     return DeepEPHTPrepareAndFinalize(
+        make_test_moe_config(
+            ep_rank=pgi.rank,
+            ep_size=pgi.world_size,
+            device=pgi.device,
+            num_experts=num_experts,
+            num_local_experts=ht_args.num_local_experts,
+            hidden_size=1,
+            max_num_tokens=1,
+            dp_size=dp_size,
+        ),
+        FUSED_MOE_UNQUANTIZED_CONFIG,
         buffer=buffer,
         num_dispatchers=pgi.world_size,
-        dp_size=dp_size,
-        rank_expert_offset=pgi.rank * ht_args.num_local_experts,
     )
 
 
@@ -188,12 +205,29 @@ def make_deepep_ll_a2a(
         low_latency_mode=True,
         num_qps_per_rank=deepep_ll_args.num_experts // pgi.world_size,
     )
+    quant_config = (
+        FusedMoEQuantConfig.make(
+            current_platform.fp8_dtype(),
+            block_shape=[128, 128],
+        )
+        if deepep_ll_args.use_fp8_dispatch
+        else FUSED_MOE_UNQUANTIZED_CONFIG
+    )
 
     return DeepEPLLPrepareAndFinalize(
+        make_test_moe_config(
+            ep_rank=pgi.rank,
+            ep_size=pgi.world_size,
+            device=pgi.device,
+            num_experts=deepep_ll_args.num_experts,
+            num_local_experts=deepep_ll_args.num_experts // pgi.world_size,
+            hidden_size=deepep_ll_args.hidden_size,
+            max_num_tokens=deepep_ll_args.max_tokens_per_rank,
+            all2all_backend="deepep_low_latency",
+        ),
+        quant_config,
         buffer=buffer,
         num_dispatchers=pgi.world_size,
-        max_tokens_per_rank=deepep_ll_args.max_tokens_per_rank,
-        use_fp8_dispatch=deepep_ll_args.use_fp8_dispatch,
     )
 
 
@@ -256,13 +290,29 @@ def make_deepep_v2_a2a(
         allow_hybrid_mode=False,
         explicitly_destroy=True,
     )
+    quant_config = (
+        FusedMoEQuantConfig.make(
+            current_platform.fp8_dtype(),
+            block_shape=[128, 128],
+        )
+        if v2_args.use_fp8_dispatch
+        else FUSED_MOE_UNQUANTIZED_CONFIG
+    )
     return DeepEPV2PrepareAndFinalize(
+        make_test_moe_config(
+            ep_rank=pgi.rank,
+            ep_size=pgi.world_size,
+            device=pgi.device,
+            num_experts=v2_args.num_experts,
+            num_local_experts=v2_args.num_local_experts,
+            hidden_size=v2_args.hidden_size,
+            max_num_tokens=v2_args.max_tokens_per_rank,
+            dp_size=dp_size,
+            experts_per_token=v2_args.num_topk,
+            all2all_backend="deepep_v2",
+        ),
+        quant_config,
         buffer=buffer,
         num_dispatchers=pgi.world_size,
-        dp_size=dp_size,
-        rank_expert_offset=pgi.rank * v2_args.num_local_experts,
-        num_experts=v2_args.num_experts,
-        num_topk=v2_args.num_topk,
-        use_fp8_dispatch=v2_args.use_fp8_dispatch,
         use_cudagraph=use_cudagraph,
     )

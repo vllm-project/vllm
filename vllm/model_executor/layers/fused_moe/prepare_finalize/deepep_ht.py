@@ -6,7 +6,10 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -47,16 +50,16 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         buffer: deep_ep.Buffer,
         num_dispatchers: int,
-        dp_size: int,
-        rank_expert_offset: int,
     ):
-        super().__init__()
+        super().__init__(moe_config, quant_config)
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
-        self.dp_size = dp_size
-        self.rank_expert_offset = rank_expert_offset
+        self.dp_size = moe_config.dp_size
+        self.rank_expert_offset = moe_config.ep_rank * moe_config.num_local_experts
         self.async_prepare = True
         self.sync_dbo_comm = current_platform.is_rocm()
 

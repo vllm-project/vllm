@@ -3,7 +3,10 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -38,6 +41,13 @@ def _quantize_input(
 
 
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+
     def supports_deferred_moe_finalize(self) -> bool:
         # finalize() here is the top-k weight-and-reduce and nothing else,
         # which is exactly the work a deferring consumer takes over.
@@ -103,6 +113,13 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
 
 
 class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+
     def supports_deferred_moe_finalize(self) -> bool:
         return True
 
@@ -141,9 +158,11 @@ class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolit
 
 def make_moe_prepare_and_finalize_no_dp_ep(
     use_monolithic: bool,
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
 ) -> MoEPrepareAndFinalizeNoDPEPModular | MoEPrepareAndFinalizeNoDPEPMonolithic:
     return (
-        MoEPrepareAndFinalizeNoDPEPMonolithic()
+        MoEPrepareAndFinalizeNoDPEPMonolithic(moe_config, quant_config)
         if use_monolithic
-        else MoEPrepareAndFinalizeNoDPEPModular()
+        else MoEPrepareAndFinalizeNoDPEPModular(moe_config, quant_config)
     )

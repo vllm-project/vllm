@@ -4,7 +4,10 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNaiveBatched,
@@ -23,15 +26,14 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
-        max_num_tokens: int,
-        num_local_experts: int,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         num_dispatchers: int,
-        rank: int,
     ):
-        super().__init__()
-        self.max_num_tokens = max_num_tokens
-        self.num_local_experts = num_local_experts
-        self.rank = rank
+        super().__init__(moe_config, quant_config)
+        self.max_num_tokens = moe_config.max_num_tokens
+        self.num_local_experts = moe_config.num_local_experts
+        self.rank = moe_config.ep_rank
         self.num_dispatchers_ = num_dispatchers
 
     @property

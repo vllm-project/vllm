@@ -8,6 +8,10 @@ from types import SimpleNamespace
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
+
+from .utils import make_dummy_moe_config
+
 
 def _describe(tensor):
     if tensor is None:
@@ -58,18 +62,16 @@ def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
     mori_module = _import_mori_prepare_finalize(monkeypatch)
     mori_op = _FakeMoriOp()
     adapter = mori_module.MoriPrepareAndFinalize(
+        make_dummy_moe_config(max_num_tokens=16),
+        FUSED_MOE_UNQUANTIZED_CONFIG,
         mori_op=mori_op,
-        max_tokens_per_rank=16,
         num_dispatchers=1,
     )
 
     hidden_states = torch.randn(2, 4)
     router_topk_ids = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
     topk_weights = torch.ones(2, 2)
-    quant_config = SimpleNamespace(
-        is_block_quantized=False,
-        is_per_act_token=False,
-    )
+    quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
     (
         dispatch_a1,
