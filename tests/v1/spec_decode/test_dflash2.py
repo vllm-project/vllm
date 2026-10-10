@@ -106,6 +106,22 @@ def test_draft_quant_exclusions_include_global_layer_indices():
     assert "lilicorr.layers.88.mlp.0" not in quant_config.exclude_modules
 
 
+def test_draft_quant_exclusions_alias_fp8_ignored_layers():
+    """fp8 keeps exclusions in `ignored_layers`; they need the same global
+    aliases or a draft built above the target's layers never matches (#61003)."""
+    quant_config = SimpleNamespace(
+        ignored_layers=[
+            "layers.0.attention_conv.kernel_projection",
+            "layers.64.already_global",
+        ]
+    )
+
+    _add_global_draft_layer_exclusions(quant_config, 64, 5)
+
+    assert "layers.64.attention_conv.kernel_projection" in quant_config.ignored_layers
+    assert quant_config.ignored_layers.count("layers.64.already_global") == 1
+
+
 def test_selector_edges_match_sequential_reference():
     torch.manual_seed(1)
     batch, steps, top_k, rank = 2, 4, 3, 5

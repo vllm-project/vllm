@@ -67,9 +67,6 @@ def _add_global_draft_layer_exclusions(
     """Add runtime layer aliases for checkpoint-local quant exclusions."""
     if quant_config is None or start_layer_id == 0:
         return
-    exclusions = getattr(quant_config, "exclude_modules", None)
-    if not isinstance(exclusions, list):
-        return
 
     def offset_local_layer(match: re.Match[str]) -> str:
         layer_idx = int(match.group(1))
@@ -77,10 +74,17 @@ def _add_global_draft_layer_exclusions(
             return match.group(0)
         return f"layers.{layer_idx + start_layer_id}"
 
-    for exclusion in tuple(exclusions):
-        global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
-        if global_exclusion != exclusion and global_exclusion not in exclusions:
-            exclusions.append(global_exclusion)
+    # Each quant family keeps its own exclusion list (compressed-tensors-style
+    # `exclude_modules`, fp8's `ignored_layers`, ...); alias all of them, or the
+    # global draft layer indices never match the checkpoint-local names.
+    for attr in ("exclude_modules", "ignored_layers"):
+        exclusions = getattr(quant_config, attr, None)
+        if not isinstance(exclusions, list):
+            continue
+        for exclusion in tuple(exclusions):
+            global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
+            if global_exclusion != exclusion and global_exclusion not in exclusions:
+                exclusions.append(global_exclusion)
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
