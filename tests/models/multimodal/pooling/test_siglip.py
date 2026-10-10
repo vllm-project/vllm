@@ -7,6 +7,8 @@ import pytest
 import torch
 from transformers import SiglipModel
 
+from vllm.model_executor.models.siglip import SiglipEmbeddingModel
+
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_embeddings_close
 
@@ -28,6 +30,118 @@ MODELS = [
     # Different image embedding dim than text_config.hidden_size
     "google/siglip2-giant-opt-patch16-384",
 ]
+
+
+def _reference_flip_sequences_by_position_ids(
+    features: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> torch.Tensor:
+    if len(features) <= 1:
+        return features
+
+    boundary_mask = position_ids[1:] <= position_ids[:-1]
+    boundary_mid = torch.where(boundary_mask)[0] + 1
+    boundary_indices = torch.cat(
+        [
+            torch.zeros(1, dtype=boundary_mid.dtype, device=features.device),
+            boundary_mid,
+            torch.full(
+                (1,),
+                len(features),
+                dtype=boundary_mid.dtype,
+                device=features.device,
+            ),
+        ]
+    )
+
+    lengths = boundary_indices[1:] - boundary_indices[:-1]
+    starts = boundary_indices[:-1]
+    ends = boundary_indices[1:]
+    sequence_ids = torch.arange(
+        len(lengths), dtype=boundary_mid.dtype, device=features.device
+    ).repeat_interleave(lengths)
+    current_positions = torch.arange(
+        len(features), dtype=boundary_mid.dtype, device=features.device
+    )
+    flip_indices = starts[sequence_ids] + ends[sequence_ids] - (1 + current_positions)
+    return features[flip_indices]
+
+
+def _flip_sequences_by_position_ids(
+    features: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> torch.Tensor:
+    return SiglipEmbeddingModel._flip_sequences_by_position_ids(
+        None, features, position_ids
+    )
+
+
+@pytest.mark.parametrize(
+    "position_ids",
+    [
+        [],
+        [0],
+        [0, 1, 2, 3],
+        [0, 1, 0, 1, 2],
+        [3, 2, 1, 0, 2, 1, 0],
+        [0, 0, 0],
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_flip_sequences_by_position_ids_matches_reference(
+    position_ids: list[int],
+) -> None:
+    position_ids_tensor = torch.tensor(position_ids, dtype=torch.long)
+    features = torch.arange(len(position_ids) * 3, dtype=torch.float32).reshape(
+        len(position_ids), 3
+    )
+
+    actual = _flip_sequences_by_position_ids(features, position_ids_tensor)
+    expected = _reference_flip_sequences_by_position_ids(features, position_ids_tensor)
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skip_global_cleanup
+def test_flip_sequences_by_position_ids_matches_reference_randomized() -> None:
+    generator = torch.Generator().manual_seed(0)
+
+    for _ in range(100):
+        remaining_tokens = 64
+        sequence_lengths = []
+        while remaining_tokens:
+            sequence_length = int(
+                torch.randint(
+                    1,
+                    min(remaining_tokens, 8) + 1,
+                    (1,),
+                    generator=generator,
+                )
+            )
+            sequence_lengths.append(sequence_length)
+            remaining_tokens -= sequence_length
+
+        position_ids = torch.cat([torch.arange(length) for length in sequence_lengths])
+        features = torch.randn(position_ids.numel(), 5, generator=generator)
+
+        actual = _flip_sequences_by_position_ids(features, position_ids)
+        expected = _reference_flip_sequences_by_position_ids(features, position_ids)
+
+        torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(not hasattr(torch, "compile"), reason="requires torch.compile")
+@pytest.mark.skip_global_cleanup
+def test_flip_sequences_by_position_ids_supports_torch_compile() -> None:
+    position_ids = torch.tensor([0, 1, 2, 0, 1, 0], dtype=torch.long)
+    features = torch.randn(position_ids.numel(), 4)
+
+    compiled_flip = torch.compile(_flip_sequences_by_position_ids, fullgraph=True)
+
+    actual = compiled_flip(features, position_ids)
+    expected = _reference_flip_sequences_by_position_ids(features, position_ids)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def _run_test(
