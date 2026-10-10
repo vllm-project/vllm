@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""vLLM side of the Kimi-K3 mono decode (``VLLM_ROCM_MONO_DECODE=1``, MI355X, TP8).
+"""vLLM side of the Kimi-K3 mono decode (``VLLM_ROCM_MONO_DECODE=1``, TP8,
+MI355X or MI300X / MI325X).
 
 A spec-verify step runs each decoder layer as two persistent launches:
 
 - K1 (``kda_pre``, KDA layers): AttnRes -> in_proj -> f_b -> conv -> the KDA
   recurrence -> the gated norm, writing o_proj's input.
 - K2 (``k2``, every MoE layer): o_proj + its TP all-reduce + the MLP AttnRes +
-  the latent MoE (router, top-16, MXFP4 experts, shared experts, the latent
-  all-reduce, up_proj) + the final all-reduce. An MLA layer runs vLLM's
+  the latent MoE (router, top-16, the routed experts, shared experts, the
+  latent all-reduce, up_proj) + the final all-reduce. An MLA layer runs vLLM's
   attention up to o_proj's input, then K2.
+
+The routed experts are MXFP4 on gfx950; gfx942 needs vLLM's packed-int4
+requant of them (``--quantization-config.moe.weight int4_per_group_32``) and
+otherwise keeps the original MoE path.
 
 Any other batch (prefill, mixed, more than ``MAX_TOKENS`` rows) takes the
 original path; both paths take and return the same tensors.
@@ -43,10 +48,27 @@ logger = init_logger(__name__)
 def enabled() -> bool:
     if not envs.VLLM_ROCM_MONO_DECODE or not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-    if not on_gfx950():
-        logger.warning_once("VLLM_ROCM_MONO_DECODE needs gfx950 (MI355X); ignored")
+    if not (on_gfx950() or on_gfx942()):
+        logger.warning_once(
+            "VLLM_ROCM_MONO_DECODE needs gfx950 (MI355X) or gfx942 "
+            "(MI300X / MI325X); ignored"
+        )
+        return False
+    from vllm.models.kimi_k3.amd.mono.common.plan import BLOCKS
+
+    cus = torch.cuda.get_device_properties(
+        torch.cuda.current_device()
+    ).multi_processor_count
+    if cus < BLOCKS:
+        # every CTA spin-waits on the others: all of them must be resident
+        # (a partitioned GPU, e.g. CPX, has too few CUs)
+        logger.warning_once(
+            "VLLM_ROCM_MONO_DECODE needs %d CUs, the GPU has %d; ignored",
+            BLOCKS,
+            cus,
+        )
         return False
     from vllm.config import get_current_vllm_config
 
@@ -66,6 +88,12 @@ def _routed_experts(m):
     return getattr(m.experts, "routed_experts", m.experts)
 
 
+def _int4_experts(m) -> bool:
+    """gfx942: the routed experts get vLLM's packed-int4 requant."""
+    method = getattr(_routed_experts(m), "quant_method", None)
+    return bool(getattr(method, "is_k3_situ_int4_gfx942", False))
+
+
 class MonoMoe:
     """Bound to one KimiMoE (TP8, latent MoE, shared experts)."""
 
@@ -78,8 +106,10 @@ class MonoMoe:
             and moe_mod.use_latent_moe
             and moe_mod.shared_experts is not None
             and moe_mod.routed_scaling_factor == 1.0
+            and (not moe.GFX942 or _int4_experts(moe_mod))
         )
         self._w_up: torch.Tensor | None = None
+        self._experts_ok: bool | None = None
         if not self.ok:
             logger.info_once("K3 mono: MoE layer unsupported, original path")
             return
@@ -100,12 +130,30 @@ class MonoMoe:
             self._w_up = w
         return self._w_up
 
+    def experts_ok(self) -> bool:
+        """The routed experts' processed weights are in the kernel's layout
+        (checked at the first step, after weight loading)."""
+        if self._experts_ok is None:
+            from vllm.models.kimi_k3.amd.mono.stages import moe
+
+            ex = _routed_experts(self.m)
+            self._experts_ok = moe.experts_ok(
+                ex.w13_weight, ex.w13_weight_scale, ex.w2_weight, ex.w2_weight_scale
+            )
+            if not self._experts_ok:
+                logger.warning_once(
+                    "K3 mono: routed experts not in the kernel's layout, "
+                    "original MoE path"
+                )
+        return self._experts_ok
+
     def eligible(self, x: torch.Tensor) -> bool:
         return (
             self.ok
             and x.size(0) <= MAX_TOKENS
             and x.dtype == torch.bfloat16
             and x.is_contiguous()
+            and self.experts_ok()
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -325,7 +373,11 @@ class MonoK2:
         self.moe = layer.mlp._mono_moe
 
     def eligible(self, core: torch.Tensor) -> bool:
-        return core.size(0) <= MAX_TOKENS and core.dtype == torch.bfloat16
+        return (
+            core.size(0) <= MAX_TOKENS
+            and core.dtype == torch.bfloat16
+            and self.moe.experts_ok()
+        )
 
     def forward(self, core, prefix_sum, block_residual, reset=False):
         """``reset`` (a block-write layer): ``prefix_sum`` is the new prefix's

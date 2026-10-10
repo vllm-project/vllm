@@ -35,10 +35,11 @@ from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T, as_ir_value
 
-from vllm.models.kimi_k3.amd.mono.common.plan import THREADS, WAVES
+from vllm.models.kimi_k3.amd.mono.common.plan import GFX942, THREADS, WAVES
 
-# gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16. SC1 alone is device
-# scope (past the per-XCD caches); SC0 | SC1 is system scope (peers over XGMI).
+# gfx94x / gfx95x cache policy bits (LLVM CPol): SC0 = 1, SC1 = 16. SC1 alone is
+# device scope (past the per-XCD caches); SC0 | SC1 is system scope (peers over
+# XGMI).
 CM_DEV = 16
 
 
@@ -178,8 +179,10 @@ def xshfl(v, off):
 
 
 def xred(v, off, op):
-    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap."""
-    if off < 16:
+    """op(v, lane ^ off) for a symmetric op; 32 / 16 take both halves of one swap
+    (gfx942, no permlane swap: the partner by ``shuffle_xor``, the same value
+    as op is symmetric)."""
+    if off < 16 or GFX942:
         return op(v, xshfl(v, off))
     is_f = isinstance(v, fx.Float32)
     x = v.bitcast(fx.Int32) if is_f else fx.Int32(v)
@@ -240,8 +243,8 @@ def row_shr(v, lane, k):
 
 def _xpartner(v, off, lane):
     """Lane ``lane ^ off``'s v: DPP within a row, v_permlane*_swap across rows
-    (``xshfl`` takes ``shuffle_xor`` there)."""
-    if off < 16:
+    (``xshfl`` takes ``shuffle_xor`` there, as gfx942 does)."""
+    if off < 16 or GFX942:
         return xshfl(v, off)
     a, b = permlane_swap(off, v, v)
     return ((lane & off) != 0).select(a, b)
@@ -341,7 +344,26 @@ def rows_to_lds(tid, src, rows, row_words, dst, dst_row):
     )  # fmt: skip
 
 
+def _bf16x4(v8, half):
+    """Elements 4 half .. 4 half + 3 of a v8bf16, as the v4i16 the gfx942 MFMA
+    takes."""
+    w = v8.bitcast(fx.Int32)
+    return fx.Vector.from_elements(
+        [w[2 * half], w[2 * half + 1]], fx.Int32
+    ).bitcast(fx.Int16)
+
+
 def mfma_bf16(a, b, c):
+    """16x16x32 bf16 MFMA of v8bf16 operands; gfx942 (no K=32 form) runs it as
+    two 16x16x16 on the operands' halves into the same accumulator."""
+    if GFX942:
+        for h in range(2):
+            c = fx.Vector(
+                rocdl.mfma_f32_16x16x16bf16_1k(
+                    T.vec(4, T.f32), [_bf16x4(a, h), _bf16x4(b, h), c, 0, 0, 0]
+                )
+            )
+        return c
     return fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
 
 

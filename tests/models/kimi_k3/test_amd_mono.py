@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Numerics of the Kimi-K3 mono decode kernels (``VLLM_ROCM_MONO_DECODE``) on MI355X
-against the ops vLLM runs for the same spec-verify step, random weights in the
-checkpoint's formats at TP8 shapes.
+"""Numerics of the Kimi-K3 mono decode kernels (``VLLM_ROCM_MONO_DECODE``) on
+MI355X and MI300X / MI325X against the ops vLLM runs for the same spec-verify
+step, random weights in the formats vLLM holds at TP8 shapes (the routed
+experts MXFP4 on gfx950, vLLM's packed-int4 requant on gfx942).
 
 - K1 (one GPU): AttnRes -> in_proj -> f_b -> conv -> KDA recurrence -> gated
   norm, the conv / SSM state updates and a block-write layer's block store.
@@ -29,16 +30,17 @@ bf = torch.bfloat16
 COS_MIN = 0.9999
 
 
-def _on_gfx950() -> bool:
+def _on_arch(name: str) -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms import rocm
 
-    return on_gfx950()
+    return getattr(rocm, f"on_{name}")()
 
 
 pytestmark = pytest.mark.skipif(
-    not _on_gfx950(), reason="the K3 mono kernels need gfx950 (MI355X)"
+    not (_on_arch("gfx950") or _on_arch("gfx942")),
+    reason="the K3 mono kernels need gfx950 (MI355X) or gfx942 (MI300X / MI325X)",
 )
 
 
@@ -176,10 +178,11 @@ def _kda_reference(w, nb: int, S: int, write_idx: int):
 @pytest.mark.parametrize("dim_first", [True, False])
 @pytest.mark.parametrize("nacc", [1, 3])
 @pytest.mark.parametrize("write", [False, True])
-def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
+@pytest.mark.parametrize("S", [8, 3])
+def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool, S: int) -> None:
     """K1 against attn_res -> in_proj -> f_b -> causal_conv1d_update ->
     fused_recurrent_kda -> FusedRMSNormGated on one spec-verify step (one
-    request, 8 tokens), including the state each step leaves behind."""
+    request, S tokens), including the state each step leaves behind."""
     from vllm.models.kimi_k3.amd.mono.attention.kda import (
         PROJ,
         KdaPreBuild,
@@ -187,7 +190,7 @@ def test_k1_matches_vllm_ops(dim_first: bool, nacc: int, write: bool) -> None:
         scratch_bytes,
     )
 
-    S, nb = 8, 4
+    nb = 4
     # a block-write layer appends block nb (block_write_idx == prev_valid_blocks)
     write_idx = nb if write else -1
     w = _kda_inputs(nb, nacc, dim_first, S)
@@ -259,8 +262,9 @@ def _all_reduce_fp32(t: torch.Tensor) -> torch.Tensor:
 
 def _moe_reference(x, mw, rank: int):
     """KimiMoE's decode path on ``x``: sigmoid router + bias top-16, the latent
-    down, aiter's MXFP4 experts, the latent all-reduce + RMSNorm, this rank's
-    up_proj rows into the shared experts' output, the final all-reduce."""
+    down, aiter's experts (MXFP4, or a16wi4 for i4x2 weights), the latent
+    all-reduce + RMSNorm, this rank's up_proj rows into the shared experts'
+    output, the final all-reduce."""
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
@@ -299,6 +303,34 @@ def _moe_reference(x, mw, rank: int):
     return _all_reduce_fp32(shared)
 
 
+def _int4_experts(g, e: int, n: int, k: int, scale: float):
+    """Random experts through vLLM's gfx942 requant (``mxfp4.py``):
+    per_1x32_i4_quant, shuffle_weight(16, 16), pack_int8_to_packed_int4 and
+    shuffle_scale_for_int4, a chunk of experts at a time."""
+    from aiter import dtypes
+    from aiter.ops.quant import per_1x32_i4_quant
+    from aiter.ops.shuffle import (
+        pack_int8_to_packed_int4,
+        shuffle_scale_for_int4,
+        shuffle_weight,
+    )
+
+    chunk = 64
+    w = torch.empty(e, n, k // 2, dtype=torch.uint8, device=g.device)
+    s = torch.empty(e * n * (k // 32), dtype=bf, device=g.device)
+    for lo in range(0, e, chunk):
+        q, sc = per_1x32_i4_quant(_randn(g, chunk, n, k, scale=scale))
+        q = q.view(dtypes.i4x2).view(chunk, n, k)
+        w[lo : lo + chunk] = pack_int8_to_packed_int4(
+            shuffle_weight(q.view(dtypes.i8), (16, 16))
+        ).view(chunk, n, k // 2)
+        sc = shuffle_scale_for_int4(sc, group_size=32).view(-1)
+        s[lo * n * (k // 32) : (lo + chunk) * n * (k // 32)] = sc
+    w = w.view(dtypes.i4x2)
+    w.is_shuffled = True
+    return w, s
+
+
 def _moe_weights(rank: int, device):
     from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -313,7 +345,7 @@ def _moe_weights(rank: int, device):
 
     fp4, e8 = torch.float4_e2m1fn_x2, torch.float8_e8m0fnu
     w_up = _randn(gc, HIDDEN, LAT, scale=0.02)
-    return {
+    mw = {
         "w_gate": _randn(gc, E, HIDDEN, scale=0.02),
         "bias": _randn(gc, E, scale=0.02, dtype=torch.float32),
         "w_ld": _randn(gc, LAT, HIDDEN, scale=0.02),
@@ -321,21 +353,26 @@ def _moe_weights(rank: int, device):
         "w_up_shard": w_up[rank * UP_N : (rank + 1) * UP_N].contiguous(),
         "w_sgu": _randn(gr, 2 * SI, HIDDEN, scale=0.02),
         "w_sd": _randn(gr, HIDDEN, SI, scale=0.03),
-        "w13": rocm_aiter_ops.shuffle_weight_a16w4(
-            u8(gr, E, 2 * RI, LAT // 2).view(fp4), 16, False
-        ),
-        "w2": rocm_aiter_ops.shuffle_weight_a16w4(
-            u8(gr, E, LAT, RI // 2).view(fp4), 16, False
-        ),
-        "w13s": rocm_aiter_ops.shuffle_scale_a16w4(
-            u8(gr, E, 2 * RI, LAT // 32, lo=118, hi=123).view(e8).view(-1, LAT // 32),
-            E,
-            False,
-        ),
-        "w2s": e8m0_shuffle(
-            u8(gr, E, LAT, RI // 32, lo=118, hi=123).view(e8).view(-1, RI // 32)
-        ),
     }
+    if _on_arch("gfx942"):
+        mw["w13"], mw["w13s"] = _int4_experts(gr, E, 2 * RI, LAT, 0.03)
+        mw["w2"], mw["w2s"] = _int4_experts(gr, E, LAT, RI, 0.05)
+        return mw
+    mw["w13"] = rocm_aiter_ops.shuffle_weight_a16w4(
+        u8(gr, E, 2 * RI, LAT // 2).view(fp4), 16, False
+    )
+    mw["w2"] = rocm_aiter_ops.shuffle_weight_a16w4(
+        u8(gr, E, LAT, RI // 2).view(fp4), 16, False
+    )
+    mw["w13s"] = rocm_aiter_ops.shuffle_scale_a16w4(
+        u8(gr, E, 2 * RI, LAT // 32, lo=118, hi=123).view(e8).view(-1, LAT // 32),
+        E,
+        False,
+    )
+    mw["w2s"] = e8m0_shuffle(
+        u8(gr, E, LAT, RI // 32, lo=118, hi=123).view(e8).view(-1, RI // 32)
+    )
+    return mw
 
 
 def _moe_args(mw):
@@ -382,6 +419,7 @@ def _k2_worker(
     peers.bytes.zero_()
     epoch = torch.zeros(1, dtype=torch.int32, device=device)
     mw = _moe_weights(rank, device)
+    assert moe.experts_ok(mw["w13"], mw["w13s"], mw["w2"], mw["w2s"])
     gc = torch.Generator(device=device).manual_seed(11)
     gr = torch.Generator(device=device).manual_seed(200 + rank)
     core = _randn(gr, S, PROJ)
@@ -443,27 +481,30 @@ def _k2_worker(
         dist.all_gather(outs, out)
         assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
 
-    # the standalone MoE launch (a layer K2 does not serve)
-    epoch.add_(1)
-    x = _randn(gc, S, HIDDEN)
-    out = torch.empty_like(x)
-    queue = torch.zeros(moe.QUEUE_BYTES // 4, dtype=torch.int32, device=device)
-    moe.moe(
-        moe.MoeBuild(tokens=S),
-        x=x,
-        out=out,
-        scratch=torch.zeros(
-            moe.scratch_bytes(moe.MoeBuild(tokens=S)), dtype=torch.uint8, device=device
-        ),
-        queue=queue,
-        peers=peers.addresses,
-        rank=rank,
-        epoch=epoch,
-        layer=128 + 3,
-        **_moe_args(mw),
-    )
-    torch.accelerator.synchronize()
-    assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN
+    # the standalone MoE launch (a layer K2 does not serve); fewer rows take
+    # other LDS splits of the experts' stages on gfx942
+    for s in (S, 5, 1):
+        epoch.add_(1)
+        x = _randn(gc, s, HIDDEN)
+        out = torch.empty_like(x)
+        queue = torch.zeros(moe.QUEUE_BYTES // 4, dtype=torch.int32, device=device)
+        key = moe.MoeBuild(tokens=s)
+        moe.moe(
+            key,
+            x=x,
+            out=out,
+            scratch=torch.zeros(
+                moe.scratch_bytes(key), dtype=torch.uint8, device=device
+            ),
+            queue=queue,
+            peers=peers.addresses,
+            rank=rank,
+            epoch=epoch,
+            layer=128 + 3,
+            **_moe_args(mw),
+        )
+        torch.accelerator.synchronize()
+        assert _cos(out, _moe_reference(x, mw, rank)) > COS_MIN, s
     peers.close()
 
 

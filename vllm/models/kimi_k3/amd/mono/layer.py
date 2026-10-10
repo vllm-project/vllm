@@ -43,9 +43,17 @@ from vllm.models.kimi_k3.amd.mono.common.debug import (
     stamp_begin,
     stamp_flush,
 )
-from vllm.models.kimi_k3.amd.mono.common.ops import ld_i32, load_ptr64, traced, uniform
+from vllm.models.kimi_k3.amd.mono.common.ops import (
+    ld_i32,
+    lds_bytes,
+    load_ptr64,
+    traced,
+    uniform,
+)
 from vllm.models.kimi_k3.amd.mono.common.plan import (
     BLOCKS,
+    GFX942,
+    LDS_BYTES,
     THREADS,
     WAVES,
     KernelAbi,
@@ -54,7 +62,6 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
 )
 from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, shift, sreg
-from vllm.models.kimi_k3.amd.mono.stages import gemv as gemv
 from vllm.models.kimi_k3.amd.mono.stages import moe as k2b
 
 O0, O1 = NA, BLOCKS  # o_proj CTAs: every CTA past AttnRes's
@@ -175,35 +182,13 @@ def build(key: K2Build):
     lay = scratch_layout(key)
     play = peer_layout(s)
     half = peer_bytes(s) // 2
-
-    @fx.struct
-    class RouteLds:
-        route: fx.Array[fx.Int32, s * 2 * k2b.TOPK, 16]
-        flag: fx.Array[fx.Int32, k2b.E, 16]
-        expert: fx.Array[fx.Int32, k2b.MAX_U, 16]
-        kof: fx.Array[fx.Int32, k2b.MAX_U * 8, 16]
-        scan: fx.Array[fx.Int32, WAVES, 16]
-
-    @fx.struct
-    class EarlyLds:
-        xl: fx.Array[fx.Int32, s * (HIDDEN + gemv.LDS_PAD) // 2, 16]
+    # the early rows also hold o_proj's core rows
+    RouteLds, EarlyLds, UgLds, DownLds = k2b.lds_structs(s, (k2a.OK,))
 
     @fx.struct
     class AttnLds:
         vals: fx.Array[fx.Float32, s * ns * COLS, 16]
         dl: fx.Array[fx.Float32, s * COLS, 16]
-
-    @fx.struct
-    class UgLds:
-        latq: fx.Array[fx.Int32, s * k2b.LAT // 8, 16]
-        latsc: fx.Array[fx.Int32, s * k2b.LAT // 32, 16]
-        av: fx.Array[fx.Float32, THREADS, 16]
-
-    @fx.struct
-    class DownLds:
-        interq: fx.Array[fx.Int32, s * k2b.TOPK * 48, 16]
-        intsc: fx.Array[fx.Int32, s * k2b.TOPK * k2b.UG_GROUPS, 16]
-        contrib: fx.Array[fx.Float32, s * k2b.TOPK * k2b.ROWS, 16]
 
     @fx.union
     class StageLds:
@@ -217,6 +202,8 @@ def build(key: K2Build):
         red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
         tls: fx.Array[fx.Int64, TL_POINTS, 16]
 
+    used = lds_bytes(Smem) + lds_bytes(RouteLds) + lds_bytes(StageLds)
+    assert used <= LDS_BYTES, f"LDS {used} > {LDS_BYTES}"
     keyed = key_tuple(key, _SOURCES)
     name = (
         f"k3_mono_k2_s{s}_nb{key.nblocks}_x{int(key.reset)}_r{int(key.reduce)}"
@@ -305,12 +292,7 @@ def build(key: K2Build):
             "xl": el.xl.ptr,
             "vals": al.vals.ptr,
             "delta_lds": al.dl.ptr,
-            "latq": ul.latq.ptr,
-            "latsc": ul.latsc.ptr,
-            "av": ul.av.ptr,
-            "interq": dl.interq.ptr,
-            "intsc": dl.intsc.ptr,
-            "contrib": dl.contrib.ptr,
+            **k2b.lds_ptrs(ul, dl),
             "scan": rl.scan.ptr,
             "rt": {
                 "route": rl.route.ptr,
@@ -349,23 +331,10 @@ def build(key: K2Build):
                 "out": out,
             },
         }
-        for region in (
-            "part",
-            "wgt",
-            "msq",
-            "xrdy",
-            "sgu",
-            "h",
-            "rpart",
-            "lpart",
-            "route",
-            "inter",
-            "isc",
-            "lmsq",
-            "lnrdy",
-            "shrdy",
-        ):
+        for region in ["part", "wgt", "msq", "xrdy", *k2b.scratch_regions()]:
             c[region] = sreg(scratch, lay[region][0], region)
+        if const_expr(GFX942):
+            c["inter16"] = scratch + fx.Int64(lay["inter16"][0])
         on, tls = key.timeline, lds.tls.ptr
         stamp_begin(on, tls, tid, TL_POINTS)
         # ---- o_proj on every CTA past AttnRes's
@@ -411,30 +380,41 @@ def build(key: K2Build):
         if bid >= NA:
             stamp(on, tls, tid, 2)
         # ---- the routed experts
-        # the latent (ready ~10 us before the route) quantized first
-        k2b.load_latq(c)
+        # the latent (ready ~10 us before the route) quantized first (gfx942:
+        # its first K phase into LDS)
+        if const_expr(GFX942):
+            k2b.load_lat(c, 0)
+        else:
+            k2b.load_latq(c)
         stamp(on, tls, tid, 12)
         nu = k2b.load_route(c)
         stamp(on, tls, tid, 11)
-        total = nu * k2b.UG_GROUPS
-        last = total - 1
-        # reversed placement: the round's leftover tasks go to the high CTAs,
-        # whose early work ends first (the AttnRes / route CTAs start ug last)
-        task = BLOCKS - 1 - bid
-        ops = k2b.ug_loads(c, fx.min(task, last))
-        while task < total:
-            nxt = task + BLOCKS
-            ops_n = k2b.ug_loads(c, fx.min(nxt, last))
-            k2b.stage_ug(c, task, ops)
-            task = nxt
-            ops = ops_n
+        if const_expr(GFX942):
+            k2b.run_ug_i4(c, bid, nu)
+        else:
+            total = nu * k2b.UG_GROUPS
+            last = total - 1
+            # reversed placement: the round's leftover tasks go to the high CTAs,
+            # whose early work ends first (the AttnRes / route CTAs start ug last)
+            task = BLOCKS - 1 - bid
+            ops = k2b.ug_loads(c, fx.min(task, last))
+            while task < total:
+                nxt = task + BLOCKS
+                ops_n = k2b.ug_loads(c, fx.min(nxt, last))
+                k2b.stage_ug(c, task, ops)
+                task = nxt
+                ops = ops_n
         stamp(on, tls, tid, 3)
-        if bid < k2b.DOWN_TASKS:
-            dops = k2b.down_loads(c, bid, nu, fx.min(c["wave"], nu - 1))
-            k2b.load_inter(c)
-            stamp(on, tls, tid, 15)
-            k2b.stage_down(c, bid, nu, dops)
+        if const_expr(GFX942):
+            k2b.run_down_i4(c, bid, nu)
             stamp(on, tls, tid, 16)
+        else:
+            if bid < k2b.DOWN_TASKS:
+                dops = k2b.down_loads(c, bid, nu, fx.min(c["wave"], nu - 1))
+                k2b.load_inter(c)
+                stamp(on, tls, tid, 15)
+                k2b.stage_down(c, bid, nu, dops)
+                stamp(on, tls, tid, 16)
         k2b.run_sdown_rest(c, bid, w_sd)
         k2b.run_sdown(c, bid, w_sd)
         stamp(on, tls, tid, 4)

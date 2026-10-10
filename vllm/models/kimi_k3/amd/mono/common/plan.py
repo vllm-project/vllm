@@ -33,8 +33,15 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 
+from flydsl.runtime.device import get_rocm_arch
+
 _SCALARS = (int, float, bool, str, enum.Enum)
 _ROOT = Path(__file__).resolve().parents[1]
+
+# The compile target (FLYDSL_GPU_ARCH overrides the device's, as FlyDSL's own
+# target does): gfx950 (MI355X) or gfx942 (MI300X / MI325X).
+ARCH = get_rocm_arch()
+GFX942 = ARCH.startswith("gfx942")
 
 
 @functools.cache
@@ -56,7 +63,8 @@ def source_digest(*paths: str) -> str:
 
 def key_tuple(key, sources: str) -> tuple:
     """``key``'s (field name, value) pairs, every value a scalar, then
-    ("sources", ``sources``): the model's ``source_digest``."""
+    ("sources", ``sources``): the model's ``source_digest``, and ("arch",
+    ``ARCH``): FlyDSL's key leaves out the target, and the bodies differ by it."""
     out = []
     for f in fields(key):
         value = getattr(key, f.name)
@@ -67,6 +75,7 @@ def key_tuple(key, sources: str) -> tuple:
             )
         out.append((f.name, value))
     out.append(("sources", sources))
+    out.append(("arch", ARCH))
     return tuple(out)
 
 
@@ -82,15 +91,16 @@ def symbol_params(key) -> dict:
 
 # The execution model every mono kernel is written for.
 #
-# One CTA per CU of an MI355X, all of them co-resident -- a spin wait on another
-# CTA can only make progress if that CTA is running, so the runner refuses a GPU
-# with another CU count -- and THREADS threads each.
+# One CTA per CU of an MI355X (256 CUs; an MI300X / MI325X has 304, the rest
+# idle), all of them co-resident -- a spin wait on another CTA can only make
+# progress if that CTA is running, so the runner refuses a GPU with fewer CUs --
+# and THREADS threads each.
 #
 
 BLOCKS = 256
 THREADS = 512
 WAVES = THREADS // 64
-LDS_BYTES = 160 * 1024  # a CU's LDS: one CTA's whole
+LDS_BYTES = (64 if GFX942 else 160) * 1024  # a CU's LDS: one CTA's whole
 
 
 def first_task(bid, base):
