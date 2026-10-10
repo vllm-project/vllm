@@ -7,7 +7,9 @@ use std::time::Instant;
 use futures::StreamExt;
 
 use super::streaming::{StreamedResponseHandler, trim_bytes};
-use super::{CompletionChunk, RequestFuncInput, RequestFuncOutput, build_headers};
+use super::{
+    CompletionChunk, RequestFuncInput, RequestFuncOutput, build_headers, update_server_metrics,
+};
 use crate::error::Result;
 
 /// Backend for OpenAI-compatible Completions API (/v1/completions).
@@ -130,6 +132,8 @@ impl OpenAICompletionsBackend {
                                 Ok(d) => d,
                                 Err(_) => continue,
                             };
+
+                            update_server_metrics(&mut output, data.metrics.as_ref());
 
                             if !data.choices.is_empty() {
                                 let text = data.choices[0].text.as_deref().unwrap_or("");
