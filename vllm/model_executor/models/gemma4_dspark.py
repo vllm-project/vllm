@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.model_executor.layers.draft_vocab import DraftVocab
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -303,7 +304,8 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
             self.config.vocab_size,
             soft_cap=getattr(self.config, "final_logit_softcapping", None),
         )
-        self.draft_id_to_target_id = None
+        self.draft_vocab = DraftVocab(self.logits_processor, self.config.vocab_size)
+        self.draft_id_to_target_id = self.draft_vocab.draft_id_to_target_id
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked = [("gate_up_proj", "gate_proj", 0), ("gate_up_proj", "up_proj", 1)]

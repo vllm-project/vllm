@@ -19,6 +19,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.draft_vocab import DraftVocab
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -800,14 +801,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.config.draft_vocab_size != target_vocab_size:
-            self.draft_id_to_target_id = nn.Parameter(
-                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
-                requires_grad=False,
-            )
-        else:
-            self.draft_id_to_target_id = None
+        self.draft_vocab = DraftVocab(
+            self.logits_processor, vllm_config.model_config.get_vocab_size()
+        )
+        self.draft_id_to_target_id = self.draft_vocab.draft_id_to_target_id
 
     def embed_input_ids(
         self,
@@ -837,18 +834,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        if self.draft_id_to_target_id is None:
-            return logits
-
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
-        logits_new = logits.new_full(
-            (logits.shape[0], self.config.vocab_size),
-            float("-inf"),
-        )
-        logits_new[:, targets] = logits
-        return logits_new
+        return self.draft_vocab.compute_logits(self.lm_head, hidden_states)
 
     def precompute_and_store_context_kv(
         self,
