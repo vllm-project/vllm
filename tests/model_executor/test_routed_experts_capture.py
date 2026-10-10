@@ -582,10 +582,7 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
             use_ubatching=False,
             enable_elastic_ep=False,
         ),
-        compilation_config=SimpleNamespace(
-            mode=CompilationMode.NONE,
-            pass_config=SimpleNamespace(enable_sp=False),
-        ),
+        compilation_config=SimpleNamespace(mode=CompilationMode.NONE),
         cache_config=SimpleNamespace(
             kv_sharing_fast_prefill=False,
             mamba_cache_mode="none",
