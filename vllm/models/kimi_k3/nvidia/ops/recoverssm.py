@@ -13,6 +13,17 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
+def _reinterpret_u64_as_i64(value: int) -> int:
+    """Preserve a uint64 pointer bit pattern in a torch.int64 tensor.
+
+    XPU device pointers can exceed 2**63, which a signed int64 tensor cannot
+    hold. The kernels below recover the address with ``tl.pointer_type``, which
+    reinterprets the word rather than converting it, so the wrapped value
+    round-trips exactly.
+    """
+    return value if value < (1 << 63) else value - (1 << 64)
+
+
 @triton.jit
 def _kda_gate(
     raw_g,
@@ -854,7 +865,7 @@ class KDARecoverSSMCommitContext:
 
         def _base_addrs(tensors: Sequence[torch.Tensor]) -> torch.Tensor:
             return torch.tensor(
-                [tensor.data_ptr() for tensor in tensors],
+                [_reinterpret_u64_as_i64(tensor.data_ptr()) for tensor in tensors],
                 dtype=torch.int64,
                 device=device,
             )
