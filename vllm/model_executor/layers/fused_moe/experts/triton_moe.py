@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -17,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
+)
+from vllm.model_executor.layers.fused_moe.experts.small_bf16_silu import (
+    small_bf16_silu_experts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _prepare_expert_assignment,
@@ -60,6 +64,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+
+logger = init_logger(__name__)
 
 
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
@@ -258,6 +264,38 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        # Avoid alignment and fuse the W1/SiLU stage for this validated
+        # small BF16 shape on Hopper. Preserve native SiLU's BF16 round
+        # before multiplying by the up projection.
+        if (
+            current_platform.is_device_capability((9, 0))
+            and hidden_states.dtype == w1.dtype == w2.dtype == torch.bfloat16
+            and 1 <= hidden_states.shape[0] <= 2
+            and hidden_states.shape[1] == 1024
+            and tuple(w1.shape) == (32, 1024, 1024)
+            and tuple(w2.shape) == (32, 1024, 512)
+            and topk_ids.shape[1] == 8
+            and activation == MoEActivation.SILU
+            and expert_map is None
+            and not apply_router_weight_on_input
+            and self.quant_dtype is None
+            and self._lora_context is None
+            and self.quant_config.w1_bias is None
+            and self.quant_config.w2_bias is None
+            and self.activation_config.clamp_limit is None
+            and self.activation_config.alpha == 1.0
+            and self.activation_config.beta == 0.0
+            and all(
+                t.is_contiguous()
+                for t in (hidden_states, w1, w2, topk_ids, topk_weights)
+            )
+        ):
+            logger.info_once("Using small BF16 SiLU Triton expert path on Hopper.")
+            small_bf16_silu_experts(
+                hidden_states, w1, w2, topk_weights, topk_ids, output=output
+            )
+            return
+
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
