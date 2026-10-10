@@ -850,6 +850,7 @@ def unified_attention(
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    int4_key_bias=None,
     # Chunked attention: restrict attention to aligned blocks with lookback.
     chunk_lookback=-1,
     # Tensor-descriptor mode: use ``tl.make_tensor_descriptor`` for Q/K/V
@@ -899,6 +900,7 @@ def unified_attention(
             mm_prefix_range=mm_prefix_range,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            key_bias=int4_key_bias,
             seq_threshold_3D=seq_threshold_3D,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,

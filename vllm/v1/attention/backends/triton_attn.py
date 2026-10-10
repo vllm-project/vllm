@@ -654,6 +654,14 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
             q_descale = k_descale = v_descale = None
+            get_int4_key_bias = (
+                getattr(layer, "get_int4_kv_key_bias", None)
+                if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD
+                else None
+            )
+            int4_key_bias = (
+                get_int4_key_bias() if get_int4_key_bias is not None else None
+            )
         # FP8 per-tensor / auto path (original flow).
         else:
             kv_cache = kv_cache.transpose(1, 2)
@@ -681,6 +689,7 @@ class TritonAttentionImpl(AttentionImpl):
             v_descale = layer._v_scale.expand(descale_shape)
             k_scale_cache = None
             v_scale_cache = None
+            int4_key_bias = None
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -728,6 +737,7 @@ class TritonAttentionImpl(AttentionImpl):
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            int4_key_bias=int4_key_bias,
             chunk_lookback=self.chunk_lookback,
             use_td=self.use_td,
             mm_prefix_clamp_sliding_window=getattr(
