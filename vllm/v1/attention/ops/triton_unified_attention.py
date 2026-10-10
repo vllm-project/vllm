@@ -30,6 +30,8 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
 
+_TRITON_3D_MAX_Q = envs.VLLM_TRITON_3D_MAX_Q
+
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -640,6 +642,10 @@ def kernel_unified_attention(
                 acc,
                 mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
             )
+        # With several query tokens per program, a row can
+        # have every key of this segment masked (ends at M = 0, L = 0). Report
+        # the segment as absent so reduce_segments ignores it.
+        M = tl.where(L > 0.0, M, float("-inf"))
         store_segm_reduce_scalars(
             segm_max_ptr,
             segm_expsum_ptr,
@@ -747,6 +753,9 @@ def reduce_segments(
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
     overall_max = tl.max(segm_max)
+    # A row with no visible key in any segment resolves
+    # to 0 instead of NaN (exp(-inf - -inf)).
+    overall_max = tl.where(overall_max > float("-inf"), overall_max, 0.0)
 
     # load and rescale segment exp sums
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
@@ -1051,13 +1060,19 @@ def unified_attention(
     # 2. The batch includes at least one prefill request, or
     # 3. The number of sequences exceeds the configured threshold, or
     # 4. Batch invariance is enabled
+    # Also use the split-KV 3D kernel for short multi-token
+    # queries (speculative-decoding verification). The 2D kernel launches only
+    # q_blocks * kv_heads programs, which leaves most CUs idle on long contexts.
+    # The segment buffers are indexed by token, so the total token count must
+    # fit in seq_threshold_3D. Enabled when VLLM_TRITON_3D_MAX_Q > 1.
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or max_seqlen_q > _TRITON_3D_MAX_Q
+        or (max_seqlen_q > 1 and q.shape[0] > seq_threshold_3D)
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )

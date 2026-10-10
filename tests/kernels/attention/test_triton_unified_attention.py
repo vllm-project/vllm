@@ -4,11 +4,11 @@
 
 import pytest
 import torch
-
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
     compute_tile_loop_bounds,
@@ -984,3 +984,93 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     ref = soft_cap * torch.tanh(scores / soft_cap)
     assert torch.isfinite(out).all(), out
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
+def _spec_verify_3d(seq_len, q_len, block_size, kv_dtype, negative):
+    """One causal multi-token query batch through the 3D path vs. a dense reference.
+
+    With ``negative`` all logits are strongly negative, so a row whose keys are
+    all masked in one segment must not report a finite segment maximum.
+    """
+    import vllm.v1.attention.ops.triton_unified_attention as ua
+
+    hq, hkv, d, segments, threshold = 24, 4, 256, 16, 32
+    nb = -(-seq_len // block_size) + 1
+    k = torch.randn(nb, block_size, hkv, d, device=DEVICE_TYPE, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    q = torch.randn(q_len, hq, d, device=DEVICE_TYPE, dtype=torch.bfloat16)
+    if negative:
+        k, v, q = k.abs() + 1, v.abs() + 1, -8 * q.abs()
+    if kv_dtype is not None:
+        k, v = k.to(kv_dtype), v.to(kv_dtype)
+    block_table = (torch.randperm(nb - 1, device=DEVICE_TYPE) + 1).int()[None, :]
+    out = torch.empty_like(q)
+    ones = torch.ones(1, hkv, device=DEVICE_TYPE)
+    segm_out = torch.empty(threshold, hq, segments, d, device=DEVICE_TYPE)
+    segm_max = torch.empty(threshold, hq, segments, device=DEVICE_TYPE)
+    ua.unified_attention(
+        q=q,
+        k=k,
+        v=v,
+        out=out,
+        cu_seqlens_q=torch.tensor([0, q_len], dtype=torch.int32, device=DEVICE_TYPE),
+        max_seqlen_q=q_len,
+        seqused_k=torch.tensor([seq_len], dtype=torch.int32, device=DEVICE_TYPE),
+        max_seqlen_k=seq_len,
+        softmax_scale=d**-0.5,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=None,
+        k_descale=ones,
+        v_descale=ones,
+        seq_threshold_3D=threshold,
+        num_par_softmax_segments=segments,
+        softmax_segm_output=segm_out,
+        softmax_segm_max=segm_max,
+        softmax_segm_expsum=torch.empty_like(segm_max),
+    )
+    keys = k[block_table[0].long()].float().reshape(-1, hkv, d)[:seq_len]
+    vals = v[block_table[0].long()].float().reshape(-1, hkv, d)[:seq_len]
+    keys = keys.repeat_interleave(hq // hkv, dim=1)
+    vals = vals.repeat_interleave(hq // hkv, dim=1)
+    scores = torch.einsum("qhd,khd->hqk", q.float(), keys) * d**-0.5
+    visible = seq_len - q_len + torch.arange(q_len, device=DEVICE_TYPE)[:, None]
+    pos = torch.arange(seq_len, device=DEVICE_TYPE)[None, :]
+    masked = pos > visible
+    probs = scores.masked_fill(masked, float("-inf")).softmax(-1).nan_to_num(0.0)
+    # Rows that see no key at all (seq_len < q_len) must come out as 0, not NaN.
+    ref = torch.einsum("hqk,khd->qhd", probs, vals)
+    assert not torch.isnan(out).any()
+    torch.testing.assert_close(out.float(), ref, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("seq_len", [37, 1601, 32768])
+@pytest.mark.parametrize("q_len", [2, 4])
+@pytest.mark.parametrize("block_size", [16, 1600])
+@pytest.mark.parametrize("kv_dtype", [None, FP8_DTYPE])
+@torch.inference_mode()
+def test_spec_verify_3d_matches_reference(
+    monkeypatch, seq_len, q_len, block_size, kv_dtype
+):
+    import vllm.v1.attention.ops.triton_unified_attention as ua
+
+    monkeypatch.setattr(ua, "_TRITON_3D_MAX_Q", q_len)
+    set_random_seed(0)
+    _spec_verify_3d(seq_len, q_len, block_size, kv_dtype, negative=False)
+
+
+@torch.inference_mode()
+def test_spec_verify_3d_fully_masked_segment_rows(monkeypatch):
+    """Rows with no visible key in a segment (epilogue guard) or at all (reducer).
+
+    Some lengths put a segment boundary right before the last query tokens;
+    lengths below q_len leave the first query rows without any visible key.
+    """
+    import vllm.v1.attention.ops.triton_unified_attention as ua
+
+    monkeypatch.setattr(ua, "_TRITON_3D_MAX_Q", 4)
+    set_random_seed(0)
+    for seq_len in range(1, 200):
+        _spec_verify_3d(seq_len, 4, 16, None, negative=True)

@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
+    VLLM_TRITON_3D_MAX_Q: int = 1
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -643,6 +644,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
+    # Largest query length that may use the split-KV 3D kernel of the Triton
+    # unified-attention backend. The default 1 keeps 3D for pure decode only;
+    # e.g. 4 also admits MTP/EAGLE verify batches with 3 speculative tokens,
+    # which otherwise run on the 2D kernel with a q_blocks x kv_heads grid.
+    "VLLM_TRITON_3D_MAX_Q": lambda: int(os.getenv("VLLM_TRITON_3D_MAX_Q", "1")),
     # If set, enable GPU<->CPU synchronization checking around the worker's
     # `execute_model` and `sample_tokens` calls, via PyTorch's sync debug mode
     # plus wrappers flagging `non_blocking` CPU<->CUDA copies that silently
