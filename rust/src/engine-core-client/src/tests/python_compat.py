@@ -139,6 +139,7 @@ class EngineCoreOutputs(
     finished_requests: set[str] | None = None
     wave_complete: int | None = None
     start_wave: int | None = None
+    weight_version: str | None = None
 
 
 request = EngineCoreRequest(
@@ -240,6 +241,7 @@ outputs = EngineCoreOutputs(
         )
     ],
     finished_requests={"req-1"},
+    weight_version="v7",
 )
 
 extended_outputs = EngineCoreOutputs(
@@ -252,6 +254,7 @@ extended_outputs = EngineCoreOutputs(
         )
     ],
     finished_requests=outputs.finished_requests,
+    weight_version=outputs.weight_version,
 )
 extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
 # The ordinary frontend's schema ignores even non-default extension values.
