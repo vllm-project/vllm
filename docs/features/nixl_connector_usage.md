@@ -38,11 +38,28 @@ export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1
 
 NixlConnector can use different NIXL transport backends (plugins). By default, NixlConnector uses UCX as the transport backend.
 
-To select a different backend, set `kv_connector_extra_config.backends` in `--kv-transfer-config`.
+To select a different backend, set `kv_connector_extra_config.backends` in
+`--kv-transfer-config`. NixlConnector does not read `NIXL_BACKEND` or
+`VLLM_NIXL_BACKEND` as a transport backend override, so setting those
+environment variables alone will still leave the connector on its UCX default.
 
 ### Example: using LIBFABRIC backend
 
 ```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector":"NixlConnector",
+    "kv_role":"kv_producer",
+    "kv_connector_extra_config":{"backends":["LIBFABRIC"]}
+  }'
+```
+
+For AWS EFA deployments that use NIXL's LIBFABRIC plugin, configure the
+libfabric provider through the usual libfabric environment variables, and select
+the NIXL backend through `kv_connector_extra_config.backends`:
+
+```bash
+FI_PROVIDER=efa \
 vllm serve <MODEL> \
   --kv-transfer-config '{
     "kv_connector":"NixlConnector",
