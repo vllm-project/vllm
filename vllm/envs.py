@@ -11,6 +11,20 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
+from vllm._env_variables import (
+    ENV_VAR_REGISTRY,
+    EnvVarDef,
+)
+from vllm._env_variables import (
+    format_env_vars_table as _format_env_vars_table,
+)
+from vllm._env_variables import (
+    get_env_var_def as _get_env_var_def,
+)
+from vllm._env_variables import (
+    list_env_vars as _list_env_vars,
+)
+
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: int | None = None
@@ -614,7 +628,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
-    "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
+    "VLLM_TARGET_DEVICE": ENV_VAR_REGISTRY["VLLM_TARGET_DEVICE"].resolve,
     # Main CUDA version of vLLM. This follows PyTorch but can be overridden.
     "VLLM_MAIN_CUDA_VERSION": lambda: (
         os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower() or "13.0"
@@ -696,49 +710,35 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note that this not only affects how vllm finds its configuration files
     # during runtime, but also affects how vllm installs its configuration
     # files during **installation**.
-    "VLLM_CONFIG_ROOT": lambda: os.path.expanduser(
-        os.getenv(
-            "VLLM_CONFIG_ROOT",
-            os.path.join(get_default_config_root(), "vllm"),
-        )
-    ),
+    "VLLM_CONFIG_ROOT": ENV_VAR_REGISTRY["VLLM_CONFIG_ROOT"].resolve,
     # ================== Runtime Env Vars ==================
     # Root directory for vLLM cache files
     # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
-    "VLLM_CACHE_ROOT": lambda: os.path.expanduser(
-        os.getenv(
-            "VLLM_CACHE_ROOT",
-            os.path.join(get_default_cache_root(), "vllm"),
-        )
-    ),
+    "VLLM_CACHE_ROOT": ENV_VAR_REGISTRY["VLLM_CACHE_ROOT"].resolve,
     # used in distributed environment to determine the ip address
     # of the current node, when the node has multiple network interfaces.
     # If you are using multi-node inference, you should set this differently
     # on each node.
-    "VLLM_HOST_IP": lambda: os.getenv("VLLM_HOST_IP", ""),
+    "VLLM_HOST_IP": ENV_VAR_REGISTRY["VLLM_HOST_IP"].resolve,
     # used in distributed environment to manually set the communication port
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
     # VLLM_PORT will be used as the first port, and the rest will be generated
     # by incrementing the VLLM_PORT value.
-    "VLLM_PORT": get_vllm_port,
+    "VLLM_PORT": ENV_VAR_REGISTRY["VLLM_PORT"].resolve,
     # path used for ipc when the frontend api server is running in
     # multi-processing mode to communicate with the backend engine process.
-    "VLLM_RPC_BASE_PATH": lambda: os.getenv(
-        "VLLM_RPC_BASE_PATH", tempfile.gettempdir()
-    ),
+    "VLLM_RPC_BASE_PATH": ENV_VAR_REGISTRY["VLLM_RPC_BASE_PATH"].resolve,
     # If true, will load models from ModelScope instead of Hugging Face Hub.
-    "VLLM_USE_MODELSCOPE": lambda: (
-        os.environ.get("VLLM_USE_MODELSCOPE", "False").strip().lower() in ("1", "true")
-    ),
+    "VLLM_USE_MODELSCOPE": ENV_VAR_REGISTRY["VLLM_USE_MODELSCOPE"].resolve,
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
     # Applies to any tokenizer mode that loads an HF fast tokenizer
     # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
     # Python package must be installed.
-    "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
+    "VLLM_USE_FASTOKENS": ENV_VAR_REGISTRY["VLLM_USE_FASTOKENS"].resolve,
     # Interval in seconds to log a warning message when the ring buffer is full
-    "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
-        os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
+    "VLLM_RINGBUFFER_WARNING_INTERVAL": (
+        ENV_VAR_REGISTRY["VLLM_RINGBUFFER_WARNING_INTERVAL"].resolve
     ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
@@ -804,16 +804,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "CUDA_VISIBLE_DEVICES": lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
     # Timeout in seconds for waiting for engine cores to become ready
     # during startup. Default is 600 seconds (10 minutes).
-    "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
-        os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    "VLLM_ENGINE_READY_TIMEOUT_S": (
+        ENV_VAR_REGISTRY["VLLM_ENGINE_READY_TIMEOUT_S"].resolve
     ),
     # Maximum wall-clock seconds allowed for a single chat template render.
     # Set to 0 to disable the timeout.
-    "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": lambda: float(
-        os.environ.get("VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT", "30")
+    "VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT": (
+        ENV_VAR_REGISTRY["VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT"].resolve
     ),
     # API key for vLLM API server
-    "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
+    "VLLM_API_KEY": ENV_VAR_REGISTRY["VLLM_API_KEY"].resolve,
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: (
         os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").lower() == "true"
@@ -823,47 +823,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "S3_SECRET_ACCESS_KEY": lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
     "S3_ENDPOINT_URL": lambda: os.environ.get("S3_ENDPOINT_URL", None),
     # Usage stats collection
-    "VLLM_USAGE_STATS_SERVER": lambda: os.environ.get(
-        "VLLM_USAGE_STATS_SERVER", "https://stats.vllm.ai"
-    ),
-    "VLLM_NO_USAGE_STATS": lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
-    "VLLM_DO_NOT_TRACK": lambda: (
-        (
-            os.environ.get("VLLM_DO_NOT_TRACK", None)
-            or os.environ.get("DO_NOT_TRACK", None)
-            or "0"
-        )
-        == "1"
-    ),
+    "VLLM_USAGE_STATS_SERVER": (ENV_VAR_REGISTRY["VLLM_USAGE_STATS_SERVER"].resolve),
+    "VLLM_NO_USAGE_STATS": ENV_VAR_REGISTRY["VLLM_NO_USAGE_STATS"].resolve,
+    "VLLM_DO_NOT_TRACK": ENV_VAR_REGISTRY["VLLM_DO_NOT_TRACK"].resolve,
     "VLLM_USAGE_SOURCE": lambda: os.environ.get("VLLM_USAGE_SOURCE", "production"),
     # Logging configuration
     # If set to 0, vllm will not configure logging
     # If set to 1, vllm will configure logging using the default configuration
     #    or the configuration file specified by VLLM_LOGGING_CONFIG_PATH
-    "VLLM_CONFIGURE_LOGGING": lambda: bool(
-        int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
-    ),
-    "VLLM_LOGGING_CONFIG_PATH": lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
+    "VLLM_CONFIGURE_LOGGING": (ENV_VAR_REGISTRY["VLLM_CONFIGURE_LOGGING"].resolve),
+    "VLLM_LOGGING_CONFIG_PATH": (ENV_VAR_REGISTRY["VLLM_LOGGING_CONFIG_PATH"].resolve),
     # this is used for configuring the default logging level
-    "VLLM_LOGGING_LEVEL": lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
+    "VLLM_LOGGING_LEVEL": ENV_VAR_REGISTRY["VLLM_LOGGING_LEVEL"].resolve,
     # this is used for configuring the default logging stream
-    "VLLM_LOGGING_STREAM": lambda: os.getenv("VLLM_LOGGING_STREAM", "ext://sys.stdout"),
+    "VLLM_LOGGING_STREAM": ENV_VAR_REGISTRY["VLLM_LOGGING_STREAM"].resolve,
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
-    "VLLM_LOGGING_PREFIX": lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
+    "VLLM_LOGGING_PREFIX": ENV_VAR_REGISTRY["VLLM_LOGGING_PREFIX"].resolve,
     # Controls colored logging output. Options: "auto" (default, colors when terminal),
     # "1" (always use colors), "0" (never use colors)
-    "VLLM_LOGGING_COLOR": lambda: os.getenv("VLLM_LOGGING_COLOR", "auto"),
+    "VLLM_LOGGING_COLOR": ENV_VAR_REGISTRY["VLLM_LOGGING_COLOR"].resolve,
     # Standard unix flag for disabling ANSI color codes
-    "NO_COLOR": lambda: os.getenv("NO_COLOR", "0") != "0",
+    "NO_COLOR": ENV_VAR_REGISTRY["NO_COLOR"].resolve,
     # De-facto standard flag for forcing ANSI color codes (e.g. non-tty case)
-    "FORCE_COLOR": lambda: os.getenv("FORCE_COLOR", "0") != "0",
+    "FORCE_COLOR": ENV_VAR_REGISTRY["FORCE_COLOR"].resolve,
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
-    "VLLM_LOG_STATS_INTERVAL": lambda: (
-        val
-        if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0.0
-        else 10.0
-    ),
+    "VLLM_LOG_STATS_INTERVAL": (ENV_VAR_REGISTRY["VLLM_LOG_STATS_INTERVAL"].resolve),
     # Trace function calls
     # If set to 1, vllm will trace function calls
     # Useful for debugging
@@ -2321,6 +2306,21 @@ def is_set(name: str):
     if name in environment_variables:
         return name in os.environ
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def get_env_var_def(name: str) -> EnvVarDef | None:
+    """Get the definition for an environment variable by name."""
+    return _get_env_var_def(name)
+
+
+def list_env_vars() -> list[EnvVarDef]:
+    """Return a list of all registered environment variable definitions."""
+    return _list_env_vars()
+
+
+def format_env_vars_table() -> str:
+    """Format registered environment variables as a human-readable table."""
+    return _format_env_vars_table()
 
 
 def compile_factors() -> dict[str, object]:

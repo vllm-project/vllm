@@ -592,3 +592,50 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+class TestEnvVarDefRegistry:
+    """Tests for the centralized EnvVarDef registry and definitions."""
+
+    def test_registry_not_empty(self):
+        defs = envs.list_env_vars()
+        assert len(defs) >= 20
+
+    def test_all_registered_vars_have_valid_fields(self):
+        for var_def in envs.list_env_vars():
+            assert var_def.name.strip(), f"Empty name in {var_def}"
+            assert var_def.doc.strip(), f"Missing doc for {var_def.name}"
+            assert var_def.var_type is not None, f"Missing type for {var_def.name}"
+            # Default value must resolve without exceptions
+            var_def.resolve_default()
+
+    def test_registered_vars_wire_into_environment_variables(self):
+        for var_def in envs.list_env_vars():
+            assert var_def.name in envs.environment_variables
+
+    def test_get_env_var_def(self):
+        cache_root_def = envs.get_env_var_def("VLLM_CACHE_ROOT")
+        assert cache_root_def is not None
+        assert cache_root_def.name == "VLLM_CACHE_ROOT"
+        assert cache_root_def.var_type is str
+
+        non_existent = envs.get_env_var_def("NON_EXISTENT_VAR_123")
+        assert non_existent is None
+
+    def test_env_var_def_is_set_helper(self, monkeypatch: pytest.MonkeyPatch):
+        target_def = envs.get_env_var_def("VLLM_TARGET_DEVICE")
+        assert target_def is not None
+
+        monkeypatch.setenv("VLLM_TARGET_DEVICE", "cpu")
+        assert target_def.is_set()
+        assert envs.is_set("VLLM_TARGET_DEVICE")
+
+        monkeypatch.delenv("VLLM_TARGET_DEVICE", raising=False)
+        assert not target_def.is_set()
+        assert not envs.is_set("VLLM_TARGET_DEVICE")
+
+    def test_format_env_vars_table(self):
+        table = envs.format_env_vars_table()
+        assert "Variable" in table
+        assert "VLLM_CACHE_ROOT" in table
+        assert "VLLM_TARGET_DEVICE" in table
