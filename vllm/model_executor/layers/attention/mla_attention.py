@@ -295,6 +295,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
@@ -1362,8 +1363,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.
             # See flashmla_sparse.py.
-            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
-                self.kv_cache_dtype
+            state_content_bytes=(
+                mxfp4_row_bytes(self.head_size)
+                if self.kv_cache_dtype == "mxfp4_mla"
+                else {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(self.kv_cache_dtype)
             ),
         )
         if self.sliding_window is not None:

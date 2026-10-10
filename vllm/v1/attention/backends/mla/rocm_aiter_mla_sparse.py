@@ -40,6 +40,8 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.mxfp4_mla import row_bytes as mxfp4_row_bytes
+from vllm.v1.attention.ops.mxfp4_mla_store import store_mxfp4_mla
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_decode_bf16,
     rocm_sparse_attn_prefill,
@@ -345,6 +347,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "mxfp4_mla",
     ]
 
     @staticmethod
@@ -833,6 +836,13 @@ class ROCMAiterMLASparseImpl(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+        rank = self.kv_lora_rank
+        if kv_cache_dtype == "mxfp4_mla" and (rank < 128 or rank & (rank - 1)):
+            # The read loads each packed row as int32 words into one
+            # power-of-two tile.
+            raise ValueError(
+                f"mxfp4_mla needs kv_lora_rank to be a power of two >= 128, got {rank}"
+            )
 
         if rocm_aiter_ops.is_triton_sparse_mla_enabled():
             reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
@@ -858,6 +868,27 @@ class ROCMAiterMLASparseImpl(
         if self.dcp_world_size > 1 or self.pcp_world_size > 1:
             return "context parallelism is not supported"
         return None
+
+    def do_kv_cache_update(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        if kv_cache_dtype != "mxfp4_mla":
+            return super().do_kv_cache_update(
+                kv_c_normed, k_pe, kv_cache, slot_mapping, kv_cache_dtype, k_scale
+            )
+        if kv_cache.numel() == 0:
+            return
+        assert k_pe.numel() == 0, (
+            f"mxfp4_mla expects a rope-free latent, got k_pe with {k_pe.numel()} "
+            "elements"
+        )
+        store_mxfp4_mla(kv_c_normed, slot_mapping.flatten(), kv_cache)
 
     def record_logical_topk_ready(self) -> None:
         # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
@@ -915,7 +946,9 @@ class ROCMAiterMLASparseImpl(
                     self.sinks.reshape(1, self.num_heads, 1),
                     q.shape[1],
                 ).reshape(-1)
-            kv = kv_c_and_k_pe_cache.view(-1, 1, q.shape[-1])
+            is_mxfp4 = self.kv_cache_dtype == "mxfp4_mla"
+            row_width = mxfp4_row_bytes(self.kv_lora_rank) if is_mxfp4 else q.shape[-1]
+            kv = kv_c_and_k_pe_cache.view(-1, 1, row_width)
             decode_num_splits = (
                 rocm_sparse_decode_bf16_num_splits(
                     num_tokens,
@@ -938,6 +971,7 @@ class ROCMAiterMLASparseImpl(
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
                     num_splits=decode_num_splits,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
             else:
                 rocm_sparse_attn_prefill(
@@ -953,6 +987,7 @@ class ROCMAiterMLASparseImpl(
                     output=output,
                     ragged_indices=attn_metadata.paged_kv_indices,
                     ragged_indptr=attn_metadata.paged_kv_indptr,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
             output = AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
             return output, None

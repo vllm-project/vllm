@@ -19,6 +19,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.mxfp4_mla_read import load_mxfp4_rows
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
@@ -2121,6 +2122,7 @@ def _sparse_attn_prefill_ragged_kernel(
     num_kv,
     scale,
     HAS_ATTN_SINK: tl.constexpr,
+    IS_MXFP4: tl.constexpr,
     OUT_DV: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -2162,13 +2164,19 @@ def _sparse_attn_prefill_ragged_kernel(
         valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
-        kv = tl.load(
-            kv_ptr
-            + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
-            + dim_offsets[None, :] * kv_stride_d,
-            mask=valid[:, None] & dim_mask[None, :],
-            other=0.0,
-        )
+        if IS_MXFP4:
+            # mxfp4_mla: kv_stride_n is the packed row pitch in bytes.
+            kv = load_mxfp4_rows(
+                kv_ptr, safe_slot, valid, kv_stride_n, BLOCK_K, BLOCK_D
+            ).to(q.dtype)
+        else:
+            kv = tl.load(
+                kv_ptr
+                + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
+                + dim_offsets[None, :] * kv_stride_d,
+                mask=valid[:, None] & dim_mask[None, :],
+                other=0.0,
+            )
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -2239,6 +2247,7 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
     head_dim,
     num_kv,
     scale,
+    IS_MXFP4: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -2286,13 +2295,19 @@ def _sparse_attn_decode_ragged_bf16_partial_kernel(
         valid = in_range & (slot >= 0) & (slot < num_kv)
         safe_slot = tl.where(valid, slot, 0)
 
-        kv = tl.load(
-            kv_ptr
-            + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
-            + dim_offsets[None, :] * kv_stride_d,
-            mask=valid[:, None] & dim_mask[None, :],
-            other=0.0,
-        )
+        if IS_MXFP4:
+            # mxfp4_mla: kv_stride_n is the packed row pitch in bytes.
+            kv = load_mxfp4_rows(
+                kv_ptr, safe_slot, valid, kv_stride_n, BLOCK_K, BLOCK_D
+            ).to(q.dtype)
+        else:
+            kv = tl.load(
+                kv_ptr
+                + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
+                + dim_offsets[None, :] * kv_stride_d,
+                mask=valid[:, None] & dim_mask[None, :],
+                other=0.0,
+            )
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -3488,6 +3503,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     out: torch.Tensor | None = None,
+    is_mxfp4: bool = False,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -3547,6 +3563,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         kv.shape[0],
         float(scale),
         HAS_ATTN_SINK=has_attn_sink,
+        IS_MXFP4=is_mxfp4,
         OUT_DV=out.shape[-1],
         BLOCK_H=block_h,
         BLOCK_D=block_d,
@@ -3566,6 +3583,7 @@ def _rocm_sparse_attn_prefill_triton(
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    is_mxfp4: bool = False,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
         indices,
@@ -3584,6 +3602,7 @@ def _rocm_sparse_attn_prefill_triton(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         out=out,
+        is_mxfp4=is_mxfp4,
     )
 
 
@@ -3827,6 +3846,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
     rope_head_dim: int,
     num_splits: int,
     out: torch.Tensor | None = None,
+    is_mxfp4: bool = False,
 ) -> torch.Tensor:
     """Split-K decode over an bf16 ragged KV cache.
 
@@ -3844,6 +3864,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         rope_head_dim: RoPE width of ``d``.
         num_splits: Number of KV splits per query.
         out: Optional destination with ``d`` trailing elements.
+        is_mxfp4: ``kv`` holds packed ``mxfp4_mla`` rows instead of bf16.
 
     Returns:
         The attention output, ``out`` when provided.
@@ -3919,6 +3940,7 @@ def _rocm_sparse_attn_decode_ragged_bf16_triton(
         head_dim,
         kv.shape[0],
         float(scale),
+        IS_MXFP4=is_mxfp4,
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
@@ -4375,6 +4397,7 @@ def rocm_sparse_attn_prefill(
     output: torch.Tensor,
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
@@ -4423,6 +4446,7 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             out=output,
+            is_mxfp4=kv_cache_dtype == "mxfp4_mla",
         )
     else:
         assert indices is not None
@@ -4437,6 +4461,7 @@ def rocm_sparse_attn_prefill(
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
             out=output,
+            is_mxfp4=kv_cache_dtype == "mxfp4_mla",
         )
 
 
@@ -4452,6 +4477,7 @@ def rocm_sparse_attn_decode_bf16(
     ragged_indices: torch.Tensor,
     ragged_indptr: torch.Tensor,
     num_splits: int,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     """Run split-K sparse attention over decode rows using an unquantized KV cache.
 
@@ -4468,6 +4494,7 @@ def rocm_sparse_attn_decode_bf16(
         ragged_indptr: Segment offsets into ``ragged_indices``, ``[sq + 1]``.
         num_splits: KV splits per query, from
             :func:`rocm_sparse_decode_bf16_num_splits`.
+        kv_cache_dtype: ``"mxfp4_mla"`` reads ``kv`` as packed rows.
 
     """
     assert kv.ndim == 3 and kv.shape[1] == 1, (
@@ -4501,6 +4528,7 @@ def rocm_sparse_attn_decode_bf16(
         rope_head_dim=rope_head_dim,
         num_splits=num_splits,
         out=out,
+        is_mxfp4=kv_cache_dtype == "mxfp4_mla",
     )
     if not direct:
         output.copy_(out[..., : output.shape[-1]])
