@@ -240,8 +240,17 @@ BLOCKWISE_PREFILL_FACTORS = [
     (5120, 5120, 5120),
 ]
 
+# M just above the swap-AB limit and at prefill scale, both not a multiple of 4:
+# on SM 9.0 these run the non-swap-AB path with padded activation scales.
+BLOCKWISE_MISALIGNED_FACTORS = [
+    (65, 6144, 4096),
+    (4097, 4096, 12288),
+]
 
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS + BLOCKWISE_PREFILL_FACTORS)
+
+@pytest.mark.parametrize(
+    "m,n,k", MNK_FACTORS + BLOCKWISE_PREFILL_FACTORS + BLOCKWISE_MISALIGNED_FACTORS
+)
 @pytest.mark.parametrize(
     "a_scale_group_shape,b_scale_group_shape", [((1, 128), (128, 128))]
 )
