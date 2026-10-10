@@ -218,6 +218,27 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
 # --- Unit Tests: Engine Parsing ---
 
 
+@pytest.mark.parametrize(
+    "engine_type",
+    [
+        NCCLWeightTransferEngine,
+        NCCLTrainerWeightTransferEngine,
+        SparseNCCLWeightTransferEngine,
+        SparseNCCLTrainerWeightTransferEngine,
+    ],
+)
+def test_nccl_shutdown_destroys_communicator_once(engine_type):
+    engine = object.__new__(engine_type)
+    group = MagicMock()
+    engine.model_update_group = group
+
+    engine.shutdown()
+    engine.shutdown()
+
+    group.destroy.assert_called_once_with()
+    assert engine.model_update_group is None
+
+
 class TestNCCLEngineParsing:
     """Test NCCLWeightTransferEngine parsing methods."""
 
