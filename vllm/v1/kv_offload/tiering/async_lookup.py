@@ -279,6 +279,9 @@ class AsyncLookupManager(ABC):
                 for (key, generation), hit in zip(entries, hits):
                     results.append((key, generation, hit))
 
+            # Do not retain requests while waiting for the next batch.
+            del pending, batches, req_context, hits
+
             # Post the entire batch as one item — no lock needed.
             if results:
                 self._pending_results.put(results)
