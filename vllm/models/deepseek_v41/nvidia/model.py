@@ -343,6 +343,14 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
         self.hc_post_alpha = 2.0
+        self.fuse_engram_mhc = (
+            envs.VLLM_USE_ENGRAM_MHC_FUSION
+            and self.engram is not None
+            and not self.use_sequence_parallel
+            and vllm_config.parallel_config.tensor_parallel_size == 1
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        )
         if vllm_config.kernel_config.enable_jit_warmup and current_platform.is_cuda():
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 mhc_fused_post_pre_splits,
@@ -385,7 +393,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             # Shifted mHC splits the epilogue in two: the input collapse on the
             # caller stream and coefficient generation on a side stream.
             split_modes = (
-                ("fused", "stats", "input") if mhc_stream is not None else ("fused",)
+                ("fused", "stats", "input")
+                if mhc_stream is not None
+                else ("fused", "stats")
+                if self.fuse_engram_mhc
+                else ("fused",)
             )
             for variant in variants:
                 for split_mode in split_modes:
@@ -394,6 +406,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                         max_tokens=(
                             max_tokens
                             if split_mode == "fused"
+                            or (self.fuse_engram_mhc and split_mode == "stats")
                             else min(max_tokens, MHC_OVERLAP_MAX_TOKENS)
                         ),
                         hidden_size=self.hidden_size,
@@ -540,12 +553,28 @@ class DeepseekV4DecoderLayer(nn.Module):
             previous_post = mhc_post_tilelang(x, residual, post_mix, res_mix)
             if capture_previous_aux:
                 previous_aux = previous_post.mean(dim=1)
-            residual = self.engram(
-                previous_post,
-                engram_hashes[:, self.engram.layer_hash_index],
-                engram_mask,
+            fused_input = None
+            if self.fuse_engram_mhc and mhc_stream is None:
+                residual, fused_input = self.engram.forward_with_mhc(
+                    previous_post,
+                    engram_hashes[:, self.engram.layer_hash_index],
+                    engram_mask,
+                    pre_mix,
+                    self.attn_norm.weight,
+                    self.attn_norm.variance_epsilon,
+                )
+            else:
+                residual = self.engram(
+                    previous_post,
+                    engram_hashes[:, self.engram.layer_hash_index],
+                    engram_mask,
+                )
+            pre = (
+                partial(mhc_pre_delayed_tilelang, stats_only=True)
+                if fused_input is not None
+                else mhc_pre
             )
-            post_mix, res_mix, x, attn_pre = mhc_pre(
+            post_mix, res_mix, collapsed, attn_pre = pre(
                 residual,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
@@ -559,6 +588,8 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_weight=self.attn_norm.weight,
                 norm_eps=self.attn_norm.variance_epsilon,
             )
+            x = fused_input if fused_input is not None else collapsed
+            assert x is not None
         else:
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
