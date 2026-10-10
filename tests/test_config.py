@@ -926,11 +926,12 @@ def test_reasoning_loop_breaking_keeps_the_v2_model_runner(monkeypatch):
     assert config.use_v2_model_runner
 
 
-@pytest.mark.parametrize("v1_trigger", ["env", "ngram"])
+@pytest.mark.parametrize("v1_trigger", ["env", "custom_class"])
 def test_v1_model_runner_rejects_reasoning_loop_breaking(monkeypatch, v1_trigger):
     """Loop breaking runs only on V2, so a config that selects V1 must fail
     instead of accepting the setting and never breaking a loop."""
-    # With Triton present, ngram is what sends the config to V1.
+    # With Triton present, a speculative method V2 does not support yet is
+    # what sends the config to V1.
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     if v1_trigger == "env":
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
@@ -939,9 +940,11 @@ def test_v1_model_runner_rejects_reasoning_loop_breaking(monkeypatch, v1_trigger
 
     def make(**kwargs) -> VllmConfig:
         speculative_config = None
-        if v1_trigger == "ngram":
+        if v1_trigger == "custom_class":
             speculative_config = SpeculativeConfig(
-                method="ngram", num_speculative_tokens=1
+                method="custom_class",
+                model="tests.test_config.Proposer",
+                num_speculative_tokens=1,
             )
         return VllmConfig(speculative_config=speculative_config, **kwargs)
 
