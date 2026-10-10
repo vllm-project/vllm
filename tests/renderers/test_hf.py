@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
+from typing import Any
+
 import jinja2
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import load_chat_template, parse_chat_messages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.hf import (
@@ -750,6 +753,21 @@ STRICT_ROLE_TEMPLATE = (
 )
 
 
+# From HuggingFaceTB/SmolVLM2-2.2B-Instruct/tokenizer_config.json.
+# This template requires structured content for every role.
+SMOLVLM_TEMPLATE = (
+    "<|im_start|>{% for message in messages %}"
+    "{{message['role'] | capitalize}}"
+    "{% if message['content'][0]['type'] == 'image' %}{{':'}}"
+    "{% else %}{{': '}}{% endif %}"
+    "{% for line in message['content'] %}"
+    "{% if line['type'] == 'text' %}{{line['text']}}"
+    "{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}"
+    "{% endfor %}<end_of_utterance>\n{% endfor %}"
+    "{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
+)
+
+
 class TestDetectDeveloperRoleSupport:
     def test_absent_in_chatml(self):
         assert _detect_developer_role_support(CHATML_TEMPLATE) is False
@@ -886,6 +904,46 @@ class TestSafeApplyChatTemplateDeveloperRole:
         )
         assert "<|im_start|>system" in result
         assert "Be concise." in result
+
+    @pytest.mark.parametrize("structured_input", [False, True])
+    @pytest.mark.parametrize("has_system", [False, True])
+    def test_developer_instructions_preserved_in_openai_template(
+        self, model_config, tokenizer, structured_input, has_system
+    ):
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "Hello"},
+            {"role": "developer", "content": "Be concise."},
+            {"role": "user", "content": "What is 2+2?"},
+        ]
+        if has_system:
+            messages[0] = {"role": "system", "content": "You are helpful."}
+        if structured_input:
+            for message in messages:
+                message["content"] = [{"type": "text", "text": message["content"]}]
+
+        request = ChatCompletionRequest(messages=messages)
+        content_format = resolve_chat_template_content_format(
+            SMOLVLM_TEMPLATE, None, "auto", tokenizer, model_config=model_config
+        )
+        conversation, _, _ = parse_chat_messages(
+            request.messages, model_config, content_format
+        )
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=SMOLVLM_TEMPLATE,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        system_text = "You are helpful.\n\nBe concise." if has_system else "Be concise."
+        first_user = "" if has_system else "User: Hello<end_of_utterance>\n"
+        assert result == (
+            f"<|im_start|>System: {system_text}<end_of_utterance>\n"
+            f"{first_user}"
+            "User: What is 2+2?<end_of_utterance>\n"
+            "Assistant:"
+        )
 
 
 SYSTEM_FIRST_TEMPLATE = (
@@ -1048,21 +1106,41 @@ class TestConsolidateSystemMessages:
         assert result[0]["content"] == "You are helpful.\n\nBe concise."
         assert result[1]["role"] == "user"
 
-    def test_list_content_handled(self):
+    def test_list_content_preserved(self):
+        content = [
+            {"type": "text", "text": "Rule 1."},
+            {"type": "text", "text": "Rule 2."},
+        ]
         conversation = [
             {"role": "user", "content": "Hello"},
-            {
-                "role": "system",
-                "content": [
-                    {"type": "text", "text": "Rule 1."},
-                    {"type": "text", "text": "Rule 2."},
-                ],
-            },
+            {"role": "system", "content": content},
         ]
         result = _consolidate_system_messages(conversation)
         assert result[0]["role"] == "system"
-        assert result[0]["content"] == "Rule 1.\nRule 2."
+        assert result[0]["content"] == content
         assert result[1]["role"] == "user"
+
+    @pytest.mark.parametrize(
+        "first_content", ["Rule 1.", [{"type": "text", "text": "Rule 1."}]]
+    )
+    def test_merging_lists_preserves_parts_and_input(self, first_content):
+        conversation = [
+            {"role": "system", "content": first_content},
+            {"role": "system", "content": []},
+            {
+                "role": "system",
+                "content": [{"type": "image"}, {"type": "text", "text": "Rule 2."}],
+            },
+        ]
+        original = deepcopy(conversation)
+        result = _consolidate_system_messages(conversation)
+        assert result[0]["content"] == [
+            {"type": "text", "text": "Rule 1."},
+            {"type": "text", "text": "\n\n"},
+            {"type": "image"},
+            {"type": "text", "text": "Rule 2."},
+        ]
+        assert conversation == original
 
     def test_does_not_mutate_original(self):
         conversation = [
