@@ -4,7 +4,6 @@
 from typing import Protocol, TypeAlias
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -17,7 +16,9 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     DerenderChatRequest,
+    DerenderChatStreamRequest,
     DerenderCompletionRequest,
+    DerenderCompletionStreamRequest,
     GenerateRequest,
     GenerateResponse,
 )
@@ -33,6 +34,7 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import (
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
 from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 
 
 class RendererRequest(Protocol):
@@ -54,6 +56,7 @@ CompletionLikeRequest: TypeAlias = (
     | TokenizeCompletionRequest
     | DetokenizeRequest
     | DerenderCompletionRequest
+    | DerenderCompletionStreamRequest
 )
 
 ChatLikeRequest: TypeAlias = (
@@ -61,6 +64,7 @@ ChatLikeRequest: TypeAlias = (
     | BatchChatCompletionRequest
     | TokenizeChatRequest
     | DerenderChatRequest
+    | DerenderChatStreamRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest

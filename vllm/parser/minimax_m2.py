@@ -69,7 +69,9 @@ def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
         ).strip()
         if not name:
             continue
-        params[name] = match.group("value").strip()
+        # Keep the value verbatim (like the glm47 converter): it is inline
+        # between `>` and `</parameter>`, so surrounding whitespace is data.
+        params[name] = match.group("value")
 
     if partial:
         remaining = _PARAM_RE.sub("", raw_args)
@@ -82,7 +84,8 @@ def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
                 or ""
             ).strip()
             if name:
-                params[name] = match.group("value").strip()
+                # Verbatim, same as the complete-match loop above.
+                params[name] = match.group("value")
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -92,6 +95,7 @@ def minimax_m2_config() -> ParserEngineConfig:
     return ParserEngineConfig(
         name="minimax_m2",
         initial_state=ParserState.REASONING,
+        wait_for_reasoning=True,
         terminals={
             "THINK_START": THINK_START,
             "THINK_END": THINK_END,

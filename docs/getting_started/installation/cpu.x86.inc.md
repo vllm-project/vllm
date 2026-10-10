@@ -24,28 +24,23 @@ Pre-built vLLM wheels for x86 with AVX512/AVX2 are available since version 0.17.
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 
 # use uv
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl --torch-backend cpu
+uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --torch-backend cpu
 ```
 
 ??? console "pip"
     ```bash
     # use pip
-    pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 !!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
+    Before use vLLM CPU installed via wheels, make sure Intel OpenMP is added to `LD_PRELOAD`:
     ```bash
-    # install TCMalloc, Intel OpenMP is installed with vLLM CPU
-    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
-
     # manually find the path
-    sudo find / -iname *libtcmalloc_minimal.so.4
     sudo find / -iname *libiomp5.so
-    TC_PATH=...
     IOMP_PATH=...
 
-    # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
+    # add it to LD_PRELOAD
+    export LD_PRELOAD="$IOMP_PATH:$LD_PRELOAD"
     ```
 
 #### Install the latest code
@@ -131,7 +126,7 @@ uv pip install dist/*.whl
     ```
 
 !!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
+    Before using vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
     ```bash
     # install TCMalloc, Intel OpenMP is installed with vLLM CPU
     sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
@@ -187,6 +182,40 @@ docker run \
     --env "HF_TOKEN=<secret>" \
     vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
+
+### Serve with vLLM Recipes
+
+The CPU image includes the [vLLM Recipes](https://recipes.vllm.ai/) deployment
+tool. Recipe-assisted serving queries the site at runtime, so the image can use
+the latest published recipe for the selected model and hardware.
+
+To find the value for `--hardware`, open vLLM Recipes, select the model, and
+choose the target in the **Hardware** picker. The selected page URL also
+contains the hardware key; for example, `?hardware=xeon6` maps to
+`--hardware xeon6`.
+
+Keep the normal image entrypoint for regular serving. For recipe-assisted
+serving, override it with `serve_with_recipe.sh`:
+
+```bash
+docker run --rm \
+    --shm-size=4g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<secret>" \
+    --entrypoint tools/recipes/serve_with_recipe.sh \
+    vllm/vllm-openai-cpu:latest-x86_64 \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --hardware xeon6
+```
+
+For Xeon 6, the script enables hardware detection automatically, generates
+`config.yml` and `env.sh`, and starts `vllm serve`. The image keeps
+`/vllm-workspace` as its working directory so relative recipe assets under
+`examples/` continue to resolve.
+
+See the [Recipes tool documentation](../../../tools/recipes/README.md) for
+interactive discovery and additional options.
 
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]

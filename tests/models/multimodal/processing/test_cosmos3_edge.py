@@ -70,7 +70,19 @@ def _assert_video_outputs(processor, processed) -> None:
     merge_size = processor.info.get_hf_config().vision_config.spatial_merge_size
     expected_tokens = int(grid_thw.prod()) // merge_size**2
     video_token_id = processor.info.get_hf_config().video_token_id
-    assert processed["prompt_token_ids"].count(video_token_id) == expected_tokens
+    prompt_token_ids = processed["prompt_token_ids"]
+    assert prompt_token_ids.count(video_token_id) == expected_tokens
+
+    hf_processor = processor.info.get_hf_processor()
+    expected_frame_wrappers = int(grid_thw[:, 0].sum())
+    assert (
+        prompt_token_ids.count(hf_processor.vision_start_token_id)
+        == expected_frame_wrappers
+    )
+    assert (
+        prompt_token_ids.count(hf_processor.vision_end_token_id)
+        == expected_frame_wrappers
+    )
 
 
 @pytest.mark.parametrize("num_images", [1, 2])

@@ -1,0 +1,17 @@
+suite: test horizontal pod autoscaler
+templates:
+  - hpa.yaml
+release:
+  name: demo
+tests:
+  - it: should target the deployment created by this release
+    set:
+      autoscaling:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 3
+        targetCPUUtilizationPercentage: 80
+    asserts:
+      - equal:
+          path: spec.scaleTargetRef.name
+          value: demo-deployment-vllm

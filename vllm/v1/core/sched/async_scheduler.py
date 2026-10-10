@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
@@ -15,6 +17,10 @@ class AsyncScheduler(Scheduler):
         # reusable read-only placeholder list for speculative decoding.
         self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
         self.pp_size = self.parallel_config.pipeline_parallel_size
+        # Only XPU can disable PP decode microbatching via VLLM_XPU_PP_MICROBATCH.
+        self.decode_stagger = self.pp_size
+        if current_platform.is_xpu() and not envs.VLLM_XPU_PP_MICROBATCH:
+            self.decode_stagger = 1
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
@@ -46,26 +52,23 @@ class AsyncScheduler(Scheduler):
             if self.use_v2_model_runner:
                 # Set the next step index in which this request is eligible to be
                 # scheduled for decode (for PP microbatching).
-                request.next_decode_eligible_step = self.current_step + self.pp_size
+                request.next_decode_eligible_step = (
+                    self.current_step + self.decode_stagger
+                )
 
     def _update_request_with_output(
-        self, request: Request, new_token_ids: list[int]
+        self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
-        if request.async_tokens_to_discard > 0:
-            # The request was force-preempted in reset_prefix_cache; drop one
-            # stale in-flight async output frame per call until the counter
-            # is drained.
-            request.async_tokens_to_discard -= 1
-            return [], False
-
         status_before_update = request.status
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids
         )
 
-        # Update the number of output placeholders.
-        request.num_output_placeholders -= len(new_token_ids)
-        assert request.num_output_placeholders >= 0
+        # Placeholders were zeroed at preemption; a stale delivery must not
+        # decrement them (it would underflow).
+        if not is_stale:
+            request.num_output_placeholders -= len(new_token_ids)
+            assert request.num_output_placeholders >= 0
 
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:

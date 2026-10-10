@@ -528,5 +528,9 @@ torch::stable::Tensor awq_gemm(torch::stable::Tensor _in_feats,
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros,
             num_in_feats, num_in_channels, num_out_channels, out_feats);
   }
-  return torch::stable::sum(_out_feats, 0);
+  // Pass the reduction dim via a named, lifetime-stable local rather than a
+  // bare `0`.
+  constexpr int64_t sum_dim = 0;
+  return torch::stable::sum(
+      _out_feats, torch::headeronly::IntHeaderOnlyArrayRef(&sum_dim, 1));
 }

@@ -18,6 +18,13 @@ class ECTransferConfig:
 
     ec_connector: str | None = None
     """The EC connector for vLLM to transmit EC caches between vLLM instances.
+
+    Built-in options include ``ECExampleConnector`` (shared filesystem via
+    safetensors) and ``ECMooncakeConnector`` (Mooncake TransferEngine RDMA;
+    requires ``mooncake-transfer-engine`` and matching producer/consumer
+    ``ec_connector_extra_config``; see ``mooncake_ec_connector`` module docstring).
+    Set ``cross_encoder_cache`` in Mooncake extra config to reuse shared
+    Encoder outputs from Store before encoding, retaining P2P delivery.
     """
 
     engine_id: str | None = None
@@ -35,15 +42,6 @@ class ECTransferConfig:
     """Whether this vLLM instance produces, consumes EC cache, or both. Choices
     are 'ec_producer', 'ec_consumer', 'ec_both'."""
 
-    ec_rank: int | None = None
-    """The rank of this vLLM instance in the EC cache transfer. Typical value:
-    0 for encoder, 1 for pd instance.
-    Currently only 1P1D is supported."""
-
-    ec_parallel_size: int = 1
-    """The number of parallel instances for EC cache transfer. For
-    PyNcclConnector, this should be 2."""
-
     ec_ip: str = "127.0.0.1"
     """The EC connector ip, used to build distributed connection."""
 
@@ -58,8 +56,7 @@ class ECTransferConfig:
     Only supported in V1."""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -102,6 +99,16 @@ class ECTransferConfig:
     @property
     def is_ec_consumer(self) -> bool:
         return self.ec_connector is not None and self.ec_role in get_args(ECConsumer)
+
+    @property
+    def is_encode_only(self) -> bool:
+        """Whether this instance encodes but does not run the language model.
+
+        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_spec`
+        returns {} for it -- so it is the one role that can spend accelerator
+        time and memory on frontend work.
+        """
+        return self.is_ec_producer and not self.is_ec_consumer
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.ec_connector_extra_config.get(key, default)

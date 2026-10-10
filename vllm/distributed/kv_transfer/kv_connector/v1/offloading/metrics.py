@@ -170,8 +170,7 @@ class _StatsKey:
 
 @dataclass
 class OffloadingConnectorStats(KVConnectorStats):
-    """
-    Offloading connector stats use flat metric names as keys.
+    """Offloading connector stats use flat metric names as keys.
 
     The ``data`` dict is structured using ``_StatsKey`` / ``_MetricType``::
 
@@ -243,8 +242,7 @@ class OffloadingConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        """
-        Reduce the observations collected during a time interval to one or
+        """Reduce the observations collected during a time interval to one or
         more representative values (eg avg/median/sum of the series).
         This is meant to be called by the logger to produce a summary of the
         stats for the last time interval.
@@ -321,10 +319,10 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
-        spec_cls = OffloadingSpecFactory.get_spec_cls(vllm_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
+        spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
         self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
             **spec_cls.build_metric_definitions(extra_config),
             **get_connector_metric_definitions(),

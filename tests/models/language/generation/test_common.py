@@ -3,8 +3,6 @@
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
@@ -26,7 +24,7 @@ AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openbmb/MiniCPM3-4B",
     "Qwen/Qwen2.5-0.5B-Instruct",
-    "TitanML/tiny-mixtral",
+    "axolotl-ai-co/tiny-mixtral-30m",
     "Qwen/Qwen3-8B",
 ]
 
@@ -95,7 +93,7 @@ AITER_MODEL_LIST = [
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
-            "TitanML/tiny-mixtral",  # mixtral
+            "axolotl-ai-co/tiny-mixtral-30m",  # mixtral
             marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
@@ -128,14 +126,6 @@ def test_models(
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-        if model == "TitanML/tiny-mixtral":
-            # Untrained model: near-uniform logits make argmax sensitive to
-            # AITER's bfloat16 rounding error. Route the plain rms_norm and the
-            # fused MoE (whose near-uniform router logits flip expert selection
-            # under ~1 ULP drift) through the native kernels for this model.
-            # See ROCm/aiter#3806 for the tracking issue and minimal repro.
-            monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
-            monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
@@ -168,17 +158,9 @@ def test_models(
                 hf_model.model.device
             )
             if prompt_embeds is not None:
-                embed = hf_model.model.get_input_embeddings()(token_ids)
-
-                if "gemma" in model.lower() and (
-                    Version(TRANSFORMERS_VERSION) < Version("5.3.0.dev0")
-                ):
-                    # For Gemma 1/2 models with Transformers 5.4.0+, the prompt
-                    # embeddings are normalised in `get_prompt_embeddings`,
-                    # like Gemma 3. For older versions, we need to manually normalise.
-                    embed_scale = hf_model.config.hidden_size**0.5
-                    normalizer = torch.tensor(embed_scale, dtype=embed.dtype)
-                    embed *= normalizer
+                # Retained prompt values must not keep reference weights alive.
+                with torch.no_grad():
+                    embed = hf_model.model.get_input_embeddings()(token_ids)
 
                 # MiniCPM models apply scale_emb to embeddings internally.
                 # vLLM expects pre-scaled embeddings when using inputs_embeds.
@@ -187,6 +169,16 @@ def test_models(
                     embed = embed * config.scale_emb
 
                 prompt_embeds.append(embed.squeeze(0))
+
+    vllm_kwargs = {}
+    if (
+        model == "bigscience/bloom-560m"
+        and current_platform.is_device_capability_family(90)
+    ):
+        # On SM90, the metadata builder otherwise selects FA3 AOT scheduling
+        # before Bloom's ALiBi layers fall back to FA2. Pinning FA2 keeps the
+        # builder and layer consistent and preserves the L4 test path.
+        vllm_kwargs["attention_config"] = {"flash_attn_version": 2}
 
     with vllm_runner(
         model,
@@ -200,6 +192,7 @@ def test_models(
         max_num_seqs=1 if current_platform.is_rocm() else 2,
         enable_prompt_embeds=use_prompt_embeds,
         compilation_config={"cudagraph_capture_sizes": [1, 2]},
+        **vllm_kwargs,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs

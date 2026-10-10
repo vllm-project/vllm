@@ -7,6 +7,7 @@ use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 const PHI4MINI_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Phi4Mini",
     start_marker: "functools[",
+    framed_start_marker: None,
     end_marker: "]",
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: Some(","),

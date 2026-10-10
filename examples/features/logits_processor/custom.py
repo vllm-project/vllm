@@ -48,7 +48,7 @@ from vllm.v1.sample.logits_processor.builtin import process_dict_updates
 
 # Hypothetical custom logits processor
 class DummyLogitsProcessor(LogitsProcessor):
-    """Fake logit processor to support unit testing and examples"""
+    """Fake logit processor to support unit testing and examples."""
 
     @classmethod
     def validate_params(cls, params: SamplingParams):

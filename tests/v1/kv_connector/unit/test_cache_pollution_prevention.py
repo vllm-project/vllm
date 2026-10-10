@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-test that invalid blocks are evicted from prefix cache to prevent pollution.
+"""test that invalid blocks are evicted from prefix cache to prevent pollution.
 
 verifies that when sync-loading fails, invalid blocks are removed from the
 prefix cache hash table so future requests cannot match and reuse corrupted data.
 """
 
 from collections.abc import Callable
-from unittest.mock import Mock
 
 import pytest
 
@@ -17,6 +15,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 from .utils import (
+    create_mock_connector,
     create_model_runner_output,
     create_request,
     create_scheduler,
@@ -39,7 +38,7 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def fail_scheduler():
-    """scheduler with kv_load_failure_policy='fail'"""
+    """Scheduler with kv_load_failure_policy='fail'."""
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
@@ -48,8 +47,7 @@ def fail_scheduler():
 def test_invalid_blocks_evicted_prevents_cache_pollution(
     fail_scheduler: Scheduler,
 ):
-    """
-    verify invalid blocks are evicted to prevent future cache hits.
+    """Verify invalid blocks are evicted to prevent future cache hits.
 
     scenario:
     1. request 1 loads externally-computed blocks (sync mode)
@@ -75,7 +73,7 @@ def test_invalid_blocks_evicted_prevents_cache_pollution(
     }
 
     # mock connector indicating sync load
-    fail_scheduler.connector = Mock()
+    fail_scheduler.connector = create_mock_connector()
     fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )

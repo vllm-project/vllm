@@ -137,8 +137,9 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                     "weight_scale",
                     convert_to_channelwise(layer.weight_scale, layer.logical_widths),
                 )
-                self.strategy = QuantizationStrategy.CHANNEL
-                self.weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
+                self.weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[
+                    QuantizationStrategy.CHANNEL
+                ]
                 self.linear_kernel.config.weight_quant_key = self.weight_quant_key
 
             # Canonicalize to (K, N) for the kernel.

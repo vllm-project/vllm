@@ -114,9 +114,7 @@ def create_static_sink_attention_backend(
 
 @CustomOp.register("static_sink_attention")
 class StaticSinkAttention(Attention, CustomOp):
-    """
-    Attention with static sink tokens
-    """
+    """Attention with static sink tokens."""
 
     def __init__(
         self,
@@ -152,8 +150,6 @@ class StaticSinkAttention(Attention, CustomOp):
             attn_backend=attn_backend,
             **kwargs,
         )
-        CustomOp.__init__(self)
-
         self.sink_len = sink_len
         self.sink_populated = False
         self.sink_key = None
@@ -241,16 +237,8 @@ def maybe_populate_sink(
     self.populate_sink_kv(self_kv_cache)
 
 
-def maybe_populate_sink_fake(
-    self_kv_cache: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="maybe_populate_sink",
     op_func=maybe_populate_sink,
     mutates_args=["self_kv_cache"],
-    fake_impl=maybe_populate_sink_fake,
 )

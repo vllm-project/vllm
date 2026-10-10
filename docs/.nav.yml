@@ -56,7 +56,9 @@ nav:
   - API Reference:
     - api/README.md
     - api/vllm
-  - CLI Reference: cli
+  - CLI Reference:
+    - cli/README.md
+    - vllm: cli
   - Community:
     - community/*
     - Governance: governance

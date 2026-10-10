@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TypeAlias, cast
+from typing import TypeAlias, assert_never, cast
 
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing_extensions import assert_never
 
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
+from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingServing
 from ..typing import PoolingServeContext
 from ..utils import (
@@ -52,6 +52,12 @@ class ServingEmbedding(PoolingServing):
 
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
+
+    async def _preprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        await super()._preprocessing(io_processor, ctx)
+        self.io_processor.maybe_pre_process_chunked(ctx)
 
     def _build_response(
         self,
