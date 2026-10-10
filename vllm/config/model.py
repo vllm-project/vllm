@@ -702,6 +702,12 @@ class ModelConfig:
             architectures, self.runner_type, self.convert
         )
 
+        if self.convert_type == "classify" and self.runner_type != "pooling":
+            raise ValueError(
+                "`--convert classify` requires `--runner pooling`; "
+                f"got `--runner {self.runner_type}`."
+            )
+
         if (
             is_pooling_model
             and not is_generative_model
