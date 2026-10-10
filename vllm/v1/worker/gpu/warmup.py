@@ -241,6 +241,12 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+        if rejection_sampler is not None:
+            # Greedy batches skip logits processing, so rejection kernels
+            # also see model-dtype logits instead of FP32.
+            _warmup_kernels(
+                model_runner, worker_execute_model, worker_sample_tokens, greedy=True
+            )
     finally:
         model_runner.adaptive_verification = adaptive_verification
         if adaptive_sampling:
@@ -252,6 +258,7 @@ def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    greedy: bool = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -325,7 +332,11 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params = (
+            SamplingParams(temperature=0)
+            if greedy
+            else SamplingParams.for_sampler_warmup()
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.

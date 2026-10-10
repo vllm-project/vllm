@@ -450,9 +450,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config, self.req_states, self.is_pooling_model, config_processors
         )
         if self.is_last_pp_rank and not self.is_pooling_model:
-            # V2 bypasses TopKTopPSampler, which registers native warmups.
-            # ROCm only: on CUDA these warmups add ~2 min to every engine start.
-            if current_platform.is_rocm():
+            # Speculative verification uses native top-k/top-p masking even
+            # when target-only sampling can use FlashInfer's fused sampler.
+            if current_platform.is_rocm() or (
+                current_platform.is_cuda() and self.speculative_config is not None
+            ):
                 from vllm.v1.sample.ops.topk_topp_sampler import (
                     register_top_k_top_p_warmups,
                 )
