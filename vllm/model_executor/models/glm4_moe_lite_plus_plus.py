@@ -1,20 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ZEDA-GLM-4.7-Flash-Dynamic (Glm4MoeLitePlusPlus) model.
-
 Thin override of vLLM's Glm4MoeLite that adds Zero-Compute Expert (ZCE)
-support by:
-- recreating the router gate to emit logits for all experts
-  (n_routed_experts + sum(zce_nums) = 64 + 32 = 96),
-- syncing the 96-dim e_score_correction_bias onto the Ascend MoE runner and
-  its routed_experts (GLM uses sigmoid + bias + group topk routing),
-- setting zero_expert_num / zero_expert_type on routed_experts so that
-  vLLM-Ascend's AscendUnquantizedFusedMoEMethod.apply() invokes
-  zero_experts_compute() to remap zero-expert slots (>= n_routed_experts) to
-  expert 0 with weight 0 (graph-friendly, no per-expert Python loop).
-
-Reuses the core FusedMoE / weight loading / forward; no eager dispatch.
-Reference: vllm-ascend PR #14905 (Qwen3 MoE++).
 """
 
 import torch
@@ -111,17 +98,6 @@ class Glm4MoeLitePlusPlusModel(Glm4MoeLiteModel):
         self.device = current_platform.device_type
 
         self.vocab_size = config.vocab_size
-        is_v32 = hasattr(config, "index_topk")
-        if is_v32:
-            topk_tokens = config.index_topk
-            topk_indices_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                topk_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            )
-        else:
-            topk_indices_buffer = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -139,7 +115,7 @@ class Glm4MoeLitePlusPlusModel(Glm4MoeLiteModel):
                 vllm_config=vllm_config,
                 config=config,
                 prefix=prefix,
-                topk_indices_buffer=topk_indices_buffer,
+                topk_indices_buffer=None,
             ),
             prefix=f"{prefix}.layers",
         )
