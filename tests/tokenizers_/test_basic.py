@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from pathlib import Path
 from typing import _get_protocol_attrs  # type: ignore
+from unittest.mock import patch
 
 import pytest
 from transformers import (
     PreTrainedTokenizerBase,
     TokenizersBackend,
+    tokenization_utils_base,
 )
 
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -54,6 +57,20 @@ def test_tokenizer_revision(tokenizer_name: str):
     # Assume that "never" branch always does not exist
     with pytest.raises(OSError, match="not a valid git identifier"):
         get_tokenizer(tokenizer_name, revision="never")
+
+
+def test_hub_tokenizer_loads_from_local_snapshot():
+    """Transformers makes a Hub request per file when given a repo ID."""
+    with patch.object(
+        tokenization_utils_base,
+        "list_repo_templates",
+        wraps=tokenization_utils_base.list_repo_templates,
+    ) as list_repo_templates:
+        tokenizer = get_tokenizer("openai-community/gpt2")
+
+    assert isinstance(tokenizer, PreTrainedTokenizerBase)
+    assert Path(tokenizer.name_or_path).is_dir()
+    list_repo_templates.assert_not_called()
 
 
 @pytest.mark.parametrize("tokenizer_name", ["BAAI/bge-base-en"])

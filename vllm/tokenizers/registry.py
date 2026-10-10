@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
+    get_non_weight_snapshot_path,
     is_mistral_model_repo,
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -164,6 +165,12 @@ def resolve_tokenizer_args(
                 "mistral_format=True is not supported with tokenizer_mode='hf'"
             )
         kwargs["mistral_format"] = False
+        tokenizer_name = get_non_weight_snapshot_path(
+            str(tokenizer_name),
+            revision=revision,
+            cache_dir=download_dir,
+            token=kwargs.get("token"),
+        )
 
     return tokenizer_mode, tokenizer_name, args, kwargs
 
