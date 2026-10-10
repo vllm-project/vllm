@@ -312,6 +312,58 @@ def _platform_device_type() -> str:
         return "cpu"
 
 
+_PP_DEVICE_BACKEND = "nccl-lazy"
+
+
+def _resolved_device_backend(
+    torch_distributed_backend: str | Backend,
+) -> str:
+    backend = str(torch_distributed_backend)
+    if backend == "nccl":
+        default_pg = torch.distributed.distributed_c10d._get_default_group()
+        return default_pg._get_backend(torch.device("cuda")).name()
+    return backend
+
+
+def _pp_device_backend(
+    group_name: str, torch_distributed_backend: str | Backend
+) -> str | None:
+    backend = str(torch_distributed_backend)
+    if (
+        group_name != "pp"
+        or _platform_device_type() != "cuda"
+        or not backend.startswith("nccl")
+    ):
+        return None
+    resolved_backend = _resolved_device_backend(torch_distributed_backend)
+    if resolved_backend in {"nccl2", _PP_DEVICE_BACKEND}:
+        return _PP_DEVICE_BACKEND
+    return backend
+
+
+def _use_lazy_device_group(group_name: str, use_device_communicator: bool) -> bool:
+    # The vLLM world group is separate from PyTorch's default process group and
+    # is used for device communication only by optional features.
+    if group_name == "world":
+        return True
+    # Device communicators route normal tensor collectives through PyNCCL or a
+    # custom backend; a direct PyTorch user will initialize the device group on
+    # demand.
+    return use_device_communicator
+
+
+def _lazy_group_options(
+    torch_distributed_backend: str | Backend,
+) -> Any | None:
+    if _platform_device_type() != "cuda":
+        return None
+    if _resolved_device_backend(torch_distributed_backend) != "nccl2":
+        return None
+    options = torch.distributed.ProcessGroupNCCL.Options()
+    options.lazy_init = True
+    return options
+
+
 def _device_backend_str(torch_distributed_backend: str | Backend) -> str:
     """Normalize ``torch_distributed_backend`` to the ``"<device>:<backend>"``
     format required by ``split_group``'s ``backend`` argument.
@@ -475,10 +527,24 @@ class GroupCoordinator:
 
         self_device_group = None
         self_cpu_group = None
+        pp_device_backend = _pp_device_backend(group_name, torch_distributed_backend)
+        use_lazy_device_group = _use_lazy_device_group(
+            group_name, use_device_communicator
+        )
+        lazy_group_options = (
+            _lazy_group_options(torch_distributed_backend)
+            if use_lazy_device_group
+            else None
+        )
 
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
-        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        if (
+            envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP
+            and pp_device_backend is None
+            and lazy_group_options is None
+            and all(len(ranks) > 1 for ranks in group_ranks)
+        ):
             self_device_group, self_cpu_group = _create_subgroups_split_group(
                 group_ranks, group_name, torch_distributed_backend
             )
@@ -498,10 +564,16 @@ class GroupCoordinator:
             device_timeout = get_distributed_timeout_or_none()
 
             for ranks in group_ranks:
+                pg_options = (
+                    _lazy_group_options(torch_distributed_backend)
+                    if len(ranks) == 1
+                    else lazy_group_options
+                )
                 device_group = torch.distributed.new_group(
                     ranks,
-                    backend=torch_distributed_backend,
+                    backend=pp_device_backend or torch_distributed_backend,
                     timeout=device_timeout,
+                    pg_options=pg_options,
                 )
                 # a group with `gloo` backend, to allow direct coordination between
                 # processes through the CPU.

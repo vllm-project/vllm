@@ -351,6 +351,8 @@ def _run_sparse_backend_vs_sdpa(
         input_size=kv_lora_rank,
         output_size=num_heads * (qk_nope_head_dim + v_head_dim),
         bias=False,
+        tp_rank=0,
+        tp_size=1,
     ).to(device=device, dtype=dtype)
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
 
@@ -442,7 +444,7 @@ def _skip_if_backend_unavailable(backend_cls, kv_cache_dtype: str, block_size: i
 @pytest.mark.parametrize("query_lens", [[1, 7, 3, 5], [1, 7, 8, 0]])
 def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     workspace_init,
     query_lens,
 ):
@@ -500,7 +502,7 @@ def test_flashinfer_sparse_mla_adaptive_varlen_graph_matches_sdpa(
 @pytest.mark.parametrize("num_heads", [128, 64], ids=["h128", "h64"])
 def test_dspark_noncausal_sparse_mla_matches_sdpa(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     workspace_init,
     backend_cls,
     config_name,
@@ -562,7 +564,7 @@ def test_dspark_noncausal_sparse_mla_matches_sdpa(
 @pytest.mark.parametrize("block_size", [64])
 def test_dspark_noncausal_differs_from_causal(
     default_vllm_config,
-    dist_init,
+    single_rank_tp,
     workspace_init,
     backend_cls,
     config_name,
