@@ -352,7 +352,7 @@ class OnlineRenderer:
             )
 
         tool_dicts = construct_tool_dicts(
-            request.tools,
+            request.model_tools,
             request.tool_choice,
             exclude_tools_when_tool_choice_none=(
                 self.exclude_tools_when_tool_choice_none
@@ -846,7 +846,9 @@ class OnlineRenderer:
                     raise NotImplementedError(msg)
                 request = parser(
                     tokenizer,
-                    request.tools,
+                    request.model_tools
+                    if isinstance(request, ResponsesRequest)
+                    else request.tools,
                     model_config=self.model_config,
                     chat_template_kwargs=chat_params.chat_template_kwargs,
                 ).adjust_request(

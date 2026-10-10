@@ -183,7 +183,7 @@ class SimpleContext(ConversationContext):
         self.response_parser = response_parser or (
             parser_cls(
                 tokenizer,
-                request.tools,
+                request.model_tools,
                 chat_template_kwargs=chat_template_kwargs,
             )
             if parser_cls is not None and tokenizer is not None and request is not None
@@ -326,7 +326,9 @@ class ParsableContext(ConversationContext):
         self.enable_auto_tools = enable_auto_tools
 
         self.response_parser = response_parser or (
-            parser_cls(tokenizer, request.tools) if parser_cls is not None else None
+            parser_cls(tokenizer, request.model_tools)
+            if parser_cls is not None
+            else None
         )
         self.parser_cls = parser_cls
         self.request = request
@@ -335,7 +337,7 @@ class ParsableContext(ConversationContext):
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
-        self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        self.tool_dicts = construct_tool_dicts(request.model_tools, request.tool_choice)
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
 
@@ -379,7 +381,8 @@ class ParsableContext(ConversationContext):
                     tool_calls=maybe_filter_parallel_tool_calls(
                         tool_calls or [], self.request
                     ),
-                    tools=self.request.tools,
+                    tools=self.request.model_tools,
+                    client_tool_search=self.request.client_tool_search,
                 )
             )
         elif completion.text:

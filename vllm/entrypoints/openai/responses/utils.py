@@ -36,6 +36,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.entrypoints.openai.responses.tool_search import (
+    TOOL_SEARCH_NAME,
+    make_tool_search_call,
+    tool_search_call_arguments,
+    tool_search_output_content,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import make_tool_call_id
@@ -56,6 +62,7 @@ def build_response_output_items(
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
     tools: list[Tool] | None = None,
+    client_tool_search: bool = False,
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)
@@ -93,14 +100,19 @@ def build_response_output_items(
 
     if tool_calls:
         for idx, tool_call in enumerate(tool_calls):
+            call_id = tool_call.id or make_tool_call_id(
+                func_name=tool_call.name, idx=idx
+            )
+            if client_tool_search and tool_call.name == TOOL_SEARCH_NAME:
+                outputs.append(make_tool_search_call(call_id, tool_call.arguments))
+                continue
             call_name = resolve_responses_tool_call_name(
                 tool_call.name, tool_call_name_map=tool_call_name_map
             )
             outputs.append(
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
-                    call_id=tool_call.id
-                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
+                    call_id=call_id,
                     type="function_call",
                     status="completed",
                     name=call_name.name,
@@ -255,6 +267,24 @@ def _construct_message_from_response_item(
         prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
     )
 
+    item_type = item.get("type") if isinstance(item, dict) else item.type
+    if item_type == "tool_search_call":
+        data = item if isinstance(item, dict) else item.model_dump()
+        item = ResponseFunctionToolCall(
+            type="function_call",
+            id=data.get("id"),
+            call_id=data.get("call_id") or make_tool_call_id(),
+            name=TOOL_SEARCH_NAME,
+            arguments=tool_search_call_arguments(data),
+        )
+    elif item_type == "tool_search_output":
+        data = item if isinstance(item, dict) else item.model_dump()
+        return ChatCompletionToolMessageParam(
+            role="tool",
+            content=tool_search_output_content(data),
+            tool_call_id=data.get("call_id"),
+        )
+
     if isinstance(item, ResponseFunctionToolCall):
         tool_name = item.name
         if item.namespace:
@@ -359,7 +389,6 @@ def _construct_message_from_response_item(
             return {"role": "assistant", "content": text}
     if isinstance(item, dict) and "role" in item:
         return item  # type: ignore[return-value]
-    item_type = item.get("type") if isinstance(item, dict) else item.type
     raise VLLMValidationError(
         f"Unsupported input item type: {item_type}",
         parameter="input",

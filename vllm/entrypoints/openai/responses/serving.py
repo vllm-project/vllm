@@ -221,7 +221,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             return None
         return self.parser(
             tokenizer,
-            request.tools,
+            request.model_tools,
             chat_template_kwargs=chat_template_kwargs,
             model_config=self.model_config,
         )
@@ -1044,7 +1044,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                 content=content,
                 tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
-                tools=request.tools,
+                tools=request.model_tools,
+                client_tool_search=request.client_tool_search,
             )
 
         # Fallback when no parser is configured
@@ -1204,7 +1205,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        processor = SimpleStreamingEventProcessor(tools=request.tools)
+        processor = SimpleStreamingEventProcessor(
+            tools=request.model_tools,
+            client_tool_search=request.client_tool_search,
+        )
 
         hide_stream_metadata = (
             not request.include_reasoning and context.response_parser is not None

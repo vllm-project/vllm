@@ -71,6 +71,10 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.responses.protocol import (
     StreamingResponsesResponse,
 )
+from vllm.entrypoints.openai.responses.tool_search import (
+    TOOL_SEARCH_NAME,
+    make_tool_search_call,
+)
 from vllm.entrypoints.openai.responses.utils import (
     build_responses_tool_call_name_map,
     resolve_responses_tool_call_name,
@@ -821,6 +825,7 @@ class SimpleStreamingState:
     tool_call_name: str = ""
     tool_call_namespace: str | None = None
     tool_call_index: int | None = None
+    tool_search_call: bool = False
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
 
 
@@ -1040,14 +1045,30 @@ def emit_simple_tool_call_open(
     index: int | None,
     namespace: str | None = None,
     call_id: str | None = None,
+    tool_search_call: bool = False,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
-    state.current_item_id = f"fc_{random_uuid()}"
+    state.current_item_id = f"{'tsc' if tool_search_call else 'fc'}_{random_uuid()}"
     state.tool_call_id = call_id or make_tool_call_id()
     state.tool_call_name = name
     state.tool_call_namespace = namespace
     state.tool_call_index = index
+    state.tool_search_call = tool_search_call
     state.accumulated_text = ""
+    if tool_search_call:
+        return [
+            ResponseOutputItemAddedEvent(
+                type="response.output_item.added",
+                sequence_number=-1,
+                output_index=state.output_index,
+                item=make_tool_search_call(
+                    state.tool_call_id,
+                    "",
+                    status="in_progress",
+                    item_id=state.current_item_id,
+                ),
+            ),
+        ]
     return [
         ResponseOutputItemAddedEvent(
             type="response.output_item.added",
@@ -1071,6 +1092,8 @@ def emit_simple_tool_call_delta(
     delta: str,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
+    if state.tool_search_call:
+        return []
     return [
         ResponseFunctionCallArgumentsDeltaEvent(
             type="response.function_call_arguments.delta",
@@ -1085,7 +1108,24 @@ def emit_simple_tool_call_delta(
 def emit_simple_tool_call_done(
     state: SimpleStreamingState,
 ) -> list[StreamingResponsesResponse]:
-    events: list[StreamingResponsesResponse] = [
+    if state.tool_search_call:
+        events: list[StreamingResponsesResponse] = [
+            ResponseOutputItemDoneEvent(
+                type="response.output_item.done",
+                sequence_number=-1,
+                output_index=state.output_index,
+                item=make_tool_search_call(
+                    state.tool_call_id,
+                    state.accumulated_text,
+                    item_id=state.current_item_id,
+                ),
+            )
+        ]
+        state.output_index += 1
+        state.tool_search_call = False
+        state.current_state = _StateType.NONE
+        return events
+    events = [
         ResponseFunctionCallArgumentsDoneEvent(
             type="response.function_call_arguments.done",
             sequence_number=-1,
@@ -1191,9 +1231,11 @@ class SimpleStreamingEventProcessor:
         self,
         state: SimpleStreamingState | None = None,
         tools: list[Tool] | None = None,
+        client_tool_search: bool = False,
     ) -> None:
         self.state = state or SimpleStreamingState()
         self.tool_call_name_map = build_responses_tool_call_name_map(tools)
+        self.client_tool_search = client_tool_search
         self.output_items: list[ResponseOutputItem] = []
 
     def resolve_target_state(
@@ -1265,6 +1307,7 @@ class SimpleStreamingEventProcessor:
                 tool_call.index,
                 call_name.namespace,
                 tool_call.id,
+                self.client_tool_search and tool_call.function.name == TOOL_SEARCH_NAME,
             )
         return handlers.open_fn(self.state)
 

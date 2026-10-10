@@ -190,3 +190,28 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+def test_client_tool_search_streams_as_tool_search_call():
+    """A tool_search call is one tool_search_call item, without argument deltas."""
+    processor = SimpleStreamingEventProcessor(client_tool_search=True)
+    events = _run_through_processor(
+        processor,
+        DeltaMessage(
+            tool_calls=[_make_tool_call(0, name="tool_search", arguments='{"query":')]
+        ),
+    )
+    events += _run_through_processor(
+        processor, DeltaMessage(tool_calls=[_make_tool_call(0, arguments='"x"}')])
+    )
+    events += processor.close_current()
+
+    assert [(e.type, e.item.type) for e in events] == [
+        ("response.output_item.added", "tool_search_call"),
+        ("response.output_item.done", "tool_search_call"),
+    ]
+    done = events[-1].item
+    assert done.execution == "client"
+    assert done.status == "completed"
+    assert done.arguments == {"query": "x"}
+    assert processor.output_items == [done]

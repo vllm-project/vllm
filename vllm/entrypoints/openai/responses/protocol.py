@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from functools import cached_property
 from typing import Annotated, Any, Literal, TypeAlias
 
 from openai.types.responses import (
@@ -59,6 +60,10 @@ from vllm.entrypoints.generate.base.protocol import (
     StopParam,
     TopLogprobsParam,
     validate_cache_salt,
+)
+from vllm.entrypoints.openai.responses.tool_search import (
+    build_model_tools,
+    has_client_tool_search,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
@@ -402,6 +407,15 @@ class ResponsesRequest(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:responses-extra-params]
+
+    @cached_property
+    def model_tools(self) -> list[Tool]:
+        """Tools as the model sees them, including client tool search."""
+        return build_model_tools(self.tools, self.input)
+
+    @cached_property
+    def client_tool_search(self) -> bool:
+        return has_client_tool_search(self.tools)
 
     def build_chat_params(
         self,
