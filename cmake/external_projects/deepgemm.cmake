@@ -185,6 +185,24 @@ if(DEEPGEMM_ARCHS)
   # DeepGEMM's own CUDA headers
   install(DIRECTORY "${deepgemm_SOURCE_DIR}/deep_gemm/include/"
     DESTINATION vllm/third_party/deep_gemm/include
+    COMPONENT _deep_gemm_C
+    PATTERN "sm90_tf32_hc_prenorm_gemm.cuh" EXCLUDE)
+
+  # Backport deepseek-ai/DeepGEMM#448 until the dependency pin includes it.
+  # Only the runtime JIT header changes; preserve DEEPGEMM_SRC_DIR itself.
+  set(_dg_sm90_header "deep_gemm/impls/sm90_tf32_hc_prenorm_gemm.cuh")
+  set(_dg_sm90_patched "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_patched/${_dg_sm90_header}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/tools/patch_deepgemm_sm90.py"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/${_dg_sm90_header}")
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/patch_deepgemm_sm90.py"
+            "${deepgemm_SOURCE_DIR}/deep_gemm/include/${_dg_sm90_header}"
+            "${_dg_sm90_patched}"
+    COMMAND_ERROR_IS_FATAL ANY)
+  install(FILES "${_dg_sm90_patched}"
+    DESTINATION vllm/third_party/deep_gemm/include/deep_gemm/impls
     COMPONENT _deep_gemm_C)
 
   # CUTLASS and CuTe headers (vendored for JIT, separate from vLLM's CUTLASS)

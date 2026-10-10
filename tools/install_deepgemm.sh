@@ -3,6 +3,7 @@
 # Default: build and install immediately
 # Optional: build wheels to a directory for later installation (useful in multi-stage builds)
 set -e
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
@@ -95,6 +96,10 @@ pushd "$INSTALL_DIR/deepgemm"
 git checkout "$DEEPGEMM_GIT_REF"
 git submodule sync --recursive
 git submodule update --init --recursive
+
+# Keep standalone installs consistent with the vendored JIT header.
+SM90_HEADER=deep_gemm/include/deep_gemm/impls/sm90_tf32_hc_prenorm_gemm.cuh
+python3 "$SCRIPT_DIR/patch_deepgemm_sm90.py" "$SM90_HEADER" "$SM90_HEADER"
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
