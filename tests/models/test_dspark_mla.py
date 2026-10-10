@@ -12,8 +12,100 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
+from vllm.models.kimi_k3.common import dspark_mla as common_dspark_mla
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
+
+
+def test_nvidia_dspark_binding_uses_multi_head_latent_attention():
+    from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+
+    assert dspark_mla.MultiHeadLatentAttention is MultiHeadLatentAttention
+
+
+def test_default_mla_hooks_return_their_inputs():
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+
+    kv = torch.zeros(2, 4)
+    k_pe = torch.zeros(2, 1, 2)
+    slots = torch.zeros(2, dtype=torch.int64)
+    q = torch.zeros(2, 2, 4)
+    ql = torch.zeros(2, 2, 4)
+    q_pe = torch.zeros(2, 2, 2)
+    layer = SimpleNamespace(
+        kv_cache_dtype="auto",
+        impl=SimpleNamespace(supports_quant_query_input=False),
+    )
+
+    out_kv, out_k_pe, out_slots = MLAAttention._prepare_kv_cache_update(
+        layer, kv, k_pe, slots, None
+    )
+    assert out_kv is kv
+    assert out_k_pe is k_pe
+    assert out_slots is slots
+
+    out_q, out_mha_k_pe = MLAAttention._prepare_mha_inputs(layer, q, k_pe)
+    assert out_q is q
+    assert out_mha_k_pe is k_pe
+
+    formed = MLAAttention._form_decode_q(layer, ql, q_pe, kv, k_pe, kv, None, 2)
+    assert formed[0] is ql
+    assert formed[1] is q_pe
+
+
+def test_kv_cache_layer_defaults_to_the_attention_module():
+    attn = SimpleNamespace(layer_name="model.layers.0.self_attn", mla_attn=object())
+    assert K3DSparkModel.kv_cache_layer(SimpleNamespace(), attn) is attn
+
+    class NestedCacheOwner(K3DSparkModel):
+        def kv_cache_layer(self, attn):
+            return attn.mla_attn
+
+    assert NestedCacheOwner.kv_cache_layer(SimpleNamespace(), attn) is attn.mla_attn
+
+
+def test_wrapper_uses_mla_attn_cls():
+    from vllm.model_executor.layers.mla import (
+        MLAModules,
+        MultiHeadLatentAttentionWrapper,
+    )
+
+    class DummyAttn(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.prefix = kwargs["prefix"]
+
+    class Sub(MultiHeadLatentAttentionWrapper):
+        mla_attn_cls = DummyAttn
+
+    modules = MLAModules(
+        kv_a_layernorm=nn.Identity(),
+        kv_b_proj=nn.Identity(),
+        rotary_emb=None,
+        o_proj=nn.Identity(),
+        fused_qkv_a_proj=None,
+        kv_a_proj_with_mqa=nn.Identity(),
+        q_a_layernorm=None,
+        q_b_proj=None,
+        q_proj=nn.Identity(),
+        indexer=None,
+        is_sparse=False,
+        topk_indices_buffer=None,
+    )
+    wrapper = Sub(
+        hidden_size=8,
+        num_heads=2,
+        scale=1.0,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=2,
+        v_head_dim=4,
+        q_lora_rank=None,
+        kv_lora_rank=4,
+        mla_modules=modules,
+        prefix="model.layers.0.self_attn",
+    )
+    assert isinstance(wrapper.mla_attn, DummyAttn)
+    assert wrapper.mla_attn.prefix == "model.layers.0.self_attn.attn"
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
@@ -121,12 +213,14 @@ def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
         context_kv_proj_calls.append((args, kwargs))
         return DummyModule()
 
-    monkeypatch.setattr(dspark_mla, "get_draft_quant_config", lambda _: None)
-    monkeypatch.setattr(dspark_mla, "ReplicatedLinear", DummyModule)
-    monkeypatch.setattr(dspark_mla, "MergedColumnParallelLinear", make_context_kv_proj)
-    monkeypatch.setattr(dspark_mla, "RMSNorm", DummyModule)
-    monkeypatch.setattr(dspark_mla, "K3DSparkDecoderLayer", DummyModule)
-    monkeypatch.setattr(dspark_mla, "DSparkMarkovHead", make_markov_head)
+    monkeypatch.setattr(common_dspark_mla, "get_draft_quant_config", lambda _: None)
+    monkeypatch.setattr(common_dspark_mla, "ReplicatedLinear", DummyModule)
+    monkeypatch.setattr(
+        common_dspark_mla, "MergedColumnParallelLinear", make_context_kv_proj
+    )
+    monkeypatch.setattr(common_dspark_mla, "RMSNorm", DummyModule)
+    monkeypatch.setattr(K3DSparkModel, "decoder_layer_cls", DummyModule)
+    monkeypatch.setattr(common_dspark_mla, "DSparkMarkovHead", make_markov_head)
 
     config = SimpleNamespace(
         target_hidden_size=16,

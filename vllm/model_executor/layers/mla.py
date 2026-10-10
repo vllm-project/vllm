@@ -60,6 +60,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
     # --8<-- [end:multi_head_latent_attention]
 
+    # Subclasses replace this to supply a platform decode epilogue.
+    mla_attn_cls: type[MLAAttention] = MLAAttention
+
     def __init__(
         self,
         hidden_size: int,
@@ -119,7 +122,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
-        self.mla_attn = MLAAttention(
+        self.mla_attn = self.mla_attn_cls(
             num_heads=self.num_heads,
             scale=scale,
             qk_nope_head_dim=self.qk_nope_head_dim,
