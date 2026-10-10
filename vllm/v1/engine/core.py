@@ -1493,13 +1493,13 @@ class EngineCoreProc(EngineCore):
                 and engine_core.vllm_config.shutdown_timeout == 0
             )
             raise
-        except Exception as e:
+        except Exception:
             if engine_core is None:
                 logger.exception("EngineCore failed to start.")
             else:
                 logger.exception("EngineCore encountered a fatal error.")
                 engine_core._send_engine_dead()
-            raise e
+            raise SystemExit(1) from None
         finally:
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.signal(signal.SIGINT, signal.SIG_DFL)
