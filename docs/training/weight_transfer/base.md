@@ -504,6 +504,24 @@ The base class provides:
     its `drain_pending()` joins both queues and syncs both streams before
     `finalize_layerwise_reload` runs.
 
+### Reload mode
+
+`WeightTransferConfig.reload_mode` selects how the `nccl` and `ipc` engines write
+received weights into the model. `layerwise` (the default) is correct for every
+model. `direct` has each `weight_loader` write into the live parameters and runs
+no post-processing, which suits a model whose post-load step leaves the
+parameters as the checkpoint has them, such as an unquantized dense model:
+
+```bash
+vllm serve ... --weight-transfer-config '{"backend": "nccl", "reload_mode": "direct"}'
+```
+
+Nothing verifies that a model qualifies, and a `direct` update has no rollback:
+any failure after `start_reload` leaves the model undefined, refuses further
+updates and requires an engine restart. In both modes the sender must send every
+tensor; an omitted one keeps its previous values. `sparse_nccl` and `sharded_rdt`
+ignore the setting.
+
 ### Request Classes
 
 The API-level request classes provide backend-agnostic serialization using plain dictionaries.
