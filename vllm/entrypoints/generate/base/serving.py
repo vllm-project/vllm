@@ -25,6 +25,10 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
+from vllm.entrypoints.serve.middleware.request_failures import (
+    RequestFailureStage,
+    record_request_failure,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput
@@ -193,15 +197,16 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> str:
-        json_str = json.dumps(
-            self.create_error_response(
-                message=message,
-                err_type=err_type,
-                status_code=status_code,
-                param=param,
-            ).model_dump()
+        error_response = self.create_error_response(
+            message=message,
+            err_type=err_type,
+            status_code=status_code,
+            param=param,
         )
-        return json_str
+        # The HTTP status is already 200, so this is the only place the
+        # failure can be counted.
+        record_request_failure(RequestFailureStage.STREAMING, error_response.error.code)
+        return json.dumps(error_response.model_dump())
 
     def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
         """Raise GenerationError if finish_reason indicates an error."""

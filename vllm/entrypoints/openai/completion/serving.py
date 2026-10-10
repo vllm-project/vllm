@@ -35,6 +35,7 @@ from vllm.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
+from vllm.entrypoints.serve.middleware.request_failures import mark_generation_started
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
@@ -235,6 +236,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             )
 
         # Non-streaming response
+        mark_generation_started(raw_request)
         final_res_batch: list[RequestOutput | None] = [None] * num_prompts
         try:
             async for i, res in result_generator:
