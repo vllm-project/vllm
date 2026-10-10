@@ -7,7 +7,7 @@ from typing import Union
 import torch
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, SchedulerConfig
+from vllm.config import ParallelConfig, SchedulerConfig, in_draft_model
 from vllm.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
@@ -1331,7 +1331,8 @@ class FusedMoEConfig:
     # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on
     # ROCm/AITER. Opt-in via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1; rejected
     # for any other model type. Resolved here, not in the forward path,
-    # because get_current_vllm_config() isn't set there.
+    # because get_current_vllm_config() isn't set there. Speculative drafts
+    # keep the checkpoint's a8w4.
     use_mxfp4_w4a4_dsv4: bool = False
 
     def __post_init__(self):
@@ -1364,7 +1365,11 @@ class FusedMoEConfig:
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
 
-        if self.rocm_aiter_fmoe_enabled and envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
+        if (
+            self.rocm_aiter_fmoe_enabled
+            and envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4
+            and not in_draft_model()
+        ):
             from vllm.config import get_current_vllm_config_or_none
 
             vllm_config = get_current_vllm_config_or_none()

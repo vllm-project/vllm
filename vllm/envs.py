@@ -1297,6 +1297,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # MXFP4 backend. Default is a8w4 (FP8); set to "1" to enable a4w4
     # ("true" is not accepted -- only "0"/"1"). Raises if set for other
     # models.
+    # Speculative draft models keep a8w4.
     "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4": lambda: maybe_convert_bool(
         os.getenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4")
     ),
@@ -1414,6 +1415,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce
+    # Speculative draft models always use a full-precision all-reduce.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": env_with_choices(
         "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
         "NONE",

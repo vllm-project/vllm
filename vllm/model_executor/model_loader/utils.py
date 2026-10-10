@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for selecting and loading models."""
 
+import functools
 import inspect
 import time
 import warnings
@@ -16,6 +17,7 @@ from vllm.config import (
     LoadConfig,
     ModelConfig,
     VllmConfig,
+    draft_model_scope,
     replace,
     set_current_vllm_config,
 )
@@ -70,6 +72,31 @@ def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
     return replace(load_config, **kwargs)
 
 
+def _is_draft_model_config(vllm_config: VllmConfig, model_config: ModelConfig) -> bool:
+    spec = vllm_config.speculative_config
+    return (
+        spec is not None
+        and model_config is spec.draft_model_config
+        # ngram and custom proposers alias the target config as the draft's.
+        and model_config is not spec.target_model_config
+    )
+
+
+def _run_forward_in_draft_scope(model: nn.Module) -> None:
+    # A top-level `support_torch_compile` class would trace this wrapper, so it
+    # is left alone; draft wrappers normally compile only their inner model.
+    if hasattr(model, "do_not_compile"):
+        return
+    forward = model.forward
+
+    @functools.wraps(forward)
+    def draft_forward(*args, **kwargs):
+        with draft_model_scope():
+            return forward(*args, **kwargs)
+
+    model.forward = draft_forward
+
+
 @instrument(span_name="Initialize model")
 def initialize_model(
     vllm_config: VllmConfig,
@@ -91,10 +118,16 @@ def initialize_model(
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix):
+        is_draft = _is_draft_model_config(vllm_config, model_config)
+        with (
+            set_current_vllm_config(vllm_config, check_compile=True, prefix=prefix),
+            draft_model_scope() if is_draft else nullcontext(),
+        ):
             model = model_class(vllm_config=vllm_config, prefix=prefix)
             record_metadata_for_reloading(model)
-            return model
+        if is_draft:
+            _run_forward_in_draft_scope(model)
+        return model
 
     msg = (
         "vLLM model class should accept `vllm_config` and `prefix` as "

@@ -3519,6 +3519,30 @@ def get_current_vllm_config_or_none() -> VllmConfig | None:
     return _current_vllm_config
 
 
+_in_draft_model = False
+
+
+@contextmanager
+def draft_model_scope():
+    """Mark construction and forward of a speculative-decoding draft model.
+
+    Opt-in optimizations that lower numeric precision below the checkpoint's
+    (e.g. ROCm a4w4 MoE, INT4 quick all-reduce) check `in_draft_model()` and
+    stay off for the draft, so they cannot silently lower the acceptance rate.
+    """
+    global _in_draft_model
+    old = _in_draft_model
+    _in_draft_model = True
+    try:
+        yield
+    finally:
+        _in_draft_model = old
+
+
+def in_draft_model() -> bool:
+    return _in_draft_model
+
+
 T = TypeVar("T")
 
 

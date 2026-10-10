@@ -56,10 +56,12 @@ from vllm.config.utils import (
 )
 from vllm.config.vllm import (
     VllmConfig,
+    draft_model_scope,
     get_cached_compilation_config,
     get_current_vllm_config,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
+    in_draft_model,
     set_current_vllm_config,
 )
 from vllm.config.watermarking import WatermarkConfig
@@ -148,6 +150,8 @@ __all__ = [
     "update_config",
     # From vllm.config.vllm
     "VllmConfig",
+    "draft_model_scope",
+    "in_draft_model",
     "get_cached_compilation_config",
     "get_current_vllm_config",
     "get_current_vllm_config_or_none",
