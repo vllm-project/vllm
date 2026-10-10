@@ -177,6 +177,9 @@ class PushProxy:
                             detail=f"Request failed with status {response.status}: "
                             f"{error_content}",
                         )
+            except HTTPException:
+                # Preserve the upstream status instead of wrapping it as 500.
+                raise
             except aiohttp.ClientError as e:
                 logger.error("ClientError occurred: %s", str(e))
                 raise HTTPException(
