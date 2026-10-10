@@ -27,6 +27,30 @@ if TYPE_CHECKING:
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
+    # Optional fastapi-guard security middleware
+    VLLM_GUARD_ENABLED: bool = False
+    VLLM_GUARD_RATE_LIMIT: int = 100
+    VLLM_GUARD_RATE_LIMIT_WINDOW: int = 60
+    VLLM_GUARD_AUTO_BAN_THRESHOLD: int = 10
+    VLLM_GUARD_AUTO_BAN_DURATION: int = 300
+    VLLM_GUARD_PASSIVE_MODE: bool = False
+    VLLM_GUARD_RATE_LIMIT_AUTO_BAN: bool = False
+    VLLM_GUARD_TRUST_X_FORWARDED_PROTO: bool = False
+    VLLM_GUARD_BLOCKED_IPS: str | None = None
+    VLLM_GUARD_ALLOWED_IPS: str | None = None
+    VLLM_GUARD_BLOCKED_USER_AGENTS: str | None = None
+    VLLM_GUARD_TRUSTED_PROXIES: str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    VLLM_GUARD_TRUSTED_PROXY_DEPTH: int = 1
+    VLLM_GUARD_EXCLUDED_PATHS: str = "/health,/metrics,/docs"
+    VLLM_GUARD_SECURITY_HEADERS: bool = False
+    VLLM_GUARD_ENFORCE_HTTPS: bool = False
+    VLLM_GUARD_BLOCKED_COUNTRIES: str | None = None
+    VLLM_GUARD_ALLOWED_COUNTRIES: str | None = None
+    VLLM_GUARD_BLOCK_CLOUD_PROVIDERS: str | None = None
+    VLLM_GUARD_REDIS_URL: str | None = None
+    VLLM_GUARD_IPINFO_TOKEN: str | None = None
+    VLLM_GUARD_LOG_FILE: str | None = None
+    VLLM_GUARD_LOG_FORMAT: str = "text"
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -818,6 +842,65 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: (
         os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").lower() == "true"
     ),
+    # Optional fastapi-guard security middleware
+    # (vllm/entrypoints/serve/middleware/guard.py)
+    "VLLM_GUARD_ENABLED": lambda: (
+        os.environ.get("VLLM_GUARD_ENABLED", "False").lower() == "true"
+    ),
+    "VLLM_GUARD_RATE_LIMIT": lambda: int(
+        os.environ.get("VLLM_GUARD_RATE_LIMIT", "100")
+    ),
+    "VLLM_GUARD_RATE_LIMIT_WINDOW": lambda: int(
+        os.environ.get("VLLM_GUARD_RATE_LIMIT_WINDOW", "60")
+    ),
+    "VLLM_GUARD_AUTO_BAN_THRESHOLD": lambda: int(
+        os.environ.get("VLLM_GUARD_AUTO_BAN_THRESHOLD", "10")
+    ),
+    "VLLM_GUARD_AUTO_BAN_DURATION": lambda: int(
+        os.environ.get("VLLM_GUARD_AUTO_BAN_DURATION", "300")
+    ),
+    "VLLM_GUARD_PASSIVE_MODE": lambda: (
+        os.environ.get("VLLM_GUARD_PASSIVE_MODE", "False").lower() == "true"
+    ),
+    "VLLM_GUARD_RATE_LIMIT_AUTO_BAN": lambda: (
+        os.environ.get("VLLM_GUARD_RATE_LIMIT_AUTO_BAN", "False").lower() == "true"
+    ),
+    "VLLM_GUARD_TRUST_X_FORWARDED_PROTO": lambda: (
+        os.environ.get("VLLM_GUARD_TRUST_X_FORWARDED_PROTO", "False").lower() == "true"
+    ),
+    "VLLM_GUARD_BLOCKED_IPS": lambda: os.environ.get("VLLM_GUARD_BLOCKED_IPS", None),
+    "VLLM_GUARD_ALLOWED_IPS": lambda: os.environ.get("VLLM_GUARD_ALLOWED_IPS", None),
+    "VLLM_GUARD_BLOCKED_USER_AGENTS": lambda: os.environ.get(
+        "VLLM_GUARD_BLOCKED_USER_AGENTS", None
+    ),
+    "VLLM_GUARD_TRUSTED_PROXIES": lambda: os.environ.get(
+        "VLLM_GUARD_TRUSTED_PROXIES", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    ),
+    "VLLM_GUARD_TRUSTED_PROXY_DEPTH": lambda: int(
+        os.environ.get("VLLM_GUARD_TRUSTED_PROXY_DEPTH", "1")
+    ),
+    "VLLM_GUARD_EXCLUDED_PATHS": lambda: os.environ.get(
+        "VLLM_GUARD_EXCLUDED_PATHS", "/health,/metrics,/docs"
+    ),
+    "VLLM_GUARD_SECURITY_HEADERS": lambda: (
+        os.environ.get("VLLM_GUARD_SECURITY_HEADERS", "False").lower() == "true"
+    ),
+    "VLLM_GUARD_ENFORCE_HTTPS": lambda: (
+        os.environ.get("VLLM_GUARD_ENFORCE_HTTPS", "False").lower() == "true"
+    ),
+    "VLLM_GUARD_BLOCKED_COUNTRIES": lambda: os.environ.get(
+        "VLLM_GUARD_BLOCKED_COUNTRIES", None
+    ),
+    "VLLM_GUARD_ALLOWED_COUNTRIES": lambda: os.environ.get(
+        "VLLM_GUARD_ALLOWED_COUNTRIES", None
+    ),
+    "VLLM_GUARD_BLOCK_CLOUD_PROVIDERS": lambda: os.environ.get(
+        "VLLM_GUARD_BLOCK_CLOUD_PROVIDERS", None
+    ),
+    "VLLM_GUARD_REDIS_URL": lambda: os.environ.get("VLLM_GUARD_REDIS_URL", None),
+    "VLLM_GUARD_IPINFO_TOKEN": lambda: os.environ.get("VLLM_GUARD_IPINFO_TOKEN", None),
+    "VLLM_GUARD_LOG_FILE": lambda: os.environ.get("VLLM_GUARD_LOG_FILE", None),
+    "VLLM_GUARD_LOG_FORMAT": lambda: os.environ.get("VLLM_GUARD_LOG_FORMAT", "text"),
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID": lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
     "S3_SECRET_ACCESS_KEY": lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
@@ -2362,6 +2445,8 @@ def compile_factors() -> dict[str, object]:
         # Credential; never affects compiled artifacts and must not be
         # persisted in cache_key_factors.json.
         "VLLM_API_KEY",
+        "VLLM_GUARD_IPINFO_TOKEN",
+        "VLLM_GUARD_REDIS_URL",
         "VLLM_USAGE_STATS_SERVER",
         "VLLM_NO_USAGE_STATS",
         "VLLM_DO_NOT_TRACK",

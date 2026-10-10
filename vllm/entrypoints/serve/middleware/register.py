@@ -40,6 +40,11 @@ def init_entrypoints_middleware(
 
         app.add_middleware(XRequestIdMiddleware)
 
+    if envs.VLLM_GUARD_ENABLED:
+        from .guard import init_guard_middleware
+
+        init_guard_middleware(app)
+
     if "generate" in supported_tasks:
         # Add scaling middleware to check for scaling state
         from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
