@@ -346,7 +346,8 @@ def fused_moe_kernel(
     use_fp8_w8a8: tl.constexpr,
     use_int8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
-    per_channel_quant: tl.constexpr,
+    per_act_token_quant: tl.constexpr,
+    per_out_ch_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     SWAP_AB: tl.constexpr,
     # Tensor-descriptor path for the A gather and B load in the K-loop.
@@ -489,19 +490,24 @@ def fused_moe_kernel(
             b_scale_ptrs = (
                 b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
             )
-        # channel-wise
-        elif per_channel_quant:
-            b_scale_ptrs = (
-                b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
-            )
-            b_scale = tl.load(b_scale_ptrs)
-            # Load per-token scale for activations
-            a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
-            a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
-        # tensor-wise
+        # Non-block activation and weight scales have independent layouts.
         else:
-            a_scale = tl.load(a_scale_ptr)
-            b_scale = tl.load(b_scale_ptr + off_experts)
+            if per_out_ch_quant:
+                b_scale_ptrs = (
+                    b_scale_ptr
+                    + off_experts * stride_bse
+                    + offs_bn[None, :] * stride_bsn
+                )
+                b_scale = tl.load(b_scale_ptrs)
+            else:
+                b_scale = tl.load(b_scale_ptr + off_experts * stride_bse)
+
+            if per_act_token_quant:
+                # Load the scale for the source token of each routed slot.
+                a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+                a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
+            else:
+                a_scale = tl.load(a_scale_ptr)
     if HAS_BIAS:
         # bias shape: [num_experts, N]
         bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
@@ -779,6 +785,7 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool = False,
 ):
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -885,9 +892,11 @@ def invoke_fused_moe_triton_kernel(
         C.stride(2),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(1)
+        if B_scale is not None and B_scale.ndim >= 2 and B_scale.size(1) > 1
+        else 0,
         B_bias.stride(0) if B_bias is not None else 0,
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
@@ -898,7 +907,8 @@ def invoke_fused_moe_triton_kernel(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
-        per_channel_quant=per_channel_quant,
+        per_act_token_quant=per_channel_quant,
+        per_out_ch_quant=per_out_ch_quant,
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
@@ -930,6 +940,7 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool = False,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -1005,9 +1016,10 @@ def dispatch_fused_moe_kernel(
             use_int8_w8a8,
             use_int8_w8a16,
             use_int4_w4a16,
-            per_channel_quant,
-            block_shape,
-            B_bias,
+            per_channel_quant=per_channel_quant,
+            block_shape=block_shape,
+            B_bias=B_bias,
+            per_out_ch_quant=per_out_ch_quant,
         )
 
 
@@ -1473,6 +1485,7 @@ def fused_experts_op(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool = False,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1499,6 +1512,7 @@ def fused_experts_op(
         block_shape,
         w1_bias,
         w2_bias,
+        per_out_ch_quant,
     )
 
 
@@ -1527,6 +1541,7 @@ def fused_experts_op_fake(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -1628,6 +1643,7 @@ def fused_experts(
         block_shape=quant_config.block_shape,
         w1_bias=quant_config.w1_bias,
         w2_bias=quant_config.w2_bias,
+        per_out_ch_quant=quant_config.per_out_ch_quant,
     )
 
 
@@ -1674,6 +1690,7 @@ def fused_experts_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    per_out_ch_quant: bool = False,
 ) -> torch.Tensor:
     if ocp_mx_scheme is not None:
         raise NotImplementedError(
@@ -1806,6 +1823,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w1_bias,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
     apply_moe_activation(
@@ -1845,6 +1863,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w2_bias,
+        per_out_ch_quant=per_out_ch_quant,
     )
 
     ops.moe_sum(

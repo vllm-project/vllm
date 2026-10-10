@@ -156,6 +156,7 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
             renormalize=False,
             quant_config=fp8_w8a8_moe_quant_config(
                 per_act_token_quant=True,
+                per_out_ch_quant=True,
                 w1_scale=w1_s,
                 w2_scale=w2_s,
                 block_shape=None,  # Not using block quantization

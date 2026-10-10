@@ -80,7 +80,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             activation_key,
             activation_format,
         )
-        if not supported or not current_platform.is_cuda_alike():
+        if not supported:
+            return supported, reason
+
+        if moe_config.is_lora_enabled and activation_key == kInt8StaticTensorSym:
+            return False, "static INT8 activation quantization with LoRA"
+
+        if not current_platform.is_cuda_alike():
             return supported, reason
 
         padded_num_experts = (moe_config.num_experts + 31) // 32 * 32
@@ -106,13 +112,29 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # Defer activation quantization to apply() only when LoRA is active AND
-        # tokens are dispatched across ranks (DP+EP all2all).
-        return (
+        parallel = self.moe_config.moe_parallel_config
+        lora_needs_gathered_input = (
             self._lora_context is not None
             and self.quant_dtype is not None
-            and self.moe_config.moe_parallel_config.use_all2all_kernels
+            and parallel.use_all2all_kernels
         )
+        # A static activation scale belongs to the target rank's local experts.
+        # Naive AllGather dispatch therefore sends floating-point activations
+        # and quantizes only after dispatch, using the receiving rank's scale.
+        static_int8_needs_target_scale = (
+            self.quant_config.use_int8_w8a8
+            and self.a1_scale is not None
+            and (
+                parallel.use_ag_rs_all2all_kernels
+                or (parallel.dp_size > 1 and not parallel.use_all2all_kernels)
+            )
+        )
+        return lora_needs_gathered_input or static_int8_needs_target_scale
+
+    def router_weight_application(self) -> mk.RouterWeightApplication:
+        if self.quant_config.use_int8_w8a8 and self.a1_scale is not None:
+            return mk.RouterWeightApplication.GEMM1
+        return mk.RouterWeightApplication.PREPARE
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -145,14 +167,14 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
-            # Activations are consumed as float and quantized to int8
-            # dynamically inside the kernel, so only dynamic-activation int8
-            # schemes are supported (static-activation int8 is not).
             supported += [
                 # per-channel weight + dynamic per-token activation
                 (kInt8StaticChannelSym, kInt8DynamicTokenSym),
                 # per-tensor weight + dynamic per-tensor activation
                 (kInt8StaticTensorSym, kInt8DynamicTensorSym),
+                # static per-tensor activation with either weight layout
+                (kInt8StaticChannelSym, kInt8StaticTensorSym),
+                (kInt8StaticTensorSym, kInt8StaticTensorSym),
             ]
         if current_platform.supports_fp8():
             supported += [
@@ -314,20 +336,25 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             block_shape=self.block_shape,
         )
 
-        if hidden_states.dtype == torch.bfloat16:
+        compute_dtype_source = (
+            self.moe_config.in_dtype
+            if self.quant_config.use_int8_w8a8 and self.a1_scale is not None
+            else hidden_states.dtype
+        )
+        if compute_dtype_source == torch.bfloat16:
             compute_type = tl.bfloat16
-        elif hidden_states.dtype == torch.float16:
+        elif compute_dtype_source == torch.float16:
             compute_type = tl.float16
-        elif hidden_states.dtype == torch.float32:
+        elif compute_dtype_source == torch.float32:
             compute_type = tl.float32
         elif (
-            hidden_states.dtype == torch.float8_e4m3fn
-            or hidden_states.dtype == torch.float8_e4m3fnuz
-            or hidden_states.dtype == torch.int8
+            compute_dtype_source == torch.float8_e4m3fn
+            or compute_dtype_source == torch.float8_e4m3fnuz
+            or compute_dtype_source == torch.int8
         ):
             compute_type = tl.bfloat16
         else:
-            raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
+            raise ValueError(f"Unsupported compute_type: {compute_dtype_source}")
 
         # Note that the output tensor might be in workspace1
         intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
@@ -412,6 +439,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             else (a1q_scale if a1q_scale is not None else self.a1_scale)
         )
 
+        apply_router_weight_in_gemm1 = (
+            apply_router_weight_on_input
+            and self.router_weight_application() == mk.RouterWeightApplication.GEMM1
+        )
+
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
                 hidden_states,
@@ -419,11 +451,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 intermediate_cache1,
                 input_scale,
                 self.w1_scale,
-                None,  # topk_weights
+                topk_weights if apply_router_weight_in_gemm1 else None,
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
-                False,  # mul_routed_weights
+                apply_router_weight_in_gemm1,
                 top_k_num,
                 config,
                 compute_type=compute_type,
@@ -434,6 +466,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w1_bias,
+                per_out_ch_quant=self.per_out_ch_quant,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -555,6 +588,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w2_bias,
+                per_out_ch_quant=self.per_out_ch_quant,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
