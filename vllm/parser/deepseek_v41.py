@@ -20,7 +20,7 @@ DSML_INVOKE_END = "</｜DSML｜ invoke>"
 DSML_PARAM_START = "<｜DSML｜ parameter"
 DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
 
-_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START, DSML_PARAM_CLOSE)
+_PARAM_RE, _PARTIAL_PARAM_RE = _param_patterns(DSML_PARAM_START)
 
 
 @functools.cache
