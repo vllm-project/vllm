@@ -22,7 +22,7 @@ use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
-    ChatRequest, CollectedAssistantMessage, FinishReason,
+    ChatRequest, CollectedAssistantMessage, FinishReason, MultimodalTokenCounts,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 
@@ -80,13 +80,17 @@ pub async fn chat_completions(
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
 
-    let chat_stream =
-        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                return chat_submit_error("failed to submit chat request", error).into_response();
-            }
-        };
+    let (chat_stream, multimodal_tokens) = match state
+        .chat
+        .chat_with_metadata(prepared.chat_request)
+        .instrument(request_span.clone())
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            return chat_submit_error("failed to submit chat request", error).into_response();
+        }
+    };
 
     if stream {
         let chunk_stream = chat_completion_chunk_stream(
@@ -96,6 +100,7 @@ pub async fn chat_completions(
             created,
             api_server_options,
             prepared.options,
+            multimodal_tokens,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
@@ -108,6 +113,7 @@ pub async fn chat_completions(
             created,
             api_server_options,
             prepared.options,
+            multimodal_tokens,
         )
         .instrument(request_span.clone())
         .await
@@ -144,6 +150,7 @@ async fn collect_chat_completion(
         return_tokens_as_token_ids,
         is_named_tool_choice,
     }: ResponseOptions,
+    multimodal_tokens: Option<MultimodalTokenCounts>,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
@@ -202,7 +209,7 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details);
+    let usage = Usage::from_token_usage(usage, enable_prompt_tokens_details, multimodal_tokens);
 
     if enable_log_requests {
         info!(
@@ -269,6 +276,7 @@ async fn chat_completion_chunk_stream(
         return_tokens_as_token_ids,
         is_named_tool_choice,
     }: ResponseOptions,
+    multimodal_tokens: Option<MultimodalTokenCounts>,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     let envelope = Arc::new(StreamResponseEnvelope::new(
@@ -474,7 +482,11 @@ async fn chat_completion_chunk_stream(
                 if include_usage {
                     y.yield_ok(usage_chunk(
                         &envelope,
-                        Usage::from_token_usage(final_usage, enable_prompt_tokens_details),
+                        Usage::from_token_usage(
+                            final_usage,
+                            enable_prompt_tokens_details,
+                            multimodal_tokens,
+                        ),
                     ))
                     .await;
                 }
@@ -983,6 +995,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1006,6 +1019,50 @@ mod tests {
                 .map(|details| details.cached_tokens),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_reports_multimodal_prompt_token_details() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                usage: done_usage(340, 1, 0),
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+        let multimodal_tokens = std::collections::BTreeMap::from([("image".to_string(), 336usize)]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-mm".to_string(),
+            "model".to_string(),
+            1,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
+            ResponseOptions {
+                include_usage: true,
+                ..Default::default()
+            },
+            Some(multimodal_tokens.clone()),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        let usage = chunks.last().and_then(|chunk| chunk.usage.as_ref()).expect("usage chunk");
+        let details = usage.prompt_tokens_details.as_ref().expect("prompt token details");
+        assert_eq!(details.cached_tokens, 0);
+        assert_eq!(details.multimodal_tokens.as_ref(), Some(&multimodal_tokens));
     }
 
     #[tokio::test]
@@ -1058,6 +1115,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1108,6 +1166,7 @@ mod tests {
             1,
             ApiServerOptions::default(),
             ResponseOptions::default(),
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1192,6 +1251,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1324,6 +1384,7 @@ mod tests {
                 return_token_ids: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1401,6 +1462,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1486,6 +1548,7 @@ mod tests {
                 include_reasoning: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1556,6 +1619,7 @@ mod tests {
                 include_continuous_usage: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await
@@ -1610,6 +1674,7 @@ mod tests {
                 include_continuous_usage: true,
                 ..Default::default()
             },
+            None,
         )
         .collect::<Vec<_>>()
         .await

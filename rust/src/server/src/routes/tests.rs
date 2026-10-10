@@ -1196,6 +1196,22 @@ async fn test_app_with_backend_and_engine_request_check<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
+    test_app_with_backend_and_engine_request_check_and_options(
+        backend,
+        ApiServerOptions::default(),
+        check_request,
+    )
+    .await
+}
+
+async fn test_app_with_backend_and_engine_request_check_and_options<F>(
+    backend: Arc<dyn ChatTextBackend>,
+    options: ApiServerOptions,
+    check_request: F,
+) -> (axum::Router, MockEngineTask)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-check-request".to_vec();
@@ -1231,10 +1247,10 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router(Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_api_server_options(options),
+        )),
         engine_task,
     )
 }
@@ -2910,6 +2926,87 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
     assert_eq!(json["object"], "chat.completion");
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
+}
+
+/// A multimodal request reports its placeholder tokens under
+/// `usage.prompt_tokens_details.multimodal_tokens`, keyed by modality, and the
+/// count matches the placeholder span the engine actually received.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_chat_reports_multimodal_prompt_token_details() {
+    let image_tokens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recorded_image_tokens = Arc::clone(&image_tokens);
+
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check_and_options(
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+        ApiServerOptions {
+            enable_prompt_tokens_details: true,
+            ..Default::default()
+        },
+        move |request| {
+            let features = request.mm_features.as_ref().expect("multimodal features");
+            assert_eq!(features[0].modality.as_str(), "image");
+            recorded_image_tokens.store(
+                features[0].mm_position.length,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        },
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe "},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                    },
+                                    "uuid": "image-1"
+                                }
+                            ]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let placeholder_tokens = image_tokens.load(std::sync::atomic::Ordering::SeqCst) as u64;
+    assert!(
+        placeholder_tokens > 0,
+        "engine received a non-empty placeholder span"
+    );
+    let details = &json["usage"]["prompt_tokens_details"];
+    assert_eq!(
+        details["multimodal_tokens"]["image"],
+        serde_json::json!(placeholder_tokens)
+    );
+    // The request hits no prefix cache, so the details object exists only because
+    // of the multimodal breakdown.
+    assert_eq!(details["cached_tokens"], serde_json::json!(0));
+    assert!(json["usage"]["prompt_tokens"].as_u64().unwrap() >= placeholder_tokens);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7,7 +7,7 @@ use std::slice;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_chat::ChatTokenUsage;
+use vllm_chat::{ChatTokenUsage, MultimodalTokenCounts};
 
 // ============================================================================
 // Constants
@@ -552,20 +552,22 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Create a Usage with prompt-token cache and reasoning-token details.
+    /// Create a Usage with prompt-token cache, multimodal, and reasoning details.
     pub fn from_counts(
         prompt_tokens: usize,
         completion_tokens: usize,
         cached_tokens: Option<usize>,
+        multimodal_tokens: Option<MultimodalTokenCounts>,
         reasoning_tokens: usize,
     ) -> Self {
         Self {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: PromptTokenUsageInfo::from_counts(
+                cached_tokens,
+                multimodal_tokens,
+            ),
             completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
@@ -573,12 +575,15 @@ impl Usage {
     pub fn from_token_usage(
         usage: impl Into<ChatTokenUsage>,
         enable_prompt_tokens_details: bool,
+        multimodal_tokens: Option<MultimodalTokenCounts>,
     ) -> Self {
         let usage = usage.into();
+        let multimodal_tokens = enable_prompt_tokens_details.then_some(multimodal_tokens).flatten();
         Self::from_counts(
             usage.prompt_token_count,
             usage.output_token_count,
             enable_prompt_tokens_details.then_some(usage.cached_token_count),
+            multimodal_tokens,
             usage.reasoning_tokens,
         )
     }
@@ -588,6 +593,30 @@ impl Usage {
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+    /// Placeholder tokens contributed by each multimodal modality.
+    ///
+    /// TODO: also report `created_cache_tokens`, which needs the engine to
+    /// report cache-creation counts.
+    pub multimodal_tokens: Option<MultimodalTokenCounts>,
+}
+
+impl PromptTokenUsageInfo {
+    /// Build the prompt-token breakdown, or `None` when there is nothing to
+    /// report. Mirrors the Python frontend, which omits the whole object when
+    /// no cached and no multimodal tokens are available.
+    fn from_counts(
+        cached_tokens: Option<usize>,
+        multimodal_tokens: Option<MultimodalTokenCounts>,
+    ) -> Option<Self> {
+        let cached_tokens = cached_tokens.filter(|&cached| cached > 0);
+        if cached_tokens.is_none() && multimodal_tokens.is_none() {
+            return None;
+        }
+        Some(Self {
+            cached_tokens: cached_tokens.unwrap_or(0),
+            multimodal_tokens,
+        })
+    }
 }
 
 /// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
@@ -598,10 +627,16 @@ pub struct CompletionTokenUsageInfo {
 
 #[cfg(test)]
 mod usage_tests {
+    use std::collections::BTreeMap;
+
     use vllm_chat::ChatTokenUsage;
     use vllm_llm::TokenUsage;
 
     use super::Usage;
+
+    fn multimodal_tokens(entries: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        entries.iter().map(|&(modality, count)| (modality.to_string(), count)).collect()
+    }
 
     #[test]
     fn token_usage_hides_prompt_token_details_by_default() {
@@ -612,6 +647,7 @@ mod usage_tests {
                 cached_token_count: 3,
             },
             false,
+            None,
         );
 
         assert_eq!(usage.prompt_tokens, 5);
@@ -628,6 +664,7 @@ mod usage_tests {
                 cached_token_count: 3,
             },
             true,
+            None,
         );
 
         assert_eq!(
@@ -648,6 +685,7 @@ mod usage_tests {
                 reasoning_tokens: 3,
             },
             false,
+            None,
         );
 
         assert_eq!(usage.completion_tokens_details.reasoning_tokens, 3);
@@ -667,6 +705,7 @@ mod usage_tests {
                 reasoning_tokens: 0,
             },
             false,
+            None,
         );
 
         let json = serde_json::to_value(&usage).expect("usage serializes");
@@ -682,11 +721,71 @@ mod usage_tests {
                 cached_token_count: 0,
             },
             false,
+            None,
         );
 
         assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
         let json = serde_json::to_value(&usage).expect("usage serializes");
         assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+    }
+
+    #[test]
+    fn token_usage_reports_multimodal_tokens_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 340,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            true,
+            Some(multimodal_tokens(&[("image", 336), ("audio", 4)])),
+        );
+
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        let details = usage.prompt_tokens_details.expect("multimodal tokens surface details");
+        assert_eq!(details.cached_tokens, 0);
+        assert_eq!(
+            details.multimodal_tokens,
+            Some(multimodal_tokens(&[("image", 336), ("audio", 4)]))
+        );
+        assert_eq!(
+            json["prompt_tokens_details"]["multimodal_tokens"]["image"],
+            336
+        );
+        assert_eq!(
+            json["prompt_tokens_details"]["multimodal_tokens"]["audio"],
+            4
+        );
+    }
+
+    #[test]
+    fn token_usage_hides_multimodal_tokens_by_default() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 340,
+                output_token_count: 2,
+                cached_token_count: 3,
+            },
+            false,
+            Some(multimodal_tokens(&[("image", 336)])),
+        );
+
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn token_usage_keeps_details_absent_without_cached_or_multimodal_tokens() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            true,
+            None,
+        );
+
+        assert!(usage.prompt_tokens_details.is_none());
     }
 }
 

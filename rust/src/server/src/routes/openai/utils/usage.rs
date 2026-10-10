@@ -50,6 +50,7 @@ impl ContinuousUsage {
             self.prompt_tokens,
             self.output_tokens,
             None,
+            None,
             self.reasoning_tokens,
         )
     }
