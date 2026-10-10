@@ -2199,10 +2199,9 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                                 # leave the conversation unrecoverable. Coerce
                                 # to an empty object so the turn can proceed.
                                 logger.warning(
-                                    "Tool call %r has arguments that are not valid "
+                                    "Tool call has arguments that are not valid "
                                     "JSON (%d chars); coercing to an empty object "
                                     "so the conversation can continue.",
-                                    function.get("name"),
                                     len(content),
                                 )
                                 parsed = None
@@ -2215,9 +2214,8 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                                 # "42", "true").
                                 # Chat templates require a mapping.
                                 logger.warning(
-                                    "Tool call %r arguments decoded to %s, not a "
+                                    "Tool call arguments decoded to %s, not a "
                                     "JSON object; coercing to an empty object.",
-                                    function.get("name"),
                                     type(parsed).__name__,
                                 )
                             parsed = {}
