@@ -84,6 +84,7 @@ from vllm.models.kimi_k3.amd.mono.common.ranks import peer_bases, sum_partials
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, preg, publish, shift, sreg
 from vllm.models.kimi_k3.amd.mono.stages import gemv
 from vllm.models.qwen3_5.amd.mono import layout as L
+from vllm.models.qwen3_5.amd.mono.layout import need
 from vllm.models.qwen3_5.amd.mono.sources import digest
 
 TP, HIDDEN, ROWS = L.TP, L.HIDDEN, L.ROWS
@@ -110,7 +111,7 @@ MAX_U = L.MAX_U
 LOG2E = 1.0 / math.log(2.0)
 TAG_SLOTS = 256
 
-assert RT0 + L.MAX_TOKENS <= BLOCKS and OTASKS == 2 * BLOCKS
+assert RT0 + L.MAX_TOKENS <= BLOCKS and OTASKS == 2 * BLOCKS and L.BLOCKS == BLOCKS
 
 REGIONS = (
     "msq",
@@ -948,7 +949,7 @@ def build(key: K2Build):
     if key in _BUILDS:
         return _BUILDS[key]
     s = key.tokens
-    assert 1 <= s <= L.MAX_TOKENS
+    need(1 <= s <= L.MAX_TOKENS, f"{s} rows, the kernels take 1..{L.MAX_TOKENS}")
     lay = scratch_layout(key)
     # every width at the widest's offsets: a step's parity half never overlaps
     # the other half of a step of another width
@@ -1209,15 +1210,40 @@ def layer_post(
     shuffled (``layout``). ``peers``: the int64 table of every rank's peer buffer
     (at least ``peer_bytes(S)`` each)."""
     s = key.tokens
-    assert core.shape == (s, OK) and residual.shape == (s, HIDDEN)
-    assert out.shape == (s, HIDDEN) and res_out.shape == (s, HIDDEN)
-    assert w_o.shape == (HIDDEN, OK) and ln_w.shape == (HIDDEN,)
-    assert w_gate.shape == (E, HIDDEN) and w_sg.numel() == HIDDEN
-    assert w_sgu.shape == (2 * SI, HIDDEN) and w_sd.shape == (HIDDEN, SI)
-    assert w13.shape[:2] == (E, 2 * RI) and w2.shape[:2] == (E, HIDDEN)
+    bf, u8 = torch.bfloat16, torch.uint8
+    need(
+        core.shape == (s, OK) and residual.shape == (s, HIDDEN),
+        "core / residual shape",
+    )
+    need(out.shape == (s, HIDDEN) and res_out.shape == (s, HIDDEN), "output shape")
+    need(w_o.shape == (HIDDEN, OK) and ln_w.shape == (HIDDEN,), "o_proj / norm shape")
+    need(w_gate.shape == (E, HIDDEN) and w_sg.numel() == HIDDEN, "router shape")
+    need(
+        w_sgu.shape == (2 * SI, HIDDEN) and w_sd.shape == (HIDDEN, SI),
+        "shared expert shape",
+    )
+    fp4 = (u8, torch.float4_e2m1fn_x2)
+    need(
+        w13.shape == (E, 2 * RI, HIDDEN // 2) and w13.dtype in fp4,
+        "w13: fp4x2 [512, 512, 4096]",
+    )
+    need(
+        w2.shape == (E, HIDDEN, RI // 2) and w2.dtype in fp4,
+        "w2: fp4x2 [512, 8192, 128]",
+    )
+    need(
+        w13s.numel() == E * 2 * RI * HIDDEN // 32 and w13s.element_size() == 1,
+        "w13 scales: e8m0, one a 32-block",
+    )
+    need(
+        w2s.numel() == E * HIDDEN * RI // 32 and w2s.element_size() == 1,
+        "w2 scales: e8m0, one a 32-block",
+    )
     weights = (w_o, w_gate, w_sgu, w_sd, w13, w13s, w2, w2s)
-    for t in (core, residual, out, res_out, *weights):
-        assert t.is_contiguous()
+    tensors = (core, residual, out, res_out, *weights)
+    need(all(t.is_contiguous() for t in tensors), "a non-contiguous input")
+    dense = (core, residual, out, res_out, w_o, ln_w, w_gate, w_sg, w_sgu, w_sd)
+    need(all(t.dtype == bf for t in dense), "activations and dense weights: bf16")
     f = build(key)
     f(
         *ABI.pack(

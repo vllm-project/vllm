@@ -199,6 +199,72 @@ def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
     }
 
 
+@pytest.mark.parametrize("s", [1, 3, 8])
+@torch.inference_mode()
+def test_attention_front_matches_vllm_ops(s: int) -> None:
+    """A full-attention layer's front, which the mono forward runs between K2
+    launches: the compiled Gemma add + norm against GemmaRMSNorm.forward_native,
+    and the fused split / q, k norm / RoPE / sigmoid gate against the model's
+    eager ops (``_project_qkv_gate`` off CUDA). TP8 shapes: 8 query heads and
+    one KV head of 256 a rank, 64 rotary dims."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        _attention_front(s)
+
+
+def _attention_front(s: int) -> None:
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+    from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+    from vllm.models.qwen3_5.amd import mono_decode as md
+    from vllm.models.qwen3_5.amd.mono.layout import HIDDEN
+
+    hq, hkv, hd, rd = 8, 1, 256, 64
+    dev = torch.device("cuda", torch.accelerator.current_device_index())
+    g = torch.Generator(device=dev).manual_seed(s)
+    norm = GemmaRMSNorm(HIDDEN, eps=1e-6).to(dev, dtype=bf)
+    norm.weight.copy_(_randn(g, HIDDEN, scale=0.1))
+    x, res = _randn(g, s, HIDDEN), _randn(g, s, HIDDEN)
+    got_x, got_res = md._gemma_norm(norm, x, res)
+    want_x, want_res = norm.forward_native(x, res)
+    assert torch.equal(got_res, want_res)
+    assert _cos(got_x, want_x) > COS_MIN
+    assert (got_x.float() - want_x.float()).abs().max().item() < 2e-2
+
+    q_norm = GemmaRMSNorm(hd, eps=1e-6).to(dev, dtype=bf)
+    k_norm = GemmaRMSNorm(hd, eps=1e-6).to(dev, dtype=bf)
+    q_norm.weight.copy_(_randn(g, hd, scale=0.1))
+    k_norm.weight.copy_(_randn(g, hd, scale=0.1))
+    rope = RotaryEmbedding(hd, rd, 262144, 10000000.0, True, bf).to(dev)
+    qkv = _randn(g, s, hq * 2 * hd + 2 * hkv * hd)
+    positions = torch.randint(0, 200000, (s,), device=dev, generator=g)
+    attn = SimpleNamespace(
+        qkv_proj=lambda t: (t, None),
+        q_size=hq * hd,
+        kv_size=hkv * hd,
+        rotary_emb=rope,
+        q_norm=q_norm,
+        k_norm=k_norm,
+        num_heads=hq,
+        num_kv_heads=hkv,
+        head_dim=hd,
+        attn=lambda q, k, v: q + k.repeat(1, hq) + v.repeat(1, hq),
+    )
+    got = md._attention_core(attn, qkv, positions)
+
+    q_gate, k, v = qkv.split([hq * hd * 2, hkv * hd, hkv * hd], dim=-1)
+    q, gate = q_gate.view(s, hq, 2 * hd).chunk(2, dim=-1)
+    q = q_norm.forward_native(q.reshape(s, hq, hd)).reshape(s, hq * hd)
+    k = k_norm.forward_native(k.reshape(s, hkv, hd)).reshape(s, hkv * hd)
+    q, k = rope.forward_native(positions, q, k)
+    want = attn.attn(q, k, v) * torch.sigmoid(gate.reshape(s, hq * hd))
+    assert got.is_contiguous() and got.shape == want.shape
+    assert _cos(got, want) > COS_MIN
+    torch.testing.assert_close(got, want, atol=3e-2, rtol=2e-2)
+
+
 @pytest.mark.parametrize(
     "s,n_real,first", [(1, 1, False), (5, 4, False), (8, 8, False), (8, 7, True)]
 )

@@ -15,6 +15,7 @@ Routed experts (``AITER_MXFP4_MXFP4``): ``w13`` (E, 2 RI, HIDDEN / 2) and ``w2``
 
 TP = 8
 HIDDEN = 8192
+BLOCKS = 256  # CTAs a launch, all resident at once: one a CU
 
 # GDN (linear attention), per rank
 HD = 128  # key and value head dim
@@ -40,6 +41,13 @@ MAX_U = MAX_TOKENS * TOPK  # distinct experts a step can touch
 
 ROWS = 16  # a weight row group
 FP4_STEP = 128  # K a scaled-MFMA step covers (a lane: 32 fp4 of one row)
+
+
+def need(ok: bool, what: str) -> None:
+    """A launch argument check that ``python -O`` keeps: the kernels read
+    out-of-bounds memory silently where a fault would be wanted."""
+    if not ok:
+        raise ValueError(f"Qwen3.8 mono decode: {what}")
 
 
 def fp4_group_dwords(k):

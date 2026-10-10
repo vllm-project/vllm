@@ -286,5 +286,6 @@ steps:
   - vllm/models/qwen3_5/amd/
   - tests/models/qwen3_5/test_amd_mono.py
   - tests/models/qwen3_5/test_amd_mono_layout.py
+  - tests/models/qwen3_5/test_amd_mono_decode.py
   commands:
-  - pytest -v -s tests/models/qwen3_5/test_amd_mono.py tests/models/qwen3_5/test_amd_mono_layout.py
+  - pytest -v -s tests/models/qwen3_5/test_amd_mono.py tests/models/qwen3_5/test_amd_mono_layout.py tests/models/qwen3_5/test_amd_mono_decode.py
