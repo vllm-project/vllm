@@ -329,7 +329,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
     const int thread_row = warp_base_row + thread_row_in_warp;
 
-#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && CUDART_VERSION >= 12000
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     if constexpr (ENABLE_PDL) {
         // PDL permits early launch, but logits/metadata still depend on the producer.
         cudaGridDependencySynchronize();
@@ -628,7 +628,7 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
-#if !defined(USE_ROCM) && CUDART_VERSION >= 12000
+#if !defined(USE_ROCM)
     if (get_device_prop()->major >= 9) {
         cudaLaunchConfig_t config{};
         config.gridDim = dim3(num_blocks);
