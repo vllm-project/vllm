@@ -34,6 +34,14 @@ logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
+is_gfx1100 = False
+is_gfx1201 = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1100, on_gfx1201
+
+    is_gfx1100 = on_gfx1100()
+    is_gfx1201 = on_gfx1201()
+
 
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
@@ -967,6 +975,41 @@ def unified_attention(
         launch_num_warps = 8
         launch_num_stages = 2
 
+    # gfx1100: taller Q block + narrower KV tile is ~3x faster for prefill and
+    # mixed batches than the default (BLOCK_M=16, TILE=32).
+    tuned_gfx1100_2d = (
+        is_gfx1100
+        and max_seqlen_q > 1
+        and num_queries_per_kv <= 32
+        and not is_batch_invariant
+    )
+    if tuned_gfx1100_2d:
+        BLOCK_M = 32
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_warps = 4
+        launch_num_stages = 1
+
+    # gfx1201: size the Q block by the average query length per sequence, so
+    # prefill-heavy batches get taller blocks while decode-heavy mixed batches
+    # keep the default; up to ~2.4x faster for long prefills.
+    gfx1201_tile_prefill = None
+    avg_query_len = q.shape[0] // max(num_seqs, 1)
+    if (
+        is_gfx1201
+        and max_seqlen_q > 1
+        and num_queries_per_kv <= 16
+        and not is_batch_invariant
+        and avg_query_len >= 8
+    ):
+        if avg_query_len < 64:
+            BLOCK_M, gfx1201_tile_prefill, launch_num_warps = 32, 32, 4
+        elif avg_query_len < 160:
+            BLOCK_M, gfx1201_tile_prefill, launch_num_warps = 64, 16, 4
+        else:
+            BLOCK_M, gfx1201_tile_prefill, launch_num_warps = 128, 16, 8
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_stages = 1
+
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.
@@ -999,6 +1042,10 @@ def unified_attention(
     # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
     if tuned_large_head:
         TILE_SIZE_PREFILL = 128
+    elif tuned_gfx1100_2d and q.element_size() >= 2:
+        TILE_SIZE_PREFILL = 16
+    elif gfx1201_tile_prefill is not None and q.element_size() >= 2:
+        TILE_SIZE_PREFILL = gfx1201_tile_prefill
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
@@ -1093,6 +1140,9 @@ def unified_attention(
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
+        if is_gfx1100:
+            launch_num_warps = 8
+            launch_num_stages = 1
 
     launch_kwargs: dict[str, int] = {}
     if launch_num_warps is not None:
