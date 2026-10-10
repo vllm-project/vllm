@@ -2204,6 +2204,15 @@ def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
     assert config.convert_type == expected_convert_type
 
 
+@pytest.mark.parametrize("runner", ["generate", "draft"])
+@pytest.mark.parametrize("convert", ["embed", "classify"])
+def test_convert_rejected_for_non_pooling_runner(runner, convert):
+    """Converted models have no LM head, so only the pooling runner can run
+    them, even when the base model supports the requested runner."""
+    with pytest.raises(ValueError, match=f"--convert {convert}"):
+        ModelConfig("Qwen/Qwen2.5-1.5B-Instruct", runner=runner, convert=convert)
+
+
 MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
     ("mistralai/Mistral-7B-v0.1", 4096),

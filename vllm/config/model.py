@@ -703,6 +703,15 @@ class ModelConfig:
         )
 
         if (
+            self.convert_type != "none"
+            and self.convert_type not in _RUNNER_CONVERTS[self.runner_type]
+        ):
+            raise ValueError(
+                f"`--convert {self.convert_type}` is not supported with "
+                f"`--runner {self.runner_type}`. Use `--runner pooling` or "
+                "`--runner auto` instead."
+            )
+        if (
             is_pooling_model
             and not is_generative_model
             and self.runner_type in ("draft", "generate")
