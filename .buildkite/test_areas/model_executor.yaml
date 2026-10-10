@@ -11,6 +11,7 @@ steps:
   - vllm/config/model.py
   - vllm/model_executor
   - vllm/model_executor/warmup
+  - vllm/models/deepseek_v32/
   - tests/model_executor
   - tests/model_executor/test_jit_warmup.py
   - tests/model_executor/test_jit_warmup_cutedsl_launcher.py

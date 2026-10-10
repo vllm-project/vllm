@@ -282,7 +282,12 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):
                 continue
