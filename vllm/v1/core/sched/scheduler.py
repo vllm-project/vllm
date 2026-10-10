@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -579,6 +580,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        self._reap_expired_streaming_requests()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -1685,6 +1687,7 @@ class Scheduler(SchedulerInterface):
         session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
+            session.streaming_wait_deadline = None
         session.status = RequestStatus.WAITING
 
         if self.log_stats:
@@ -2461,6 +2464,36 @@ class Scheduler(SchedulerInterface):
         else:
             self.waiting.add_request(request)
 
+    def _reap_expired_streaming_requests(self) -> None:
+        """Abort WAITING_FOR_STREAMING_REQ requests past their deadline.
+
+        Must run before the capacity gate in the waiting loop below. A
+        request only leaves this status through add_request() or
+        finish_requests(); if the capacity gate is what's saturated (every
+        slot held by a vanished client), the waiting loop never reaches it
+        to check the deadline, and the timeout never fires. See #53130.
+        """
+        now = time.time()
+        expired = [
+            req
+            for req in itertools.chain(self.kv_holding_waiting, self.waiting)
+            if req.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+            and req.streaming_wait_deadline is not None
+            and now > req.streaming_wait_deadline
+        ]
+        if not expired:
+            return
+        for req in expired:
+            logger.warning(
+                "%s timed out waiting for streaming input after %ds; "
+                "aborting to free its admission slot.",
+                req.request_id,
+                envs.VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS,
+            )
+        self.finish_requests(
+            [req.request_id for req in expired], RequestStatus.FINISHED_ABORTED
+        )
+
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
         if not request.resumable:
@@ -2484,6 +2517,9 @@ class Scheduler(SchedulerInterface):
             self._update_request_as_session(request, update)
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+            request.streaming_wait_deadline = (
+                time.time() + envs.VLLM_STREAMING_REQUEST_TIMEOUT_SECONDS
+            )
             self.num_waiting_for_streaming_input += 1
 
         self._enqueue_waiting_request(request)
