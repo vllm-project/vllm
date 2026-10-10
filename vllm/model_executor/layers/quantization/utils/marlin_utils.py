@@ -8,6 +8,7 @@ import numpy
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -521,19 +522,6 @@ def get_scale_perms():
     return scale_perm, scale_perm_single
 
 
-def marlin_permute_scales(
-    s: torch.Tensor, size_k: int, size_n: int, group_size: int, is_a_8bit: bool = False
-) -> torch.Tensor:
-    scale_perm, scale_perm_single = get_scale_perms()
-    if group_size < size_k and group_size != -1 and not is_a_8bit:
-        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
-    else:
-        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
-    s = s.reshape((-1, size_n)).contiguous()
-
-    return s
-
-
 def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
     origin_shape = s.shape
     _, scale_perm_single = get_scale_perms()
@@ -559,7 +547,9 @@ def marlin_moe_permute_scales(
     )
 
     for e in range(num_experts):
-        output[e] = marlin_permute_scales(s[e], size_k, size_n, group_size, is_a_8bit)
+        output[e] = ops.marlin_permute_scales(
+            s[e], size_k, size_n, group_size, is_a_8bit
+        )
     return output
 
 

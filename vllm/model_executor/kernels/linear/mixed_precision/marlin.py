@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_pad_scales,
     marlin_padded_nk,
     marlin_permute_bias,
-    marlin_permute_scales,
     marlin_zero_points,
     query_marlin_supported_quant_types,
     unpack_cols,
@@ -112,7 +111,7 @@ class MarlinLinearKernel(MPLinearKernel):
         def transform_w_s(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1)
-            x.data = marlin_permute_scales(
+            x.data = ops.marlin_permute_scales(
                 marlin_pad_scales(
                     x.data.contiguous(),
                     size_n,
