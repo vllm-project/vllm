@@ -369,8 +369,12 @@ class RequestRunner:
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
         skip_reading_prefix_cache: bool = False,
+        req_id: str | None = None,
+        resumable: bool = False,
     ):
-        self.req_id += 1
+        if req_id is None:
+            self.req_id += 1
+            req_id = str(self.req_id)
 
         sampling_params = SamplingParams(
             max_tokens=1000,
@@ -379,11 +383,12 @@ class RequestRunner:
         sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
         req = Request(
-            request_id=str(self.req_id),
+            request_id=req_id,
             prompt_token_ids=token_ids,
             sampling_params=sampling_params,
             pooling_params=None,
             block_hasher=self._block_hasher,
+            resumable=resumable,
         )
         if kv_transfer_params is not None:
             req.kv_transfer_params = kv_transfer_params
