@@ -608,7 +608,16 @@ class FlashInferBackend(AttentionBackend):
             # The trtllm-gen kernels consume head-major block interiors; the L/B
             # nesting outside the block is immaterial to them.
             return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
-        return super().supported_kv_cache_layouts()
+        # FlashInfer addresses a layer's cache as NHD or HND pages, so it cannot
+        # consume LHBNC, which puts the head dim outside the block dim (see
+        # get_flashinfer_layout_string). Keep the default preference otherwise.
+        return (
+            KVCacheLayout.LBNHC,
+            KVCacheLayout.LBHNC,
+            KVCacheLayout.BLNHC,
+            KVCacheLayout.BLHNC,
+            KVCacheLayout.BHLNC,
+        )
 
     forward_includes_kv_cache_update: bool = False
 

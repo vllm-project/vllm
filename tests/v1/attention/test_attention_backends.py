@@ -771,6 +771,27 @@ def test_flashinfer_cross_layer_layout(
     )
 
 
+@pytest.mark.parametrize("capability", [(8, 0), (9, 0), (10, 0), (12, 0)])
+def test_flashinfer_declares_only_layouts_it_can_address(monkeypatch, capability):
+    """Layout resolution must not hand FlashInfer a layout it asserts on (LHBNC)."""
+    pytest.importorskip("flashinfer")
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.v1.attention.backends.utils import get_flashinfer_layout_string
+
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(*capability),
+    )
+    layouts = FlashInferBackend.supported_kv_cache_layouts()
+
+    assert layouts, "FlashInfer must declare the KV cache layouts it can address"
+    assert KVCacheLayout.LHBNC not in layouts
+    for layout in layouts:
+        get_flashinfer_layout_string(layout)
+
+
 @pytest.mark.parametrize(
     "batch_spec_name",
     [
