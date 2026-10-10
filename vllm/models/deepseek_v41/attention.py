@@ -1520,3 +1520,18 @@ class DeepseekV4Indexer(nn.Module):
         # ReplicatedLinear returns (output, bias); bias is None.
         q, _ = self.wq_b(qr)
         return q
+
+
+def autotune_indexer_wq_b(model: nn.Module, num_tokens: int) -> None:
+    """Short-context dummy runs skip wq_b, so tune it directly."""
+    for module in model.modules():
+        if isinstance(module, DeepseekV4Indexer):
+            # Run every wq_b: FlashInfer keys on op, runner, shapes and dtype,
+            # and skips profiling on a cache hit, so duplicates are cheap.
+            qr = torch.randn(
+                num_tokens,
+                module.q_lora_rank,
+                dtype=module.vllm_config.model_config.dtype,
+                device=next(module.weights_proj.parameters()).device,
+            )
+            module.wq_b(qr)
