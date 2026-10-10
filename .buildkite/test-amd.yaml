@@ -3179,6 +3179,7 @@ steps:
   commands:
   - amd-smi
   - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+  - pytest -v -s tests/compile/passes/test_rocm_aiter_mxfp4_quant_fusion.py
   - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
 
 - label: ":amd: (MI355 DPX) Fusion E2E FP8 Config Sweep"

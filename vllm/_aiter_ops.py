@@ -1034,6 +1034,95 @@ def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
     return out, residual_out, y_scale
 
 
+def _rocm_aiter_dynamic_mxfp4_quant_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    return dynamic_mxfp4_quant(x)
+
+
+def _mxfp4_quant_outputs(m: int, n: int, device: torch.device):
+    # dynamic_mxfp4_quant returns the e8m0 scales as a transposed view
+    # (shape (M, N//32), stride (1, M)). The fused ops below are asked for the
+    # same layout (transpose_scale=True), the afp4wfp4 GEMM is faster with it.
+    x_fp4 = torch.empty((m, n // 2), dtype=torch.uint8, device=device)
+    bs = torch.empty(((n + 31) // 32, m), dtype=torch.uint8, device=device)
+    return x_fp4, bs.transpose(0, 1)
+
+
+def _rocm_aiter_dynamic_mxfp4_quant_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _mxfp4_quant_outputs(x.shape[0], x.shape[-1], x.device)
+
+
+def _rocm_aiter_act_mul_and_mxfp4_quant_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.quant.fused_mxfp4_quant import (
+        fused_reduce_act_mul_and_mxfp4_quant,
+    )
+
+    # round the silu-mul to the input dtype once, like the compiled native
+    # silu_and_mul, so the output matches it + dynamic_mxfp4_quant bit for bit
+    (y, y_scale), _ = fused_reduce_act_mul_and_mxfp4_quant(
+        x, activation="silu", round_to_input_dtype=True, transpose_scale=True
+    )
+    return y, y_scale
+
+
+def _rocm_aiter_act_mul_and_mxfp4_quant_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _mxfp4_quant_outputs(x.shape[0], x.shape[-1] // 2, x.device)
+
+
+def _rocm_aiter_rmsnorm_fused_mxfp4_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.quant.fused_mxfp4_quant import fused_rms_mxfp4_quant
+
+    (out_fp4, out_bs), _, _, _ = fused_rms_mxfp4_quant(
+        x, weight, epsilon, transpose_scale=True
+    )
+    return out_fp4, out_bs
+
+
+def _rocm_aiter_rmsnorm_fused_mxfp4_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _mxfp4_quant_outputs(x.shape[0], x.shape[-1], x.device)
+
+
+def _rocm_aiter_fused_add_rmsnorm_mxfp4_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.quant.fused_mxfp4_quant import fused_rms_mxfp4_quant
+
+    (out_fp4, out_bs), _, _, res_out = fused_rms_mxfp4_quant(
+        x, weight, epsilon, res1=residual, transpose_scale=True
+    )
+    return out_fp4, out_bs, res_out
+
+
+def _rocm_aiter_fused_add_rmsnorm_mxfp4_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    out_fp4, out_bs = _mxfp4_quant_outputs(x.shape[0], x.shape[-1], x.device)
+    return out_fp4, out_bs, torch.empty_like(x)
+
+
 def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -2021,6 +2110,8 @@ class rocm_aiter_ops:
     _MOE_SITUV2 = _resolve_situv2_activation()
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    _MXFP4_SILU_QUANT_FUSION = envs.VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION
+    _MXFP4_RMSNORM_QUANT_FUSION = envs.VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -2052,6 +2143,10 @@ class rocm_aiter_ops:
         _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
         cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
+        cls._MXFP4_SILU_QUANT_FUSION = envs.VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION
+        cls._MXFP4_RMSNORM_QUANT_FUSION = (
+            envs.VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION
+        )
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
@@ -2397,6 +2492,51 @@ class rocm_aiter_ops:
             cls.is_linear_enabled()
             and (get_cdna_version() > 2)
             and cls._LINEAR_HIPBMM_ENABLED
+        )
+
+    @staticmethod
+    @functools.cache
+    def _fused_mxfp4_quant_supported() -> bool:
+        """The MXFP4 activation quant folds need `round_to_input_dtype` (so the
+        SiLU-mul fold stays bitwise equal to the compiled unfused path) and
+        `transpose_scale` (same scale layout as dynamic_mxfp4_quant) on the
+        AITER fused kernels. Older AITER has neither.
+        """
+        import inspect
+
+        from aiter.ops.triton.quant.fused_mxfp4_quant import (
+            fused_reduce_act_mul_and_mxfp4_quant,
+            fused_rms_mxfp4_quant,
+        )
+
+        act = inspect.signature(fused_reduce_act_mul_and_mxfp4_quant).parameters
+        rms = inspect.signature(fused_rms_mxfp4_quant).parameters
+        ok = "round_to_input_dtype" in act and "transpose_scale" in act
+        ok = ok and "transpose_scale" in rms
+        if not ok:
+            logger.warning_once(
+                "The installed AITER is too old for the MXFP4 activation quant "
+                "fusion (needs round_to_input_dtype / transpose_scale on the "
+                "fused mxfp4 quant kernels), leaving it off."
+            )
+        return ok
+
+    @classmethod
+    @if_aiter_supported
+    def is_mxfp4_silu_quant_fusion_enabled(cls) -> bool:
+        return (
+            cls._AITER_ENABLED
+            and cls._MXFP4_SILU_QUANT_FUSION
+            and cls._fused_mxfp4_quant_supported()
+        )
+
+    @classmethod
+    @if_aiter_supported
+    def is_mxfp4_rmsnorm_quant_fusion_enabled(cls) -> bool:
+        return (
+            cls._AITER_ENABLED
+            and cls._MXFP4_RMSNORM_QUANT_FUSION
+            and cls._fused_mxfp4_quant_supported()
         )
 
     @classmethod
@@ -2927,6 +3067,34 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_dynamic_mxfp4_quant",
+                op_func=_rocm_aiter_dynamic_mxfp4_quant_impl,
+                fake_impl=_rocm_aiter_dynamic_mxfp4_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_act_mul_and_mxfp4_quant",
+                op_func=_rocm_aiter_act_mul_and_mxfp4_quant_impl,
+                fake_impl=_rocm_aiter_act_mul_and_mxfp4_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fused_mxfp4_quant",
+                op_func=_rocm_aiter_rmsnorm_fused_mxfp4_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_fused_mxfp4_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_add_rmsnorm_mxfp4_quant",
+                op_func=_rocm_aiter_fused_add_rmsnorm_mxfp4_quant_impl,
+                fake_impl=_rocm_aiter_fused_add_rmsnorm_mxfp4_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_triton_add_rmsnorm_pad",
                 op_func=_rocm_aiter_triton_add_rmsnorm_pad_impl,
                 fake_impl=_rocm_aiter_triton_add_rmsnorm_pad_fake,
@@ -3057,6 +3225,22 @@ class rocm_aiter_ops:
     @staticmethod
     def get_act_mul_fused_fp8_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+    @staticmethod
+    def get_dynamic_mxfp4_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_dynamic_mxfp4_quant.default
+
+    @staticmethod
+    def get_act_mul_fused_mxfp4_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_act_mul_and_mxfp4_quant.default
+
+    @staticmethod
+    def get_rmsnorm_fused_mxfp4_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_fused_mxfp4_quant.default
+
+    @staticmethod
+    def get_fused_add_rmsnorm_mxfp4_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_add_rmsnorm_mxfp4_quant.default
 
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:

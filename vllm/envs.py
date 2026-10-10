@@ -157,6 +157,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_MONO_DECODE: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION: bool = True
+    VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -1398,6 +1400,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # Fold the MXFP4 dense linear activation quant into the SiLU-mul that
+    # produces it (down_proj input), via the fuse_act_quant pass. Output is
+    # bitwise identical to the compiled native silu_and_mul + quant (the
+    # default), the +silu_and_mul custom kernel rounds twice so it can differ
+    # there. Only takes effect with an AITER that has round_to_input_dtype.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION", "True").lower()
+        in ("true", "1")
+    ),
+    # Fold the MXFP4 dense linear activation quant into the preceding RMSNorm
+    # (qkv / gate_up input), via the fuse_norm_quant pass. Not bitwise identical,
+    # the fused kernel reduces the norm in a different order so some fp4 values
+    # land on the other side of a rounding boundary. Needs a recent AITER.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION", "False").lower()
+        in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (

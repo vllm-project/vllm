@@ -561,6 +561,87 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         )
 
 
+class AiterRMSNormMxfp4QuantPattern:
+    """AITER RMSNorm + MXFP4 dynamic activation quant, folded into AITER's
+    ``fused_rms_mxfp4_quant``. Matches the standalone
+    ``rocm_aiter_dynamic_mxfp4_quant`` that the MXFP4 linear emits when one of
+    the MXFP4 quant fusions is enabled. Not bitwise equal to the unfused pair
+    (the fused kernel reduces the norm in a different order), so it is only
+    registered with VLLM_ROCM_USE_AITER_MXFP4_RMSNORM_QUANT_FUSION.
+    """
+
+    QUANT_OP = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_fused_mxfp4_quant_op()
+
+    def __init__(self, epsilon: float) -> None:
+        self.epsilon = epsilon
+        self.device = torch.device("cuda")
+
+    def empty(self, *args: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.bfloat16, device=self.device)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
+            at = self.QUANT_OP(result_rms)
+            return at[0], at[1]
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at = self.FUSED_OP(input, weight, self.epsilon)
+            return at[0], at[1]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            [self.empty(5, 64), self.empty(64)],
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class AiterFusedAddRMSNormMxfp4QuantPattern(AiterRMSNormMxfp4QuantPattern):
+    """Residual variant of ``AiterRMSNormMxfp4QuantPattern``, for the qkv and
+    gate_up inputs of every layer past the first. The residual add, RMSNorm
+    and MXFP4 quant become one ``fused_rms_mxfp4_quant`` call with ``res1``.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_fused_add_rmsnorm_mxfp4_quant_op()
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
+            at = self.QUANT_OP(result_rms)
+            return at[0], at[1], residual_out
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            at = self.FUSED_OP(input, residual, weight, self.epsilon)
+            return at[0], at[1], at[2]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            [self.empty(5, 64), self.empty(64), self.empty(5, 64)],
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """This pass fuses aiter rms_norm & vllm/aiter quant custom ops
     into a fused rms_norm_quant op.
@@ -675,6 +756,10 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                         match_aiter_quant=match_aiter_quant_op,
                     ).register(self.patterns)
 
+            if rocm_aiter_ops.is_mxfp4_rmsnorm_quant_fusion_enabled():
+                AiterFusedAddRMSNormMxfp4QuantPattern(epsilon).register(self.patterns)
+                AiterRMSNormMxfp4QuantPattern(epsilon).register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -693,6 +778,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             DoubleAiterRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantViewPattern,
             AiterRMSNormGatedFp8GroupQuantPattern,
+            AiterRMSNormMxfp4QuantPattern,
+            AiterFusedAddRMSNormMxfp4QuantPattern,
         ]
         return self.hash_source(self, *fusion_patterns)
 
@@ -737,6 +824,45 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
         return _replacement
 
 
+class AiterSiluMulMxfp4QuantPattern(VllmPatternReplacement):
+    """Fuse aiter silu_and_mul + MXFP4 dynamic activation quant into AITER's
+    ``fused_reduce_act_mul_and_mxfp4_quant``, the MXFP4 analog of
+    ``AiterSiluMulFp8GroupQuantPattern``. The MXFP4 linear path emits the
+    activation quant as a standalone ``rocm_aiter_dynamic_mxfp4_quant`` op when
+    VLLM_ROCM_USE_AITER_MXFP4_SILU_QUANT_FUSION is on (the default), so the
+    down_proj input (SiLU-mul of gate_up) matches here. The fused kernel is
+    called with ``round_to_input_dtype`` so the result is bitwise equal to the
+    compiled native silu_and_mul + quant. With ``+silu_and_mul`` the _C kernel
+    rounds silu before the multiply, so there it can be one fp4 code off.
+    """
+
+    QUANT_OP = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()
+    FUSED_OP = rocm_aiter_ops.get_act_mul_fused_mxfp4_quant_op()
+
+    def __init__(self) -> None:
+        self.silu_and_mul_matcher = MatcherSiluAndMul()
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [self.silu_and_mul_matcher.inputs()[0]]
+
+    @property
+    def pattern(self):
+        def _pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            act = self.silu_and_mul_matcher(input)
+            at = self.QUANT_OP(act)
+            return at[0], at[1]
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            at = self.FUSED_OP(input)
+            return at[0], at[1]
+
+        return _replacement
+
+
 class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     """This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
@@ -754,6 +880,8 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
         self.register(
             AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
         )
+        if rocm_aiter_ops.is_mxfp4_silu_quant_fusion_enabled():
+            self.register(AiterSiluMulMxfp4QuantPattern())
 
         self.dump_patterns(config, self.pm_pass)
 
