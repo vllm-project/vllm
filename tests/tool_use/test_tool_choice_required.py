@@ -19,7 +19,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
-from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
+from vllm.tool_parsers.streaming import (
+    RequiredToolCallScanner,
+    extract_required_tool_call_streaming,
+)
 from vllm.tool_parsers.utils import (
     find_tool_properties,
     get_json_schema_from_tools,
@@ -305,17 +308,15 @@ def _stream_required_tool_calls(
     required-tool streaming helper and rebuild the calls per array index,
     checking that every index gets exactly one id/name chunk first."""
     assert "".join(deltas) == output_json
-    previous_text = ""
+    scanner = RequiredToolCallScanner()
     calls: dict[int, dict] = {}
     for delta_text in deltas:
-        current_text = previous_text + delta_text
         delta_message, _ = extract_required_tool_call_streaming(
-            previous_text=previous_text,
-            current_text=current_text,
+            delta_text=delta_text,
             tool_call_idx=tool_call_idx,
             tool_call_id_type=tool_call_id_type,
+            scanner=scanner,
         )
-        previous_text = current_text
         if delta_message is None:
             continue
         assert delta_message.tool_calls
@@ -341,6 +342,14 @@ def _stream_required_tool_calls(
 
 def _fixed_len_deltas(text: str, delta_len: int) -> list[str]:
     return [text[i : i + delta_len] for i in range(0, len(text), delta_len)]
+
+
+@pytest.mark.parametrize("delta_len", [1, 13])
+def test_streaming_parameters_before_name(delta_len):
+    output = [
+        {"parameters": call["parameters"], "name": call["name"]} for call in TWO_CALLS
+    ]
+    _assert_streams_to(output, _fixed_len_deltas(json.dumps(output), delta_len))
 
 
 def _assert_streams_to(output: list[dict], deltas: list[str]) -> None:

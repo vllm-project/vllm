@@ -9,7 +9,10 @@ import pytest
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.abstract_parser import DelegatingParser
-from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
+from vllm.parser.engine.registered_adapters import (
+    GraniteParserToolAdapter,
+    Qwen3ParserReasoningAdapter,
+)
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
@@ -103,6 +106,34 @@ def make_parser(tokenizer, reasoning=False, tool=False, **kwargs):
         tool_parser_cls = Hermes2ProToolParser if tool else None
 
     return TestParser(tokenizer, **kwargs)
+
+
+@pytest.mark.parametrize("parser_cls", [Hermes2ProToolParser, GraniteParserToolAdapter])
+def test_required_stream_owns_history(tokenizer, request_obj, monkeypatch, parser_cls):
+    monkeypatch.setattr(parser_cls, "supports_required_and_named", True)
+
+    class TestParser(DelegatingParser):
+        tool_parser_cls = parser_cls
+
+    parser = TestParser(tokenizer)
+    request = request_obj.model_copy(update={"tool_choice": "required"})
+    parameters = [{"city": 'Beijing " north', "days": [1, 2]}, {"city": "Dallas"}]
+    text = json.dumps(
+        [{"name": "get_weather", "parameters": args} for args in parameters]
+    )
+    results = stream_text(parser, tokenizer, text, request, prompt_token_ids=[])
+    _, content, calls = collect_fields(results)
+    assert content == ""
+    assert [
+        (call.index, call.function.name) for call in calls if call.id is not None
+    ] == [(0, "get_weather"), (1, "get_weather")]
+    for index, args in enumerate(parameters):
+        arguments = [
+            call.function.arguments or "" for call in calls if call.index == index
+        ]
+        assert json.loads("".join(arguments)) == args
+    if parser._engine_based:
+        assert parser._stream_state.previous_text == ""
 
 
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
