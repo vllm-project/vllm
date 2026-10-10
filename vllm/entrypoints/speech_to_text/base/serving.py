@@ -163,6 +163,19 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     def shutdown(self) -> None:
         self._preprocess_executor.shutdown(wait=False)
 
+    def _engine_generate(
+        self,
+        request,
+        engine_input,
+        sampling_params,
+        request_id: str,
+        **generate_kwargs,
+    ):
+        """Hook for transcription gzip fallback; translation keeps this path."""
+        return self.engine_client.generate(
+            engine_input, sampling_params, request_id, **generate_kwargs
+        )
+
     def _decode_and_chunk_speech(
         self,
         audio_data: bytes,
@@ -557,7 +570,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    generator = self.engine_client.generate(
+                    generator = self._engine_generate(
+                        request,
                         engine_input,
                         sampling_params,
                         request_id_item,
