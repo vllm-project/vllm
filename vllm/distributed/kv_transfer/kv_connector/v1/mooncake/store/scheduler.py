@@ -193,6 +193,7 @@ class MooncakeStoreScheduler:
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+        self._allocated_req_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
@@ -270,6 +271,7 @@ class MooncakeStoreScheduler:
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
+        self._allocated_req_ids.add(request.request_id)
 
         if request.request_id not in self.load_specs:
             return
@@ -308,10 +310,13 @@ class MooncakeStoreScheduler:
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
-            self.load_specs.pop(req_id, None)
             if request_tracker := self._request_trackers.get(req_id):
                 request_tracker.reset()
+            if req_id in self._allocated_req_ids:
+                continue
+            self.load_specs.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
+        self._allocated_req_ids.clear()
 
         meta = MooncakeStoreConnectorMetadata(
             self._unfinished_request_ids,

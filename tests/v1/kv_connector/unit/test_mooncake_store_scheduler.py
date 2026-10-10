@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -58,6 +59,7 @@ def _make_bare_scheduler(
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
+    scheduler._allocated_req_ids = set()
     scheduler._request_trackers = {}
     scheduler._finished_partial_tail_metas = {}
     scheduler._gpu_block_pool = BlockPool(
@@ -773,6 +775,60 @@ def test_resumed_request_in_resumed_req_ids_replaces_blocks():
     assert tracker.token_len == 48
     blocks_held = sum(len(g) for g in tracker.allocated_block_ids)
     assert tracker.token_len // scheduler._block_size <= blocks_held
+
+
+@pytest.mark.parametrize(
+    "make_output",
+    [
+        pytest.param(_make_new_scheduler_output, id="new"),
+        pytest.param(
+            partial(_make_resumed_scheduler_output, num_scheduled_tokens=48),
+            id="resumed",
+        ),
+    ],
+)
+def test_preempted_request_readmitted_in_same_step(make_output):
+    scheduler = _make_bare_scheduler()
+    request = SimpleNamespace(
+        request_id="req-0",
+        all_token_ids=list(range(48)),
+        num_computed_tokens=0,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        num_output_placeholders=0,
+    )
+    scheduler.update_state_after_alloc(request, SimpleNamespace(), 0)
+    out = make_output()
+    out.preempted_req_ids = {"req-0"}
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert [req_meta.req_id for req_meta in meta.requests] == ["req-0"]
+    assert "req-0" in scheduler._unfinished_requests
+
+
+def test_preempted_request_readmitted_with_pending_load_in_same_step():
+    scheduler = _make_bare_scheduler()
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        num_output_placeholders=0,
+    )
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=False,
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda group_ids: ([10, 11, 12],))
+    scheduler.update_state_after_alloc(request, blocks, 48)
+    out = _make_pending_load_scheduler_output()
+    out.preempted_req_ids = {"req-0"}
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    load_spec = meta.requests[0].load_spec
+    assert load_spec is not None and load_spec.can_load
 
 
 # Focused tests for ReqMeta.from_request_tracker — the centralized guard that
