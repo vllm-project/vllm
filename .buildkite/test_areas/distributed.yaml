@@ -547,6 +547,7 @@ steps:
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
+    - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py::test_distributed_direct_a2a_matches_reference
     - pytest -v -s tests/distributed/test_custom_all_gather_reduce_scatter.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
