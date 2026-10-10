@@ -1784,7 +1784,7 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cors_default_simple_request_allows_any_origin() {
+async fn cors_default_simple_request_omits_allow_origin() {
     let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
     let response = app
         .call(
@@ -1799,18 +1799,39 @@ async fn cors_default_simple_request_allows_any_origin() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        header_value(&response, "access-control-allow-origin"),
-        Some("*")
-    );
-    // Wildcard origins without credentials emit no `Vary` (Starlette parity).
-    assert_eq!(header_value(&response, "vary"), None);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cors_default_preflight_returns_explicit_methods_and_max_age() {
+async fn cors_default_preflight_omits_allow_origin() {
     let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "content-type")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_wildcard_preflight_returns_explicit_methods_and_max_age() {
+    let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
     let response = app
         .call(
             Request::builder()
@@ -1917,6 +1938,7 @@ async fn cors_explicit_origin_disallowed_omits_allow_origin() {
 #[serial]
 async fn cors_wildcard_with_credentials_reflects_origin_without_panic() {
     let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
         allow_credentials: true,
         ..CorsConfig::default()
     };
@@ -1971,8 +1993,12 @@ async fn cors_unauthorized_response_has_no_cors_headers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn cors_preflight_bypasses_auth_and_returns_cors_headers() {
+    let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
+        ..CorsConfig::default()
+    };
     let (mut app, _engine_task) =
-        test_app_with_cors_and_keys(CorsConfig::default(), vec!["secret".to_string()]).await;
+        test_app_with_cors_and_keys(cors, vec!["secret".to_string()]).await;
     let response = app
         .call(
             Request::builder()

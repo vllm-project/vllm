@@ -205,9 +205,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -1075,9 +1073,7 @@ fn frontend_args_accept_json() {
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -1382,13 +1378,13 @@ fn serve_args_parse_cors_flags() {
 }
 
 #[test]
-fn serve_args_cors_defaults_are_permissive() {
+fn serve_args_cors_defaults_restrict_origins() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
 
     let Command::Serve(serve) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(serve.runtime.allowed_origins.0, ["*"]);
+    assert!(serve.runtime.allowed_origins.0.is_empty());
     assert_eq!(serve.runtime.allowed_methods.0, ["*"]);
     assert_eq!(serve.runtime.allowed_headers.0, ["*"]);
     assert!(!serve.runtime.allow_credentials);
@@ -1748,9 +1744,7 @@ fn serve_args_accept_handshake_aliases() {
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
-                            [
-                                "*",
-                            ],
+                            [],
                         ),
                         allowed_methods: JsonStringList(
                             [
@@ -1906,9 +1900,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
@@ -2002,9 +1994,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
@@ -2142,9 +2132,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 sse_keep_alive_interval: None,
             },
             cors: CorsConfig {
-                allow_origins: [
-                    "*",
-                ],
+                allow_origins: [],
                 allow_methods: [
                     "*",
                 ],
