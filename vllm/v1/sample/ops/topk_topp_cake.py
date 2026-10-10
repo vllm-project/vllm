@@ -65,18 +65,21 @@ _WORKSPACES: dict[tuple[int, torch.device], tuple[torch.Tensor, ...]] = {}
 
 def _workspace(batch: int, device: torch.device) -> tuple[torch.Tensor, ...]:
     """Slab probs, slab ids, counts, renormalized probs and samples buffers."""
-    key = (batch, device)
+    # Power-of-two capacities keep the cache within 4x the largest batch. The
+    # buffers are never freed, so captured CUDA graphs may hold their views.
+    capacity = 1 << (batch - 1).bit_length()
+    key = (capacity, device)
     workspace = _WORKSPACES.get(key)
     if workspace is None:
         workspace = (
-            torch.empty(batch, CAKE_MAX_TOP_K, device=device, dtype=torch.float32),
-            torch.empty(batch, CAKE_MAX_TOP_K, device=device, dtype=torch.int32),
-            torch.empty(batch, device=device, dtype=torch.int32),
-            torch.empty(batch, CAKE_MAX_TOP_K, device=device, dtype=torch.float32),
-            torch.empty(batch, device=device, dtype=torch.int32),
+            torch.empty(capacity, CAKE_MAX_TOP_K, device=device, dtype=torch.float32),
+            torch.empty(capacity, CAKE_MAX_TOP_K, device=device, dtype=torch.int32),
+            torch.empty(capacity, device=device, dtype=torch.int32),
+            torch.empty(capacity, CAKE_MAX_TOP_K, device=device, dtype=torch.float32),
+            torch.empty(capacity, device=device, dtype=torch.int32),
         )
         _WORKSPACES[key] = workspace
-    return workspace
+    return tuple(buffer[:batch] for buffer in workspace)
 
 
 def cake_sample(

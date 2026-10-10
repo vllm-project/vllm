@@ -48,7 +48,7 @@ def test_mask_matches_reference(batch_size, vocab_size, top_k, top_p):
 
 def test_mask_per_row_params():
     torch.manual_seed(1)
-    batch_size, vocab_size = 16, 50000
+    batch_size, vocab_size = 13, 50000
     logits = torch.randn(batch_size, vocab_size, device=DEVICE) * 2
     k = torch.randint(1, 300, (batch_size,), device=DEVICE, dtype=torch.int32)
     p = torch.rand(batch_size, device=DEVICE) * 0.8 + 0.1
@@ -73,7 +73,7 @@ def test_mask_ties_keep_lowest_index():
 @pytest.mark.parametrize("top_p", [None, 0.8])
 def test_sample_within_kept_set(top_p):
     torch.manual_seed(2)
-    batch_size, vocab_size, top_k = 32, 32000, 50
+    batch_size, vocab_size, top_k = 24, 32000, 50
     logits = torch.randn(batch_size, vocab_size, device=DEVICE) * 2
     k, p = _params(batch_size, top_k, top_p)
     kept = apply_top_k_top_p_pytorch(logits.clone(), k, p) > float("-inf")
