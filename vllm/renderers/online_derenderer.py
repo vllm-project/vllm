@@ -640,12 +640,6 @@ class OnlineDerenderer:
                     if tc.index < len(last_tool_call_ids):
                         # Pin: reuse the ID already recorded for this index
                         # rather than one a from scratch replay regenerated.
-                        # Real trigger not just defensive with
-                        # tool_choice="required",
-                        # extract_required_tool_call_streaming resets
-                        # function_name_returned to False whenever the
-                        # partial JSON transiently fails to parse which
-                        # re-emits id+name for the same index on replay.
                         tc.id = last_tool_call_ids[tc.index]
                     else:
                         last_tool_call_ids.append(tc.id)

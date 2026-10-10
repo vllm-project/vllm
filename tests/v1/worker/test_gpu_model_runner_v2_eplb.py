@@ -185,7 +185,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         slot_mappings_by_layer=None,
         hidden_states=None,
         aux_hidden_states=None,
-        dp_sync=None,
+        dp_sync_state=None,
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
