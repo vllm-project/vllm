@@ -2502,11 +2502,11 @@ class rocm_aiter_ops:
     @classmethod
     @functools.cache
     def is_gdn_flydsl_prefill_available(cls) -> bool:
-        """Whether the opt-in AITER FlyDSL GDN prefill path can be used.
+        """Whether the AITER FlyDSL GDN prefill path can be used.
 
-        Selecting the backend is an explicit opt-in in itself, but it still
-        runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch that
-        turns all of them off.
+        The backend is selected explicitly or, on gfx942/gfx950, by default
+        under "auto". Either way it runs AITER kernels, so VLLM_ROCM_USE_AITER
+        remains the one switch that turns all of them off.
         """
         return (
             cls._AITER_ENABLED
