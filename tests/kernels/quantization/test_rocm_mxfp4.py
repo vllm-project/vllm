@@ -148,7 +148,7 @@ def test_fp4_env_defaults():
     import vllm.envs as envs
 
     assert envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM is False
-    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is True
+    assert envs.VLLM_ROCM_USE_AITER_FP4BMM is False
 
 
 @pytest.mark.parametrize(
