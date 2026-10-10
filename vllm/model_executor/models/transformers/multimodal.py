@@ -16,14 +16,15 @@
 # limitations under the License.
 """Transformers modeling backend mixin for multi-modal models."""
 
+import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 import torch
 import transformers
-from transformers.utils.generic import ModelOutput
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.utils import getattr_iter
@@ -47,6 +48,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -62,12 +64,33 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
-_MODALITY_SIZE_KEYS = {"audio": "num_audio_tokens", "image": "num_image_patches"}
+_MODALITY_SIZE_KEYS = {
+    "audio": "num_audio_tokens",
+    "image": "num_image_patches",
+    "video": "num_video_patches",
+}
+# NOTE: Profiling cap as in llava_onevision._MAX_FRAMES_PER_VIDEO
+# past which a pixel budget only shrinks the frames, so Qwen3-VL's most is
+# 12168 tokens at 16 frames and 9600 at its `max_frames` of 768
+_MAX_FRAMES_PER_VIDEO = 16
+# Arbitrary large size, bounded only by the processor's own resizing
+_MAX_DUMMY_SIDE = 10_000
+# Tiny inputs trip processors' channel-axis inference
+_MIN_DUMMY_SIDE = 224
 
 
 def _get_embed_token_id(replacement_ids: torch.Tensor) -> int:
     """The token an expansion repeats is the one holding the embeddings."""
     return int(replacement_ids.mode().values)
+
+
+def _count_embed_tokens(seqs: list[list[int]]) -> torch.Tensor:
+    """Number of embedding tokens in each item's replacement."""
+    counts = []
+    for seq in seqs:
+        ids = torch.tensor(seq)
+        counts.append(int(ids.eq(_get_embed_token_id(ids)).sum()))
+    return torch.tensor(counts)
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
@@ -77,23 +100,62 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             self.get_hf_processor(), ("audio_processor", "feature_extractor")
         )
 
+    @cached_property
     def _is_audio_model(self) -> bool:
         return self._get_audio_processor() is not None
 
+    @cached_property
     def _is_image_model(self) -> bool:
         return hasattr(self.get_hf_processor(), "image_processor")
 
+    @cached_property
+    def _is_video_model(self) -> bool:
+        if not hasattr(self.get_hf_processor(), "video_processor"):
+            return False
+        try:
+            Base.check_version("5.18.0", "video inputs")
+        except ImportError as e:
+            logger.info_once("%s, so video inputs are disabled.", e)
+            return False
+        num_frames = self._get_min_video_frames()
+        side = _MIN_DUMMY_SIDE
+        # TODO: Drop the except branch once every video processor can count, see
+        # https://github.com/huggingface/transformers/issues/43329
+        try:
+            mm_tokens = self._get_num_mm_tokens(video_sizes=([num_frames, side, side],))
+        except AttributeError:
+            logger.info_once(
+                "%s cannot count video tokens yet, so the Transformers modeling "
+                "backend serves this model without video inputs. See "
+                "https://github.com/huggingface/transformers/issues/43329",
+                type(self.get_hf_processor()).__name__,
+            )
+            return False
+        return mm_tokens["num_video_tokens"] is not None
+
+    @cached_property
+    def _video_needs_metadata(self) -> bool:
+        video_processor = getattr(self.get_hf_processor(), "video_processor", None)
+        return getattr(video_processor, "do_sample_frames", False)
+
+    def _get_min_video_frames(self) -> int:
+        video_processor = self.get_hf_processor().video_processor
+        # A processor without `temporal_patch_size` groups no frames, so one is enough
+        return getattr(video_processor, "temporal_patch_size", 1)
+
     def _get_supported_modalities(self) -> list[str]:
         modalities = []
-        if self._is_audio_model():
+        if self._is_audio_model:
             modalities.append("audio")
-        if self._is_image_model():
+        if self._is_image_model:
             modalities.append("image")
+        if self._is_video_model:
+            modalities.append("video")
         if not modalities:
             raise ValueError(
-                f"{type(self.get_hf_processor()).__name__} exposes neither an image "
-                "processor nor an audio processor, so the Transformers modeling "
-                "backend cannot serve this model as multi-modal."
+                f"{type(self.get_hf_processor()).__name__} exposes no image, video "
+                "or audio processor, so the Transformers modeling backend cannot "
+                "serve this model as multi-modal."
             )
         return modalities
 
@@ -104,12 +166,13 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return 16000.0
 
     def get_data_parser(self) -> MultiModalDataParser:
-        if self._is_audio_model():
-            return MultiModalDataParser(
-                target_sr=self._get_audio_sampling_rate(),
-                expected_hidden_size=self._get_expected_hidden_size(),
-            )
-        return super().get_data_parser()
+        target_sr = self._get_audio_sampling_rate() if self._is_audio_model else None
+        return MultiModalDataParser(
+            target_sr=target_sr,
+            video_needs_metadata=self._video_needs_metadata,
+            expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
+        )
 
     def get_supported_mm_limits(self):
         return dict.fromkeys(self._get_supported_modalities())
@@ -121,6 +184,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             max_tokens["audio"] = self.get_max_audio_tokens()
         if "image" in modalities:
             max_tokens["image"] = self.get_max_image_tokens()
+        if "video" in modalities:
+            max_tokens["video"] = self.get_max_video_tokens(seq_len, mm_counts)
         return max_tokens
 
     def get_max_audio_tokens(self) -> int:
@@ -136,30 +201,127 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             f"The following attribute names were checked: {names}."
         )
 
-    def get_max_image_tokens(self) -> int:
-        width, height = self.get_image_size_with_most_features()
+    def _get_num_mm_tokens(self, **sizes: Sequence[Sequence[int]]) -> Any:
         processor = self.get_hf_processor()
         multimodal_config = self.ctx.model_config.get_multimodal_config()
         mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
-        mm_tokens = processor._get_num_multimodal_tokens(
-            image_sizes=([height, width],), **mm_processor_kwargs
-        )
-        image_tokens = mm_tokens["num_image_tokens"][0]
-        return image_tokens
+        return processor._get_num_multimodal_tokens(**sizes, **mm_processor_kwargs)
+
+    def get_max_image_tokens(self) -> int:
+        size = self.get_image_size_with_most_features()
+        return self._get_num_image_tokens(size)
+
+    def get_max_video_tokens(self, seq_len: int, mm_counts: Mapping[str, int]) -> int:
+        num_frames = self.get_num_frames_with_most_features(seq_len, mm_counts)
+        return self._get_max_video_tokens_for_frames(num_frames)
+
+    def _get_max_video_tokens_for_frames(self, num_frames: int) -> int:
+        size = self.get_video_size_with_most_features(num_frames)
+        return self._get_num_video_tokens(num_frames, size)
+
+    def _get_num_image_tokens(self, size: ImageSize) -> int:
+        mm_tokens = self._get_num_mm_tokens(image_sizes=([size.height, size.width],))
+        return mm_tokens["num_image_tokens"][0]
+
+    def _get_num_video_tokens(self, num_frames: int, size: ImageSize) -> int:
+        video_sizes = ([num_frames, size.height, size.width],)
+        mm_tokens = self._get_num_mm_tokens(video_sizes=video_sizes)
+        return mm_tokens["num_video_tokens"][0]
+
+    def _get_size_candidates(
+        self, sub_processor: Any, divisors: tuple[int, ...]
+    ) -> list[ImageSize]:
+        """Candidate sizes read off a sub-processor's `size`.
+
+        The keys are one of `VALID_SIZE_DICT_KEYS`, so the bound is either exact
+        or an area budget, which `divisors` splits over its items. `shortest_edge`
+        bounds only the small side, so it yields no candidate.
+
+        `longest_edge` is read as the area budget Qwen and GLM use it for. A
+        processor using it as an edge length (SmolVLM) yields a tiny candidate,
+        which is only chosen if it ties on tokens, so it is still correct.
+        """
+        size = getattr(sub_processor, "size", None) or {}
+        height = size.get("height", size.get("max_height"))
+        width = size.get("width", size.get("max_width"))
+        if height and width:
+            return [ImageSize(width=width, height=height)]
+        if max_pixels := size.get("max_pixels", size.get("longest_edge")):
+            sides = {math.isqrt(max_pixels // divisor) for divisor in divisors}
+            return [
+                ImageSize(width=side, height=side) for side in sorted(sides) if side
+            ]
+        return []
+
+    def _get_size_with_most_tokens(
+        self, candidates: list[ImageSize], count: Callable[[ImageSize], int]
+    ) -> ImageSize:
+        """Smallest size found that yields the most tokens.
+
+        `size` bounds the resized output, not the token count, so the candidates
+        are compared by token count against an arbitrary large fallback, which
+        tiling processors need. The fallback goes last so a candidate wins a tie.
+        Resize rounding can give a large input fewer tokens (Qwen2.5-VL), so the
+        candidates matter for the count, not only for memory.
+
+        The winner is then halved while the count holds, so processors with no
+        usable bound aren't profiled on huge dummy inputs.
+        """
+        sizes = [*candidates, ImageSize(width=_MAX_DUMMY_SIDE, height=_MAX_DUMMY_SIDE)]
+        num_tokens = [count(size) for size in sizes]
+        most_tokens = max(num_tokens)
+        size = sizes[num_tokens.index(most_tokens)]
+
+        while min(size.width, size.height) // 2 >= _MIN_DUMMY_SIDE:
+            smaller = ImageSize(width=size.width // 2, height=size.height // 2)
+            if count(smaller) < most_tokens:
+                break
+            size = smaller
+        return size
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        return ImageSize(width=10_000, height=10_000)  # arbitrary very large size
+        return self._get_size_with_most_tokens(
+            self._get_size_candidates(self.get_hf_processor().image_processor, (1,)),
+            self._get_num_image_tokens,
+        )
+
+    def get_video_size_with_most_features(self, num_frames: int) -> ImageSize:
+        """Per-frame size that yields the most video tokens.
+
+        The video processor's `size` budget may cover one frame, every frame or
+        every temporal patch, so all three splits are tried.
+        """
+        video_processor = self.get_hf_processor().video_processor
+        grid_t = max(num_frames // self._get_min_video_frames(), 1)
+        return self._get_size_with_most_tokens(
+            self._get_size_candidates(video_processor, (num_frames, grid_t, 1)),
+            lambda size: self._get_num_video_tokens(num_frames, size),
+        )
+
+    def get_num_frames_with_most_features(
+        self, seq_len: int, mm_counts: Mapping[str, int]
+    ) -> int:
+        max_videos = max(mm_counts.get("video", 0), 1)
+        step = self._get_min_video_frames()
+        num_frames = step
+        while (
+            num_frames + step <= _MAX_FRAMES_PER_VIDEO
+            and self._get_max_video_tokens_for_frames(num_frames + step) * max_videos
+            <= seq_len
+        ):
+            num_frames += step
+        return num_frames
 
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         text = ""
-        if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
+        if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
             processor = self.info.get_hf_processor()
             audio_token = getattr(processor, "audio_token", "")
             # Separated so that adjacent placeholders stay distinguishable
             text += " ".join([audio_token] * num_audios)
-        if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
+        if self.info._is_image_model and (num_images := mm_counts.get("image", 0)):
             processor = self.info.get_hf_processor()
             if "gemma3" in processor.__class__.__name__.lower():
                 image_token = processor.boi_token
@@ -171,6 +333,10 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 end_token = getattr(processor, "image_end_token", "")
                 image_token = f"{start_token}{image_token}{end_token}"
             text += image_token * num_images
+        if self.info._is_video_model and (num_videos := mm_counts.get("video", 0)):
+            processor = self.info.get_hf_processor()
+            video_token = getattr(processor, "video_token", "")
+            text += video_token * num_videos
         return text
 
     def get_dummy_mm_data(
@@ -180,7 +346,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         mm_options: "MultiModalDummyOptions",
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
-        if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
+        if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
             sampling_rate = self.info._get_audio_sampling_rate()
             sub = self.info._get_audio_processor()
             chunk_length = getattr(sub, "chunk_length", None) if sub else None
@@ -191,7 +357,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 num_audios=num_audios,
                 overrides=mm_options.get("audio"),
             )
-        if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
+        if self.info._is_image_model and (num_images := mm_counts.get("image", 0)):
             width, height = self.info.get_image_size_with_most_features()
             data["image"] = self._get_dummy_images(
                 width=width,
@@ -199,6 +365,36 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 num_images=num_images,
                 overrides=mm_options.get("image"),
             )
+        if self.info._is_video_model and (num_videos := mm_counts.get("video", 0)):
+            num_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+            width, height = self.info.get_video_size_with_most_features(num_frames)
+            videos = self._get_dummy_videos(
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                num_videos=num_videos,
+                overrides=mm_options.get("video"),
+            )
+            # Only processors that sample frames need metadata, which has the
+            # dummy frames consumed verbatim
+            if self.info._video_needs_metadata:
+                video_processor = self.info.get_hf_processor().video_processor
+                fps = getattr(video_processor, "fps", None)
+                videos = [
+                    (
+                        video,
+                        {
+                            "fps": fps,
+                            "duration": len(video) / fps if fps else None,
+                            "total_num_frames": len(video),
+                            "frames_indices": list(range(len(video))),
+                            "video_backend": "opencv",
+                            "do_sample_frames": False,
+                        },
+                    )
+                    for video in videos
+                ]
+            data["video"] = videos
         return data
 
 
@@ -210,6 +406,40 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
     unexpanded prompt, so this processor takes the base class's processing path
     and with it the multi-modal processor cache.
     """
+
+    def _get_hf_mm_inputs(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        """Pass the video metadata along to the HF processor."""
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        hf_data = hf_inputs.hf_data
+
+        if "videos" not in hf_data or not self.info._video_needs_metadata:
+            return hf_inputs
+
+        videos = hf_data["videos"]
+        assert isinstance(videos, Sequence)
+        videos, metadata = zip(*videos)
+        hf_data["videos"] = list(videos)
+        hf_data["video_metadata"] = [
+            {k: v for k, v in item.items() if k != "do_sample_frames"}
+            for item in metadata
+        ]
+        do_sample_frames = {item.get("do_sample_frames", False) for item in metadata}
+        if len(do_sample_frames) > 1:
+            raise ValueError(
+                "The videos in a request must agree on `do_sample_frames`, "
+                "since the HF processor takes one value for all of them."
+            )
+
+        return hf_inputs._replace(
+            hf_kwargs={
+                "do_sample_frames": do_sample_frames.pop(),
+                **hf_inputs.hf_kwargs,
+            }
+        )
 
     def _get_modality_field_names(self, modality: str) -> set[str]:
         """Names of the fields the sub-processor for `modality` produces."""
@@ -287,23 +517,18 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         modalities = [m for m, size in sizes.items() if size is not None]
 
         # Keys we wrote ourselves, rather than ones a sub-processor produced
-        own_keys = set(_MODALITY_SIZE_KEYS.values()) | {
+        own_keys = {*_MODALITY_SIZE_KEYS.values(), "num_video_tokens"} | {
             f"{modality}_replacement_{suffix}"
             for modality in modalities
             for suffix in ("ids", "sizes")
         }
+        # Registered by name below, so no sub-processor has to claim them
+        own_keys |= {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"}
         keys = [key for key in hf_inputs if key not in own_keys]
         owned = self._partition_keys_by_modality(keys, modalities)
 
-        # Un-padded fields are already one entry per item, so index rather than slice
-        mm_fields: dict[str, MultiModalFieldConfig] = {
-            key: MultiModalFieldConfig.batched(modality)
-            if modality == "audio" or isinstance(hf_inputs[key], list)
-            else MultiModalFieldConfig.flat_from_sizes(
-                modality,
-                sizes[modality],
-                dim=self._get_slice_dim(hf_inputs[key], int(sizes[modality].sum())),
-            )
+        mm_fields = {
+            key: self._get_field_config(modality, key, hf_inputs, sizes[modality])
             for modality in modalities
             for key in owned[modality]
         }
@@ -326,12 +551,50 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched(
                 "image", keep_on_cpu=True
             )
-            # TODO: route to "video" once the video modality is supported
+        if "video" in modalities:
             mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched(
-                "image", keep_on_cpu=True
+                "video", keep_on_cpu=True
+            )
+            mm_fields["second_per_grid_ts"] = MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
             )
 
         return mm_fields
+
+    def _get_field_config(
+        self,
+        modality: str,
+        key: str,
+        hf_inputs: "BatchFeature",
+        sizes: torch.Tensor,
+    ) -> MultiModalFieldConfig:
+        data = hf_inputs[key]
+        # Un-padded fields are already one entry per item, so index rather than slice
+        if modality == "audio" or isinstance(data, list):
+            return MultiModalFieldConfig.batched(modality)
+
+        total = int(sizes.sum())
+        dim = self._get_slice_dim(data, total)
+        if modality != "video":
+            return MultiModalFieldConfig.flat_from_sizes(modality, sizes, dim=dim)
+
+        rows = data.shape[dim]
+        if rows == len(sizes):
+            return MultiModalFieldConfig.batched("video")
+        if rows == total:
+            return MultiModalFieldConfig.flat_from_sizes("video", sizes, dim=dim)
+        # VideoLLaMA3's compression mask has one row per token the processor counts
+        num_video_tokens = hf_inputs["num_video_tokens"]
+        if rows == int(num_video_tokens.sum()):
+            return MultiModalFieldConfig.flat_from_sizes(
+                "video", num_video_tokens, dim=dim
+            )
+        # NOTE: Any other layout would need a per-model guess, which we'd like to avoid
+        raise ValueError(
+            f"{type(self.info.get_hf_processor()).__name__} returned {rows} row(s) of "
+            f"`{key}` for {len(sizes)} video(s) with {total} patch(es), so the rows "
+            "cannot be attributed to a video."
+        )
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
@@ -569,11 +832,15 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     hf_inputs, hf_data, len(seqs)
                 )
             elif modality == "audio":
-                counts = []
-                for seq in seqs:
-                    ids = torch.tensor(seq)
-                    counts.append(int(ids.eq(_get_embed_token_id(ids)).sum()))
-                hf_inputs["num_audio_tokens"] = torch.tensor(counts)
+                hf_inputs["num_audio_tokens"] = _count_embed_tokens(seqs)
+            elif modality == "video":
+                grid = hf_inputs.get("video_grid_thw")
+                hf_inputs["num_video_patches"] = (
+                    grid.prod(-1)
+                    if grid is not None
+                    else torch.ones(len(seqs), dtype=torch.long)
+                )
+                hf_inputs["num_video_tokens"] = _count_embed_tokens(seqs)
 
         hf_inputs.pop("input_ids")
 
@@ -833,25 +1100,47 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         if pixel_values is None:
             return None
 
-        num_image_patches = kwargs.pop("num_image_patches")
+        return self._process_vision_input(
+            "image", pixel_values, kwargs.pop("num_image_patches"), **kwargs
+        )
 
-        split_sizes = num_image_patches.flatten().tolist()
+    def _process_video_input(self, **kwargs) -> list[torch.Tensor] | None:
+        pixel_values_videos: torch.Tensor | None = kwargs.pop(
+            "pixel_values_videos", None
+        )
+        if pixel_values_videos is None:
+            return None
+
+        kwargs.pop("second_per_grid_ts", None)
+        return self._process_vision_input(
+            "video", pixel_values_videos, kwargs.pop("num_video_patches"), **kwargs
+        )
+
+    def _process_vision_input(
+        self,
+        modality: str,
+        pixel_values: torch.Tensor,
+        num_patches: torch.Tensor,
+        **kwargs,
+    ) -> list[torch.Tensor]:
+        split_sizes = num_patches.flatten().tolist()
         if isinstance(pixel_values, torch.Tensor):
-            vision_embeddings = self._get_image_features(pixel_values, **kwargs)
+            vision_embeddings = self._get_features(modality, pixel_values, **kwargs)
             if isinstance(vision_embeddings, torch.Tensor):
                 return self._split_embeddings(vision_embeddings, split_sizes)
             return list(vision_embeddings)
 
-        # Images the processor left un-padded arrive as a list once their
+        # Items the processor left un-padded arrive as a list once their
         # shapes differ. Encode them one at a time so that none of them is
         # padded to match another.
         embeddings: list[torch.Tensor] = []
-        for index, image in enumerate(pixel_values):
-            features = self._get_image_features(
-                image.unsqueeze(0),
+        for index, item in enumerate(pixel_values):
+            features = self._get_features(
+                modality,
+                item.unsqueeze(0),
                 **self._select_item_kwargs(kwargs, index, len(pixel_values)),
             )
-            # Encoders which return one entry per image return a single entry
+            # Encoders which return one entry per item return a single entry
             if not isinstance(features, torch.Tensor):
                 features = torch.cat(list(features))
             embeddings.extend(self._split_embeddings(features, [split_sizes[index]]))
@@ -870,35 +1159,31 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             for key, value in kwargs.items()
         }
 
-    def _get_image_features(self, pixel_values: torch.Tensor, **kwargs) -> Any:
+    def _get_features(self, modality: str, pixel_values: torch.Tensor, **kwargs) -> Any:
         # grid_thw fields are registered keep_on_cpu; restore the on-device
-        # placement that HF get_image_features implementations expect.
+        # placement that HF get_*_features implementations expect.
         for key, value in kwargs.items():
             if isinstance(value, torch.Tensor) and value.is_cpu:
                 kwargs[key] = async_tensor_h2d(value, pixel_values.device)
 
-        # The underlying HuggingFace `get_image_features` implementations
+        # The underlying HuggingFace `get_*_features` implementations
         # contain model-internal syncs (e.g. Idefics3 filters all-zero
         # padding images via boolean-mask indexing, LlavaOnevision
         # branches on per-sample batch counts).
         with gpu_sync_allowed():
-            features = self.model.get_image_features(pixel_values, **kwargs)
-
-        # Transformers `v5`, `self.get_image_features` returns a tuple
-        # containing the features and optionally attentions/hidden_states
-        # After v5 is settled, we can enable qwen3-vl with several outputs
-        # from `self.get_image_features`
-        if isinstance(features, tuple):
-            return features[0]
-        if isinstance(features, ModelOutput):
-            return features.pooler_output
-        return features
+            get_modality_features = getattr(self.model, f"get_{modality}_features")
+            features = get_modality_features(pixel_values, return_dict=True, **kwargs)
+        return features.pooler_output
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         # Each helper detects its own inputs. We are called once per modality, so the
         # leftovers a helper forwards to the HF model can't belong to the other one.
         embeddings: list[torch.Tensor] = []
-        for process_input in (self._process_audio_input, self._process_image_input):
+        for process_input in (
+            self._process_audio_input,
+            self._process_image_input,
+            self._process_video_input,
+        ):
             embeddings.extend(process_input(**kwargs) or [])
         return embeddings
 
@@ -917,16 +1202,21 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 "use_audio_in_video",
             },
         )
-        if any(v for k, v in kwargs.items() if k not in {"image_grid_thw"}):
+        if kwargs.get("audio_feature_lengths") or kwargs.get("use_audio_in_video"):
             raise NotImplementedError(
-                "Transformers modeling backend only supports images."
+                "Transformers modeling backend does not support audio inputs in "
+                "M-RoPE models."
             )
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
 
         image_grid_thw = torch.stack(image_grid_thw) if image_grid_thw else None
         video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
+        second_per_grid_ts = (
+            torch.stack(second_per_grid_ts) if second_per_grid_ts else None
+        )
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
         if not hasattr(self, "_get_rope_index_kwarg_names"):
@@ -950,6 +1240,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             for name, value in (
                 ("image_grid_thw", image_grid_thw),
                 ("video_grid_thw", video_grid_thw),
+                ("second_per_grid_ts", second_per_grid_ts),
             )
             if value is not None or accepts_kwarg(name)
         }
@@ -958,8 +1249,11 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
             for feature in mm_features:
                 position = feature.mm_position
                 offset, length = position.offset, position.length
+                is_embed = position.is_embed
+                if is_embed is None:
+                    is_embed = slice(None)
                 mm_token_type_id = _MODALITY_TO_TOKEN_TYPE_ID[feature.modality]
-                mm_token_type_ids[offset : offset + length] = mm_token_type_id
+                mm_token_type_ids[offset : offset + length][is_embed] = mm_token_type_id
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(

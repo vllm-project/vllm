@@ -92,6 +92,11 @@ ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 # Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
 
+# Flag builds NIXL, including its NIXL EP extension for the installed PyTorch,
+# from source and installs it in place of the nixl packages from the KV-connector
+# requirements
+ARG BUILD_NIXL=false
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
@@ -148,7 +153,7 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
         && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl; \
     fi
 
@@ -549,6 +554,24 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         (cd "${TRITON_WORKSPACE}/dist" \
             && sha256sum build-state > wheel.sha256); \
     fi
+
+# Build NIXL and its NIXL EP extension against the PyTorch installed here when
+# requested. The wheels are installed by the final image, which has no compiler.
+ARG BUILD_NIXL
+COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
+RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    set -eux; \
+    NIXL_WORKSPACE=/tmp/nixl_workspace; \
+    mkdir -p "${NIXL_WORKSPACE}/dist"; \
+    if [ "${BUILD_NIXL}" = "true" ]; then \
+        dnf install -y --setopt=install_weak_deps=False autoconf automake libtool; \
+        dnf clean all; \
+        rm -rf /var/cache/dnf; \
+        NIXL_REQUIREMENTS_FILE=/tmp/vllm-requirements/kv_connectors.txt \
+        WHEELS_CACHE_HOME="${NIXL_WORKSPACE}/dist" \
+        MAX_JOBS="${max_jobs:-}" \
+            python3 /tmp/build_nixl_for_rubin.py --skip-system-deps --build-only; \
+    fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -915,13 +938,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
-# https://docs.flashinfer.ai/installation.html
-# From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.7.0.post1
-RUN --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+# Install FlashInfer's precompiled kernels for all GPU architectures (the default).
+# `vllm download-kernels` wraps this command but vLLM is only installed in later
+# stages, and running it there would rebuild this large layer for every wheel.
+RUN --mount=type=cache,target=/opt/pip/cache \
+    PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -1261,6 +1282,25 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && rm -f \
         /tmp/install_triton_from_source.sh \
         /tmp/triton-source-wheel.sha256
+
+# Install source-built NIXL last, replacing the nixl packages installed above, so
+# the image has a NIXL EP build for its PyTorch version. There is no GPU driver
+# at build time, so check for the extension instead of importing it.
+ARG BUILD_NIXL
+RUN --mount=type=cache,target=/opt/uv/cache \
+    --mount=type=bind,from=extensions-build,source=/tmp/nixl_workspace/dist,target=/tmp/nixl-dist,ro \
+    set -eu; \
+    if [ "${BUILD_NIXL}" = "true" ]; then \
+        ls /tmp/nixl-dist/*.whl; \
+        uv pip uninstall --system nixl nixl-cu12 nixl-cu13; \
+        uv pip install --system --no-deps /tmp/nixl-dist/*.whl; \
+        python3 -c "import glob, importlib.util as u, os, torch; \
+            spec = u.find_spec('nixl_ep_cu' + os.environ['CUDA_VERSION'].split('.')[0]); \
+            mm = ''.join(torch.__version__.split('.')[:2]); \
+            ext = glob.glob(os.path.join(spec.submodule_search_locations[0], 'nixl_ep_cpp_torch' + mm + '.*')) if spec else []; \
+            assert ext, 'NIXL EP has no build for torch ' + torch.__version__; \
+            print('NIXL EP extension:', ext[0])"; \
+    fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \
