@@ -1057,7 +1057,7 @@ scipy==1.13.1
     #   vocos
 segmentation-models-pytorch==0.5.0
     # via -r requirements/test/cuda.in
-sentence-transformers==5.2.0
+sentence-transformers==5.6.0
     # via
     #   -r requirements/test/cuda.in
     #   mteb
