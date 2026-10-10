@@ -118,11 +118,19 @@ def find_last_user_index(messages: list[dict[str, Any]]) -> int:
     return last_user_index
 
 
+def _previous_non_tool_index(messages: list[dict[str, Any]], index: int) -> int:
+    prev = index - 1
+    while prev >= 0 and messages[prev].get("role") == "tool":
+        prev -= 1
+    return prev
+
+
 def render_message(
     index: int,
     messages: list[dict[str, Any]],
     thinking_mode: str,
     last_user_idx: int | None = None,
+    last_non_tool_idx: int | None = None,
 ) -> str:
     if not (0 <= index < len(messages)):
         raise ValueError(
@@ -189,19 +197,19 @@ def render_message(
             prompt += thinking_end_token
 
     elif role == "tool":
-        prev_assistant_idx = index - 1
-        assistant_msg = messages[prev_assistant_idx]
-        while prev_assistant_idx >= 0 and assistant_msg.get("role") == "tool":
-            prev_assistant_idx -= 1
-            assistant_msg = messages[prev_assistant_idx]
-
-        if not (
-            index == 0
-            or prev_assistant_idx >= 0
-            and assistant_msg.get("role") == "assistant"
+        prev_assistant_idx = (
+            last_non_tool_idx
+            if last_non_tool_idx is not None
+            else _previous_non_tool_index(messages, index)
+        )
+        if (
+            prev_assistant_idx < 0
+            or messages[prev_assistant_idx].get("role") != "assistant"
         ):
-            raise ValueError(f"Invalid messages at {index}:\n{assistant_msg}")
+            invalid = messages[prev_assistant_idx] if prev_assistant_idx >= 0 else msg
+            raise ValueError(f"Invalid messages at {index}:\n{invalid}")
 
+        assistant_msg = messages[prev_assistant_idx]
         tool_call_order = index - prev_assistant_idx
         assistant_tool_calls = assistant_msg.get("tool_calls")
         if not (assistant_tool_calls and len(assistant_tool_calls) >= tool_call_order):
@@ -300,13 +308,18 @@ def encode_messages(
         full_messages = drop_thinking_messages(full_messages)
 
     last_user_idx = find_last_user_index(full_messages)
+    last_non_tool_idx = _previous_non_tool_index(full_messages, len(context))
 
     for idx in range(len(messages)):
+        full_idx = idx + len(context)
         prompt += render_message(
-            idx + len(context),
+            full_idx,
             full_messages,
             thinking_mode=thinking_mode,
             last_user_idx=last_user_idx,
+            last_non_tool_idx=last_non_tool_idx,
         )
+        if full_messages[full_idx].get("role") != "tool":
+            last_non_tool_idx = full_idx
 
     return prompt
