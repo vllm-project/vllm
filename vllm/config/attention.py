@@ -103,6 +103,13 @@ class AttentionConfig:
     candidate pool instead, with fp32 logits, and keeps the masked dense walk
     for steps whose contexts are too short for the pool to pay."""
 
+    minimax_m3_indexer_cp: bool = False
+    """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse
+    indexer context-parallel at decode. Each rank reads 1/TP of the index
+    cache, scores every index head on it, and per-head top-k candidates are
+    exchanged and merged, so the selected blocks match the default path.
+    Requires a bf16 index cache (`indexer_kv_dtype` "auto" or "bf16")."""
+
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
     Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
@@ -150,6 +157,21 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
+        if self.minimax_m3_indexer_cp:
+            # Checked here rather than at indexer selection: an fp8 index
+            # cache is served by the AITER indexer, which never reaches it.
+            if self.indexer_kv_dtype not in ("auto", "bf16"):
+                raise ValueError(
+                    "minimax_m3_indexer_cp requires a bf16 index cache "
+                    "(indexer_kv_dtype 'auto' or 'bf16'), got "
+                    f"{self.indexer_kv_dtype!r}"
+                )
+            if getattr(self, "minimax_m3_fused_decode", False):
+                raise ValueError(
+                    "minimax_m3_indexer_cp cannot be combined with "
+                    "minimax_m3_fused_decode, which computes the indexer top-k "
+                    "inside its kernel"
+                )
 
     def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
         """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""

@@ -871,6 +871,7 @@ steps:
   - tests/models/test_vision.py
   commands:
   - pytest -v -s distributed/test_custom_all_reduce.py
+  - pytest -v -s distributed/test_minimax_m3_indexer_cp_tp.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
