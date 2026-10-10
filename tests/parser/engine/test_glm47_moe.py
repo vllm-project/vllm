@@ -11,6 +11,8 @@ earlier turn's markers must not be read as the current turn's state.
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.glm47_moe import (
     THINK_END,
     THINK_START,
@@ -22,7 +24,36 @@ from vllm.parser.glm47_moe import (
 THINK_S, THINK_E = 1000, 1001
 TOOL_S, TOOL_E = 1002, 1003
 ASSISTANT, OBSERVATION, USER = 1004, 1005, 1006
+OBSERVATION_TEXT = "<|observation|>"
 TEXT = 42  # stand-in for an ordinary reasoning/content token
+
+# GLM-5 ordinary-token pieces captured in issue #58315.
+SPLIT_TOOL_VOCAB = {
+    "<": 27,
+    "tool": 14163,
+    "_call": 13420,
+    ">": 29,
+    "get": 455,
+    "_current": 11075,
+    "_time": 3009,
+    "</": 522,
+}
+SPLIT_TOOL_IDS = [
+    27,
+    14163,
+    13420,
+    29,
+    455,
+    11075,
+    3009,
+    522,
+    14163,
+    13420,
+    29,
+    154829,  # <|observation|>
+]
+ATOMIC_TOOL_IDS = [154843, 455, 11075, 3009, 154844, 154829]
+SPLIT_TOOL_TEXT = "<tool_call>get_current_time</tool_call>"
 
 VOCAB = {
     THINK_START: THINK_S,
@@ -33,6 +64,51 @@ VOCAB = {
     "<|observation|>": OBSERVATION,
     "<|user|>": USER,
 }
+
+
+def _make_glm5_tokenizer():
+    return make_mock_tokenizer(
+        {
+            **VOCAB,
+            **SPLIT_TOOL_VOCAB,
+            TOOL_CALL_START: 154843,
+            TOOL_CALL_END: 154844,
+            OBSERVATION_TEXT: 154829,
+        },
+        special_tokens=list(VOCAB),
+    )
+
+
+def _make_glm5_parser(tokenizer, request, tool_choice, *, skip_reasoning_parsing=False):
+    request.tool_choice = tool_choice
+    request.tools = [
+        ChatCompletionToolsParam(
+            function={
+                "name": "get_current_time",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        )
+    ]
+    parser = Glm47MoeParser(tokenizer)
+    parser.skip_reasoning_parsing = skip_reasoning_parsing
+    parser.initialize_streaming(
+        initial_state=(ParserState.CONTENT if skip_reasoning_parsing else None)
+    )
+    return parser
+
+
+def _parse_one_token_at_a_time(parser, tokenizer, request, token_ids):
+    deltas = []
+    for index, token_id in enumerate(token_ids):
+        delta = parser.parse_delta(
+            tokenizer.decode([token_id]),
+            [token_id],
+            request,
+            finished=index == len(token_ids) - 1,
+        )
+        if delta is not None:
+            deltas.append(delta)
+    return deltas
 
 
 @pytest.fixture
@@ -106,3 +182,68 @@ class TestExtractContentIds:
     def test_thinking_disabled(self, no_thinking_parser):
         ids = [THINK_S, TEXT, TOOL_S]
         assert no_thinking_parser.extract_content_ids(ids) == ids
+
+
+class TestRequiredToolChoice:
+    @pytest.mark.parametrize(
+        ("tool_choice", "token_ids", "expected_tool_call"),
+        [
+            pytest.param("required", SPLIT_TOOL_IDS, True, id="required-split-markers"),
+            pytest.param("auto", SPLIT_TOOL_IDS, False, id="auto-split-markers"),
+            pytest.param(
+                "auto", ATOMIC_TOOL_IDS, True, id="auto-special-token-markers"
+            ),
+        ],
+    )
+    def test_tool_marker_encoding_follows_tool_choice(
+        self, mock_request, tool_choice, token_ids, expected_tool_call
+    ):
+        tokenizer = _make_glm5_tokenizer()
+        assert tokenizer.decode(token_ids) == f"{SPLIT_TOOL_TEXT}{OBSERVATION_TEXT}"
+        parser = _make_glm5_parser(tokenizer, mock_request, tool_choice)
+
+        output_ids = [THINK_S, TEXT, THINK_E, *token_ids]
+        deltas = _parse_one_token_at_a_time(parser, tokenizer, mock_request, output_ids)
+
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        content = "".join(delta.content or "" for delta in deltas)
+        assert bool(tool_calls) == expected_tool_call
+        if expected_tool_call:
+            assert tool_calls[0].function.name == "get_current_time"
+            assert content == ""
+        else:
+            assert content == SPLIT_TOOL_TEXT
+
+    def test_required_choice_keeps_split_markers_in_reasoning(self, mock_request):
+        tokenizer = _make_glm5_tokenizer()
+        parser = _make_glm5_parser(tokenizer, mock_request, "required")
+
+        output_ids = [THINK_S, TEXT, *SPLIT_TOOL_IDS[:-1], THINK_E, 154829]
+        deltas = _parse_one_token_at_a_time(parser, tokenizer, mock_request, output_ids)
+
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        reasoning = "".join(delta.reasoning or "" for delta in deltas)
+        assert tool_calls == []
+        assert reasoning == f"*{SPLIT_TOOL_TEXT}"
+
+    def test_required_choice_waits_for_reasoning_boundary_when_skipped(
+        self, mock_request
+    ):
+        tokenizer = _make_glm5_tokenizer()
+        parser = _make_glm5_parser(
+            tokenizer, mock_request, "required", skip_reasoning_parsing=True
+        )
+        output_ids = [THINK_S, *SPLIT_TOOL_IDS[:-1], THINK_E, *SPLIT_TOOL_IDS]
+        deltas = _parse_one_token_at_a_time(parser, tokenizer, mock_request, output_ids)
+
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        content = "".join(delta.content or "" for delta in deltas)
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "get_current_time"
+        assert content == f"{THINK_START}{SPLIT_TOOL_TEXT}{THINK_END}"

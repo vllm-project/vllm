@@ -8,6 +8,8 @@ Each model format is described by a :class:`ParserEngineConfig` that specifies:
   (e.g. ``<tool_call>``, ``</think>``).
 * **token_id_terminals** – terminals that should be matched by token ID
   rather than (or in addition to) text.
+* **required_tool_choice_text_fallback_terminals** – token-ID terminals that
+  may also match by text when the request requires a tool call.
 * **transitions** – a state machine mapping
   ``(state, terminal) → (new_state, events_to_emit)`` that drives semantic
   event generation during streaming.
@@ -58,6 +60,13 @@ class ParserEngineConfig:
     terminals: Mapping[str, str | tuple[str, ...]] = field(default_factory=dict)
 
     token_id_terminals: dict[str, str] = field(default_factory=dict)
+
+    # Token-ID terminals whose textual spelling may also delimit a tool call
+    # when constrained decoding requires one. Some grammars accept the same
+    # marker as either a special token or ordinary sub-tokens.
+    required_tool_choice_text_fallback_terminals: frozenset[str] = field(
+        default_factory=frozenset
+    )
 
     transitions: dict[tuple[ParserState, str], Transition] = field(
         default_factory=dict,
