@@ -80,6 +80,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             # harness; their direct and delegating coverage lives in dedicated
             # tests.
             continue
+        if cfg.name == "llama_json":
+            # llama_json is a bare-JSON format with no TOOL_END terminal
+            # because calls close when the envelope JSON balances. Replay
+            # coverage lives in test_llama_json.py.
+            continue
         if cfg.name == "granite":
             # Granite has a JSON-array tool body with no TOOL_END terminal, so
             # it does not fit this token-terminal harness; its replay coverage
