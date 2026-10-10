@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 import torch
 from tqdm import tqdm
 
+import vllm.envs as envs
 from vllm import RequestOutput, TextPrompt, TokensPrompt
 from vllm.entrypoints.common.offline import OfflineInferenceMixin
 from vllm.logger import init_logger
@@ -29,10 +30,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-# Engine-side cap on `SamplingParams.allowed_token_ids`; keep in sync with
-# MAX_NUM_ALLOWED_TOKEN_IDS in vllm/v1/worker/gpu/sample/logit_bias.py.
-_MAX_NUM_ALLOWED_TOKEN_IDS = 1024
 
 
 _bitmask_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
@@ -426,6 +423,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         vocab_size = self.model_config.get_vocab_size()
         request_type, grammar_spec = structured_output_key
         result: list[tuple[SamplingParams, list[int]] | None] = []
+        # Engine-side cap on `SamplingParams.allowed_token_ids`
+        # (Model Runner V2 sampler buffer width).
+        max_num_allowed_token_ids = envs.VLLM_MAX_NUM_ALLOWED_TOKEN_IDS
 
         for beam in beams:
             # Fresh grammar per beam, replaying generated tokens.
@@ -462,7 +462,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 detokenize=False,
                 allowed_token_ids=(
                     allowed_ids
-                    if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
+                    if len(allowed_ids) <= max_num_allowed_token_ids
                     else None
                 ),
                 skip_clone=True,

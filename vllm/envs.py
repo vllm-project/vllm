@@ -114,6 +114,8 @@ if TYPE_CHECKING:
     VLLM_MAX_STOP_STRINGS: int = 4
     VLLM_MAX_NUM_BAD_WORDS: int = 128
     VLLM_MAX_BAD_WORDS_TOTAL_TOKENS: int = 1024
+    VLLM_MAX_NUM_ALLOWED_TOKEN_IDS: int = 1024
+    VLLM_MAX_NUM_LOGIT_BIAS_TOKENS: int = 1024
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -1161,6 +1163,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # allowed per request. Bounds the per-request GPU buffer width.
     "VLLM_MAX_BAD_WORDS_TOTAL_TOKENS": lambda: int(
         os.environ.get("VLLM_MAX_BAD_WORDS_TOTAL_TOKENS", "1024")
+    ),
+    # Maximum number of `allowed_token_ids` per request. Bounds the
+    # per-request GPU buffer width in the Model Runner V2 sampler.
+    "VLLM_MAX_NUM_ALLOWED_TOKEN_IDS": lambda: int(
+        os.environ.get("VLLM_MAX_NUM_ALLOWED_TOKEN_IDS", "1024")
+    ),
+    # Maximum number of `logit_bias` entries per request. Bounds the
+    # per-request GPU buffer width in the Model Runner V2 sampler.
+    "VLLM_MAX_NUM_LOGIT_BIAS_TOKENS": lambda: int(
+        os.environ.get("VLLM_MAX_NUM_LOGIT_BIAS_TOKENS", "1024")
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
