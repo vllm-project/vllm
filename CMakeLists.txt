@@ -31,6 +31,9 @@ endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
+if (VLLM_TARGET_DEVICE STREQUAL "rocm" OR "$ENV{VLLM_KERNEL_SYMBOL_MAP}" STREQUAL "1")
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -412,6 +415,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         COMMAND patch --batch --forward -p1
           "--input=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         WORKING_DIRECTORY "${TORCH_SHADOW_INCLUDE_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+
+      execute_process(
+        COMMAND ${Python_EXECUTABLE} -c
+          "import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({sys.argv[2]: sys.argv[3:]}))"
+          "${CMAKE_CURRENT_BINARY_DIR}/generated-source-deps.json"
+          "${TORCH_SHADOW_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${TORCH_INCLUDE_DIR}/${_stable_hdr_rel}"
+          "${CMAKE_CURRENT_LIST_DIR}/cmake/patches/pytorch_stable_string.patch"
         COMMAND_ERROR_IS_FATAL ANY)
 
       include_directories(BEFORE "${TORCH_SHADOW_INCLUDE_DIR}")
