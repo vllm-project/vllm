@@ -15,7 +15,7 @@ and decode segments write disjoint token ranges of one output buffer pair, so
 a single ``wo_a`` einsum covers the whole step.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -134,6 +134,45 @@ def alloc_mega_attn_output(
         orig_shape=data.shape,
         quant_key=kMxfp8Dynamic,
     )
+
+
+@dataclass(eq=False)
+class _PrefillKVOwner:
+    """What the retained prefill KV span's compressed columns hold.
+
+    ``_forward_prefill_mega`` lays a chunk out as ``[chunk, m, 512]`` bf16:
+    each request's whole compressed history in columns ``[0, n)``, its SWA
+    window after. Compressed caches live only on the kv-source layers and
+    consumers never write them, so every consumer that follows its source in a
+    forward would gather the very same compressed columns. The chunk therefore
+    sits in the workspace's retained tail span, which the indexer and top-k
+    scratch of the layers in between leave alone, and a consumer whose source,
+    metadata and chunk match this record (while the span is intact) rewrites
+    only its SWA columns.
+    """
+
+    source: str | None = None
+    # Held, not compared by id, so its identity stays unique while it is held.
+    metadata: DeepseekV4FlashMLAMetadata | None = None
+    chunk: tuple[int, int, int, int] | None = None
+
+    def holds(
+        self,
+        source: str,
+        metadata: DeepseekV4FlashMLAMetadata,
+        chunk: tuple[int, int, int, int],
+    ) -> bool:
+        return (
+            self.metadata is metadata and self.source == source and self.chunk == chunk
+        )
+
+    def claim(
+        self,
+        source: str,
+        metadata: DeepseekV4FlashMLAMetadata,
+        chunk: tuple[int, int, int, int],
+    ) -> None:
+        self.source, self.metadata, self.chunk = source, metadata, chunk
 
 
 def _token_slice(out: QuantizedActivation, start: int, end: int) -> QuantizedActivation:
@@ -295,11 +334,27 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         else:
             assert self.topk_indices_buffer is not None
             top_k = self.topk_indices_buffer.shape[-1]
-        combined_topk = round_up(top_k + self.window_size, 128)
+            self._prefill_kv_owner()
+        # One request covers the KV chunk (retained at the tail at runtime) and
+        # the index scratch (taken from the head) side by side.
         current_workspace_manager().get_simultaneous(
             ((self.PREFILL_CHUNK_SIZE, m, q.shape[-1]), torch.bfloat16),
+            *self._prefill_index_workspace_specs(top_k),
+        )
+
+    def _prefill_index_workspace_specs(
+        self, top_k: int
+    ) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+        combined_topk = round_up(top_k + self.window_size, 128)
+        return (
             ((self.max_num_batched_tokens, combined_topk), torch.int32),
             ((self.max_num_batched_tokens,), torch.int32),
+        )
+
+    @staticmethod
+    def _prefill_kv_owner() -> _PrefillKVOwner:
+        return current_workspace_manager().get_persistent_resource(
+            _PrefillKVOwner, _PrefillKVOwner
         )
 
     def _decode_compressed_kv_and_topk(
@@ -395,27 +450,45 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
-        for chunk_start, chunk_end, chunk_n, chunk_m in chunk_plan:
+        index_specs = self._prefill_index_workspace_specs(top_k)
+        owner = None if swa_only else self._prefill_kv_owner()
+        for chunk in chunk_plan:
+            chunk_start, chunk_end, chunk_n, chunk_m = chunk
             chunk_size = chunk_end - chunk_start
-            kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
-            if not swa_only:
-                assert flashmla_metadata is not None
-                dequantize_and_gather_k_cache(
-                    kv_ws[:chunk_size, :chunk_n],
-                    self._compressed_kv_cache(),
-                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                    gather_lens=None,
-                    block_table=flashmla_metadata.block_table[num_decodes:][
-                        chunk_start:chunk_end
-                    ],
-                    block_size=flashmla_metadata.block_size // self.compress_ratio,
-                    offset=0,
+            kv_spec = ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16)
+            if owner is None:
+                kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
+                    kv_spec, *index_specs
                 )
+            else:
+                assert flashmla_metadata is not None
+                assert self.compressed_cache_prefix is not None
+                idx_ws, lens_ws = workspace_manager.get_simultaneous(*index_specs)
+                kv_ws, intact = workspace_manager.get_retained(
+                    _PrefillKVOwner, *kv_spec
+                )
+                # A kv source has just inserted this step's rows, so it always
+                # gathers; the consumers after it reuse those columns until the
+                # next source or chunk claims the span or scratch overwrites it.
+                if (
+                    self.is_kv_source
+                    or not intact
+                    or not owner.holds(
+                        self.compressed_cache_prefix, flashmla_metadata, chunk
+                    )
+                ):
+                    dequantize_and_gather_k_cache(
+                        kv_ws[:, :chunk_n],
+                        self._compressed_kv_cache(),
+                        seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=flashmla_metadata.block_table[num_decodes:][
+                            chunk_start:chunk_end
+                        ],
+                        block_size=flashmla_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                    )
+                    owner.claim(self.compressed_cache_prefix, flashmla_metadata, chunk)
             dequantize_and_gather_k_cache(
                 kv_ws[:chunk_size],
                 self.swa_cache_layer.kv_cache,
