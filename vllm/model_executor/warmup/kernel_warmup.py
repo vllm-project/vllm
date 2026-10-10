@@ -19,6 +19,7 @@ from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    load_flashinfer_autotune_cache_only,
     resolve_flashinfer_autotune_file,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
@@ -261,6 +262,11 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if enable_flashinfer_autotune is False:
         logger.info_once("Skipping FlashInfer autotune because it is disabled.")
+        if envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY:
+            logger.warning_once(
+                "VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY has no effect because "
+                "FlashInfer autotune is disabled; no cache is loaded."
+            )
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
@@ -458,6 +464,20 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     )
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+
+    if envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY:
+        load_flashinfer_autotune_cache_only(cache_path, world)
+        # Besides tuning, this raises the KDA projection-overlap limit on the
+        # model, which the cache does not carry.
+        with torch.inference_mode():
+            _autotune_kimi_k3_kda_qkvg(runner.get_model())
+        if is_leader:
+            logger.info_once(
+                "Loaded the FlashInfer autotune cache; skipping autotuning "
+                "because VLLM_FLASHINFER_AUTOTUNE_CACHE_ONLY is set. Ops "
+                "without a cached entry use FlashInfer's default tactic."
+            )
+        return
 
     # We skip EPLB here since we don't want to record dummy metrics.
     # Randomize inputs to avoid every token pick the same experts,
