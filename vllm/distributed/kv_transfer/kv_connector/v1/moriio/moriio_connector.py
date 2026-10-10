@@ -2751,6 +2751,11 @@ class MoRIIOConnectorWorker:
                     )
                     to_remove.append(req_id)
                 elif state is TransferBatchState.FAILED:
+                    if self._has_mamba:
+                        raise TransferError(
+                            f"MoRIIO hybrid READ failed for request {req_id}; "
+                            "refusing to release or reuse in-flight KV blocks"
+                        )
                     failed_status = next(
                         (status for status in statuses if status.Failed()), None
                     )
@@ -2788,6 +2793,11 @@ class MoRIIOConnectorWorker:
                     # indefinitely on this request.
                     _age = time.monotonic() - self._recving_transfers_start[req_id]
                     if _age > _xfer_timeout:
+                        if self._has_mamba:
+                            raise TransferError(
+                                f"MoRIIO hybrid READ timed out for request {req_id}; "
+                                "refusing to release or reuse in-flight KV blocks"
+                            )
                         logger.error(
                             "RDMA read TIMED OUT for req %s after %.1fs "
                             "(kv_connector_extra_config.recv_abort_timeout=%.0f)",
@@ -3519,8 +3529,8 @@ class MoRIIOConnectorWorker:
         read_remote_data posts synchronously, so a send-queue-full rejection is
         a Failed() status on return; a separate CQ-poll thread drains
         completions and frees SQ depth, so we back off and re-post until
-        transfer_timeout, then store the failed status (get_finished notifies
-        prefill and drops the request non-fatally).
+        transfer_timeout, then store the failed status for completion/error
+        handling. Hybrid failures abort before releasing source KV.
         """
         _backoff = _SQ_FULL_BACKOFF_INITIAL_S
         while True:
@@ -3533,8 +3543,8 @@ class MoRIIOConnectorWorker:
                 logger.warning(
                     "MoRIIO READ send queue stayed full past "
                     "transfer_timeout for req %s layer %s; storing failed "
-                    "status (get_finished notifies prefill and drops the "
-                    "request). Raise qp_per_transfer if frequent.",
+                    "status for completion/error handling. "
+                    "Raise qp_per_transfer if frequent.",
                     request_id,
                     layer_name,
                 )
