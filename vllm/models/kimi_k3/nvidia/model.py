@@ -566,6 +566,7 @@ class KimiMoE(nn.Module):
         )
         self.latent_moe_use_norm = config.latent_moe_use_norm
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.use_sequence_parallel = use_sequence_parallel
         self.routed_scaling_factor = config.routed_scaling_factor
         self.moe_renormalize = moe_renormalize
         self.use_grouped_topk = config.use_grouped_topk
