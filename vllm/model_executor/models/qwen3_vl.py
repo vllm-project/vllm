@@ -114,7 +114,11 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.cache import LRUCache
+from vllm.utils.cache import (
+    VISION_ROPE_SHAPE_CACHE_BYTES,
+    LRUCache,
+    tensors_nbytes,
+)
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -588,7 +592,10 @@ class Qwen3_VisionTransformer(nn.Module):
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
         self._rot_pos_ids_cache: LRUCache[tuple[int, int, int], torch.Tensor] = (
-            LRUCache(capacity=1024)
+            LRUCache(
+                capacity=VISION_ROPE_SHAPE_CACHE_BYTES,
+                getsizeof=tensors_nbytes,
+            )
         )
 
         use_data_parallel = is_vit_use_data_parallel()
@@ -710,7 +717,7 @@ class Qwen3_VisionTransformer(nn.Module):
         wpos_ids = wpos_ids.flatten()
 
         result = torch.from_numpy(np.stack([hpos_ids, wpos_ids], axis=-1))
-        self._rot_pos_ids_cache[cache_key] = result
+        self._rot_pos_ids_cache.put_if_fits(cache_key, result)
         return result
 
     def rot_pos_emb(self, grid_thw: Sequence[Sequence[int]]):

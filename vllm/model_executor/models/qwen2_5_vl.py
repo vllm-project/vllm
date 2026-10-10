@@ -91,7 +91,11 @@ from vllm.multimodal.video_prune.evs import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.cache import LRUCache
+from vllm.utils.cache import (
+    VISION_ROPE_SHAPE_CACHE_BYTES,
+    LRUCache,
+    tensors_nbytes,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -657,7 +661,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self._rope_by_thw_cache: LRUCache[
             tuple[int, int, int],
             tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        ] = LRUCache(capacity=1024)
+        ] = LRUCache(
+            capacity=VISION_ROPE_SHAPE_CACHE_BYTES,
+            getsizeof=tensors_nbytes,
+        )
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1
@@ -831,7 +838,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             cu_seqlens_window_thw,
             cu_seqlens_thw,
         )
-        self._rope_by_thw_cache[cache_key] = result
+        self._rope_by_thw_cache.put_if_fits(cache_key, result)
         return result
 
     def compute_attn_mask_seqlen(
