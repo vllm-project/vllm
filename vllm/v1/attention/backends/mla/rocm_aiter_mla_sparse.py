@@ -69,9 +69,12 @@ def _use_rocm_sparse_triton(
     speculative verification rows have the same capability requirements as
     plain decode rows.
     """
+    from vllm.platforms.rocm import on_gfx11
+
     return (
         not kv_cache_dtype.startswith("fp8")
-        and head_size == kv_lora_rank
+        # AITER has no gfx11 sparse MLA kernels, so Triton also takes RoPE.
+        and (head_size == kv_lora_rank or on_gfx11())
         and (num_prefills > 0 or num_decodes > 0)
     )
 

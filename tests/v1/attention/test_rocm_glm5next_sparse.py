@@ -132,6 +132,7 @@ def test_rocm_sparse_mla_supports_glm_packed_layout():
     ],
 )
 def test_rocm_sparse_triton_route(
+    monkeypatch,
     kv_cache_dtype,
     head_size,
     num_prefills,
@@ -141,6 +142,8 @@ def test_rocm_sparse_triton_route(
     expected,
 ):
     """Validate Triton routing for prefill, decode, and MTP verification."""
+    # The 576 case above is the non-gfx11 behaviour, so pin the arch.
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: False)
     assert (
         _use_rocm_sparse_triton(
             kv_cache_dtype=kv_cache_dtype,
@@ -152,6 +155,24 @@ def test_rocm_sparse_triton_route(
             max_query_len=max_query_len,
         )
         is expected
+    )
+
+
+@pytest.mark.parametrize("on_gfx11", [True, False])
+def test_rocm_sparse_triton_route_rope_layout_on_gfx11(monkeypatch, on_gfx11):
+    """The RoPE layout (576 = 512 + 64) uses Triton only on gfx11."""
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: on_gfx11)
+    assert (
+        _use_rocm_sparse_triton(
+            kv_cache_dtype="auto",
+            head_size=576,
+            kv_lora_rank=512,
+            num_prefills=1,
+            num_decodes=0,
+            num_decode_tokens=0,
+            max_query_len=32,
+        )
+        is on_gfx11
     )
 
 
