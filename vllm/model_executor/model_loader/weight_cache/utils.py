@@ -7,7 +7,7 @@ draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -63,13 +63,17 @@ def build_warmup_runner(
     model_config: "ModelConfig",
 ) -> "GPUModelRunner":
     """Create a model runner for the daemon's warmup dummy runs."""
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
     if is_draft:
         vllm_config = replace(
             vllm_config, model_config=model_config, speculative_config=None
         )
     device = torch.device(current_platform.device_type, local_rank)
     with set_current_vllm_config(vllm_config):
-        runner = GPUModelRunner(vllm_config, device)
-    return runner
+        if vllm_config.use_v2_model_runner:
+            from vllm.v1.worker.gpu.model_runner import GPUModelRunner as Runner
+        else:
+            from vllm.v1.worker.gpu_model_runner import GPUModelRunner as Runner
+        runner = Runner(vllm_config, device)
+    # The two runner classes share the warmup surface; the nominal type
+    # stays V1's GPUModelRunner.
+    return cast("GPUModelRunner", runner)
