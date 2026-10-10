@@ -737,6 +737,21 @@ class SparseAttnIndexerKpool(CustomOp):
             raise NotImplementedError(
                 "SparseAttnIndexerKpool on ROCm does not support DCP."
             )
+        hf_config = cfg.model_config.hf_text_config if cfg is not None else None
+        index_kpool = getattr(hf_config, "index_kpool", None) or 1
+        if index_kpool > 1:
+            kpool_ops.kpool_compress_dispatch.register_warmup(
+                k_cache=k_cache,
+                pool_size=index_kpool,
+                head_dim=head_dim,
+                round_scale=scale_fmt is not None,
+            )
+            if tail_cache is not None:
+                kpool_ops.kpool_tail_seed_dispatch.register_warmup(
+                    tail_cache=tail_cache,
+                    kpool=index_kpool,
+                    head_dim=head_dim,
+                )
 
     def forward_hip(
         self,
