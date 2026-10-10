@@ -278,7 +278,9 @@ class OffloadingConnectorStats(KVConnectorStats):
     ) -> None:
         """Increase a counter on the stats payload."""
         self._types.setdefault(counter_name, _MetricType.COUNTER)
-        counter_values = self._values.setdefault(counter_name, {})
+        counter_values = self._values.get(counter_name)
+        if counter_values is None:
+            counter_values = self._values[counter_name] = {}
         counter_values[labelvalues] = (
             counter_values.get(labelvalues, 0) + counter_increase_value
         )
@@ -291,7 +293,9 @@ class OffloadingConnectorStats(KVConnectorStats):
     ) -> None:
         """Set a gauge snapshot on the stats payload."""
         self._types.setdefault(gauge_name, _MetricType.GAUGE)
-        gauge_values = self._values.setdefault(gauge_name, {})
+        gauge_values = self._values.get(gauge_name)
+        if gauge_values is None:
+            gauge_values = self._values[gauge_name] = {}
         gauge_values[labelvalues] = gauge_value
 
     def observe_histogram(
@@ -302,8 +306,13 @@ class OffloadingConnectorStats(KVConnectorStats):
     ) -> None:
         """Record a histogram observation on the stats payload."""
         self._types.setdefault(histogram_name, _MetricType.HISTOGRAM)
-        histogram_values = self._values.setdefault(histogram_name, {})
-        histogram_values.setdefault(labelvalues, []).append(histogram_value)
+        histogram_values = self._values.get(histogram_name)
+        if histogram_values is None:
+            histogram_values = self._values[histogram_name] = {}
+        observations: list[int | float] | None = histogram_values.get(labelvalues)
+        if observations is None:
+            observations = histogram_values[labelvalues] = []
+        observations.append(histogram_value)
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
