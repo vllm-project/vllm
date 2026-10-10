@@ -71,12 +71,6 @@ else:
 
 logger = init_logger(__name__)
 
-# TODO(rocm): These models are either unsupported by MRV2 or slower with
-# MRV2 on AMD GPUs.
-ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
-    {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
-)
-
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "DeepseekV32MTPModel",
@@ -726,30 +720,6 @@ class VllmConfig:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
-
-        from vllm.platforms import current_platform
-
-        model_config = self.model_config
-        if model_config is not None and current_platform.is_rocm():
-            architectures = getattr(model_config, "architectures", ())
-            if any(arch in ROCM_DEFAULT_MRV1_ARCHITECTURES for arch in architectures):
-                # This default is a speed preference, not a claim that V1 can
-                # serve the config, so it yields where V1 cannot. It yields by
-                # falling through to the checks below, not by selecting V2.
-                v1_unsupported = self._get_v1_model_runner_unsupported_features()
-                if not v1_unsupported:
-                    logger.warning_once(
-                        "Defaulting to V1 model runner on ROCm for model "
-                        "architectures: %s",
-                        ", ".join(architectures),
-                    )
-                    return False
-                logger.warning_once(
-                    "Skipping the ROCm V1 model runner default for %s: V1 does "
-                    "not support %s.",
-                    ", ".join(architectures),
-                    ", ".join(v1_unsupported),
-                )
 
         if not HAS_TRITON:
             logger.warning_once(
