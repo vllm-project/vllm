@@ -1058,7 +1058,6 @@ class TestPushWriterNotifs:
         """A submission error remains a failure even if later polls succeed."""
         w = self._pollable_worker()
         request_id = self._make_sending_req(w)
-        w.transfer_topo.block_size_ratio.return_value = 1
         w._apply_prefix_caching = MagicMock(return_value=([[1]], [[1]]))
         w._compute_desc_ids = MagicMock(return_value=[0])
         w.dst_num_blocks = {w.engine_id: 8}
@@ -1690,7 +1689,6 @@ class TestPushPrefixCaching:
             remote_tp_size=1,
         )
         w.transfer_topo.tp_ratio.return_value = 1
-        w.transfer_topo.block_size_ratio.return_value = 1
         w.tp_mappings = {
             engine_id: TPMapping(
                 source_ranks_per_group=((0,),),
@@ -2117,22 +2115,10 @@ def test_set_region_layers_rejects_layer_outside_any_kv_group():
         _layer_routing_worker([["a"], ["b"]], {"a": 0})
 
 
-@pytest.mark.parametrize(
-    ("local_block_size", "remote_block_size", "remote_tp_size", "error"),
-    [
-        (32, 16, 1, "identical P/D block sizes"),
-        (16, 32, 1, "identical P/D block sizes"),
-        (16, 16, 2, "decode TP greater"),
-    ],
-)
-def test_layer_handshake_rejects_unsupported_geometry(
-    local_block_size: int, remote_block_size: int, remote_tp_size: int, error: str
-):
+def test_layer_handshake_rejects_unsupported_geometry():
     """Reject unsupported peers without registering agents or transfer state."""
     metadata = _agent_metadata([["a"]], [0xA000], [128])
-    metadata.block_size = remote_block_size
     worker = _layer_routing_worker([["a"]], {"a": 0})
-    worker.block_size = local_block_size
     worker.block_len_per_layer = [128]
     worker.use_mla = False
     worker.nixl_wrapper = MagicMock()
@@ -2142,7 +2128,7 @@ def test_layer_handshake_rejects_unsupported_geometry(
     worker.transfer_topo = TransferTopology(
         tp_rank=0,
         tp_size=1,
-        block_size=local_block_size,
+        block_size=16,
         engine_id=worker.engine_id,
         is_mla=False,
         is_mamba=False,
@@ -2150,8 +2136,8 @@ def test_layer_handshake_rejects_unsupported_geometry(
         attn_backends=[],
     )
 
-    with pytest.raises(NotImplementedError, match=error):
-        worker.add_remote_agent(metadata, remote_tp_size=remote_tp_size)
+    with pytest.raises(NotImplementedError, match="decode TP greater"):
+        worker.add_remote_agent(metadata, remote_tp_size=2)
     worker.nixl_wrapper.add_remote_agent.assert_not_called()
     worker.nixl_wrapper.prep_xfer_dlist.assert_not_called()
     assert not worker.tp_mappings
@@ -2159,3 +2145,19 @@ def test_layer_handshake_rejects_unsupported_geometry(
     assert not worker.kv_caches_base_addr
     with pytest.raises(KeyError):
         worker.transfer_topo.get_engine_info(metadata.engine_id)
+
+
+@pytest.mark.parametrize(
+    ("remote_block_size", "remote_ppl"), [(8, 1), (32, 1), (16, 2)]
+)
+def test_push_handshake_rejects_different_block_sizes(
+    remote_block_size: int, remote_ppl: int
+):
+    metadata = _agent_metadata([["a"]], [0xA000], [128])
+    metadata.block_size = remote_block_size
+    metadata.physical_blocks_per_logical_kv_block = remote_ppl
+    worker = _layer_routing_worker([["a"]], {"a": 0})
+    worker.pcp_size = 1
+
+    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
+        worker._validate_remote_parallel_config(metadata)

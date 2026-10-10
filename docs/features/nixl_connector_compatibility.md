@@ -91,7 +91,7 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 ### What can safely differ between P and D
 
 - `tensor-parallel-size` (heterogeneous TP, subject to model restrictions above)
-- `block-size` (heterogeneous block size, subject to restrictions above)
+- `block-size` (heterogeneous block size, subject to restrictions above; not with `NixlPushConnector`)
 - Number of KV cache blocks (determined by available memory on each instance)
 - `num_speculative_tokens` (prefill and decode may use different draft depths)
 - Draft-model `attention_backend` (each instance auto-selects independently; the
