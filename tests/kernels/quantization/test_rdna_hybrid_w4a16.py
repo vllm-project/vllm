@@ -30,6 +30,8 @@ RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
+LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
+MEDIUM_SKINNY_LIMIT_ELEMENTS = hybrid_module.MEDIUM_SKINNY_LIMIT_ELEMENTS
 
 
 # ---------------------------------------------------------------------------
@@ -100,8 +102,8 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
     """Smoke test the registered custom op for both decode and prefill batches.
 
     Verifies the dispatch logic in `_rdna_hybrid_w4a16_apply_impl`:
-      - M <= MAX_SKINNY_BATCH_SIZE: HIP wvSplitK_int4_g
-      - M > MAX_SKINNY_BATCH_SIZE: Triton prefill kernel
+      - supported M and K*M: HIP wvSplitK_int4_g
+      - otherwise: Triton prefill kernel
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
@@ -563,3 +565,257 @@ def test_wvsplitk_int4_g_rejects_unpacked_zero_points():
 
     with pytest.raises(RuntimeError, match="Zero points must be int32 or uint32"):
         ops.wvSplitK_int4_g(w, a, scales, num_compute_units(), G, zp_unpacked, None)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.skipif(
+    not hasattr(torch.ops, "_rocm_C")
+    or not hasattr(torch.ops._rocm_C, "wvSplitK_int4_g"),
+    reason="wvSplitK_int4_g not built",
+)
+def test_wvsplitk_int4_g_rejects_undersized_weight_view():
+    """A sufficient row stride does not prove the row holds K/2 packed bytes.
+
+    Row padding makes stride(0) > K/2 legitimate, but the logical size still
+    has to be checked: this view has a valid stride and half the required
+    bytes, and without the size check the kernel reads past it.
+    """
+    import vllm._custom_ops as ops
+    from vllm.utils.platform_utils import num_compute_units
+
+    K, N, G, M = 512, 256, 128, 1
+    a = torch.randn((M, K), device=device, dtype=torch.float16)
+    # Full-size backing allocation, so a missing check misreads rather than
+    # running off the end of the buffer.
+    backing = torch.randint(0, 255, (N, K // 2), device=device, dtype=torch.uint8).view(
+        torch.int8
+    )
+    undersized = backing[:, : K // 4]
+    assert undersized.stride(0) == K // 2
+    scales = torch.rand((N, K // G), device=device, dtype=torch.float16)
+
+    with pytest.raises(RuntimeError, match=r"must contain M\*K/2 bytes"):
+        ops.wvSplitK_int4_g(undersized, a, scales, num_compute_units(), G, None, None)
+
+
+# ---------------------------------------------------------------------------
+# gfx11 weight row-stride padding
+# ---------------------------------------------------------------------------
+
+_weight_pad_bytes = hybrid_module._weight_pad_bytes
+_act_pad_bytes = hybrid_module._act_pad_bytes
+_WEIGHT_CLIFF_BYTES = hybrid_module._WEIGHT_CLIFF_BYTES
+_ACT_CLIFF_BYTES = hybrid_module._ACT_CLIFF_BYTES
+_STRIDE_PAD_BYTES = hybrid_module._STRIDE_PAD_BYTES
+
+
+def test_weight_pad_bytes_only_moves_strides_on_the_cliff():
+    """Pad 1024 B multiples, leave everything else dense."""
+    # On the cliff (K % 2048 == 0): 1024 B multiples.
+    for row_bytes in (1024, 2048, 4096, 5120, 6144, 7168, 8192):
+        assert _weight_pad_bytes(row_bytes) == _STRIDE_PAD_BYTES
+
+    # Off it, including strides that are 512 B multiples but not 1024 B ones:
+    # padding those measured as a real loss on gfx1151 (-14% at M=1 on a
+    # 4864 B row).
+    for row_bytes in (1280, 1536, 2560, 4864, 9472, 12800):
+        assert _weight_pad_bytes(row_bytes) == 0
+
+    # The padded stride is never back on the cliff.
+    for row_bytes in range(16, 16384, 16):
+        padded = row_bytes + _weight_pad_bytes(row_bytes)
+        assert padded % _WEIGHT_CLIFF_BYTES != 0 or row_bytes % _WEIGHT_CLIFF_BYTES
+
+
+def test_act_pad_bytes_only_moves_strides_on_the_cliff():
+    """Activations sit on a wider cliff than the packed weight: 2048 B."""
+    # On the cliff (K % 1024 == 0 for a 2-byte dtype): 2048 B multiples.
+    for row_bytes in (2048, 4096, 8192, 16384, 20480, 24576, 43008):
+        assert _act_pad_bytes(row_bytes) == _STRIDE_PAD_BYTES
+
+    # Off it, including 1024 B multiples that are not 2048 B ones -- the
+    # weight cliff must not be applied to activations.
+    for row_bytes in (1024, 3072, 5120, 10752, 19456, 37888):
+        assert _act_pad_bytes(row_bytes) == 0
+
+    # The padded stride is never back on the cliff.
+    for row_bytes in range(16, 65536, 16):
+        padded = row_bytes + _act_pad_bytes(row_bytes)
+        assert padded % _ACT_CLIFF_BYTES != 0 or row_bytes % _ACT_CLIFF_BYTES
+
+
+def _row_padded_copy(t: torch.Tensor, pad_cols: int) -> torch.Tensor:
+    """Copy of ``t`` whose stride(0) is ``t.shape[1] + pad_cols``."""
+    rows, cols = t.shape
+    buf = torch.empty((rows, cols + pad_cols), dtype=t.dtype, device=t.device)
+    buf[:, :cols].copy_(t)
+    return buf[:, :cols]
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1])
+def test_weight_row_padding_does_not_change_results(dtype, has_zp, M):
+    """Padding the weight rows is a pure layout change.
+
+    Both the HIP skinny kernel (M small) and the Triton prefill kernel take the
+    weight row stride from the tensor, so a padded layout must produce exactly
+    the same numbers as the dense one.
+    """
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(0)
+    K, N, G = 512, 256, 128
+
+    a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    w_q = pack_int4_exllama_shuffle(w_int4_nk).view(torch.int8)
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+    zp = (
+        _pack_zp_rows_for_kernel(
+            torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32)
+        )
+        if has_zp
+        else None
+    )
+
+    # 32 int32 columns = 128 B of pad, the production pad size.
+    w_q_pad = _row_padded_copy(w_q.view(torch.int32), 32).view(torch.int8)
+    assert w_q_pad.stride(0) == w_q.stride(0) + _STRIDE_PAD_BYTES
+
+    cu_count = num_compute_units()
+    dense = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        a, w_q, scales, zp, None, cu_count, G
+    )
+    padded = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        a, w_q_pad, scales, zp, None, cu_count, G
+    )
+    torch.testing.assert_close(padded, dense, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not hybrid_module._on_gfx1151(),
+    reason="row-stride padding is only enabled on gfx1151",
+)
+@pytest.mark.parametrize(
+    "K,expected_weight_stride",
+    [
+        (512, 256),  # 256 B row: off the cliff, stored dense
+        (8192, 4096 + 128),  # 4096 B row: on the cliff, padded
+    ],
+)
+def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
+    """The stored weight row stride follows the padding rule."""
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    set_random_seed(0)
+    N, G = 128, 128
+
+    w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    layer = _build_dummy_layer(
+        _pack_int4_along_k_to_ckpt(w_int4_kn),
+        0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16),
+        zeros_ckpt=None,
+    )
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=G,
+        zero_points=False,
+    )
+    RDNAHybridW4A16LinearKernel(
+        config,
+        w_q_param_name="weight_packed",
+        w_s_param_name="weight_scale",
+        w_zp_param_name=None,
+    ).process_weights_after_loading(layer)
+
+    # Weight rows: stride is in int8 elements, i.e. bytes.
+    assert layer.weight_packed.stride(0) == expected_weight_stride
+    # The int32 view the Triton path uses survives the padded stride.
+    assert tuple(layer.weight_packed.view(torch.int32).shape) == (N, K // 8)
+    # Metadata is untouched by this change.
+    assert layer.weight_scale.is_contiguous()
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize(
+    "M,K,expected_path",
+    [
+        (4, 8192, "hip"),
+        (4, 9728, "hip"),
+        (4, 9856, "triton"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, "triton"),
+    ],
+    ids=["regular_limit", "medium_range", "above_medium", "batch_too_large"],
+)
+def test_rdna_hybrid_w4a16_dispatch_boundaries(M, K, expected_path, monkeypatch):
+    """Route only supported regular and medium skinny shapes to HIP."""
+    import vllm._custom_ops as ops
+
+    N, G = 16, 128
+    x_mk = torch.empty((M, K), dtype=torch.float16)
+    w_q = torch.empty((N, K // 2), dtype=torch.int8)
+    scales = torch.empty((N, K // G), dtype=torch.float16)
+    called = []
+
+    def fake_hip(*args, **kwargs):
+        called.append("hip")
+        return torch.empty((M, N), dtype=x_mk.dtype)
+
+    def fake_triton(*args, **kwargs):
+        called.append("triton")
+        return torch.empty((M, N), dtype=x_mk.dtype)
+
+    monkeypatch.setattr(ops, "wvSplitK_int4_g", fake_hip)
+    monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake_triton)
+
+    output = hybrid_module._rdna_hybrid_w4a16_apply_impl(
+        x_mk, w_q, scales, None, None, 40, G
+    )
+
+    assert output.shape == (M, N)
+    assert called == [expected_path]
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
+    """Validate the HIP medium path against an FP32 dequantization reference."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(0)
+    M, K, N, G = 4, 9728, 256, 128
+    assert LDS_CAPACITY_ELEMENTS < K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS
+
+    x_mk = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    w_q = pack_int4_exllama_shuffle(w_int4_nk).contiguous().view(torch.int8)
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+    zp = (
+        torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32)
+        if has_zp
+        else None
+    )
+    w_zp = _pack_zp_rows_for_kernel(zp) if zp is not None else None
+
+    output = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        x_mk, w_q, scales, w_zp, None, num_compute_units(), G
+    )
+    reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
+
+    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)

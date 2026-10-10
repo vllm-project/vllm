@@ -802,18 +802,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype,
             k_scale,
         )
-        if cache is not None:
-            mirror_target = cache.mirror_write_target(kv_c_normed.shape[0])
-            if mirror_target is not None:
-                mirror_cache, mirror_slots = mirror_target
-                self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                    kv_c_normed,
-                    k_pe,
-                    mirror_cache,
-                    mirror_slots,
-                    kv_cache_dtype,
-                    k_scale,
-                )
 
     def prepare_kv_cache_update(
         self, attn_metadata: "MLACommonMetadata | None"
@@ -1272,23 +1260,34 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 quark_quantize_weight_to_mxfp4,
             )
 
-            self.W_K, self.W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
-            # Convert from (L, N, P) to (N, L, P)
-            self.W_K = self.W_K.transpose(0, 1)
-            self.W_K_scale = self.W_K_scale.transpose(0, 1)
-
-            self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
-                W_UV.permute(1, 2, 0)
-            )
+            W_K, W_K_scale = quark_quantize_weight_to_mxfp4(W_UK)
+            W_V, W_V_scale = quark_quantize_weight_to_mxfp4(W_UV.permute(1, 2, 0))
+            # Copy in place on reload so captured CUDA graphs stay valid.
+            # Convert W_K from (L, N, P) to (N, L, P).
+            for name, tensor in (
+                ("W_K", W_K.transpose(0, 1)),
+                ("W_K_scale", W_K_scale.transpose(0, 1)),
+                ("W_V", W_V),
+                ("W_V_scale", W_V_scale),
+            ):
+                replace_parameter(self, name, tensor, prefer_copy=True)
         elif self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
-            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
+            W_K, W_K_scale = dynamic_per_batched_tensor_quant(
                 W_K, dtype=current_platform.fp8_dtype()
             )
-            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
+            W_V, W_V_scale = dynamic_per_batched_tensor_quant(
                 W_V, dtype=current_platform.fp8_dtype()
             )
+            # Copy in place on reload so captured CUDA graphs stay valid.
+            for name, tensor in (
+                ("W_K", W_K),
+                ("W_K_scale", W_K_scale),
+                ("W_V", W_V),
+                ("W_V_scale", W_V_scale),
+            ):
+                replace_parameter(self, name, tensor, prefer_copy=True)
 
             # The kernel operates on non-padded inputs. Hence, pre-compiling
             # triton kernel to avoid runtime compilation for unseen batch sizes
@@ -1327,8 +1326,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Convert from (L, N, P) to (N, P, L)
             replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
             if self.dcp_q_replicate:
-                self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
-                    self.W_UK_T.contiguous(), dim=0
+                replace_parameter(
+                    self,
+                    "W_UK_T_dcp_qrep",
+                    get_dcp_group().all_gather(self.W_UK_T.contiguous(), dim=0),
+                    prefer_copy=True,
                 )
 
         # If we should not load quant weights, we initialize the scales to 1.0
@@ -1374,14 +1376,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
-        # SM100 FlashMLA paged kernels also express TMA coordinates in token rows.
-        uses_tma_rows = (
-            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
-            and self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
-            and current_platform.is_device_capability_family(100)
-        )
-        if self._uses_flat_kv_cache() or uses_tma_rows:
-            spec = replace(spec, block_stride_alignment=spec.state_content_size_bytes)
         return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
@@ -2384,8 +2378,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        self.non_causal_multi_token_decode = getattr(
-            kv_cache_spec, "non_causal_multi_token_decode", False
+        # merge() unions this flag across the KV group, so a shared target/draft
+        # group would mark the target builder as non-causal.
+        ctx = self.compilation_config.static_forward_context
+        self.non_causal_multi_token_decode = any(
+            getattr(ctx[name], "non_causal_multi_token_decode", False)
+            for name in layer_names
         )
         self._validate_dspark_dcp_support(supports_dcp_with_varlen)
 
@@ -3033,7 +3031,13 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         dcp_world_size: int,
+        fused_mla_kv_concat_fn: Callable[
+            [torch.Tensor, torch.Tensor, bool], tuple[torch.Tensor, torch.Tensor]
+        ]
+        | None = None,
     ):
+        # fused_mla_kv_concat_fn(kv_nope, k_pe, use_fp8_prefill) -> (k, v) replaces
+        # the per-chunk cast + split + concat below with one fused kernel.
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
@@ -3127,11 +3131,16 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            if use_fp8_prefill:
-                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
-                k_pe = k_pe.to(prefill_metadata.q_data_type)
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            k = self._concat_k_nope_k_pe(k_nope, k_pe)
+            if fused_mla_kv_concat_fn is not None:
+                k, v = fused_mla_kv_concat_fn(kv_nope, k_pe, use_fp8_prefill)
+            else:
+                if use_fp8_prefill:
+                    kv_nope = kv_nope.to(prefill_metadata.q_data_type)
+                    k_pe = k_pe.to(prefill_metadata.q_data_type)
+                k_nope, v = kv_nope.split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+                )
+                k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
                 prefill_metadata.prefill_backend.run_prefill_context_chunk(

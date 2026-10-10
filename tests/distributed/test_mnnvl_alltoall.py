@@ -150,7 +150,9 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
 
 
 @contextmanager
-def _make_forward_context(rank, world_size, num_tokens_per_rank):
+def _make_forward_context(
+    rank, world_size, num_tokens_per_rank, num_tokens_across_dp=None
+):
     """Keep the vLLM config and mock-DP forward context active together.
 
     Returns a context manager suitable for ``with`` statements.
@@ -175,15 +177,15 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
         is_moe_model=True,
         data_parallel_rank=rank,
     )
+    if num_tokens_across_dp is None:
+        num_tokens_across_dp = [num_tokens_per_rank] * world_size
     with (
         set_current_vllm_config(vllm_config),
         set_forward_context(
             _AttnMeta(),
             vllm_config,
             num_tokens=num_tokens_per_rank,
-            num_tokens_across_dp=torch.tensor(
-                [num_tokens_per_rank] * world_size, dtype=torch.int
-            ),
+            num_tokens_across_dp=torch.tensor(num_tokens_across_dp, dtype=torch.int),
         ),
     ):
         yield
@@ -516,6 +518,121 @@ def test_one_sided_manager_workspace_grow(world_size):
 # ---------------------------------------------------------------------------
 
 
+class _FakeCombineGroup:
+    def __init__(self, combine_input):
+        self.combine_input = combine_input
+        self.allocation_calls = 0
+        self.combined_input = None
+
+    def allocate_combine_input(self, shape, dtype, device, **kwargs):
+        self.allocation_calls += 1
+        assert self.combine_input is not None
+        assert self.combine_input.shape == shape
+        assert self.combine_input.dtype == dtype
+        assert self.combine_input.device == device
+        return self.combine_input
+
+    def combine_into_output(self, hidden_states, output, **kwargs):
+        self.combined_input = hidden_states
+        output.copy_(hidden_states)
+        return output
+
+
+def test_args_cpu_workspace_allocation(monkeypatch):
+    from types import SimpleNamespace
+
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
+    kernel = object.__new__(mk.FusedMoEKernelModularImpl)
+    kernel.fused_experts = SimpleNamespace(
+        workspace_dtype=lambda dtype: dtype,
+        workspace_shapes=lambda *args: ((0,), (0,), (2, 3)),
+        finalize_weight_and_reduce_impl=lambda: None,
+    )
+    kernel.prepare_finalize = SimpleNamespace(
+        allocate_fused_expert_output=lambda *args: None,
+    )
+    monkeypatch.setattr(mk.current_platform, "is_cpu", lambda: True)
+
+    workspace13, workspace2, output, specialized = kernel._allocate_buffers(
+        torch.float32,
+        torch.device("cpu"),
+        2,
+        2,
+        3,
+        3,
+        1,
+        1,
+        1,
+        None,
+        MoEActivation.SILU,
+    )
+    assert workspace13.numel() == workspace2.numel() == 0
+    assert output.shape == (2, 3)
+    assert output.device.type == "cpu"
+    assert not specialized
+
+
+def test_args_finalize_noop_reuses_fused_expert_output(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep as pf
+    from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+        TopKWeightAndReduceNoOP,
+    )
+
+    fused_expert_output = torch.arange(6, dtype=torch.float32).view(2, 3)
+    output = torch.empty_like(fused_expert_output)
+    group = _FakeCombineGroup(combine_input=None)
+    monkeypatch.setattr(pf, "get_ep_group", lambda: group)
+
+    impl = pf.MoEPrepareAndFinalizeNaiveDPEPModular()
+    impl.finalize(
+        output,
+        fused_expert_output,
+        torch.ones((2, 1)),
+        torch.zeros((2, 1), dtype=torch.long),
+        False,
+        TopKWeightAndReduceNoOP(),
+    )
+
+    assert group.allocation_calls == 0
+    assert group.combined_input is fused_expert_output
+    torch.testing.assert_close(output, fused_expert_output)
+
+
+def test_args_finalize_contiguous_writes_combine_input(monkeypatch):
+    import vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep as pf
+    import vllm.model_executor.layers.fused_moe.topk_weight_and_reduce as wr
+
+    fused_expert_output = torch.arange(12, dtype=torch.float32).view(2, 2, 3)
+    original = fused_expert_output.clone()
+    topk_weights = torch.tensor([[0.25, 0.75], [0.4, 0.6]])
+    combine_input = torch.empty((2, 3), dtype=torch.float32)
+    output = torch.empty_like(combine_input)
+    group = _FakeCombineGroup(combine_input)
+    monkeypatch.setattr(pf, "get_ep_group", lambda: group)
+    monkeypatch.setattr(
+        wr.ops,
+        "moe_sum",
+        lambda hidden_states, out: out.copy_(hidden_states.sum(dim=1)),
+    )
+
+    impl = pf.MoEPrepareAndFinalizeNaiveDPEPModular()
+    impl.finalize(
+        output,
+        fused_expert_output,
+        topk_weights,
+        torch.zeros((2, 2), dtype=torch.long),
+        False,
+        wr.TopKWeightAndReduceContiguous(),
+    )
+
+    expected = (original * topk_weights.unsqueeze(-1)).sum(dim=1)
+    assert group.allocation_calls == 1
+    assert group.combined_input is combine_input
+    torch.testing.assert_close(output, expected)
+
+
 def _args_dispatch_combine_worker(rank, world_size):
     from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
     from vllm.forward_context import get_forward_context
@@ -604,14 +721,39 @@ def _args_dispatch_combine_worker(rank, world_size):
             # -- combine (reduce-scatter) --
             # Each token i has value i in all columns; after reduce-scatter
             # each rank gets its slice, summed across ranks.
-            expert_out = (
+            expert_values = (
                 torch.arange(total_tokens, device=device, dtype=torch.float32)
                 .unsqueeze(1)
                 .expand(total_tokens, hidden_size)
                 .contiguous()
             )
+            expert_out = manager.allocate_combine_input(
+                expert_values.shape,
+                expert_values.dtype,
+                expert_values.device,
+                is_sequence_parallel=True,
+            )
+            if expert_out is None:
+                expert_out = expert_values
+            else:
+                from vllm.distributed.device_communicators.pynccl_allocator import (
+                    is_symmetric_memory_tensor,
+                )
 
-            combined = manager.combine(expert_out, is_sequence_parallel=True)
+                assert is_symmetric_memory_tensor(expert_out)
+                expert_out.copy_(expert_values)
+
+            combine_output = torch.empty(
+                (tokens_per_rank, hidden_size),
+                device=device,
+                dtype=expert_out.dtype,
+            )
+            combined = manager.combine_into_output(
+                expert_out,
+                combine_output,
+                is_sequence_parallel=True,
+            )
+            assert combined.data_ptr() == combine_output.data_ptr()
             assert combined.shape == (tokens_per_rank, hidden_size)
 
             for i in range(tokens_per_rank):
@@ -622,6 +764,61 @@ def _args_dispatch_combine_worker(rank, world_size):
                 )
 
             torch.distributed.barrier()
+
+    uneven_sizes = [tokens_per_rank + r for r in range(world_size)]
+    with _make_forward_context(
+        rank,
+        world_size,
+        uneven_sizes[rank],
+        num_tokens_across_dp=uneven_sizes,
+    ):
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
+            assert (
+                manager.allocate_combine_input(
+                    (sum(uneven_sizes), hidden_size),
+                    torch.float32,
+                    device,
+                    is_sequence_parallel=True,
+                )
+                is None
+            )
+
+            total_uneven_tokens = sum(uneven_sizes)
+            uneven_input = (
+                torch.arange(
+                    total_uneven_tokens,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                .unsqueeze(1)
+                .expand(total_uneven_tokens, hidden_size)
+                .contiguous()
+            )
+            uneven_input.add_(rank)
+            uneven_output = torch.empty(
+                (uneven_sizes[rank], hidden_size),
+                dtype=torch.float32,
+                device=device,
+            )
+            combined = get_ep_group().reduce_scatterv_into_output(
+                uneven_input,
+                uneven_output,
+                dim=0,
+                sizes=uneven_sizes,
+            )
+            assert combined.data_ptr() == uneven_output.data_ptr()
+
+            start = sum(uneven_sizes[:rank])
+            expected = torch.arange(
+                start,
+                start + uneven_sizes[rank],
+                dtype=torch.float32,
+                device=device,
+            ) * world_size + sum(range(world_size))
+            expected = expected.unsqueeze(1).expand_as(combined)
+            torch.testing.assert_close(combined, expected)
 
 
 @requires_multi_gpu

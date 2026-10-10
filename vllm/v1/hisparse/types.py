@@ -3,6 +3,10 @@
 
 from dataclasses import dataclass
 
+# Sealed pages this many positions behind the block-table tail stay pinned so
+# a page written by an in-flight step is never handed out under it.
+ACTIVE_TAIL_PAGES = 2
+
 
 @dataclass(frozen=True)
 class SparseKVPageTransfer:

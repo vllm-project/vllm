@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.cpu.common import (
 )
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.factory import CachePolicyFactory
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 
 @dataclass(slots=True)
@@ -192,6 +193,12 @@ class CPUOffloadingManager(OffloadingManager):
         if not chunk.is_ready:
             return LookupResult.HIT_PENDING
         return LookupResult.HIT
+
+    @override
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        return CacheHitSource.HOST
 
     @override
     def prepare_load(

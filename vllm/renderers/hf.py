@@ -1000,7 +1000,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             return await coro
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._replace_executor()
             raise TimeoutError(
                 f"Chat template rendering timed out after "

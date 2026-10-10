@@ -207,6 +207,7 @@ def test_tiering_spec_replicated_sizing_removes_world_factor(world_size: int):
 
 
 def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
@@ -234,7 +235,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
     monkeypatch.setattr(
-        tiering_spec_module.torch.accelerator, "current_device_index", lambda: 5
+        cpu_spec_module.torch.accelerator, "current_device_index", lambda: 5
     )
 
     kv_caches = MagicMock()
@@ -251,6 +252,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
 
 
 def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     spec = _create_spec(
@@ -269,7 +271,7 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())
     monkeypatch.setattr(
-        tiering_spec_module.torch.accelerator,
+        cpu_spec_module.torch.accelerator,
         "current_device_index",
         lambda: 5,
     )
@@ -337,6 +339,7 @@ def test_cpu_spec_replicated_disabled_without_shared_region(
     # those private buffers empty and corrupting subsequent loads.
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: rocm)
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
@@ -371,6 +374,7 @@ def test_cpu_spec_replicated_layout_truth_matrix(
     # actually allocates on the shared region.
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(
         cpu_spec_module.current_platform, "is_cuda_alike", lambda: cuda_alike
     )
@@ -473,6 +477,7 @@ def test_cpu_spec_create_worker_uses_tensor_path_without_shared_region(
         worker_calls.append(kwargs)
         return MagicMock()
 
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: rocm)
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)

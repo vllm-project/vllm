@@ -601,13 +601,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
+        verify_route = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.lower()
         asm_dcp_verify_config = (
             _asm_dcp_verify_configured(
                 parallel_config.decode_context_parallel_size,
                 parallel_config.cp_kv_cache_interleave_size,
                 multi_token_decode=vllm_config.speculative_config is not None,
             )
-            and envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY == "asm"
+            and verify_route != "segmented"
         )
         super().__init__(
             kv_cache_spec,
@@ -627,14 +628,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._asm_dcp_verify_heads = _asm_dcp_verify_heads(
                 self.num_heads * self.dcp_world_size
             )
-            if not self._asm_dcp_verify_heads:
+            if self._asm_dcp_verify_heads:
+                self._asm_dcp_verify = True
+            elif verify_route == "asm" or not supports_segmented_dcp_verify:
                 raise ValueError(
-                    "VLLM_ROCM_AITER_MLA_DCP_VERIFY=asm, but the round-robin asm "
-                    f"decode has no kernel for {self.num_heads * self.dcp_world_size} "
-                    f"DCP-gathered heads (native counts: {_NATIVE_CPRR_HEADS}). "
-                    "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
+                    f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={verify_route}, but the "
+                    "round-robin asm decode has no kernel for "
+                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads "
+                    f"(native counts: {_NATIVE_CPRR_HEADS}). "
+                    + (
+                        "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
+                        if supports_segmented_dcp_verify
+                        else "This AITER build also lacks segmented MLA decode."
+                    )
                 )
-            self._asm_dcp_verify = True
         self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
         self._mla_max_split_per_batch = 0
         if self._asm_dcp_verify:

@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
+from contextlib import nullcontext
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, Mock, patch
 
@@ -17,7 +18,9 @@ from tests.quantization.utils import (
     load_model_without_vllm_runner,
 )
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
     FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -40,12 +43,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.platforms import current_platform
 
 
@@ -113,11 +118,13 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
     )
 
 
-def test_modelopt_nvfp4_quantizes_parallel_lm_head():
+@pytest.mark.parametrize("moe_activation", [None, "nvfp4_per_token"])
+def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     config = ModelOptNvFp4Config(
         is_checkpoint_nvfp4_serialized=True,
         kv_cache_quant_algo=None,
         exclude_modules=[],
+        quantization_args=QuantizationConfigArgs(moe={"activation": moe_activation}),
     )
 
     method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
@@ -688,7 +695,8 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.parametrize(
     ("linear_backend", "kernel_cls"),
     [
-        ("auto", MarlinNvFp4LinearKernel),
+        ("auto", None),
+        ("marlin", MarlinNvFp4LinearKernel),
         ("humming", HummingNvFp4LinearKernel),
         ("flashinfer_cutedsl", FlashInferCuteDslNvFp4W4A16LinearKernel),
     ],
@@ -696,7 +704,7 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
-    ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
+    ``use_a16=True`` follows platform priorities, but an explicit backend wins. The
     generic method routes this through ``select_linear_kernel``."""
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -704,7 +712,20 @@ def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
         select_linear_kernel,
     )
 
-    if linear_backend != "auto":
+    if linear_backend == "auto":
+        capability = current_platform.get_device_capability()
+        assert capability is not None
+        cc = capability.to_int()
+        if (
+            cc in (100, 103)
+            and FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported()[0]
+        ):
+            kernel_cls = FlashInferCuteDslNvFp4W4A16LinearKernel
+        elif cc == 90 and HummingNvFp4LinearKernel.is_supported()[0]:
+            kernel_cls = HummingNvFp4LinearKernel
+        else:
+            kernel_cls = MarlinNvFp4LinearKernel
+    else:
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             pytest.skip(reason)
@@ -774,6 +795,74 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+@pytest.mark.parametrize("quantization", ["modelopt_fp4", "modelopt_mixed"])
+@pytest.mark.parametrize("per_token", [False, True])
+def test_modelopt_nvfp4_moe_activation_override(quantization, per_token):
+    """Runtime overrides reach NVFP4 configs without changing HF metadata."""
+    hf_config = {
+        "quant_method": "modelopt",
+        "quant_algo": "MIXED_PRECISION"
+        if quantization == "modelopt_mixed"
+        else "NVFP4",
+        "quantized_layers": {"experts": {"quant_algo": "NVFP4"}},
+    }
+    args = (
+        QuantizationConfigArgs(moe={"activation": "nvfp4_per_token"})
+        if per_token
+        else None
+    )
+    config = get_quant_config(
+        Mock(
+            quantization=quantization,
+            quantization_config=args,
+            hf_config=Mock(quantization_config=hf_config),
+        ),
+        LoadConfig(),
+    )
+    if isinstance(config, ModelOptMixedPrecisionConfig):
+        config = config.nvfp4_config
+    assert isinstance(config, ModelOptNvFp4Config)
+    assert config.moe_activation_override == (kNvfp4DynamicToken if per_token else None)
+    assert "_online_quantization_args" not in hf_config
+
+
+@pytest.mark.parametrize(
+    "quant_method,activation,backend,error",
+    [
+        ("NVFP4", kNvfp4DynamicToken, "FLASHINFER_TRTLLM", None),
+        ("W4A16_NVFP4", kNvfp4DynamicToken, "FLASHINFER_TRTLLM", "W4A4 checkpoint"),
+        (
+            "NVFP4",
+            kMxfp8Dynamic,
+            "FLASHINFER_TRTLLM",
+            "Unsupported.*activation override",
+        ),
+        ("NVFP4", kNvfp4DynamicToken, "MARLIN", "requires the FlashInfer TRTLLM"),
+    ],
+)
+def test_modelopt_nvfp4_moe_validates_activation_override(
+    quant_method, activation, backend, error
+):
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4FusedMoE
+
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        quantization_args=QuantizationConfigArgs(moe={"activation": activation}),
+    )
+    expected = pytest.raises(ValueError, match=error) if error else nullcontext()
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            return_value=(NvFp4MoeBackend[backend], Mock()),
+        ) as select_backend,
+        expected,
+    ):
+        method = ModelOptNvFp4FusedMoE(config, Mock())
+        assert method.per_token_activation
+        assert select_backend.call_args.kwargs["activation_key"] == activation
 
 
 @pytest.mark.parametrize(
