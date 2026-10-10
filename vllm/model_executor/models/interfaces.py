@@ -859,6 +859,27 @@ def _supports_pp_inspect(model: type[object] | object) -> bool:
 
 
 @runtime_checkable
+class SupportsHCSP(Protocol):
+    """Support sequence-parallel HC without changing MoE parallelism."""
+
+    supports_hc_sp: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_hc_sp(model: type[object]) -> TypeIs[type[SupportsHCSP]]: ...
+
+
+@overload
+def supports_hc_sp(model: object) -> TypeIs[SupportsHCSP]: ...
+
+
+def supports_hc_sp(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsHCSP]] | TypeIs[SupportsHCSP]:
+    return getattr(model, "supports_hc_sp", False)
+
+
+@runtime_checkable
 class HasInnerState(Protocol):
     """The interface required for all models that has inner state."""
 
