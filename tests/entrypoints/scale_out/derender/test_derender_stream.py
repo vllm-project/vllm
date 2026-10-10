@@ -1108,6 +1108,45 @@ class TestDerenderChatStreamParsed:
         assert state.output_token_ids == [_FakeParser.CONTENT]
 
     @pytest.mark.asyncio
+    async def test_parsed_stream_resolves_logprobs(self, parsed_derenderer):
+        """When logprobs are present on the generate chunk and include_reasoning
+        is True, the parsed streaming path must resolve logprobs on the choice."""
+        token_ids = [_FakeParser.CONTENT]
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                token_ids,
+                logprobs=_generate_logprobs(token_ids),
+                finish_reason="stop",
+            ),
+            chat_request=_chat_request(include_reasoning=True),
+        )
+        choice = chunk.choices[0]
+        assert choice.logprobs is not None
+        assert choice.logprobs.content is not None
+        assert len(choice.logprobs.content) == 1
+        assert choice.logprobs.content[0].logprob == -0.5
+
+    @pytest.mark.asyncio
+    async def test_parsed_stream_suppresses_logprobs_when_reasoning_hidden(
+        self, parsed_derenderer
+    ):
+        """When include_reasoning=False on a parser-configured request,
+        logprobs must be suppressed to avoid leaking hidden reasoning tokens."""
+        token_ids = [_FakeParser.CONTENT]
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                token_ids,
+                logprobs=_generate_logprobs(token_ids),
+                finish_reason="stop",
+            ),
+            chat_request=_chat_request(include_reasoning=False),
+        )
+        choice = chunk.choices[0]
+        assert choice.logprobs is None
+
+    @pytest.mark.asyncio
     async def test_role_sent_once(self, parsed_derenderer):
         chat_request = _chat_request()
         chunk1, state = await parsed_derenderer.derender_chat_stream(

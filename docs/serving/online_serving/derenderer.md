@@ -105,7 +105,7 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **Send `prompt_token_ids` on the first chunk, even without a parser.** It seeds detokenization so the first token's leading space matches the coupled endpoint (see [Request format](#request-format)). Later chunks already carry that context in `stream_state`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.
 
-`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Streaming derender does the same per chunk on the plain detokenization path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
+`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Streaming derender does the same per chunk on both the plain detokenization path and the parser-configured path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). When reasoning is hidden on a parser-configured request (`include_reasoning=false`), logprobs are suppressed to prevent leaking hidden reasoning tokens.
 
 ## Streaming cost
 
