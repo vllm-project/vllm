@@ -93,6 +93,60 @@ def test_fused_topk(
     not current_platform.is_cuda_alike(),
     reason="This test is skipped on non-CUDA platform.",
 )
+@pytest.mark.parametrize("num_experts,padded_num_experts", [(60, 64), (64, 72)])
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+def test_fused_topk_padded_row_stride(
+    num_experts: int,
+    padded_num_experts: int,
+    scoring_func: str,
+):
+    """Regression test for row-padded router logits produced by Inductor."""
+    torch.manual_seed(0)
+    num_tokens = 33
+    hidden_size = 128
+    topk = 4
+    dtype = torch.bfloat16
+
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    storage = torch.full(
+        (num_tokens, padded_num_experts),
+        1e4,
+        dtype=dtype,
+        device="cuda",
+    )
+    gating_output = storage[:, :num_experts]
+    gating_output.copy_(
+        torch.linspace(-4, 4, num_experts, dtype=dtype, device="cuda").expand(
+            num_tokens, -1
+        )
+    )
+    assert gating_output.stride() == (padded_num_experts, 1)
+    assert not gating_output.is_contiguous()
+
+    topk_weights_ref, topk_ids_ref = torch_topk(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        scoring_func=scoring_func,
+    )
+    topk_weights, topk_ids, _ = fused_topk(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        scoring_func=scoring_func,
+    )
+
+    torch.testing.assert_close(
+        topk_weights_ref.to(torch.float32), topk_weights, atol=1e-2, rtol=1e-2
+    )
+    torch.testing.assert_close(topk_ids_ref.to(torch.int32), topk_ids, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
 @pytest.mark.parametrize("num_tokens", [1, 33, 56])
 @pytest.mark.parametrize("hidden_size", [1024, 2048])
 @pytest.mark.parametrize("num_experts", [6, 16])
