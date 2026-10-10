@@ -86,7 +86,7 @@ def _patch(
 class _FakeFlyDSLQuickReduce:
     def __init__(self, accepts: bool):
         self.accepts = accepts
-        self.calls = []
+        self.calls: list[tuple] = []
 
     def should_fused_allreduce_rmsnorm_mxfp4(self, inp, residual, weight):
         return self.accepts
