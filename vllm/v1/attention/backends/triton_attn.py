@@ -39,7 +39,10 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    MAX_3D_QUERY_LEN,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
@@ -152,7 +155,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
-        # On SM120, batches whose 16-segment grid under-fills the SMs use 64.
+        # On SM120, batches whose 16-segment decode grid under-fills the SMs use
+        # 64. This counts requests, not Q blocks, on purpose: for 1..11 verify
+        # requests (K=3/5, 8 q / 1 KV head, 2k-128k context) 64 segments were
+        # faster or within 6% at 2k, and 1.1-3.6x faster from 8k up.
         self.max_seqs_64_segments = 0
         if current_platform.is_cuda() and current_platform.is_device_capability(
             (12, 0)
@@ -160,18 +166,30 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             self.max_seqs_64_segments = (current_platform.num_compute_units() - 1) // (
                 NUM_PAR_SOFTMAX_SEGMENTS * self.num_heads_kv
             )
-        max_num_tokens_3d = self.seq_threshold_3D
+        headdim_padded = next_power_of_2(self.headdim)
+        max_query_len_3d = 1
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            num_speculative_tokens = speculative_config.num_speculative_tokens or 0
+            query_len = 1 + num_speculative_tokens * (
+                2 if speculative_config.parallel_drafting else 1
+            )
+            max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
+        # Scratch is indexed by query token, including verification tokens.
+        max_num_seqs_3d = min(
+            self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
+        )
+        max_num_tokens_3d = max_num_seqs_3d * max_query_len_3d
         if self.max_seqs_64_segments > 0:
             self.num_par_softmax_segments = 64
             # build() reuses this scratch at 16 segments with proportionally more rows.
             max_num_tokens_3d = max(
-                min(self.max_seqs_64_segments, max_num_tokens_3d),
+                min(self.max_seqs_64_segments, max_num_seqs_3d) * max_query_len_3d,
                 cdiv(
                     max_num_tokens_3d,
                     self.num_par_softmax_segments // NUM_PAR_SOFTMAX_SEGMENTS,
                 ),
             )
-        headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
                 max_num_tokens_3d,
