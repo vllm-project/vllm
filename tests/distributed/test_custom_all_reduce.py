@@ -309,6 +309,9 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
         (4, (10, 3), True, True),
         (8, (10, 0), True, True),
         (8, (10, 3), True, True),
+        (2, (10, 7), True, True),
+        (4, (10, 7), True, True),
+        (6, (10, 7), True, False),
         (6, (10, 3), True, False),
         (8, (10, 1), True, False),
         (8, (9, 0), True, False),
@@ -323,7 +326,7 @@ def test_mnnvl_multimem_reduce_scatter_platform_gate(
     expected,
 ):
     def is_device_capability(capability, device_id):
-        assert capability in ((10, 0), (10, 3))
+        assert capability in ((10, 0), (10, 3), (10, 7))
         assert device_id == 3
         return device_capability == capability
 

@@ -625,13 +625,13 @@ def nvfp4_sf_byte(s: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(100),
-    reason="nvfp4_ds_mla requires SM100 (Blackwell)",
+    not (current_platform.is_device_capability_family(100)),
+    reason="nvfp4_ds_mla requires SM100 family",
 )
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
 def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int, cfg: ModelConfig):
-    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 only).
+    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 family).
 
     Per-token 352-byte entry: 256 B of 512 e2m1 NoPE packed 2/byte (low nibble
     = even element) | 64 B unscaled e4m3 RoPE | 32 B byte-permuted e4m3 tile

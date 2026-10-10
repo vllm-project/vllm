@@ -106,9 +106,12 @@ def _supports_mnnvl_multimem_reduce_scatter(
     return (
         world_size in _MNNVL_MULTIMEM_REDUCE_SCATTER_WORLD_SIZES
         and device.index is not None
+        # leave explicit minor versions since some mock tests set
+        # device capability to specific values (e.g. (10, 1))
         and (
             current_platform.is_device_capability((10, 0), device.index)
             or current_platform.is_device_capability((10, 3), device.index)
+            or current_platform.is_device_capability((10, 7), device.index)
         )
         and _has_local_multicast_support(device)
     )
