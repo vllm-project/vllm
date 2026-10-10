@@ -318,6 +318,21 @@ class TestWireTypes:
         assert reshard_order == ["pair.weight", "direct", "pair.scale"]
         assert stream.synchronize.call_count == 2
 
+    @pytest.mark.parametrize("uses_load_weights", [True, False])
+    def test_abort_undoes_only_a_layerwise_reload(self, monkeypatch, uses_load_weights):
+        aborted: list[object] = []
+        monkeypatch.setattr(
+            "vllm.model_executor.model_loader.reload.abort_layerwise_reload",
+            aborted.append,
+        )
+        engine = object.__new__(M2NWeightTransferEngine)
+        engine.model = object()
+        engine._uses_load_weights = uses_load_weights
+
+        engine.abort_weight_update()
+
+        assert aborted == ([engine.model] if uses_load_weights else [])
+
     def test_trainer_rank_must_be_a_trainer_rank(self):
         """A trainer rank must fall within the trainer portion of the group."""
         with pytest.raises(ValueError, match="num_trainer_ranks"):
