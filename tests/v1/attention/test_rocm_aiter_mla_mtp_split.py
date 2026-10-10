@@ -740,26 +740,34 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
     torch.testing.assert_close(output, reference, rtol=3e-2, atol=3e-2)
 
 
-@pytest.mark.parametrize("num_heads", [8, 16, 24, 32, 64, 128])
 @pytest.mark.parametrize(
-    "spec_method, parallel_drafting",
+    "num_heads,spec_method,parallel_drafting,group_cache_dtype,needs_row_map",
     [
-        ("deepseek_mtp", False),
-        # A drafter that is not one of the historically recognized MTP methods,
-        # and a parallel one, so the threshold is 1 + 2 * num_spec rather than
-        # 1 + num_spec. Sizing the metadata off a method name instead leaves
-        # these at qlen=1 while the router still admits the full range.
-        ("custom", True),
-        ("eagle", False),
+        *[
+            (num_heads, method, parallel, None, True)
+            for num_heads in [8, 16, 24, 32, 64, 128]
+            for method, parallel in [
+                ("deepseek_mtp", False),
+                # Parallel drafting needs qlen=1+2*num_spec, regardless of name.
+                ("custom", True),
+                ("eagle", False),
+            ]
+        ],
+        pytest.param(16, "deepseek_mtp", False, "auto", False, id="bf16-group"),
+        pytest.param(16, "deepseek_mtp", False, "fp8_e5m2", False, id="e5m2-group"),
     ],
 )
-def test_mtp_builder_init_sizes_native_fp8_metadata(
-    monkeypatch, num_heads, spec_method, parallel_drafting
+def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
+    monkeypatch,
+    num_heads,
+    spec_method,
+    parallel_drafting,
+    group_cache_dtype,
+    needs_row_map,
 ):
-    """Aiter init sizes the metadata for every query length decode can be handed.
+    """Size decode metadata for padded heads/qlen; skip unsupported DCP maps.
 
-    Sweeping num_heads asserts metadata is sized for the padded decode shape,
-    covering Kimi-K3 TP4's 24 -> 32 head path and native fp8 nhead=32 folding.
+    The group's raw cache format must override the global FP8 configuration.
     """
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
     info_calls = []
@@ -789,6 +797,13 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
 
     def init_common_builder(self, *args, **kwargs):
         self.num_heads = num_heads
+        self.q_data_type = config.model_config.dtype
+        self.mla_dims = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
         self.dcp_world_size = 1
         self.cp_kv_cache_interleave_size = 1
         # Mirror what _init_reorder_batch_threshold would have left behind: the
@@ -813,6 +828,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
         init_common_builder,
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
@@ -840,7 +856,9 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
         ),
     )
     builder = AiterMLAMetadataBuilder(
-        kv_cache_spec=SimpleNamespace(block_size=1, dtype=torch.bfloat16),
+        kv_cache_spec=SimpleNamespace(
+            block_size=1, dtype=torch.bfloat16, cache_dtype_str=group_cache_dtype
+        ),
         layer_names=["layer.0"],
         vllm_config=config,
         device=torch.device("cpu"),
@@ -859,6 +877,35 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
     ]
     assert builder._mla_q_dtype == dtypes.fp8
     assert builder._mla_kv_dtype == dtypes.fp8
+
+    builder.dcp_world_size = 2
+    chunk = object()
+    rows = torch.tensor([0], dtype=torch.int64)
+    build_rows = mock.Mock(return_value=rows)
+    monkeypatch.setattr(rocm_aiter_mla, "context_row_indices", build_rows)
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_supports_fused_dcp_prefill_config",
+        mock.Mock(side_effect=AssertionError("Support must be cached at init")),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla.MLACommonMetadataBuilder,
+        "build",
+        lambda *args: SimpleNamespace(
+            prefill=SimpleNamespace(
+                chunked_context=SimpleNamespace(chunks=[chunk]),
+                block_table=torch.empty(0),
+            ),
+            decode=None,
+            dcp_context_row_indices=None,
+        ),
+    )
+    for _ in range(2):
+        metadata = builder.build(0, SimpleNamespace(causal=True))
+        assert metadata.dcp_context_row_indices == ([rows] if needs_row_map else None)
+    assert build_rows.call_args_list == (
+        [mock.call(chunk, torch.device("cpu"))] * 2 if needs_row_map else []
+    )
 
 
 def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):

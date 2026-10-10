@@ -643,6 +643,36 @@ def _check_aiter_mla_fp8_support() -> bool:
     return _AITER_MLA_SUPPORTS_FP8
 
 
+def _rocm_aiter_gather_kv_b_proj_impl(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    from aiter.ops.triton.gather_kv_b_proj import gather_kv_b_proj
+
+    gather_kv_b_proj(
+        kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, None, k, v
+    )
+
+
+def _rocm_aiter_gather_kv_b_proj_fake(
+    kv_cache: torch.Tensor,
+    kv_scale: torch.Tensor,
+    kv_indptr: torch.Tensor,
+    kv_indices: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    weight: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> None:
+    pass
+
+
 def _rocm_aiter_mla_decode_fwd_impl(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
@@ -2840,6 +2870,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_gather_kv_b_proj",
+                op_func=_rocm_aiter_gather_kv_b_proj_impl,
+                mutates_args=["k", "v"],
+                fake_impl=_rocm_aiter_gather_kv_b_proj_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+            direct_register_custom_op(
                 op_name="rocm_aiter_mla_decode_fwd",
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
@@ -3451,6 +3488,21 @@ class rocm_aiter_ops:
             extra_kv=extra_kv_buffer,
             extra_indptr=extra_kv_indptr,
             extra_indices=extra_kv_indices,
+        )
+
+    @staticmethod
+    def gather_kv_b_proj(
+        kv_cache: torch.Tensor,
+        kv_scale: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        kv_indices: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        weight: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_gather_kv_b_proj(
+            kv_cache, kv_scale, kv_indptr, kv_indices, cu_seq_lens, weight, k, v
         )
 
     @staticmethod

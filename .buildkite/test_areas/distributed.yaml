@@ -527,8 +527,11 @@ steps:
       - examples/rl/rlhf_async_new_apis.py
       - tests/distributed/test_weight_transfer.py
       - tests/distributed/test_packed_tensor.py
+      - tests/v1/attention/test_rocm_mla_dcp_context.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
       commands:
       - pytest -v -s tests/distributed/test_context_parallel.py
+      - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
