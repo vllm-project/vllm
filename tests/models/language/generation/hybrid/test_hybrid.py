@@ -6,7 +6,13 @@ from contextlib import contextmanager, nullcontext
 
 import pytest
 
+from tests.models.language.generation.hybrid._hybrid_models import (
+    ATTN_BACKEND,
+    MAX_NUM_SEQS,
+    check_models,
+)
 from tests.models.registry import HF_EXAMPLE_MODELS
+from tests.models.utils import check_logprobs_close, check_outputs_equal
 from tests.utils import multi_gpu_test
 from vllm import LLM
 from vllm.config import CUDAGraphMode
@@ -15,14 +21,14 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
-from ...utils import check_logprobs_close, check_outputs_equal
-
 # Mark all tests as hybrid
 pytestmark = pytest.mark.hybrid_model
 
 # NOTE: The first model in each list is taken as the primary model,
 # meaning that it will be used in all tests in this file
 # The rest of the models will only be tested by test_models
+# ibm-granite/granite-4.0-tiny-preview runs from ../test_granite_4_hybrid.py
+# on its own compatibility job (https://github.com/vllm-project/vllm/issues/25194).
 
 APC_MULTIPLY_BY = 300
 
@@ -37,7 +43,6 @@ SSM_MODELS = [
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "Zyphra/Zamba2-1.2B-instruct",
-    "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
     "tiny-random/qwen3-next-moe",
@@ -52,11 +57,6 @@ FP32_STATE_MODELS = [
     "state-spaces/mamba-130m-hf",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
-
-# Avoid OOM
-MAX_NUM_SEQS = 4
-
-ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
 
 
 def _set_conv_state_layout(monkeypatch, layout: str) -> None:
@@ -80,33 +80,8 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    try:
-        model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
-        model_info.check_available_online(on_fail="skip")
-        model_info.check_transformers_version(on_fail="skip")
-    except ValueError:
-        pass
-
-    with hf_runner(model) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs
-        )
-
-    with vllm_runner(
-        model,
-        max_num_seqs=MAX_NUM_SEQS,
-        attention_backend=ATTN_BACKEND,
-        enable_chunked_prefill=True,
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs
-        )
-
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
+    check_models(
+        hf_runner, vllm_runner, example_prompts, model, max_tokens, num_logprobs
     )
 
 
