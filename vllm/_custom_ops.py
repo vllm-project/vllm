@@ -700,6 +700,35 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3
         )
 
 
+def w8a8_block_fp8_gemm_rdna4(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    C: torch.Tensor,
+    group_n: int,
+    group_k: int,
+) -> None:
+    torch.ops._rocm_C.w8a8_block_fp8_gemm_rdna4(A, B, As, Bs, C, group_n, group_k)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "w8a8_block_fp8_gemm_rdna4"
+):
+
+    @register_fake("_rocm_C::w8a8_block_fp8_gemm_rdna4")
+    def _w8a8_block_fp8_gemm_rdna4_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        C: torch.Tensor,
+        group_n: int,
+        group_k: int,
+    ) -> None:
+        return None
+
+
 def moe_gptq_gemm_rdna3(
     a: torch.Tensor,
     c: torch.Tensor,

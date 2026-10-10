@@ -75,6 +75,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
+#ifdef VLLM_ROCM_GFX1201
+  // W8A8 block-scaled FP8 GEMM for AMD RDNA4 (gfx1201).
+  // Bs is expected in the kernel's k-major [K/128, N/128] layout, which is
+  // the transpose of how vLLM stores block scales; the caller transposes it
+  // once in process_weights_after_loading.
+  rocm_ops.def(
+      "w8a8_block_fp8_gemm_rdna4(Tensor A, Tensor B, Tensor As, Tensor Bs, "
+      "Tensor! C, int group_n, int group_k) -> ()");
+  rocm_ops.impl("w8a8_block_fp8_gemm_rdna4", torch::kCUDA,
+                &w8a8_block_fp8_gemm_rdna4);
+#endif
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
