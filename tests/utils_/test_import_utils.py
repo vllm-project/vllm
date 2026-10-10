@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import builtins
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
+from vllm.utils.import_utils import (
+    PlaceholderModule,
+    _has_module,
+    check_torchcodec_available,
+    import_plugin,
+)
 
 
 def _raises_module_not_found():
@@ -47,6 +53,20 @@ def test_placeholder_module_error_handling():
     with _raises_module_not_found():
         # Test conflict with internal __module attribute
         _ = placeholder_attr.module
+
+
+def test_check_torchcodec_available_handles_native_library_load_error(monkeypatch):
+    real_import = builtins.__import__
+
+    def import_with_broken_torchcodec(name, *args, **kwargs):
+        if name == "torchcodec":
+            raise OSError("libcudart.so.13: cannot open shared object file")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_broken_torchcodec)
+
+    with pytest.raises(RuntimeError, match="torchcodec.*native libraries"):
+        check_torchcodec_available()
 
 
 class TestHasModule:
