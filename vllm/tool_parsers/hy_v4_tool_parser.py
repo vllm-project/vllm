@@ -375,7 +375,8 @@ class HYV4ToolExtractor:
         self._streaming_tool_name: str | None = None  # tool name being streamed
 
         # State fields for incremental argument streaming
-        self._completed_args: dict = {}  # closed {key: parsed_value}
+        # closed (key, parsed_value) pairs in order; duplicate keys kept
+        self._completed_args: list[tuple[str, Any]] = []
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
@@ -568,7 +569,7 @@ class HYV4ToolExtractor:
     def _reset_streaming_tool_state(self):
         """Reset the streaming state for a single tool call."""
         self._streaming_tool_name = None
-        self._completed_args = {}
+        self._completed_args = []
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
@@ -803,13 +804,15 @@ class HYV4ToolExtractor:
             remaining = ""
 
         # --- scan all fully closed kv pairs ---
+        # ``args_text`` starts at this call's first ``<arg_key>``, so pairs past
+        # the recorded ones are new. Duplicate keys are kept because an earlier
+        # value may already be streamed.
         arg_pairs = self.func_args_regex.findall(args_text)
-        for key, value in arg_pairs:
+        for key, value in arg_pairs[len(self._completed_args) :]:
             key = key.strip()
-            if key not in self._completed_args:
-                self._completed_args[key] = _parse_value(
-                    value, self._streaming_tool_name or "", key, tools
-                )
+            self._completed_args.append(
+                (key, _parse_value(value, self._streaming_tool_name or "", key, tools))
+            )
 
         # --- detect partial (unclosed) kv at the tail ---
         last_closed_end = 0
@@ -858,7 +861,7 @@ class HYV4ToolExtractor:
         # We construct JSON manually so we can precisely control
         # what gets sent incrementally.
         snapshot_parts: list[str] = []
-        for k, v in self._completed_args.items():
+        for k, v in self._completed_args:
             k_json = json.dumps(k, ensure_ascii=False)
             v_json = json.dumps(v, ensure_ascii=False)
             snapshot_parts.append(f"{k_json}: {v_json}")
@@ -880,9 +883,15 @@ class HYV4ToolExtractor:
 
         if is_complete:
             # Tool call finished - send everything remaining.
-            # Build final snapshot with proper JSON (all values closed).
+            # ``final_args`` keeps the last value of a repeated key.
+            # ``final_json`` must extend the bytes already sent. Use the
+            # deduplicated JSON when it does; otherwise keep repeated keys.
             final_args = dict(self._completed_args)
+            closed_parts = snapshot_parts[: len(self._completed_args)]
+            closed_json = "{" + ", ".join(closed_parts) + "}"
             final_json = json.dumps(final_args, ensure_ascii=False)
+            if not final_json.startswith(closed_json[: self._streamed_json_len]):
+                final_json = closed_json
             if self._streamed_json_len < len(final_json):
                 argument_diff = final_json[self._streamed_json_len :]
             self._streamed_json_len = len(final_json)
