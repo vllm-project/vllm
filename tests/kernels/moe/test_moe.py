@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_act_int8_process_scales,
     marlin_permute_bias,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -960,9 +961,7 @@ class MarlinMoEWeightData:
 
         a_scales_factor = None
         if input_type == scalar_types.int8 and group_size != -1:
-            a_scales_factor = 1 / 4096 * scales.max().float()
-            scales = scales / scales.max() * 4096
-            scales = scales.round().to(torch.int16).view(w.dtype)
+            scales, a_scales_factor = marlin_act_int8_process_scales(scales)
 
         return MarlinMoEWeightData(
             w_ref=w_ref,
