@@ -35,6 +35,21 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+### Reusing generated assistant replies
+
+`--enable-mamba-decode-checkpoint` retains private decode checkpoints and publishes the deepest reusable one when a request finishes with a normal stop. A later turn that replays the generated reply can reuse that state. Length-limited, aborted and failed requests discard their private checkpoints. This opt-in requires prefix caching, `--mamba-cache-mode align` and `--prefix-cache-retention-interval 0`.
+
+With Model Runner V2, an eligible `--prefix-match-unit` smaller than the scheduler block size also enables snapshots inside a scheduler block. The GPU copies the state at the latest accepted match-unit boundary before the running state advances. EAGLE/MTP keeps a previous candidate when the newest boundary lacks finalized draft KV lookahead.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <hybrid-model> \
+    --enable-prefix-caching --mamba-cache-mode align \
+    --prefix-cache-retention-interval 0 --prefix-match-unit 64 \
+    --enable-mamba-decode-checkpoint
+```
+
+Smaller match units reduce replayed prefill tokens, but copy recurrent state more frequently and consume extra cache blocks for private candidates and in-flight snapshots. Choose the unit using measurements of your multi-turn workload. Model Runner V1, pipeline parallelism, KV connectors, ReplaySSM and RecoverSSM retain scheduler-aligned checkpoints. Fine-grained snapshots currently target the ordinary materialized-state MRV2 path.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

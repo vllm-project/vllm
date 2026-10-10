@@ -343,6 +343,16 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+            enable_mamba_decode_checkpoint=(
+                self.cache_config.enable_mamba_decode_checkpoint
+            ),
+            enable_fine_grained_decode_checkpoint=(
+                vllm_config.use_v2_model_runner
+                and self.parallel_config.pipeline_parallel_size == 1
+                and self.connector is None
+                and not self.cache_config.use_replayssm
+                and not self.cache_config.use_kda_recoverssm
+            ),
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -1519,6 +1529,9 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            mamba_decode_checkpoints=self.kv_cache_manager.take_decode_checkpoints(
+                num_scheduled_tokens
+            ),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -2073,6 +2086,7 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        decode_checkpoints = scheduler_output.mamba_decode_checkpoints
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2084,6 +2098,14 @@ class Scheduler(SchedulerInterface):
                     output_is_stale = True
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
+            checkpoint = decode_checkpoints.get(req_id) if decode_checkpoints else None
+            if checkpoint is not None and (
+                output_is_stale
+                or req_id in failed_kv_load_req_ids
+                or request is None
+                or request.is_finished()
+            ):
+                self.kv_cache_manager.discard_decode_checkpoint(req_id, checkpoint)
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
                 # skip failed or rescheduled requests from KV load failure
                 continue
@@ -2105,6 +2127,7 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
+            num_generated_tokens = len(generated_token_ids)
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
@@ -2194,6 +2217,11 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_ERROR
                 request.resumable = False
                 stopped = True
+
+            if not output_is_stale:
+                self.kv_cache_manager.update_decode_checkpoint_candidates(
+                    request, checkpoint, num_generated_tokens
+                )
 
             routed_experts = None
             should_emit_output = bool(
@@ -2717,6 +2745,10 @@ class Scheduler(SchedulerInterface):
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
+        self.kv_cache_manager.finalize_decode_checkpoints(
+            request,
+            keep=request.status == RequestStatus.FINISHED_STOPPED,
+        )
         self._inflight_prefills.discard(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)

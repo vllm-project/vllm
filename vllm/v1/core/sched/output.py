@@ -266,6 +266,8 @@ class SchedulerOutput:
     free_encoder_mm_hashes: list[str]
 
     scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+    # Private per-step snapshot blocks, in Mamba group order, and their token unit.
+    mamba_decode_checkpoints: dict[str, tuple[int, tuple[int, ...]]] | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.

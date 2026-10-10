@@ -209,6 +209,8 @@ def _copy_mamba_state_block(
     COPY_BLOCK_SIZE: tl.constexpr,
     CONV_STATE_DIM_FIRST: tl.constexpr,
     TEMPORAL_TILES: tl.constexpr,
+    direct_dst_ptr=None,
+    direct_dst_stride: tl.constexpr = 0,
 ):
     """Copy one (layer, state-type) mamba state block between block columns.
 
@@ -248,7 +250,12 @@ def _copy_mamba_state_block(
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
     # and Triton would otherwise do the multiply in int32 and wrap.
-    dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
+    if direct_dst_ptr is not None:
+        dest_block_id = tl.load(
+            direct_dst_ptr + dst_col * direct_dst_stride + group_idx + 1
+        ).to(tl.int64)
+    else:
+        dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
     dst_addr = state_base_addr + dest_block_id * state_block_stride
 
     is_conv_state = conv_width > 0
@@ -362,6 +369,71 @@ def _copy_mamba_state_block(
         tile_idx,
         COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
         NUM_TILES=TEMPORAL_TILES,
+    )
+
+
+@triton.jit
+def save_mamba_decode_checkpoint_kernel(
+    checkpoints_ptr,
+    checkpoint_stride: tl.constexpr,
+    idx_mapping_ptr,
+    num_sampled_ptr,
+    state_idx_ptr,
+    num_computed_ptr,
+    block_table_ptrs_ptr,
+    block_table_stride_req: tl.int64,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
+):
+    """Save the latest accepted match-unit boundary into private physical blocks.
+
+    checkpoints is [batch, 1 + Mamba groups]: token unit, then destination IDs.
+    Read counts and source columns before align postprocessing can shift the
+    running convolution state in place.
+    """
+    row = tl.program_id(0)
+    unit = tl.load(checkpoints_ptr + row * checkpoint_stride)
+    if unit == 0:
+        return
+    req_idx = tl.load(idx_mapping_ptr + row)
+    if req_idx < 0:
+        return
+    end = tl.load(num_computed_ptr + req_idx)
+    accepted = tl.maximum(tl.load(num_sampled_ptr + row), 1)
+    running_start = end - accepted + 1
+    boundary = end // unit * unit
+    if boundary < running_start:
+        return
+    _copy_mamba_state_block(
+        tl.program_id(1),
+        req_idx,
+        tl.load(state_idx_ptr + req_idx),
+        row,
+        boundary - running_start,
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        tl.program_id(2),
+        1024,
+        CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
+        checkpoints_ptr,
+        checkpoint_stride,
     )
 
 
@@ -1242,6 +1314,38 @@ class MambaSpecDecodeGPUContext:
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=idx_mapping is not None,
+            TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+
+    def save_decode_checkpoints(
+        self,
+        checkpoints: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        state_idx: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        assert self.is_initialized
+        save_mamba_decode_checkpoint_kernel[
+            (idx_mapping.numel(), self.num_states, _TEMPORAL_TILES)
+        ](
+            checkpoints,
+            checkpoints.stride(0),
+            idx_mapping,
+            num_sampled,
+            state_idx,
+            num_computed_tokens,
+            self.block_table_ptrs,
+            self.block_table_stride_req,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 

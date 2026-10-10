@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -346,6 +347,40 @@ class MambaHybridModelState(DefaultModelState):
                 attn_metadata, attn_groups, for_capture=for_capture
             )
         return attn_metadata
+
+    def save_decode_checkpoints(
+        self,
+        req_ids: list[str],
+        checkpoints: dict[str, tuple[int, tuple[int, ...]]],
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        assert self._align_mode and self._mamba_ctx is not None
+        ctx = self._mamba_ctx
+        # Scheduler IDs follow KV group order; copy metadata groups equal specs.
+        scheduler_groups = sorted(ctx.mamba_group_ids)
+        group_order = [
+            scheduler_groups.index(group_id) for group_id in ctx.mamba_group_ids
+        ]
+        empty = (0,) * (1 + ctx.num_groups)
+        rows = [
+            (
+                checkpoints[req_id][0],
+                *(checkpoints[req_id][1][index] for index in group_order),
+            )
+            if req_id in checkpoints
+            else empty
+            for req_id in req_ids
+        ]
+        snapshot_blocks = async_tensor_h2d(rows, dtype=torch.int32, device=self.device)
+        ctx.save_decode_checkpoints(
+            snapshot_blocks,
+            idx_mapping,
+            num_sampled,
+            self._mamba_state_idx_gpu,
+            num_computed_tokens,
+        )
 
     def postprocess_state(
         self,

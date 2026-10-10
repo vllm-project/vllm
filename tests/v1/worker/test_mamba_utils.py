@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -910,6 +910,96 @@ class TestPostprocessMambaFusedKernel:
             batch_memcpy(src_ptrs, dst_ptrs, sizes)
             torch.accelerator.synchronize()
             torch.testing.assert_close(state, expected, rtol=0, atol=0)
+
+    @pytest.mark.parametrize("dim_first", [False, True])
+    def test_decode_checkpoint_copies_accepted_match_unit_state(
+        self, device, test_config, dim_first, monkeypatch
+    ):
+        """Private snapshots select accepted offsets and ignore rejected crossings."""
+        monkeypatch.setattr(
+            "vllm.v1.worker.mamba_utils.is_conv_state_dim_first", lambda: dim_first
+        )
+        cfg = test_config
+        names = ["layer_0", "layer_1", "layer_2"]
+        kv_cache_config = _make_kv_cache_config(cfg, names)
+        spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        kv_cache_config.kv_cache_groups = [
+            KVCacheGroupSpec([names[0]], spec),
+            KVCacheGroupSpec(
+                [names[1]], replace(spec, mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+            ),
+            KVCacheGroupSpec([names[2]], spec),
+        ]
+        conv_py, temporal_py, conv_gpu, temporal_gpu, _, forward_context = (
+            _make_dual_states(cfg, names, device)
+        )
+        if dim_first:
+            for index, name in enumerate(names):
+                conv_gpu[index] = conv_gpu[index].transpose(1, 2).contiguous()
+                forward_context[name].kv_cache = [conv_gpu[index], temporal_gpu[index]]
+        table = torch.arange(32, dtype=torch.int32, device=device).reshape(8, 4)
+        ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        ctx.initialize_from_forward_context(
+            kv_cache_config, forward_context, _COPY_FUNCS, [table] * 3
+        )
+
+        def tensor(values):
+            return torch.tensor(values, dtype=torch.int32, device=device)
+
+        # Request slots deliberately differ from batch order.
+        idx_mapping = tensor([3, 1, 5])
+        state_idx = tensor([0] * 8)
+        computed = tensor([0, 13, 0, 14, 0, 12, 0, 0])
+        accepted = tensor([4, 1, 1])
+        model_state = object.__new__(MambaHybridModelState)
+        model_state._align_mode = True
+        model_state._mamba_ctx = ctx
+        model_state._mamba_state_idx_gpu = state_idx
+        model_state.device = device
+        checkpoints = {
+            "a": (4, (28, 29, 30)),
+            "b": (4, (27, 26, 25)),
+            "c": (4, (31, 27, 26)),
+        }
+        model_state.save_decode_checkpoints(
+            ["a", "b", "c"], checkpoints, idx_mapping, accepted, computed
+        )
+        torch.accelerator.synchronize()
+        # Row 0 crosses 12 at accepted offset 1; row 1 rejects the crossing;
+        # row 2 is ordinary decode at the exact match-unit boundary.
+        for group_id in range(3):
+            for dest, source, offset in [
+                (28 + group_id, 12, 1),
+                ([31, 27, 26][group_id], 20, 0),
+            ]:
+                actual = conv_gpu[group_id][dest]
+                if dim_first:
+                    actual = actual.transpose(0, 1)
+                torch.testing.assert_close(
+                    actual[: cfg.conv_width - offset],
+                    conv_py[group_id][source, offset:],
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    temporal_gpu[group_id][dest],
+                    temporal_py[group_id][source + offset],
+                    rtol=0,
+                    atol=0,
+                )
+            dest = [27, 26, 25][group_id]
+            unchanged = conv_gpu[group_id][dest]
+            if dim_first:
+                unchanged = unchanged.transpose(0, 1)
+            torch.testing.assert_close(
+                unchanged, conv_py[group_id][dest], rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                temporal_gpu[group_id][dest],
+                temporal_py[group_id][dest],
+                rtol=0,
+                atol=0,
+            )
 
     def test_matches_python_postprocess_mamba(self, device, test_config):
         """Golden test: GPU kernel produces identical results to Python impl.

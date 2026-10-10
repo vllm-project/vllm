@@ -1671,6 +1671,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        checkpoint_req_ids: list[str] | None = None,
+        checkpoints: dict[str, tuple[int, tuple[int, ...]]] | None = None,
     ) -> None:
         # Update the number of computed tokens.
         output_bin_counts = None
@@ -1690,6 +1692,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.total_len.gpu,
         )
 
+        if checkpoints is not None:
+            assert checkpoint_req_ids is not None
+            self.model_state.save_decode_checkpoints(
+                checkpoint_req_ids,
+                checkpoints,
+                idx_mapping,
+                num_sampled,
+                self.req_states.num_computed_tokens.gpu,
+            )
         self.model_state.postprocess_state(
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
@@ -2058,6 +2069,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            mamba_decode_checkpoints=scheduler_output.mamba_decode_checkpoints,
         )
 
         if not self.is_last_pp_rank:
@@ -2088,6 +2100,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        checkpoints = self.execute_model_state.mamba_decode_checkpoints
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2195,18 +2208,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch, draft_lookahead=1
             )
 
-        # Postprocess results and update request states.
-        # NOTE: This is intentionally done after creating the AsyncOutput,
-        # ensuring that `copy_event` is recorded before calling postprocess.
-        # This sequencing may slightly reduce latency as async D2H copy does not
-        # need to wait for the postprocess to finish.
         self.postprocess_sampled(
             input_batch.idx_mapping,
             sampler_output.sampled_token_ids,
             num_sampled,
             num_rejected,
             input_batch.query_start_loc,
+            input_batch.req_ids,
+            checkpoints,
         )
+        if checkpoints is not None:
+            # Cover private snapshot writes before the scheduler can publish
+            # or free their blocks, while overlapping D2H with postprocessing.
+            self.output_copy_stream.wait_stream(self.main_stream)
+            async_output.copy_event.record(self.output_copy_stream)
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -2397,6 +2412,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    mamba_decode_checkpoints: dict[str, tuple[int, tuple[int, ...]]] | None = None
 
 
 class BatchReqState(NamedTuple):
