@@ -679,3 +679,90 @@ def test_dsv4_fast_topk_bias_vl():
     assert topk_ids.dtype == torch.int64
     torch.testing.assert_close(topk_ids_ref.to(torch.int64), topk_ids, atol=0, rtol=0)
     torch.testing.assert_close(topk_weights_ref, topk_weights, atol=2e-5, rtol=2e-5)
+
+
+@pytest.mark.parametrize(
+    "nargs,has_bias,image_sentinel_lo",
+    [
+        (10, False, 0),
+        (12, False, 0),
+        (12, True, 0),
+        (12, False, 129000),
+        (12, True, 129000),
+    ],
+)
+def test_topk_hash_softplus_sqrt_schema_forwarding(
+    monkeypatch, nargs, has_bias, image_sentinel_lo
+):
+    """Preserve output buffers and routing arguments for both kernel interfaces."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    kernel = Mock()
+    kernel._schema = SimpleNamespace(arguments=[None] * nargs)
+    monkeypatch.setattr(
+        torch.ops._moe_C,
+        "topk_softplus_sqrt",
+        Mock(side_effect=kernel, default=kernel),
+        raising=False,
+    )
+    args = (
+        object(),
+        object(),
+        object(),
+        object(),
+        True,
+        1.5,
+        object(),
+        object(),
+        object(),
+        object(),
+    )
+    bias_vl = object() if has_bias else None
+
+    assert (
+        ops.topk_hash_softplus_sqrt(
+            *args, bias_vl=bias_vl, image_sentinel_lo=image_sentinel_lo
+        )
+        is None
+    )
+
+    expected = args if nargs == 10 else (*args, bias_vl, image_sentinel_lo)
+    kernel.assert_called_once_with(*expected)
+
+
+@pytest.mark.parametrize(
+    "nargs,has_bias,image_sentinel_lo,match",
+    [
+        (10, True, 0, "non-default"),
+        (10, False, 129000, "non-default"),
+        (10, True, 129000, "non-default"),
+        (11, False, 0, "Unexpected topk_softplus_sqrt schema"),
+    ],
+)
+def test_topk_hash_softplus_sqrt_schema_rejects_unsupported(
+    monkeypatch, nargs, has_bias, image_sentinel_lo, match
+):
+    """Never drop requested routing features or launch an unknown interface."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    kernel = Mock()
+    kernel._schema = SimpleNamespace(arguments=[None] * nargs)
+    monkeypatch.setattr(
+        torch.ops._moe_C,
+        "topk_softplus_sqrt",
+        Mock(side_effect=kernel, default=kernel),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match=match):
+        ops.topk_hash_softplus_sqrt(
+            object(),
+            object(),
+            object(),
+            object(),
+            bias_vl=object() if has_bias else None,
+            image_sentinel_lo=image_sentinel_lo,
+        )
+    kernel.assert_not_called()
