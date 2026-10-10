@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at b02df0db8 (Apache-2.0 License),
+# Adapted from ROCm/aiter#6173 at c39b56c36 (Apache-2.0 License),
 # Copyright (c) 2025 FlyDSL Project Contributors:
 # aiter/ops/flydsl/kernels/glm5_mono/config.py
 # ruff: noqa: E501
@@ -71,74 +71,6 @@ class KvCacheLayout(str, Enum):
 
     SPLIT = "split"
     ATOM = "atom"
-
-
-class ConvStateLayout(str, Enum):
-    """Physical layout of one slot's causal-convolution history."""
-
-    CHANNEL_MAJOR = "channel_major"
-    TIME_MAJOR = "time_major"
-
-
-def conv_state_offset(
-    layout: ConvStateLayout,
-    channel,
-    time: int,
-    channels: int,
-    state_length: int = 3,
-):
-    if not isinstance(layout, ConvStateLayout):
-        raise TypeError(f"conv-state layout must be ConvStateLayout, got {layout!r}")
-    if not 0 <= time < state_length:
-        raise ValueError(f"conv-state time must be in [0, {state_length}), got {time}")
-    if channels <= 0:
-        raise ValueError(f"conv-state channels must be positive, got {channels}")
-    if layout is ConvStateLayout.TIME_MAJOR:
-        return time * channels + channel
-    return channel * state_length + time
-
-
-def conv_state_shape(
-    layout: ConvStateLayout,
-    slots: int,
-    channels: int,
-    state_length: int = 3,
-) -> tuple[int, int, int]:
-    if layout is ConvStateLayout.TIME_MAJOR:
-        return slots, state_length, channels
-    if layout is ConvStateLayout.CHANNEL_MAJOR:
-        return slots, channels, state_length
-    raise TypeError(f"conv-state layout must be ConvStateLayout, got {layout!r}")
-
-
-@dataclass(frozen=True)
-class KimiDecodeGeometry:
-    """One grouped decode/state contract for Kimi-K3 native execution."""
-
-    groups: int
-    q: int
-    conv_state_rows: int
-    state_dtype: str
-    replay_mode: bool
-
-    def __post_init__(self) -> None:
-        if self.groups <= 0:
-            raise ValueError(f"groups must be positive, got {self.groups}")
-        if self.q <= 0:
-            raise ValueError(f"q must be positive, got {self.q}")
-        if self.conv_state_rows < self.q + 2:
-            raise ValueError(
-                "conv_state_rows must retain the q-token rollback window plus "
-                f"two history rows, got q={self.q}, rows={self.conv_state_rows}"
-            )
-        if self.state_dtype not in {"fp16", "fp32"}:
-            raise ValueError(
-                f"state_dtype must be 'fp16' or 'fp32', got {self.state_dtype!r}"
-            )
-
-    @property
-    def tokens(self) -> int:
-        return self.groups * self.q
 
 
 @dataclass(frozen=True)
@@ -227,14 +159,8 @@ class LayerConfig:
     local_heads: int
     attention_weight: AttentionWeight = AttentionWeight.FP8_BLOCK128
     attention_output_gate: bool = False
-    attention_input_norm: bool = True
-    attention_residual: bool = True
     routed_hidden: int | None = None
-    shared_inter: int | None = None
     num_shared_experts: int = 1
-    situ_beta: float = 1.0
-    situ_linear_beta: float = 1.0
-    attn_res_block_size: int | None = None
 
     @property
     def qkv_a_rows(self) -> int:
@@ -255,10 +181,6 @@ class LayerConfig:
     def softmax_scale(self) -> float:
         return (self.nope_dim + self.pe_dim) ** -0.5
 
-    @property
-    def uses_latent_moe(self) -> bool:
-        return self.routed_hidden is not None
-
 
 GLM5_CONFIG = LayerConfig(
     name="glm5",
@@ -277,8 +199,6 @@ GLM5_CONFIG = LayerConfig(
 
 GLM5_REFERENCE_TP = 8
 GLM5_TP_SIZES = (4, GLM5_REFERENCE_TP)
-GLM5_GRAPH_BATCHES = tuple(range(1, 97))
-GLM5_AGENTX_BATCHES = tuple(range(2, 11))
 GLM5_QUERY_LENGTHS = (1, 4, 5, 6)
 GLM5_KERNEL_SAMPLES = (1, 2, 4, 5, 6, 8, 10, 12)
 GLM5_GLOBAL_HEADS = GLM5_CONFIG.local_heads * GLM5_REFERENCE_TP
@@ -320,32 +240,7 @@ def glm5_kernel_samples(samples: int, query_length: int) -> int:
     )
 
 
-KIMI_K3_CONFIG = LayerConfig(
-    name="kimi_k3",
-    hidden=7168,
-    q_lora=1536,
-    kv_lora=512,
-    pe_dim=64,
-    nope_dim=128,
-    v_dim=128,
-    n_experts=896,
-    top_k=16,
-    inter=384,
-    route_scale=1.0,
-    local_heads=12,
-    attention_weight=AttentionWeight.BF16,
-    attention_output_gate=True,
-    attention_input_norm=False,
-    attention_residual=False,
-    routed_hidden=3584,
-    shared_inter=768,
-    num_shared_experts=2,
-    situ_beta=4.0,
-    situ_linear_beta=25.0,
-    attn_res_block_size=12,
-)
-
-MODEL_CONFIGS = {config.name: config for config in (GLM5_CONFIG, KIMI_K3_CONFIG)}
+MODEL_CONFIGS = {config.name: config for config in (GLM5_CONFIG,)}
 
 
 def as_layer_config(value: LayerConfig | str) -> LayerConfig:
@@ -383,7 +278,6 @@ SOFTMAX_SCALE = GLM5_CONFIG.softmax_scale
 
 SUPPORTED_SAMPLES = (1, 2, 4, 8)
 SUPPORTED_PEERS = (1, 2, 4, 8)
-LOCAL_HEADS = GLM5_CONFIG.local_heads
 MAX_LAYERS_PER_STEP = 128
 
 

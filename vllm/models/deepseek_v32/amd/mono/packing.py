@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at b02df0db8 (Apache-2.0 License),
+# Adapted from ROCm/aiter#6173 at c39b56c36 (Apache-2.0 License),
 # Copyright (c) 2025 FlyDSL Project Contributors:
 # aiter/ops/flydsl/kernels/glm5_mono/packing.py
 
@@ -51,36 +51,6 @@ def pack_ptpc_fp8(q: torch.Tensor) -> torch.Tensor:
     nlead = len(lead)
     order = list(range(nlead)) + [nlead + position for position in (0, 2, 3, 1, 4)]
     return values.permute(*order).contiguous().view(-1)
-
-
-def pack_mxfp8_weight(q: torch.Tensor) -> torch.Tensor:
-    """Preshuffle row-major MXFP8 weights for gfx950 scaled MFMA GEMM."""
-    if q.ndim != 2:
-        raise ValueError(f"MXFP8 packing expects a matrix, got shape {tuple(q.shape)}")
-    rows, k = q.shape
-    if rows % 16 or k % 64:
-        raise ValueError(
-            f"MXFP8 matrix dimensions must be divisible by (16, 64), got {(rows, k)}"
-        )
-    values = q.view(torch.uint8).reshape(rows // 16, 16, k // 64, 4, 16)
-    return values.permute(0, 2, 3, 1, 4).contiguous().view(-1)
-
-
-def pack_mxfp8_scale(scale: torch.Tensor) -> torch.Tensor:
-    """Preshuffle per-1x32 E8M0 scales in the ATOM/AITER layout."""
-    scale = scale.view(torch.uint8)
-    if scale.ndim != 2:
-        raise ValueError(
-            f"MXFP8 scale packing expects a matrix, got shape {tuple(scale.shape)}"
-        )
-    rows, groups = scale.shape
-    if groups % 8:
-        raise ValueError(f"MXFP8 scale groups must be divisible by 8, got {groups}")
-    padded_rows = (rows + 255) // 256 * 256
-    padded = torch.zeros(padded_rows, groups, dtype=torch.uint8, device=scale.device)
-    padded[:rows] = scale
-    values = padded.reshape(padded_rows // 32, 2, 16, groups // 8, 2, 4)
-    return values.permute(0, 3, 5, 2, 4, 1).contiguous().view(-1)
 
 
 def pack_bf16(w: torch.Tensor) -> torch.Tensor:

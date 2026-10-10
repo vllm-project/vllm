@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at b02df0db8 (Apache-2.0 License),
+# Adapted from ROCm/aiter#6173 at c39b56c36 (Apache-2.0 License),
 # Copyright (c) 2025 FlyDSL Project Contributors:
 # aiter/ops/flydsl/kernels/glm5_mono/glm/layout.py
 
 """Compile-time storage layout and CTA schedule for the GLM-5 MonoKernel."""
-
-import math
 
 from vllm.models.deepseek_v32.amd.mono.config import (
     HIDDEN,
@@ -59,47 +57,9 @@ def fp8_pe_upper_pair_lane(lane):
     return (lane & -2) + 1
 
 
-def sparse_cache_rows(
-    sparse_kv_indices,
-    *,
-    sample: int,
-    topk: int,
-    cur_pos: int = 0,
-    sparse_kv_indptr=None,
-):
-    """Resolve the cache rows consumed by one flat or paged attention row."""
-    if sparse_kv_indptr is not None:
-        start, end = sparse_kv_indptr[sample : sample + 2]
-        return sparse_kv_indices[start:end]
-    context = cur_pos + sample + 1
-    count = min(context, topk)
-    if context <= topk:
-        return range(count)
-    start = sample * topk
-    return sparse_kv_indices[start : start + count]
-
-
-def paged_row_contract(
-    sparse_kv_indices, sparse_kv_indptr, sample: int, slot_mapping=None
-):
-    """Reference the device contract for one ATOM-layout request row."""
-    start, end = sparse_kv_indptr[sample : sample + 2]
-    active = end > start
-    rows = sparse_kv_indices[start:end] if active else ()
-    slot_owned = slot_mapping is None or slot_mapping[sample] >= 0
-    return {
-        "active": active,
-        "context": end - start,
-        "index_base": start if active else 0,
-        "safe_row": rows[0] if active else 0,
-        "write_cache": active if slot_mapping is None else slot_owned,
-    }
-
-
 N_QKV_A = QKV_A_ROWS // QKV_A_TILE
 N_ROW_TILES = HIDDEN // ROW_TILE
 N_ROUTER = N_EXPERTS // ROUTER_TILE
-N_UG_PER_SLOT = INTER // UG_TILE
 XQ_BLOCKS = HIDDEN // 128
 XQ_GROUPS = HIDDEN // 32
 XQ_WAVES = (XQ_BLOCKS + N_ROUTER - 1) // N_ROUTER
@@ -138,15 +98,6 @@ def down_x_words(
     return (
         samples * MOE_SLOTS * inter // (4 if native_fp4_mfma or not expert_mxfp4 else 2)
     )
-
-
-def dcp_softmax_weights(maxima, sums):
-    global_max = max(maxima)
-    scaled = [
-        total * math.exp(maximum - global_max) for maximum, total in zip(maxima, sums)
-    ]
-    denominator = sum(scaled)
-    return [value / denominator if denominator else 0.0 for value in scaled]
 
 
 def dcp_summary_index(source, sample, tile, item, samples, n_uv):

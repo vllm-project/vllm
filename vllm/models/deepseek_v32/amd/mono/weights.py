@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at b02df0db8 (Apache-2.0 License),
+# Adapted from ROCm/aiter#6173 at c39b56c36 (Apache-2.0 License),
 # Copyright (c) 2026 FlyDSL Project Contributors:
 # aiter/ops/flydsl/kernels/glm5_mono/weights.py
 # ruff: noqa: E501
@@ -20,7 +20,6 @@ from vllm.models.deepseek_v32.amd.mono.config import (
     Mxfp4WeightLayout,
 )
 from vllm.models.deepseek_v32.amd.mono.dispatch import MonoUnsupported
-from vllm.models.deepseek_v32.amd.mono.formats import dequantize_mxfp4
 
 
 def _need(ok: bool, what: str) -> None:
@@ -82,205 +81,6 @@ def _unshuffle_linear_scale(
     return native.reshape(padded_rows, padded_groups)[:flat_rows, :groups].reshape(
         experts, rows, groups
     )
-
-
-def linear_ptpc_fp8(
-    linear,
-    *,
-    name: str,
-    logical_rows: int,
-    logical_cols: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return a preshuffled PTPC FP8 weight and its per-output-channel scales."""
-    weight = linear.weight
-    scale = getattr(linear, "weight_scale", None)
-    fp8_dtypes = tuple(
-        dtype
-        for dtype in (
-            getattr(torch, "float8_e4m3fn", None),
-            getattr(torch, "float8_e4m3fnuz", None),
-        )
-        if dtype is not None
-    )
-    _need(
-        getattr(getattr(linear, "quant_type", None), "name", None) == "per_Token",
-        f"{name} must use per-token FP8",
-    )
-    _need(
-        getattr(linear, "params_dtype", None) in fp8_dtypes
-        and weight.dtype == getattr(linear, "params_dtype", None),
-        f"{name} must use E4M3 FP8 weights",
-    )
-    _need(
-        bool(getattr(weight, "is_shuffled", False)),
-        f"{name} FP8 weight must use the AITER preshuffle",
-    )
-    _need(
-        weight.ndim == 2
-        and weight.shape[0] >= logical_rows
-        and weight.shape[1] == logical_cols,
-        f"{name} weight shape {tuple(weight.shape)}",
-    )
-    _need(
-        not getattr(linear, "is_output_padded", False)
-        or getattr(linear, "_output_size_before_padding", None) == logical_rows,
-        f"{name} output padding does not preserve {logical_rows} logical rows",
-    )
-    _need(
-        scale is not None
-        and scale.dtype == torch.float32
-        and scale.numel() == weight.shape[0],
-        f"{name} per-output-channel scale",
-    )
-    return weight.data, scale.data.view(-1)
-
-
-def linear_bf16(
-    linear,
-    *,
-    name: str,
-    logical_rows: int,
-    logical_cols: int,
-    row_start: int = 0,
-    row_count: int | None = None,
-) -> torch.Tensor:
-    """Return one logical linear matrix as contiguous BF16 storage."""
-    row_count = logical_rows - row_start if row_count is None else row_count
-    _need(
-        getattr(linear, "input_size", None) == logical_cols,
-        f"{name} declares input_size={getattr(linear, 'input_size', None)}, expected {logical_cols}",
-    )
-    _need(
-        0 <= row_start < logical_rows and 0 < row_count <= logical_rows - row_start,
-        f"{name} row slice [{row_start}, {row_start + row_count}) is outside {logical_rows} rows",
-    )
-
-    weight = linear.weight
-    quant_name = getattr(getattr(linear, "quant_type", None), "name", None)
-    params_dtype = getattr(linear, "params_dtype", None)
-    shuffled = bool(getattr(weight, "is_shuffled", False))
-    if quant_name == "No":
-        _need(
-            params_dtype == torch.bfloat16,
-            f"{name} unquantized params must be BF16, got {params_dtype}",
-        )
-        _need(not shuffled, f"{name} BF16 weight must not be preshuffled")
-        _need(
-            weight.dtype == torch.bfloat16,
-            f"{name} BF16 weight has dtype {weight.dtype}",
-        )
-        _need(
-            weight.shape == (logical_rows, logical_cols),
-            f"{name} weight shape {tuple(weight.shape)}",
-        )
-        _need(weight.is_contiguous(), f"{name} BF16 weight must be contiguous")
-        if row_start == 0 and row_count == logical_rows:
-            return weight
-        return weight.narrow(0, row_start, row_count).contiguous()
-
-    fp8_dtypes = tuple(
-        dtype
-        for dtype in (
-            getattr(torch, "float8_e4m3fn", None),
-            getattr(torch, "float8_e4m3fnuz", None),
-        )
-        if dtype is not None
-    )
-    if quant_name == "per_Token":
-        _need(
-            params_dtype in fp8_dtypes,
-            f"{name} per_Token params must be E4M3 FP8, got {params_dtype}",
-        )
-        _need(
-            weight.dtype == params_dtype,
-            f"{name} FP8 weight has dtype {weight.dtype}, expected {params_dtype}",
-        )
-        padded = bool(getattr(linear, "is_output_padded", False))
-        storage_rows = weight.shape[0] if weight.ndim == 2 else 0
-        if padded:
-            _need(
-                getattr(linear, "_output_size_before_padding", None) == logical_rows,
-                f"{name} padded logical rows do not match {logical_rows}",
-            )
-            _need(
-                storage_rows >= logical_rows,
-                f"{name} padded FP8 rows {storage_rows} < logical rows {logical_rows}",
-            )
-        else:
-            _need(
-                storage_rows == logical_rows,
-                f"{name} FP8 rows {storage_rows}, expected {logical_rows}",
-            )
-        _need(
-            weight.shape == (storage_rows, logical_cols),
-            f"{name} FP8 weight shape {tuple(weight.shape)}",
-        )
-        scale = getattr(linear, "weight_scale", None)
-        _need(scale is not None, f"{name} per_Token weight_scale is missing")
-        _need(
-            scale.shape == (storage_rows, 1),
-            f"{name} weight_scale shape {tuple(scale.shape)}, expected {(storage_rows, 1)}",
-        )
-        _need(
-            scale.dtype == torch.float32,
-            f"{name} weight_scale must be FP32, got {scale.dtype}",
-        )
-        if shuffled:
-            _need(
-                storage_rows % 16 == 0 and logical_cols % 32 == 0,
-                f"{name} preshuffled FP8 shape must align to (16, 32), got {(storage_rows, logical_cols)}",
-            )
-            weight = _unshuffle_linear_weight(weight)
-        weight = weight.narrow(0, row_start, row_count)
-        scale = scale.narrow(0, row_start, row_count)
-        return (weight.float() * scale.float()).to(torch.bfloat16).contiguous()
-
-    fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-    _need(
-        quant_name == "per_1x32"
-        and fp4_dtype is not None
-        and params_dtype == fp4_dtype,
-        f"{name} unsupported quantization: quant_type={quant_name}, params_dtype={params_dtype}",
-    )
-    _need(shuffled, f"{name} per_1x32 FP4 weight must be preshuffled")
-    _need(
-        logical_cols % 32 == 0,
-        f"{name} logical K={logical_cols} must be divisible by 32",
-    )
-    expected_weight = (logical_rows, logical_cols // 2)
-    _need(
-        weight.dtype == fp4_dtype,
-        f"{name} packed weight has dtype {weight.dtype}, expected {fp4_dtype}",
-    )
-    _need(
-        weight.shape == expected_weight,
-        f"{name} packed weight shape {tuple(weight.shape)}, expected {expected_weight}",
-    )
-
-    scale = getattr(linear, "weight_scale", None)
-    groups = logical_cols // 32
-    padded_rows = (logical_rows + 255) // 256 * 256
-    padded_groups = (groups + 7) // 8 * 8
-    expected_scale_shape = (padded_rows, padded_groups)
-    _need(scale is not None, f"{name} per_1x32 weight_scale is missing")
-    _need(
-        scale.element_size() == 1, f"{name} weight_scale must use one-byte E8M0 values"
-    )
-    _need(
-        scale.shape == expected_scale_shape,
-        f"{name} weight_scale shape {tuple(scale.shape)}, expected {expected_scale_shape}",
-    )
-    packed = _unshuffle_linear_weight(weight).narrow(0, row_start, row_count)
-    native_scale = _unshuffle_linear_scale(
-        scale, experts=1, rows=logical_rows, groups=groups
-    )[0]
-    native_scale = native_scale.narrow(0, row_start, row_count)
-    result = dequantize_mxfp4(packed, native_scale).to(torch.bfloat16).contiguous()
-    _need(
-        result.shape == (row_count, logical_cols),
-        f"{name} dequantized shape {tuple(result.shape)}, expected {(row_count, logical_cols)}",
-    )
-    return result
 
 
 @dataclass
@@ -462,37 +262,8 @@ def pack_dense_mlp(
     }
 
 
-def prepare_aiter_mxfp4_expert_storage(
-    weights: LayerWeights,
-) -> tuple[torch.Tensor, ...]:
-    if (
-        weights.mxfp4_weight_layout is Mxfp4WeightLayout.ATOM
-        and weights.mxfp4_scale_layout is Mxfp4ScaleLayout.ATOM
-    ):
-        return prepare_mxfp4_expert_storage(weights, canonical=False)
-    if (
-        weights.mxfp4_weight_layout is Mxfp4WeightLayout.NATIVE
-        and weights.mxfp4_scale_layout is Mxfp4ScaleLayout.NATIVE
-    ):
-        from vllm.models.deepseek_v32.amd.mono.packing import (
-            pack_a16w4_scale,
-            pack_a16w4_weight,
-        )
-
-        tensors = weights.t
-        return (
-            pack_a16w4_weight(tensors["w_ug"]),
-            pack_a16w4_scale(tensors["s_ug"]),
-            pack_a16w4_weight(tensors["w_dn"]),
-            pack_a16w4_scale(tensors["s_dn"]),
-        )
-    raise ValueError("AITER MXFP4 storage requires matching value/scale layouts")
-
-
 __all__ = [
     "LayerWeights",
     "atom_mxfp4_storage_view",
-    "linear_bf16",
-    "prepare_aiter_mxfp4_expert_storage",
     "prepare_mxfp4_expert_storage",
 ]
