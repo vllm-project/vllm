@@ -21,6 +21,9 @@ DEVICES = [
 @pytest.mark.parametrize("device", DEVICES)
 def test_cpu_write(device):
     torch.set_default_device(device)
+    # Initializes the device; otherwise torch.accelerator.synchronize() is a no-op,
+    # as the UVA view's ops never trigger lazy init.
+    torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
@@ -34,6 +37,7 @@ def test_cpu_write(device):
     cpu_tensor[4, 5] = -1
 
     gpu_view.mul_(2)
+    torch.accelerator.synchronize(gpu_view.device)
     assert gpu_view[0, 0] == 2
     assert gpu_view[2, 3] == 4
     assert gpu_view[4, 5] == -2
@@ -43,6 +47,9 @@ def test_cpu_write(device):
 @pytest.mark.parametrize("device", DEVICES)
 def test_gpu_write(device):
     torch.set_default_device(device)
+    # Initializes the device; otherwise torch.accelerator.synchronize() is a no-op,
+    # as the UVA view's ops never trigger lazy init.
+    torch.accelerator.set_device_index(device)
     cpu_tensor = torch.zeros(10, 10, device="cpu", pin_memory=True, dtype=torch.int32)
     gpu_view = get_accelerator_view_from_cpu_tensor(cpu_tensor)
     assert gpu_view.device.type == DEVICE_TYPE
@@ -55,6 +62,7 @@ def test_gpu_write(device):
     gpu_view[2, 3] = 2
     gpu_view[4, 5] = -1
     gpu_view.mul_(2)
+    torch.accelerator.synchronize(gpu_view.device)
 
     assert cpu_tensor[0, 0] == 2
     assert cpu_tensor[2, 3] == 4
@@ -230,6 +238,25 @@ def test_non_pinned_cpu_tensor(device):
     gpu_view.mul_(2)
     assert gpu_view[2, 3] == 46
     assert gpu_view[9, 9] == 198
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only sync check.")
+def test_non_uva_buffer_copies_without_stream_sync():
+    buffer = buffer_utils.NonUvaBuffer(8, torch.int32)
+    buffer.np[:] = np.arange(8)
+
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        prefix = buffer.uva(4)
+        full = buffer.uva()
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
+    # The next step overwrites the host buffer right after the copy is issued.
+    buffer.np[:] = -1
+    torch.accelerator.synchronize()
+
+    assert prefix.tolist() == list(range(4))
+    assert full.tolist() == list(range(8))
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")

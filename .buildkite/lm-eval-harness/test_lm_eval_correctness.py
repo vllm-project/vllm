@@ -8,16 +8,28 @@ pytest -s -v test_lm_eval_correctness.py \
     --tp-size=1
 """
 
+import gc
 import os
+import time
 from contextlib import contextmanager
 
 import lm_eval
 import pytest
+import torch
 import yaml
+from lm_eval.api.registry import get_model
+from lm_eval.utils import simple_parse_args_string
 
+from vllm import LLM
+from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+logger = init_logger(__name__)
+
 DEFAULT_RTOL = 0.08
+ROCM_ENGINE_SHUTDOWN_TIMEOUT_S = 60.0
+MEMORY_RELEASE_TIMEOUT_S = 240.0
 
 
 @contextmanager
@@ -44,6 +56,48 @@ def scoped_env_vars(new_env: dict[str, str]):
             os.environ[key] = value
         for key in new_keys:
             os.environ.pop(key, None)
+
+
+def _wait_for_memory_release(gpu_memory_utilization: float) -> None:
+    devices = range(torch.accelerator.device_count())
+    deadline = time.monotonic() + MEMORY_RELEASE_TIMEOUT_S
+    while True:
+        memory = [torch.accelerator.get_memory_info(d) for d in devices]
+        if all(free >= total * gpu_memory_utilization for free, total in memory):
+            return
+        if time.monotonic() >= deadline:
+            usage = ", ".join(
+                f"{d}: {free / 2**30:.2f}/{total / 2**30:.2f} GiB free"
+                for d, (free, total) in zip(devices, memory)
+            )
+            logger.warning(
+                "GPU memory not released after %ss (%s); the next model needs %.2f",
+                MEMORY_RELEASE_TIMEOUT_S,
+                usage,
+                gpu_memory_utilization,
+            )
+            return
+        time.sleep(1)
+
+
+def _shutdown_lm(lm) -> None:
+    if not current_platform.is_rocm():
+        return
+    llm = getattr(lm, "model", None)
+    if not isinstance(llm, LLM):
+        return
+    gpu_memory_utilization = (
+        llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+    )
+    try:
+        llm.llm_engine.engine_core.shutdown(timeout=ROCM_ENGINE_SHUTDOWN_TIMEOUT_S)
+    except Exception:
+        logger.exception("Engine core shutdown raised; GPU memory may leak")
+    del llm
+    lm.model = None
+    gc.collect()
+    cleanup_dist_env_and_memory()
+    _wait_for_memory_release(gpu_memory_utilization)
 
 
 def launch_lm_eval(eval_config, tp_size):
@@ -82,9 +136,17 @@ def launch_lm_eval(eval_config, tp_size):
 
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):
+        if current_platform.is_rocm():
+            model = get_model(backend).create_from_arg_string(
+                model_args,
+                {"batch_size": batch_size, "max_batch_size": None, "device": None},
+            )
+            model_kwargs = {"metadata": simple_parse_args_string(model_args)}
+        else:
+            model = backend
+            model_kwargs = {"model_args": model_args}
         results = lm_eval.simple_evaluate(
-            model=backend,
-            model_args=model_args,
+            model=model,
             tasks=[task["name"] for task in eval_config["tasks"]],
             num_fewshot=eval_config["num_fewshot"],
             limit=eval_config["limit"],
@@ -98,7 +160,9 @@ def launch_lm_eval(eval_config, tp_size):
             # Forward decoding and early-stop controls (e.g., max_gen_toks, until=...)
             gen_kwargs=eval_config.get("gen_kwargs"),
             batch_size=batch_size,
+            **model_kwargs,
         )
+    _shutdown_lm(model)
     return results
 
 
