@@ -49,6 +49,7 @@ from vllm.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
+from vllm.entrypoints.serve.middleware.request_failures import mark_generation_started
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
@@ -418,6 +419,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 mm_token_counts=mm_token_counts,
             )
 
+        mark_generation_started(raw_request)
         return await self.chat_completion_full_generator(
             request,
             result_generator,
