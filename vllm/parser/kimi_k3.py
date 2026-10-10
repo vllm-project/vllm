@@ -10,8 +10,9 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
 )
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.abstract_parser import DelegatingParser, StreamState
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -93,6 +94,33 @@ class KimiK3Parser(DelegatingParser):
             delta_message.tool_calls = []
         return delta_message, False
 
+    def finalize_generation(
+        self,
+        delta_message: DeltaMessage | None,
+        request: ChatCompletionRequest | ResponsesRequest,
+        state: StreamState,
+    ) -> DeltaMessage | None:
+        delta_message = super().finalize_generation(delta_message, request, state)
+        if not state.reasoning_ended and isinstance(
+            self._reasoning_parser, KimiK3ReasoningParser
+        ):
+            tail = self._reasoning_parser.finish_reasoning_streaming(
+                state.previous_text
+            )
+            if tail:
+                if delta_message is None:
+                    delta_message = DeltaMessage()
+                delta_message.reasoning = (delta_message.reasoning or "") + tail
+        elif state.reasoning_ended and isinstance(self._tool_parser, KimiK3ToolParser):
+            content_tail = self._tool_parser._extract_response_content(
+                state.previous_text, finished=True
+            )
+            if content_tail:
+                if delta_message is None:
+                    delta_message = DeltaMessage()
+                delta_message.content = (delta_message.content or "") + content_tail
+        return delta_message
+
     def parse_delta(
         self,
         delta_text: str,
@@ -116,14 +144,16 @@ class KimiK3Parser(DelegatingParser):
             self._tool_parser is not None
             or not isinstance(self._reasoning_parser, KimiK3ReasoningParser)
             or not state.reasoning_ended
-            or delta_message is None
         ):
             return delta_message
 
         stripped = self._reasoning_parser.strip_content_streaming(
             previous_text=previous_content,
             current_text=state.previous_text,
+            finished=finished,
         )
+        if delta_message is None:
+            return stripped
         delta_message.content = stripped.content if stripped is not None else None
         if (
             delta_message.role is None
