@@ -1039,6 +1039,22 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
+    """A native user's buffer export must block unmapping -- unmapping under it
+    would let the NIC write into reused address space. The pathname still goes."""
+    region = _make_region(iid)
+    export = ctypes.c_char.from_buffer(region.mmap_obj)
+    try:
+        region.cleanup()
+        assert region.mmap_obj is not None and not region.mmap_obj.closed
+        assert not os.path.exists(region.mmap_path), "pathname must still go"
+        assert region.mmap_obj[0:1] == b"\x00", "mapping must stay readable"
+    finally:
+        del export
+        region.mmap_obj.close()
+        _cleanup_file(region.mmap_path)
+
+
 def test_backing_file_unlinked_after_barrier(iid):
     """The file must exist until the barrier releases (late joiners need the
     name) and be gone right after, so no exit path can leak it."""
