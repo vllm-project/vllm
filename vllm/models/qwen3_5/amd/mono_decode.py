@@ -99,7 +99,7 @@ def _unsupported(model, vllm_config) -> str | None:
             return "dense MLP"
         if mlp.shared_expert is None or mlp.replicate_shared_expert:
             return "shared expert not TP sharded"
-        if mlp.enable_eplb or mlp.ep_size != 1:
+        if mlp.enable_eplb or _routed_experts(mlp).use_ep:
             return "expert parallel"
         if layer.layer_type == "linear_attention":
             a = layer.linear_attn
