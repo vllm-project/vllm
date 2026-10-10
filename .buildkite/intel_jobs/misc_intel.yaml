@@ -389,3 +389,29 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s compile/passes/test_qk_norm_rope_fusion.py'
+- label: Meta-Device Op Capture
+  key: op-capture-intel
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/config/load.py
+    - vllm/model_executor/model_loader/
+    - vllm/profiler/op_capture/
+    - vllm/utils/torch_utils.py
+    - vllm/v1/worker/xpu_model_runner.py
+    - tests/profiler/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s profiler/test_op_capture.py'

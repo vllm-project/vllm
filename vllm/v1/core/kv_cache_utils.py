@@ -2359,6 +2359,21 @@ def _max_memory_usage_bytes_from_groups(
     return bytes_per_block * total_blocks
 
 
+def min_kv_cache_memory_bytes(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> int:
+    """Bytes the KV cache needs to hold one request of `max_model_len`.
+
+    Planned over the cache groups `get_kv_cache_configs` builds, plus the null
+    block the block pool holds back.
+    """
+    # Copied: grouping may unify the specs of a hybrid model in place.
+    groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
+    return _max_memory_usage_bytes_from_groups(
+        vllm_config, groups
+    ) + _pool_bytes_per_block(groups)
+
+
 def _estimate_max_model_len_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],

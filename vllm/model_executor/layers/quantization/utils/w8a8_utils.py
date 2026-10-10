@@ -86,8 +86,10 @@ def requantize_with_max_scale(
     # * Sample Model: nm-testing/Phi-3-mini-128k-instruct-FP8
     #
     # Extra note: upon weight reloading weight_scale.ndim == 0
+    # On meta the scales hold no values; either branch leaves the same shapes.
     unfused_module_in_checkpoint = (
-        weight_scale.ndim != 0
+        not weight_scale.is_meta
+        and weight_scale.ndim != 0
         and weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min
     )
 
