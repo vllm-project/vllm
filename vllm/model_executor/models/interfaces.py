@@ -347,7 +347,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         as a tower model component.
 
         Tower model components are automatically skipped when `--limit-mm-per-prompt`
-        is set to zero for all of their modalities.
+        is set to zero for all of their modalities, and on pipeline stages after the
+        first under Model Runner V2, which runs encoders on the first stage only.
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
@@ -356,6 +357,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         it supports tower offloading), since `make_layers` only ever sees the
         decoder layer stack.
         """
+        from vllm.distributed import get_pp_group
         from vllm.model_executor.offloader import get_offloader
 
         from .utils import StageMissingLayer, collect_children, no_init_weights
@@ -378,6 +380,9 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                or (
+                    vllm_config.use_v2_model_runner and not get_pp_group().is_first_rank
+                )
                 else nullcontext()
             ):
                 yield

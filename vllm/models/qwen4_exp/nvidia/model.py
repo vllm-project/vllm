@@ -961,7 +961,9 @@ class Qwen4ExpForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        if not get_pp_group().is_first_rank and self.use_deepstack:
+        if not get_pp_group().is_first_rank and any(
+            multimodal_config.get_limit_per_prompt(m) for m in ("image", "video")
+        ):
             assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (

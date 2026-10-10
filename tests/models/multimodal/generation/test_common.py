@@ -1029,6 +1029,11 @@ def _mark_splits(
     return new_test_settings
 
 
+VLM_TEST_SETTINGS["llava-pp-broadcast"] = VLM_TEST_SETTINGS["llava-broadcast"]._replace(
+    tensor_parallel_size=1,
+    distributed_executor_backend="mp",
+    vllm_runner_kwargs={"pipeline_parallel_size": 2},
+)
 VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 
 
