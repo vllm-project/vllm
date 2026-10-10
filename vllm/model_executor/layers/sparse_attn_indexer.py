@@ -732,7 +732,7 @@ def sparse_attn_indexer(
                 weights[:num_padded_tokens],
                 seq_lens,
                 decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
+                decode_metadata.get_schedule_metadata(),
                 max_model_len=max_model_len,
                 clean_logits=False,
                 indices=decode_metadata.indices,

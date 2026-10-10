@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -21,6 +21,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    get_num_sms,
     get_paged_mqa_logits_metadata,
     get_paged_mqa_page_sizes,
     has_deep_gemm,
@@ -672,6 +673,34 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    # SM count and KV block size `schedule_metadata` was planned with by
+    # DeepGEMM; 0 when it is not a DeepGEMM schedule (e.g. XPU, ROCm).
+    schedule_num_sms: int = 0
+    schedule_block_size: int = 0
+    _schedule_metadata_by_num_sms: dict[int, torch.Tensor] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def get_schedule_metadata(self) -> torch.Tensor:
+        """`schedule_metadata` planned for DeepGEMM's current SM count, which
+        dual-batch overlap lowers while microbatches run
+        (`create_sm_control_context`). Re-planned schedules are cached, so
+        only the first indexer layer of a forward pays for it."""
+        if self.schedule_num_sms <= 0:
+            return self.schedule_metadata
+        num_sms = get_num_sms()
+        if num_sms == self.schedule_num_sms:
+            return self.schedule_metadata
+        metadata = self._schedule_metadata_by_num_sms.get(num_sms)
+        if metadata is None:
+            metadata = get_paged_mqa_logits_metadata(
+                self.seq_lens,
+                self.schedule_block_size,
+                num_sms,
+                indices=self.indices,
+            )
+            self._schedule_metadata_by_num_sms[num_sms] = metadata
+        return metadata
 
 
 @dataclass
@@ -1668,11 +1697,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             schedule_metadata = self.scheduler_metadata_buffer
+            schedule_num_sms = 0
             if current_platform.is_cuda() and has_deep_gemm():
+                schedule_num_sms = self.num_sms
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.num_states,
-                    self.num_sms,
+                    schedule_num_sms,
                     indices=decode_indices,
                 )
                 schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
@@ -1689,6 +1720,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                schedule_num_sms=schedule_num_sms,
+                schedule_block_size=self.kv_cache_spec.num_states,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -1759,6 +1792,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             assert schedule_metadata.shape == decode.schedule_metadata.shape
             decode.schedule_metadata.copy_(schedule_metadata)
+            # seq_lens changed in place, so schedules re-planned for a
+            # different SM count are stale.
+            decode._schedule_metadata_by_num_sms.clear()
 
 
 def build_prefill_chunk_metadata(
