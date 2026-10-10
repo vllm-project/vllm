@@ -213,6 +213,39 @@ def test_spec_checkpoint_metadata_gathers_non_spec_rows_by_index() -> None:
     )
 
 
+def test_later_kv_cache_groups_regather_the_checkpoint_rows() -> None:
+    # K3 is 93 layers, which the hybrid allocator splits into 14 KDA groups
+    # holding the same requests in their own state blocks. MRV2 builds one
+    # group and re-gathers the rest, so the rows this builder adds have to
+    # survive that re-gather.
+    builder = _builder()
+    assert builder.reuses_group_metadata
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[200, 128], query_lens=[200, 128]),
+        BLOCK_SIZE,
+        torch.device("cuda"),
+        arange_block_indices=True,
+    )
+    first = builder.build(0, common)
+    assert first.checkpoint is not None
+
+    offset = 100
+    second_table = common.block_table_tensor + offset
+    builder.mamba_aligned_state_indices = second_table
+    second = builder.update_block_table(first, second_table, common.slot_mapping)
+
+    assert second.checkpoint is not None
+    torch.testing.assert_close(
+        second.checkpoint.state_indices, first.checkpoint.state_indices + offset
+    )
+    torch.testing.assert_close(
+        second.checkpoint.checkpoint_offsets, first.checkpoint.checkpoint_offsets
+    )
+    # The batch-level work is done once.
+    assert second.non_spec_query_start_loc is first.non_spec_query_start_loc
+    assert second.prefill_query_start_loc is first.prefill_query_start_loc
+
+
 def test_checkpoint_metadata_absent_outside_align_mode() -> None:
     md = _build(
         BatchSpec(seq_lens=[200], query_lens=[200]),

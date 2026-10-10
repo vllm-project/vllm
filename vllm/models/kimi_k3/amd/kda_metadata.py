@@ -93,6 +93,11 @@ def prepare_chunk_metadata_device(
 
 
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    # The checkpoint rows and the chunk metadata this builder adds read
+    # batch-level inputs. Its per-group part is the checkpoint state indices,
+    # which update_block_table re-gathers.
+    reuses_group_metadata = True
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,

@@ -305,6 +305,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
     # so one k+1 graph replays any 1..k+1 mix.
     _cudagraph_support = AttentionCGSupport.ALWAYS
     mamba_aligned_state_indices: torch.Tensor | None = None
+    # RecoverSSM keeps per-group commit state, which the state-index re-gather
+    # in update_block_table does not carry over.
+    reuses_group_metadata = False
 
     def __init__(
         self,

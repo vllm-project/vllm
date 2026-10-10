@@ -10,6 +10,7 @@ recomputed at runtime with the explicit correct dtypes.
 """
 
 import types
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -72,9 +73,10 @@ _OUTPUT_ARG_FIELDS = (
 def _build_decode_metadata():
     """Build AITER MLA decode metadata for the fp8/fp8 nhead=32 fold path.
 
-    Returns ``(metadata, captured)`` where ``captured`` records the positional
-    args/kwargs the builder passed to ``get_mla_metadata_v1``, so the golden can
-    be recomputed from the identical inputs.
+    Returns ``(metadata, captured, builder, common_attn_metadata)`` where
+    ``captured`` records the positional args/kwargs the builder passed to
+    ``get_mla_metadata_v1``, so the golden can be recomputed from the identical
+    inputs.
     """
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -157,7 +159,7 @@ def _build_decode_metadata():
                 common_attn_metadata=common_attn_metadata,
             )
 
-    return metadata, captured
+    return metadata, captured, builder, common_attn_metadata
 
 
 def _compute_golden_metadata(captured: dict) -> dict[str, torch.Tensor]:
@@ -191,7 +193,7 @@ def test_persistent_decode_metadata_matches_fp8_golden():
     dtypes. Dropping the dtypes (the original bug) produces a different layout
     and fails this test.
     """
-    metadata, captured = _build_decode_metadata()
+    metadata, captured, _, _ = _build_decode_metadata()
 
     # qlen=1 must take the persistent-metadata path for this to be meaningful.
     assert metadata.decode is not None
@@ -211,3 +213,38 @@ def test_persistent_decode_metadata_matches_fp8_golden():
         f"golden for fields {mismatched}; the builder must forward "
         "dtype_q/dtype_kv to get_mla_metadata_v1."
     )
+
+
+def test_later_kv_cache_group_derives_the_metadata_it_would_have_built():
+    """A model whose MLA layers span several KV cache groups builds once.
+
+    The groups hold the same requests in their own blocks, so the runner
+    builds the first and points the rest at their own blocks. What that
+    produces has to be what building the group outright would have.
+    """
+    first, _, builder, common = _build_decode_metadata()
+    assert builder.supports_update_block_table
+    assert first.decode is not None
+
+    second_table = common.block_table_tensor + BATCH_SIZE * CONTEXT_LEN
+    derived = builder.update_block_table(first, second_table, common.slot_mapping)
+    assert derived.decode is not None
+    # The page indices live in a buffer the next build overwrites.
+    derived_page_indices = derived.decode.paged_kv_indices.clone()
+
+    direct = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=replace(common, block_table_tensor=second_table),
+    )
+    assert direct.decode is not None
+
+    torch.testing.assert_close(derived.decode.block_table, direct.decode.block_table)
+    torch.testing.assert_close(derived_page_indices, direct.decode.paged_kv_indices)
+
+    # The batch-level work is done once: the derived metadata keeps the first
+    # group's sequence lengths, indptrs and decode schedule.
+    assert derived.decode.paged_kv_indptr is first.decode.paged_kv_indptr
+    assert derived.decode.seq_lens is first.decode.seq_lens
+    assert derived.decode.qo_indptr is first.decode.qo_indptr
+    assert derived.work_indptr is first.work_indptr
+    assert derived.work_info_set is first.work_info_set
