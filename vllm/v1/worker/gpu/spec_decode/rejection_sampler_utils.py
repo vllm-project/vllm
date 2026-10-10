@@ -425,6 +425,9 @@ def _compute_local_residual_mass_kernel(
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
+    # Adaptive verification can end before num_speculative_steps.
+    if logit_idx + 1 >= tl.num_programs(0):
+        return
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
     if draft_step_idx == 0 or draft_step_idx >= num_speculative_steps:
         # The acceptance threshold, h, looks one position ahead and sums
