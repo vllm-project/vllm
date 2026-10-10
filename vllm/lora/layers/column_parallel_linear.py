@@ -202,7 +202,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             divide(output_size, self.tp_size) for output_size in self.output_sizes
         )
         self.n_slices = len(self.output_slices)
-        self.output_ids = (self.tp_rank,) * self.n_slices
+        replicated_shard_ids = getattr(self.base_layer, "replicated_shard_ids", ())
+        self.output_ids = tuple(
+            0 if i in replicated_shard_ids else self.tp_rank
+            for i in range(self.n_slices)
+        )
 
     def create_lora_weights(
         self,
