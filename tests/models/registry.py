@@ -259,6 +259,21 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV4ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
     ),
+    "DoryForCausalLM": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-BF16",
+        use_original_num_layers=True,
+        max_model_len=128,
+        hf_overrides={
+            "num_hidden_layers": 8,
+            "n_input_layers": 2,
+            "n_recurrent_layers": 4,
+            "n_output_layers": 2,
+            "n_recurrent_loops": 2,
+            "hybrid_layer_pattern": "S-S-S-*-",
+            "rope_profile_layers": [2, 1, 2, 1, 2, 1, 1, 1],
+            "no_rope_layers": [0] * 8,
+        },
+    ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
