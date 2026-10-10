@@ -81,6 +81,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_nvfp4_moe_weights,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
     QuantKey,
@@ -884,6 +887,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def uses_weight_scale_2_pattern(self) -> bool:
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
         return True
+
+    def dequantize_weight(
+        self, layer: torch.nn.Module
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Materialize serialized ModelOpt NVFP4 expert weights."""
+        return dequantize_nvfp4_moe_weights(
+            layer.w13_weight,
+            layer.w13_weight_scale,
+            layer.w13_weight_scale_2,
+            layer.w2_weight,
+            layer.w2_weight_scale,
+            layer.w2_weight_scale_2,
+            layer.params_dtype,
+            group_size=self.quant_config.group_size,
+            invert_global_scales=False,
+        )
 
     def create_weights(
         self,
