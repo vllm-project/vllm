@@ -23,6 +23,9 @@ import zmq.asyncio
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.elastic_ep.external_elastic_ep import (
+    ExternalElasticEPScaleCoordinator,
+)
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -270,6 +273,11 @@ class EngineCoreClient(ABC):
 
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
+
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        return None
 
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
@@ -626,6 +634,8 @@ class MPClient(EngineCoreClient):
             enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
+            self.coordinator_input_address: str | None = None
+            self.coordinator_output_address: str | None = None
             tensor_queue: Queue | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
@@ -701,6 +711,11 @@ class MPClient(EngineCoreClient):
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
+
+            self.input_address = self.input_socket.getsockopt_string(zmq.LAST_ENDPOINT)
+            output_socket = self.resources.output_socket
+            assert output_socket is not None
+            self.output_address = output_socket.getsockopt_string(zmq.LAST_ENDPOINT)
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             tensor_ipc_sender: TensorIpcSender | None = None
@@ -884,6 +899,25 @@ class MPClient(EngineCoreClient):
             self._kv_event_sources[response.data_parallel_rank] = (
                 response.kv_events_config
             )
+
+        parallel_config = vllm_config.parallel_config
+        if response.coord_store_port:
+            if parallel_config._coord_store_port:
+                assert response.coord_store_port == parallel_config._coord_store_port
+            else:
+                parallel_config._coord_store_port = response.coord_store_port
+
+        for attribute in (
+            "coordinator_input_address",
+            "coordinator_output_address",
+        ):
+            address = getattr(response, attribute)
+            if address is not None:
+                existing_address = getattr(self, attribute)
+                if existing_address is None:
+                    setattr(self, attribute, address)
+                else:
+                    assert address == existing_address
 
     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
         return dict(self._kv_event_sources)
@@ -1431,6 +1465,12 @@ class DPAsyncMPClient(AsyncMPClient):
         renderer: BaseRenderer | None = None,
     ):
         self.current_wave = 0
+        parallel_config = vllm_config.parallel_config
+        self.external_eep_coordinator: ExternalElasticEPScaleCoordinator | None = None
+        if parallel_config.enable_elastic_ep and (
+            parallel_config.data_parallel_external_lb
+        ):
+            self.external_eep_coordinator = ExternalElasticEPScaleCoordinator(self)
 
         super().__init__(
             vllm_config,
@@ -1514,23 +1554,19 @@ class DPAsyncMPClient(AsyncMPClient):
                             dp_rank = parallel_config.data_parallel_rank
                             assert dp_rank == 0
                             assert dp_size == new_engine_count
-                            assert not (
-                                parallel_config.data_parallel_hybrid_lb
-                                or parallel_config.data_parallel_external_lb
-                            )
-                            num_ranks = dp_size
-                            self.engine_ranks_managed = list(
-                                range(dp_rank, dp_rank + num_ranks)
-                            )
-                            if len(self.lb_engines) < new_engine_count:
-                                self.lb_engines = self.lb_engines + [
-                                    [0, 0, 0.0]
-                                    for _ in range(
-                                        new_engine_count - len(self.lb_engines)
-                                    )
-                                ]
-                            else:
-                                self.lb_engines = self.lb_engines[:new_engine_count]
+                            assert not parallel_config.data_parallel_hybrid_lb
+                            # External LB clients continue to manage only local ranks.
+                            if not parallel_config.data_parallel_external_lb:
+                                self.engine_ranks_managed = list(range(dp_size))
+                                if len(self.lb_engines) < new_engine_count:
+                                    self.lb_engines += [
+                                        [0, 0, 0.0]
+                                        for _ in range(
+                                            new_engine_count - len(self.lb_engines)
+                                        )
+                                    ]
+                                else:
+                                    self.lb_engines = self.lb_engines[:new_engine_count]
                             # Send scale up notification to coordinator
                             scale_msg = msgspec.msgpack.encode(
                                 ("SCALE_ELASTIC_EP", new_engine_count)
@@ -1598,6 +1634,86 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
+
+    def _eep_commit_pause_mode(self) -> PauseMode:
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            can_reuse_fused_moe_kernel,
+        )
+
+        # MRV2 re-warms through the request pool, so running requests must
+        # finish first while new ones stay queued in the scheduler.
+        parallel_config = self.vllm_config.parallel_config
+        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
+            parallel_config
+        ):
+            return "wait"
+        return "keep"
+
+    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
+        from vllm.distributed.utils import create_tcp_store
+        from vllm.utils.network_utils import get_open_ports_list
+
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
+        parallel_config.data_parallel_master_port = (
+            parallel_config._data_parallel_master_port_list.pop()
+        )
+
+        ip = parallel_config.data_parallel_master_ip
+        store = create_tcp_store(
+            ip,
+            0,
+            is_master=True,
+            world_size=-1,
+            wait_for_workers=False,
+        )
+        parallel_config._coord_store_port = store.port
+        self._coord_store = store
+        return ip, store.port
+
+    @staticmethod
+    async def eep_process_engine_core_notification(
+        self: "DPAsyncMPClient", notification_data: tuple[str, int]
+    ) -> None:
+        if self.external_eep_coordinator is not None:
+            await self.external_eep_coordinator.process_engine_core_notification(
+                notification_data
+            )
+
+    def _get_external_eep_coordinator(self) -> ExternalElasticEPScaleCoordinator:
+        parallel_config = self.vllm_config.parallel_config
+        if not parallel_config.enable_elastic_ep:
+            raise NotImplementedError(
+                "Elastic EP scaling requires enable_elastic_ep=True."
+            )
+        if not parallel_config.data_parallel_external_lb:
+            raise NotImplementedError(
+                "DPAsyncMPClient only supports Elastic EP scaling in external "
+                "load-balancer mode."
+            )
+        coordinator = self.external_eep_coordinator
+        assert coordinator is not None
+        return coordinator
+
+    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+        cur_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+
+        assert new_data_parallel_size != cur_data_parallel_size, (
+            f"new_data_parallel_size {new_data_parallel_size} must be "
+            f"different from cur_data_parallel_size {cur_data_parallel_size}"
+        )
+        await self._get_external_eep_coordinator().prepare(
+            cur_data_parallel_size, new_data_parallel_size
+        )
+
+    async def commit_elastic_ep(self) -> None:
+        await self._get_external_eep_coordinator().commit()
+
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        coordinator = self.external_eep_coordinator
+        return None if coordinator is None else coordinator.get_status()
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
@@ -1711,8 +1827,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     @staticmethod
     async def eep_process_engine_core_notification(
-        self: "DPLBAsyncMPClient", notification_data: tuple[str, int]
-    ):
+        self: "DPAsyncMPClient", notification_data: tuple[str, int]
+    ) -> None:
+        assert isinstance(self, DPLBAsyncMPClient)
         cache = self.eep_scaling_cache
         notification_type_str, dp_rank = notification_data
         try:
@@ -1864,27 +1981,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             new_engine_identities.discard(identity)
             self._apply_ready_response(payload)
 
-    def _setup_elastic_ep_reconfig_bootstrap(self) -> None:
-        from vllm.distributed.utils import create_tcp_store
-        from vllm.utils.network_utils import get_open_ports_list
-
-        parallel_config = self.vllm_config.parallel_config
-        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
-        parallel_config.data_parallel_master_port = (
-            parallel_config._data_parallel_master_port_list.pop()
-        )
-
-        ip = parallel_config.data_parallel_master_ip
-        store = create_tcp_store(
-            ip,
-            0,
-            is_master=True,
-            world_size=-1,
-            wait_for_workers=False,
-        )
-        parallel_config._coord_store_port = store.port
-        self._coord_store = store
-
     def _make_reconfig_request(
         self,
         new_data_parallel_size: int,
@@ -1938,20 +2034,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         await asyncio.to_thread(self._coord_store.wait, ready_keys)
         logger.info("[Elastic EP] Successfully started new engines")
-
-    def _eep_commit_pause_mode(self) -> PauseMode:
-        from vllm.distributed.elastic_ep.elastic_execute import (
-            can_reuse_fused_moe_kernel,
-        )
-
-        # MRV2 re-warms through the request pool, so running requests must
-        # finish first while new ones stay queued in the scheduler.
-        parallel_config = self.vllm_config.parallel_config
-        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
-            parallel_config
-        ):
-            return "wait"
-        return "keep"
 
     async def _commit_scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         new_core_engines = [

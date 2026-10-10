@@ -8,6 +8,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from vllm.distributed.elastic_ep.external_elastic_ep import ExternalElasticEPScalePhase
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.elastic_ep.middleware import get_scaling_elastic_ep
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
@@ -82,7 +83,35 @@ async def scale_elastic_ep(raw_request: Request):
 
 @router.post("/is_scaling_elastic_ep")
 async def is_scaling_elastic_ep(raw_request: Request):
-    return JSONResponse({"is_scaling_elastic_ep": get_scaling_elastic_ep()})
+    # External operation status comes from the shared store. Middleware gating
+    # remains process-local, so scaling requests must reach every old-rank API.
+    try:
+        status = await engine_client(raw_request).get_external_elastic_ep_status()
+    except Exception as e:
+        logger.warning("Failed to query external Elastic EP status: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="External Elastic EP status is temporarily unavailable",
+        ) from e
+    if status is None:
+        # Non-external EEP modes retain the process-local middleware state.
+        is_scaling = get_scaling_elastic_ep()
+        status = {
+            "phase": (
+                ExternalElasticEPScalePhase.COMMITTING.value
+                if is_scaling
+                else ExternalElasticEPScalePhase.IDLE.value
+            ),
+            "epoch": None,
+            "error": None,
+            "requested_data_parallel_size": None,
+        }
+    else:
+        is_scaling = status["phase"] in (
+            ExternalElasticEPScalePhase.PREPARING.value,
+            ExternalElasticEPScalePhase.COMMITTING.value,
+        )
+    return JSONResponse({"is_scaling_elastic_ep": is_scaling, **status})
 
 
 def attach_router(app: FastAPI):
