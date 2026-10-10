@@ -107,6 +107,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     ensure_private_socket_dir,
     get_current_device_uuid,
     get_socket_path,
+    hash_rope_parameters,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
@@ -251,6 +252,8 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+        # In-place reloads use configs already normalized by model construction.
+        self.loaded_rope_parameters_hash = hash_rope_parameters(self.model_config)
         # Loading and post-processing leave freed transients in the caching
         # allocator; return them so engines sharing the GPU can use them.
         gc.collect()
@@ -397,6 +400,12 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Missing cache_config"})
             return
         mismatched = self.cache_config.mismatched_fields(client_config)
+        if (
+            request.get("is_reload", False)
+            and "rope_parameters_hash" in mismatched
+            and client_config.rope_parameters_hash == self.loaded_rope_parameters_hash
+        ):
+            mismatched.remove("rope_parameters_hash")
         if mismatched:
             logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
