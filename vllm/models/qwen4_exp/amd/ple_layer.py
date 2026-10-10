@@ -286,9 +286,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             self.layer_name,
         )
         embedding = self.ngram_embedding
+        stored_dim = self.ngram_heads * embedding.weight.shape[1]
         if embedding.supports_prefetch:
             output = ngram_ids.new_empty(
-                (ngram_ids.shape[0], self.embedding_dim),
+                (ngram_ids.shape[0], stored_dim),
                 dtype=embedding.weight.dtype,
             )
             torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(
@@ -297,9 +298,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 self.layer_name,
             )
             return output
+        packed = embedding.weight.dtype == torch.uint8
         output = ngram_ids.new_empty(
-            (ngram_ids.shape[0], self.embedding_dim),
-            dtype=embedding.params_dtype,
+            (ngram_ids.shape[0], stored_dim if packed else self.embedding_dim),
+            dtype=torch.uint8 if packed else embedding.params_dtype,
         )
         torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding(
             ngram_ids,
@@ -353,7 +355,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     0,
                     min(shard_size, embedding.org_vocab_size - checkpoint_start),
                 )
-                expected_shape = (expected_rows, embedding.embedding_dim)
+                expected_shape = (expected_rows, embedding.weight.shape[1])
                 if tuple(loaded_weight.shape) != expected_shape:
                     raise ValueError(
                         f"Shape mismatch for PLE embedding shard {shard_index}: "

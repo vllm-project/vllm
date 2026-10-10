@@ -177,6 +177,8 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         """Select the concrete PLE embedding format for a layer."""
         if embedding_dtype == "float8_e4m3fn":
             return Qwen4ExpPLEFp8EmbeddingMethod()
+        if embedding_dtype == "nf4":
+            return Qwen4ExpPLENf4EmbeddingMethod()
         if quant_config is None:
             return Qwen4ExpPLEUnquantizedEmbeddingMethod()
         if isinstance(quant_config, ModelOptMixedPrecisionConfig):
@@ -339,6 +341,96 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         return embeddings.to(output_dtype) * weight_scale.to(output_dtype)
 
 
+# Lloyd-Max levels of a unit Gaussian; the rows of the n-gram table are
+# close to Gaussian, so 16 levels at these points beat a uniform int4 grid.
+_NF4_LEVELS = (0.1284, 0.3881, 0.6568, 0.9424, 1.2562, 1.6181, 2.0690, 2.7326)
+NF4_PLE_LEVELS = tuple(-v for v in reversed(_NF4_LEVELS)) + _NF4_LEVELS
+
+
+class Qwen4ExpPLENf4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
+    """4-bit PLE embedding: per-row scale times one of 16 Gaussian levels.
+
+    Each stored row is ``dim // 2`` bytes of codes (element ``2i`` in the low
+    nibble of byte ``i``), the FP16 row scale, and two bytes of padding, so a
+    row is one contiguous read for the pinned UVA lookup.
+    """
+
+    @staticmethod
+    def row_bytes(embedding_dim: int) -> int:
+        return embedding_dim // 2 + 4
+
+    def create_weights(
+        self,
+        layer: Qwen4ExpPLEEmbedding,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size, params_dtype
+        if input_size_per_partition % 2:
+            raise ValueError("NF4 PLE embedding needs an even embedding dim")
+        weight = ModelWeightParameter(
+            data=layer.allocate_embedding_weight(
+                sum(output_partition_sizes),
+                self.row_bytes(input_size_per_partition),
+                torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=extra_weight_attrs.get("weight_loader"),
+        )
+        layer.register_parameter("weight", weight)
+
+    def dequantize(
+        self,
+        layer: nn.Module,
+        embeddings: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        dim = layer.embedding_dim
+        rows = embeddings.reshape(-1, self.row_bytes(dim))
+        codes = rows[:, : dim // 2]
+        codes = torch.stack((codes & 15, codes >> 4), dim=-1).flatten(-2)
+        scale = rows[:, dim // 2 : dim // 2 + 2].contiguous().view(torch.float16)
+        levels = torch.tensor(
+            NF4_PLE_LEVELS, dtype=torch.float32, device=embeddings.device
+        )
+        values = levels[codes.long()] * scale.float()
+        return values.reshape(*embeddings.shape[:-1], -1).to(output_dtype)
+
+
+def quantize_ple_nf4(weight: torch.Tensor) -> torch.Tensor:
+    """Pack float PLE rows into the NF4 row layout.
+
+    The row scale is searched around the row RMS for the lowest squared error.
+    """
+    rows = weight.float()
+    levels = torch.tensor(NF4_PLE_LEVELS, device=rows.device)
+    edges = (levels[1:] + levels[:-1]) / 2
+    rms = rows.square().mean(-1, keepdim=True).sqrt().clamp_min(1e-12)
+    best_err = best_codes = best_scale = None
+    for factor in (0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15):
+        scale = (rms * factor).half().float()
+        codes = torch.bucketize(rows / scale, edges)
+        err = (levels[codes] * scale - rows).square().sum(-1, keepdim=True)
+        if best_err is None:
+            best_err, best_codes, best_scale = err, codes, scale
+        else:
+            better = err < best_err
+            best_err = torch.minimum(err, best_err)
+            best_codes = torch.where(better, codes, best_codes)
+            best_scale = torch.where(better, scale, best_scale)
+    assert best_codes is not None and best_scale is not None
+    codes = best_codes.to(torch.uint8)
+    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
+    scale_bytes = best_scale.half().view(torch.uint8)
+    padding = packed.new_zeros(packed.shape[0], 2)
+    return torch.cat((packed, scale_bytes, padding), dim=-1)
+
+
 class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
     """PLE table allocated on the active model device."""
 
@@ -437,14 +529,17 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             data_parallel_rank=data_parallel_rank,
         )
         self._uva_weight = get_accelerator_view_from_cpu_tensor(self.weight)
-        self._row_bytes = self.embedding_dim * self.weight.element_size()
+        # Stored row width; packed formats store more or fewer elements per
+        # row than the embedding dim.
+        self._row_width = self.weight.shape[1]
+        self._row_bytes = self._row_width * self.weight.element_size()
         self._block_d = triton.next_power_of_2(self._row_bytes)
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetch_buffer: torch.Tensor | None = None
         self._prefetch_alloc_lock = threading.Lock()
         self._prefetch_rows = max_total_tokens * self.etp_data_parallel_size
         self._num_ngram_heads = num_ngram_heads
-        self._output_dim = num_ngram_heads * self.embedding_dim
+        self._output_dim = num_ngram_heads * self._row_width
 
     def allocate_embedding_weight(
         self,
@@ -467,7 +562,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Look up local ETP rows while preserving the weight storage dtype."""
-        expected_shape = (*input_ids.shape, self.embedding_dim)
+        expected_shape = (*input_ids.shape, self._row_width)
         if output is None:
             output = torch.empty(
                 expected_shape,
@@ -514,8 +609,8 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         if self.tp_size == 1:
             return embeddings
         assert self.parallel_group is not None
-        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
+        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2, torch.uint8):
+            # Each vocabulary row has one owner, so reduce the raw bytes.
             reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
             return reduced.view(embeddings.dtype)
         return self.parallel_group.all_reduce(embeddings)
@@ -547,7 +642,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
                     buffer = torch.empty(
                         self._prefetch_rows,
                         self._num_ngram_heads,
-                        self.embedding_dim,
+                        self._row_width,
                         dtype=self.weight.dtype,
                         device=self._uva_weight.device,
                     )
