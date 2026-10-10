@@ -442,13 +442,7 @@ class OnlineDerenderer:
                 spaces_between_special_tokens=spaces_between,
             )
 
-            # NOTE: parser-configured servers dispatch to
-            # _derender_chat_stream_parsed above and never reach this plain
-            # path. That parsed path does not resolve logprobs yet; when it
-            # does, mirror the generate chat streaming path, which suppresses
-            # logprobs entirely when a parser is configured and reasoning is
-            # hidden, because decoded logprob token text would leak hidden
-            # reasoning.
+            # Plain path resolves logprobs unless none were supplied.
             resolved_logprobs = None
             if choice.logprobs is not None:
                 resolved_logprobs = _resolve_logprobs(
@@ -656,9 +650,26 @@ class OnlineDerenderer:
                 if tools_streamed and not is_named_tool_choice:
                     finish_reason = "tool_calls"
 
+            # When reasoning is hidden on a parser-configured request,
+            # suppress logprobs to prevent leaking hidden reasoning tokens
+            # through decoded logprob token strings. Mirrors the coupled
+            # chat streaming path.
+            resolved_logprobs = None
+            if choice.logprobs is not None:
+                hide_stream_metadata = not getattr(
+                    chat_request, "include_reasoning", True
+                )
+                if not hide_stream_metadata:
+                    resolved_logprobs = _resolve_logprobs(
+                        choice.logprobs,
+                        tokenizer,
+                        initial_context_token_ids=state.logprob_context_token_ids,
+                    )
+
             stream_choice = ChatCompletionResponseStreamChoice(
                 index=choice.index,
                 delta=delta_message,
+                logprobs=resolved_logprobs,
                 finish_reason=finish_reason,
             )
             stream_choices.append(
@@ -672,6 +683,9 @@ class OnlineDerenderer:
                 "role_sent": role_sent,
                 "tools_streamed": tools_streamed,
                 "last_tool_call_ids": last_tool_call_ids,
+                "logprob_context_token_ids": _logprob_context_tail(
+                    state.logprob_context_token_ids, delta_tids
+                ),
             }
         )
 
