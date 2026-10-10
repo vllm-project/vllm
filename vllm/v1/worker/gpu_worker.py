@@ -73,6 +73,7 @@ from vllm.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.flashinfer import warn_if_flashinfer_kernels_missing
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
@@ -497,6 +498,7 @@ class Worker(WorkerBase):
 
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
+            warn_if_flashinfer_kernels_missing()
 
             # Set random seed.
             set_random_seed(self.model_config.seed)

@@ -240,6 +240,15 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    enable_shm_tensor_arena: bool = False
+    """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the
+    engine→worker broadcast through a zero-copy shared-memory arena instead of
+    sending a copy to every reader. **Experimental**: may be reconciled with
+    vLLM's existing multimodal shm tensor caching in a future release. Opt-in;
+    most beneficial for multimodal serving with large images and tensor
+    parallelism. Active only when all queue readers are node-local; reserves
+    slots in ``/dev/shm``."""
+
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
     elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
@@ -906,6 +915,7 @@ class ParallelConfig:
             "nnodes",
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
+            "enable_shm_tensor_arena",
             "ray_workers_use_nsight",
             "ray_runtime_env",
             "placement_group",

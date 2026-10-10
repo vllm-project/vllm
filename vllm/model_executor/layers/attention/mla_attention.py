@@ -1376,14 +1376,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
-        # SM100 FlashMLA paged kernels also express TMA coordinates in token rows.
-        uses_tma_rows = (
-            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
-            and self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
-            and current_platform.is_device_capability_family(100)
-        )
-        if self._uses_flat_kv_cache() or uses_tma_rows:
-            spec = replace(spec, block_stride_alignment=spec.state_content_size_bytes)
         return spec
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
