@@ -286,6 +286,8 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        # Sync scheduling: requests whose last draft is a kept grammar-invalid one.
+        self.kept_invalid_draft_req_ids: set[str] = set()
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
@@ -610,6 +612,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        num_invalid_spec_tokens: dict[str, int] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
         # Whether any scheduled request has a synchronous connector KV load.
@@ -859,6 +862,10 @@ class Scheduler(SchedulerInterface):
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
                         spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+                    if len(spec_token_ids) == len(request.spec_token_ids) and (
+                        request.request_id in self.kept_invalid_draft_req_ids
+                    ):
+                        num_invalid_spec_tokens[request.request_id] = 1
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
@@ -1519,6 +1526,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            num_invalid_spec_tokens=num_invalid_spec_tokens or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -2547,6 +2555,12 @@ class Scheduler(SchedulerInterface):
             self.ec_connector.update_state_after_free(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
+        # Synthetic rejection accepts by rate alone, so it must not see an
+        # invalid draft.
+        spec_config = self.vllm_config.speculative_config
+        keep_invalid_draft = (
+            spec_config is None or spec_config.rejection_sample_method != "synthetic"
+        )
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
             draft_token_ids.draft_token_ids,
@@ -2563,9 +2577,21 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            request.spec_token_ids = self.structured_output_manager.validate_tokens(
+            valid_spec_token_ids = self.structured_output_manager.validate_tokens(
                 request, spec_token_ids
             )
+            # Keep the first grammar-invalid draft, as `grammar_invalid_drafts`
+            # does: its bitmask row is real, so verification rejects it and
+            # resamples from the residual max(p - q, 0) rather than from p.
+            num_kept = len(valid_spec_token_ids) + 1
+            self.kept_invalid_draft_req_ids.discard(req_id)
+            if keep_invalid_draft and num_kept <= len(
+                strip_speculative_padding(spec_token_ids)
+            ):
+                valid_spec_token_ids = spec_token_ids[:num_kept]
+                # Like async, leave it out of the drafted count in the metrics.
+                self.kept_invalid_draft_req_ids.add(req_id)
+            request.spec_token_ids = valid_spec_token_ids
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -2718,6 +2744,7 @@ class Scheduler(SchedulerInterface):
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
+        self.kept_invalid_draft_req_ids.discard(request.request_id)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 

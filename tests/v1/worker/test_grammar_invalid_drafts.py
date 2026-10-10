@@ -4,9 +4,10 @@
 
 `StructuredOutputManager.grammar_bitmask` fills row i before it inspects
 `req_tokens[i]`, so with the first -1 placeholder at index j rows 0..j carry a
-real mask and rows j+1.. carry the all-permissive `_full_mask`. Drafts j..K-1
+real mask and rows j+1.. carry the all-permissive `_full_mask`. Drafts j+1..K-1
 must therefore be rejected, or the request samples with no grammar constraint
-at a position the model really does sample.
+at a position the model really does sample. Draft j keeps its id: row j rejects
+it, so the recovery token comes from the residual max(p - q, 0), not from p.
 """
 
 from types import SimpleNamespace
@@ -41,16 +42,22 @@ def _invalid_rows(batch, grammar_req_ids, num_acceptable):
 def test_reject_whole_window_when_nothing_was_backfilled():
     # Request "g" is at rows 0..3 (1 + 3 drafts), so its drafts are rows 1..3.
     batch = _input_batch(["g", "p"], [3, 3])
-    assert _invalid_rows(batch, ["g"], [0]) == [1, 2, 3]
+    assert _invalid_rows(batch, ["g"], None) == [1, 2, 3]
+
+
+def test_keep_the_first_invalid_draft_for_its_real_mask_row():
+    batch = _input_batch(["g", "p"], [3, 3])
+    assert _invalid_rows(batch, ["g"], [0]) == [2, 3]
 
 
 def test_keep_the_drafts_the_bitmask_could_see():
     batch = _input_batch(["g", "p"], [3, 3])
-    assert _invalid_rows(batch, ["g"], [2]) == [3]
+    assert _invalid_rows(batch, ["g"], [1]) == [3]
+    assert _invalid_rows(batch, ["g"], [2]) is None
 
 
 def test_follow_the_device_layout_under_adaptive_verification():
     # Scheduled 3 drafts each, but adaptive verification admitted 2 for "a" and
     # 3 for "b": the real rows are a=0..2, b=3..6, not the scheduled 0..3, 4..7.
     batch = _input_batch(["a", "b"], [3, 3], num_admitted=[2, 3])
-    assert _invalid_rows(batch, ["a", "b"], [1, 0]) == [2, 4, 5, 6]
+    assert _invalid_rows(batch, ["a", "b"], [0, 0]) == [2, 5, 6]

@@ -657,6 +657,37 @@ def test_synthetic_rejection_sample(
 
 
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_synthetic_rejection_sample_rejects_masked_draft(temperature: float):
+    """Synthetic acceptance ignores p(x), but must not accept a draft the
+    target masks out, such as a grammar-invalid draft kept for verification.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    num_trials = 64
+    K = 1
+
+    inputs = _build_rejection_sample_inputs(
+        torch.randn(VOCAB_SIZE, device=device),
+        torch.randn(VOCAB_SIZE, device=device),
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    drafts = inputs["draft_sampled"].view(num_trials, K + 1)[:, 1]
+    target_logits = inputs["target_logits"].view(num_trials, K + 1, VOCAB_SIZE)
+    target_logits[torch.arange(num_trials, device=device), 0, drafts] = float("-inf")
+
+    sampled, num_sampled = rejection_sample(
+        **inputs,
+        num_speculative_steps=K,
+        synthetic_conditional_rates=torch.ones(K, device=device),
+    )
+
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
+    assert (sampled[:, 0] != drafts).all()
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
 def test_all_nan_target_logits_in_range(temperature: float):
     """Regression test for NaN breaking tl.argmax index bounds.
 

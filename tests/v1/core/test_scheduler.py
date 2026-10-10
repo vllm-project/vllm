@@ -7339,6 +7339,37 @@ def test_update_draft_token_ids_strips_ngram_padding():
     assert request.spec_token_ids == [10, 11]
 
 
+@pytest.mark.parametrize("rejection_sample_method", ["standard", "synthetic"])
+def test_update_draft_token_ids_keeps_first_invalid_draft(rejection_sample_method):
+    """Sync scheduling keeps the first grammar-invalid draft, so verification
+    rejects it against its real bitmask row and resamples from the residual.
+    Synthetic rejection ignores the target probs, so it keeps no invalid draft."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    spec_config = scheduler.vllm_config.speculative_config
+    spec_config.rejection_sample_method = rejection_sample_method
+    request = _decode_ready_request(scheduler)
+
+    request.structured_output_request = SimpleNamespace(
+        grammar=SimpleNamespace(validate_tokens=lambda tokens: tokens[:1]),
+        reasoning_ended=True,
+    )
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[10, 11, 12, -1]])
+    )
+
+    if rejection_sample_method == "synthetic":
+        assert request.spec_token_ids == [10]
+        output = scheduler.schedule()
+        assert output.num_invalid_spec_tokens is None
+        return
+    assert request.spec_token_ids == [10, 11]
+    # As on the async path, the kept draft is not counted as drafted.
+    output = scheduler.schedule()
+    assert output.scheduled_spec_decode_tokens[request.request_id] == [10, 11]
+    assert output.num_invalid_spec_tokens == {request.request_id: 1}
+
+
 def test_update_draft_token_ids_in_output_strips_padding():
     """Same guard on the output path; the -1 pad-back for the rejected count
     is preserved (only the input to manager validation is stripped)."""
