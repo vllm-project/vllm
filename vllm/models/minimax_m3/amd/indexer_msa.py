@@ -42,7 +42,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.minimax_m3.amd.indexer_cp import get_indexer_cp_peers
+from vllm.models.minimax_m3.amd.indexer_cp import IndexerCpPeers, get_indexer_cp_peers
 from vllm.models.minimax_m3.amd.ops.sparse_pa import ASM_PAGE_SIZE
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
@@ -313,7 +313,7 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         # across calls even as the decode batch varies.
         self.cp_cand_rows = 0
         self._cp_score: torch.Tensor | None = None
-        self._cp_peers = None
+        self._cp_peers: IndexerCpPeers | None = None
 
     def init_cp(self) -> None:
         """Resolve the CP decode pass and allocate its buffers.
@@ -961,7 +961,7 @@ def msa_indexer_cp_enabled(
         # built with index_q replicated, so an indexer that did not take this
         # path would read its own heads out of a replicated tensor. The
         # selection logged its own reason on the way past.
-        reason = "the MSA indexer was not selected, so there is nothing to shard"
+        reason: str | None = "the MSA indexer was not selected, so nothing to shard"
     else:
         config = vllm_config.model_config.hf_text_config
         tp_size = get_tensor_model_parallel_world_size()
