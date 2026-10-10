@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm import envs
 from vllm.entrypoints.pooling.typing import AnyPoolingRequest
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.logger import init_logger
@@ -70,12 +71,22 @@ class RequestLogger:
         )
 
     def log_request_body(self, request: AnyRequest | AnyPoolingRequest) -> None:
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Request %s JSON body: %s",
-                getattr(request, "request_id", "N/A"),
-                request.model_dump_json(exclude_unset=True)[: self.max_log_len],
+        try:
+            level = logging.getLevelNamesMapping()[envs.VLLM_REQUEST_BODY_LOG_LEVEL]
+        except KeyError:
+            logger.warning_once(
+                "Invalid logging level for request content: %s. "
+                "Request JSON body will not be logged.",
+                envs.VLLM_REQUEST_BODY_LOG_LEVEL,
             )
+            return
+
+        logger.log(
+            level,
+            "Request %s JSON body: %s",
+            getattr(request, "request_id", "N/A"),
+            request.model_dump_json(exclude_unset=True)[: self.max_log_len],
+        )
 
     def log_outputs(
         self,
