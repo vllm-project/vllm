@@ -5,6 +5,7 @@ import functools
 import json
 import logging
 import os
+import stat
 import sys
 import tempfile
 import uuid
@@ -343,6 +344,87 @@ def get_default_config_root():
         "XDG_CONFIG_HOME",
         os.path.join(os.path.expanduser("~"), ".config"),
     )
+
+
+def _current_uid() -> int:
+    getuid = getattr(os, "getuid", None)
+    return getuid() if getuid is not None else -1
+
+
+def _ensure_private_dir(path: str) -> bool:
+    """Create ``path`` as a 0700 directory owned by the current user.
+
+    Returns False (leaving any unexpected existing object untouched) when
+    the path cannot be trusted, e.g. it is a symlink, not a directory, or -
+    on POSIX - is owned by someone else or accessible to group/others.
+    Mirrors the checks of ``verify_private_dir`` in the weight-cache
+    protocol.
+    """
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            return False
+        uid = _current_uid()
+        if uid != -1 and info.st_uid != uid:
+            return False
+        os.chmod(path, 0o700)
+        info = os.lstat(path)
+        if uid != -1 and info.st_mode & 0o077:
+            return False
+        return True
+    except OSError:
+        return False
+
+
+_default_rpc_base_path: str | None = None
+
+
+def get_default_rpc_base_path() -> str:
+    """Return the default base directory for IPC control-plane sockets.
+
+    The ``ipc://`` sockets of the v1 engine (front-end <-> EngineCore, DP
+    coordinator, handshake, local pub/sub) carry engine requests and
+    control messages, so the directory behind ``VLLM_RPC_BASE_PATH`` is
+    resolved to a location only the current user can reach:
+
+    1. ``$XDG_RUNTIME_DIR/vllm`` (on Linux, ``/run/user/<uid>`` is a 0700
+       tmpfs owned by the user, so ``/run/user/<uid>/vllm`` cannot be
+       planted by another local user). ``XDG_RUNTIME_DIR`` itself is
+       assumed to be owner-only per the XDG spec - systemd guarantees
+       this; an operator overriding it must keep that guarantee;
+    2. ``<tempdir>/vllm-<uid>``, created (or tightened) to 0700 and then
+       verified: ``/tmp`` is sticky and world-writable, so the directory
+       is checked for symlink, type, owner and permission bits before
+       use;
+    3. a unique ``tempfile.mkdtemp`` directory (0700 by construction) if
+       both candidates exist but cannot be trusted, pinned into the
+       environment so descendant processes resolve the same directory.
+
+    Resolution is deterministic per user, so independently started
+    processes agree on the directory; the result is cached in-process.
+    """
+    global _default_rpc_base_path
+    if _default_rpc_base_path is None:
+        candidates: list[str] = []
+        xdg_runtime_dir = os.getenv("XDG_RUNTIME_DIR")
+        if xdg_runtime_dir:
+            candidates.append(os.path.join(xdg_runtime_dir, "vllm"))
+        candidates.append(os.path.join(tempfile.gettempdir(), f"vllm-{_current_uid()}"))
+        for candidate in candidates:
+            if _ensure_private_dir(candidate):
+                _default_rpc_base_path = candidate
+                break
+        else:
+            _default_rpc_base_path = tempfile.mkdtemp(prefix="vllm-ipc-")
+            os.environ.setdefault("VLLM_RPC_BASE_PATH", _default_rpc_base_path)
+            logger.warning(
+                "Neither XDG_RUNTIME_DIR nor a private directory under %s "
+                "could be secured for IPC sockets; falling back to %s",
+                tempfile.gettempdir(),
+                _default_rpc_base_path,
+            )
+    return _default_rpc_base_path
 
 
 def maybe_convert_int(value: str | None) -> int | None:
@@ -723,8 +805,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PORT": get_vllm_port,
     # path used for ipc when the frontend api server is running in
     # multi-processing mode to communicate with the backend engine process.
-    "VLLM_RPC_BASE_PATH": lambda: os.getenv(
-        "VLLM_RPC_BASE_PATH", tempfile.gettempdir()
+    # Defaults to a per-user private directory (see
+    # get_default_rpc_base_path) so that other local users can neither
+    # reach nor plant sockets in it. Set explicitly to override: the
+    # operator then owns the trust decision for that directory.
+    "VLLM_RPC_BASE_PATH": get_env_or_set_default(
+        "VLLM_RPC_BASE_PATH", get_default_rpc_base_path
     ),
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     "VLLM_USE_MODELSCOPE": lambda: (
