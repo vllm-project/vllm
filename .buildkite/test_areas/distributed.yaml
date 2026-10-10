@@ -520,6 +520,8 @@ steps:
       - vllm/_custom_ops.py
       - vllm/envs.py
       - tests/distributed/test_rocm_aiter_custom_ar.py
+      - tests/distributed/test_rocm_aiter_indexer_m_split.py
+      - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
       - tests/distributed/test_rocm_quick_reduce.py
       - tests/distributed/test_quick_all_reduce.py
       - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
@@ -536,6 +538,7 @@ steps:
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
       - pytest -v -s tests/distributed/test_packed_tensor.py
       - pytest -v -s tests/distributed/test_rocm_aiter_custom_ar.py
+      - pytest -v -s tests/distributed/test_rocm_aiter_indexer_m_split.py
       - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
       - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
       - pytest -v -s tests/distributed/test_quick_all_reduce.py

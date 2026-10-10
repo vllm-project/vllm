@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_CP_INDEXER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1343,6 +1344,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "auto",
         ["auto", "gluon", "asm"],
         case_sensitive=False,
+    ),
+    "VLLM_ROCM_USE_AITER_CP_INDEXER": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_CP_INDEXER", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.

@@ -1937,6 +1937,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_RMSNORM: Controls RMSNorm operations.
         VLLM_ROCM_USE_AITER_MOE: Controls MoE (Mixture of Experts) ops.
         VLLM_ROCM_USE_AITER_MLA: Controls MLA (Multi-head Latent Attention) ops.
+        VLLM_ROCM_USE_AITER_CP_INDEXER: Controls the sparse-MLA indexer M-split.
         VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
@@ -2006,6 +2007,7 @@ class rocm_aiter_ops:
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+    _CP_INDEXER_ENABLED = envs.VLLM_ROCM_USE_AITER_CP_INDEXER
     _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
     # TODO: Consolidate under _LINEAR_ENABLED
@@ -2039,6 +2041,7 @@ class rocm_aiter_ops:
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+        cls._CP_INDEXER_ENABLED = envs.VLLM_ROCM_USE_AITER_CP_INDEXER
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
@@ -2259,6 +2262,12 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_cp_indexer_enabled(cls) -> bool:
+        """Shard the sparse-MLA indexer prefill rows across TP ranks."""
+        return cls.is_mla_enabled() and cls._CP_INDEXER_ENABLED
 
     @classmethod
     @if_aiter_supported
