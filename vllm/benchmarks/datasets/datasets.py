@@ -2502,7 +2502,11 @@ class CustomDataset(BenchmarkDataset):
                 break
             prompt = item["prompt"]
 
-            if tokenizer is None:
+            if (
+                tokenizer is None
+                and (output_len is None or output_len == -1)
+                and "output_tokens" not in item
+            ):
                 new_output_len = 1
             elif output_len is None or output_len == -1:
                 # check that the request has an 'output_tokens' field

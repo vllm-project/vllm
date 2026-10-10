@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import vllm.benchmarks.serve as serve_module
+from vllm.benchmarks.datasets import get_samples
 
 # Exact prompt payload from the failing benchmark run against a
 # Prithvi-EO-2.0 pooling endpoint (URL-in / base64-out format).
@@ -122,6 +123,39 @@ def _args(dataset_path: str) -> argparse.Namespace:
         input_len=None,
         output_len=None,
     )
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    ("output_len", "output_tokens", "expected_output_len"),
+    [
+        (256, None, 256),
+        (256, 32, 256),
+        (None, 32, 32),
+        (-1, 32, 32),
+        (None, None, 1),
+        (-1, None, 1),
+    ],
+)
+def test_custom_output_length_without_tokenizer(
+    tmp_path: Path,
+    output_len: int | None,
+    output_tokens: int | None,
+    expected_output_len: int,
+) -> None:
+    """Skipping tokenization must preserve the requested generation budget."""
+    dataset_path = tmp_path / "dataset.jsonl"
+    row: dict[str, str | int] = {"prompt": "Hello"}
+    if output_tokens is not None:
+        row["output_tokens"] = output_tokens
+    dataset_path.write_text(json.dumps(row) + "\n")
+    args = _args(str(dataset_path))
+    args.custom_output_len = output_len
+
+    samples = get_samples(args, tokenizer=None)
+
+    assert len(samples) == 1
+    assert samples[0].expected_output_len == expected_output_len
 
 
 @pytest.mark.benchmark
