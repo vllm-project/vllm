@@ -7,6 +7,7 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import functools
 from typing import Any
 
 import torch
@@ -320,8 +321,15 @@ def kernel_unified_attention(
         return
 
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+        num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+        if SLIDING_WINDOW > 0 and not (USE_MM_PREFIX or USE_R_SWA):
+            start_tile_idx = tl.maximum(0, (seq_len - SLIDING_WINDOW) // TILE_SIZE)
+        else:
+            start_tile_idx = 0
+        active_tiles = tl.maximum(1, num_tiles - start_tile_idx)
+        tiles_per_segment = cdiv_fn(active_tiles, NUM_SEGMENTS_PER_SEQ)
+        segm_start_tile = start_tile_idx + segm_idx * tiles_per_segment
+        if segm_start_tile >= num_tiles:
             return
     else:
         tiles_per_segment = 0
@@ -717,6 +725,7 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    SLIDING_WINDOW: tl.constexpr = 0,
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -730,10 +739,18 @@ def reduce_segments(
 
     # number of segments for this particular sequence
     num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
+    num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+    if SLIDING_WINDOW > 0:
+        start_tile_idx = tl.maximum(0, (seq_len - SLIDING_WINDOW) // TILE_SIZE)
+    else:
+        start_tile_idx = 0
+    active_tiles = tl.maximum(0, num_tiles - start_tile_idx)
+    tiles_per_segment = tl.maximum(1, cdiv_fn(active_tiles, num_segments))
 
     # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
+    act_num_segments = tl.minimum(
+        num_segments, cdiv_fn(active_tiles, tiles_per_segment)
+    )
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
         [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
@@ -784,14 +801,26 @@ def reduce_segments(
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
 
-def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
-    """Detect Gemma3 models via unique (head_size, sliding_window) signature.
+@functools.lru_cache(maxsize=8)
+def _get_device_max_smem(device_idx: int) -> int:
+    if not torch.cuda.is_available():
+        return 65536
+    props = torch.cuda.get_device_properties(device_idx)
+    return getattr(
+        props,
+        "shared_memory_per_block_optin",
+        getattr(props, "shared_memory_per_block", 65536),
+    )
 
-    Gemma3 models are the only ones using sliding_window=1024 with
-    head_size 128 (27B) or 256 (1B, 4B, 12B). Other SWA models use
+
+def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
+    """Detect Gemma 3 and Gemma 4 models via unique (head_size, window) signature.
+
+    Gemma 3 and Gemma 4 models use sliding_window=512 or 1024 with
+    head_size 128 or 256. Other SWA models use
     different window sizes (Mistral=4096, Phi-3=2047).
     """
-    return sliding_window == 1024 and head_size in (128, 256)
+    return sliding_window in (512, 1024) and head_size in (128, 256)
 
 
 def _get_tile_size(
@@ -951,21 +980,67 @@ def unified_attention(
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
 
-    # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
-    # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
-    # defaults (BLOCK_Q=8, TILE=32, 4 warps) under-tile it. A wider KV tile +
-    # more query rows per block + 8 warps is ~2x faster on B200.
-    tuned_large_head = (
+    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+
+    # Select prefill tile size and warp count for head_size 256 and 512 based on
+    # device shared memory.
+    tuned_large_head = False
+    is_gemma_large_head = head_size == 512 or (
         head_size == 256
+        and (
+            _is_gemma3_attention(head_size, sliding_window_val)
+            or sliding_window_val <= 0
+        )
+    )
+    if (
+        is_gemma_large_head
         and max_seqlen_q > 1
         and num_queries_per_kv <= 16
-        and current_platform.is_device_capability_family(100)
-    )
-    if tuned_large_head:
-        BLOCK_M = 32
-        BLOCK_Q = BLOCK_M // num_queries_per_kv
-        launch_num_warps = 8
-        launch_num_stages = 2
+        and q.element_size() <= 2
+    ):
+        dev_idx = q.device.index if q.device.index is not None else 0
+        max_smem = _get_device_max_smem(dev_idx)
+        if current_platform.is_device_capability_family(100):  # B200
+            if head_size == 256:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 2
+                TILE_SIZE_PREFILL = 128
+                tuned_large_head = True
+            elif head_size == 512 and q.shape[0] * num_kv_heads >= 2048:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 2
+                TILE_SIZE_PREFILL = 64
+                tuned_large_head = True
+        elif max_smem >= 160000:  # A100 / SM80+ with >= 160KB SMEM
+            if head_size == 256:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 128
+                tuned_large_head = True
+            elif head_size == 512 and q.shape[0] * num_kv_heads >= 2048:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 64
+                tuned_large_head = True
+        elif max_smem >= 96000:  # L4, RTX 3090, RTX 4090
+            if head_size == 256:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 64
+                tuned_large_head = True
+            elif head_size == 512 and q.shape[0] * num_kv_heads >= 2048:
+                BLOCK_M = 32
+                launch_num_warps = 8
+                launch_num_stages = 1
+                TILE_SIZE_PREFILL = 32
+                tuned_large_head = True
+
+    BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -978,8 +1053,6 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
-
     # Compute chunked block size from sliding window if needed.
     chunk_size = -1
     if sliding_window_val > 0 and chunk_lookback > -1:
@@ -988,17 +1061,13 @@ def unified_attention(
     elif sliding_window_val <= 0:
         chunk_lookback = -1
 
-    TILE_SIZE_PREFILL = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=True
-    )
+    if not tuned_large_head:
+        TILE_SIZE_PREFILL = _get_tile_size(
+            head_size, sliding_window_val, q.element_size(), is_prefill=True
+        )
     TILE_SIZE_DECODE = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
-
-    # Wider KV tile for the tuned large-head path (see above). Only the 2D
-    # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
-    if tuned_large_head:
-        TILE_SIZE_PREFILL = 128
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
@@ -1061,6 +1130,11 @@ def unified_attention(
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )
+
+    # 3D kernel is slower for short sliding windows (e.g. Gemma3 with 512/1024)
+    # because the segment reduction overhead outweighs the parallelism benefit.
+    if use_3d and 0 < sliding_window_val < max_seqlen_k:
+        use_3d = False
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
@@ -1199,4 +1273,7 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
+            SLIDING_WINDOW=(1 + window_size[0])
+            if (window_size[0] >= 0 and not (use_mm_prefix or use_rswa))
+            else 0,
         )
