@@ -4,8 +4,34 @@
 import pytest
 
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+    ExpertMapManager,
     determine_expert_map,
 )
+
+
+def test_expert_map_manager_meta_initialization():
+    """IPC loading builds on meta; host expert queries must remain readable."""
+    from types import SimpleNamespace
+
+    import torch
+
+    parallel_config = SimpleNamespace(use_ep=True, ep_size=2, ep_rank=1)
+    with torch.device("meta"):
+        manager = ExpertMapManager(
+            max_num_batched_tokens=16,
+            top_k=1,
+            global_num_experts=4,
+            num_redundant_experts=0,
+            num_expert_group=None,
+            moe_parallel_config=parallel_config,
+            placement_strategy="linear",
+            enable_eplb=False,
+        )
+
+    assert manager.expert_map.device.type == "meta"
+    assert manager.get_local_expert_ids() == [2, 3]
+    assert manager.map_global_to_local(2) == 0
+    assert manager.map_global_to_local(0) == -1
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):
