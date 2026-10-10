@@ -132,11 +132,11 @@ def _get_feature_tensor(feature: MultiModalFeatureSpec, key: str) -> torch.Tenso
 
 
 def unpad_and_flat_audio_features(
-    input_audio_features: torch.Tensor,
+    input_audio_features: torch.Tensor | Sequence[torch.Tensor],
     audio_feature_lengths: torch.Tensor,
 ) -> torch.Tensor:
-    """Unpad and flatten batched audio features."""
-    if len(audio_feature_lengths) != input_audio_features.size(0):
+    """Unpad and flatten stacked or ragged per-audio features."""
+    if len(audio_feature_lengths) != len(input_audio_features):
         raise ValueError(
             "Length of audio_feature_lengths must match "
             "the batch size of input_audio_features."
@@ -920,8 +920,10 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
         # inputs features from rust frontend is batched and padded
         # with shape [batch_size, n_mels, padded_seq_len], different
-        # from python's shape [n_mels, batch_size * seq_len]
-        if (
+        # from python's shape [n_mels, batch_size * seq_len].
+        # Requests with different padded lengths are batched as a
+        # list of [n_mels, padded_seq_len] tensors.
+        if isinstance(input_audio_features, (list, tuple)) or (
             isinstance(input_audio_features, torch.Tensor)
             and input_audio_features.dim() == 3
         ):
