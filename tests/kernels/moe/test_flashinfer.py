@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
+    mxfp4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
@@ -67,6 +68,105 @@ from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+
+
+def test_flashinfer_cutlass_moe_reuses_preallocated_workspace(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.experts import flashinfer_cutlass_moe
+
+    flashinfer_cutlass_moe._get_workspace_size_bytes.cache_clear()
+    workspace_call = {}
+
+    def fake_workspace_size(**kwargs):
+        workspace_call.update(kwargs)
+        return 513
+
+    moe_call = {}
+
+    def fake_fused_moe(**kwargs):
+        moe_call.update(kwargs)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe."
+        "flashinfer_cutlass_fused_moe_workspace_size",
+        fake_workspace_size,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe."
+        "flashinfer_cutlass_fused_moe",
+        fake_fused_moe,
+    )
+
+    num_experts = 2
+    hidden_size = 128
+    intermediate_size = 64
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=torch.empty(num_experts, 2 * intermediate_size, hidden_size // 32),
+        w2_scale=torch.empty(num_experts, hidden_size, intermediate_size // 32),
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=1,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        routing_method=RoutingMethodType.TopK,
+    )
+    experts = FlashInferExperts(moe_config, quant_config)
+
+    _, workspace_shape, _ = experts.workspace_shapes(
+        4,
+        2 * intermediate_size,
+        hidden_size,
+        1,
+        num_experts,
+        num_experts,
+        None,
+        MoEActivation.SILU,
+    )
+    assert workspace_shape == (257,)
+    assert workspace_call["x_dtype"] == torch.bfloat16
+    assert workspace_call["weight_dtype"] == torch.uint8
+    assert workspace_call["use_w4_group_scaling"] is True
+
+    workspace = torch.empty(workspace_shape, dtype=torch.bfloat16)
+    experts.apply(
+        output=torch.empty(4, hidden_size, dtype=torch.bfloat16),
+        hidden_states=torch.empty(4, hidden_size, dtype=torch.bfloat16),
+        w1=torch.empty(
+            num_experts,
+            2 * intermediate_size,
+            hidden_size // 2,
+            dtype=torch.uint8,
+        ),
+        w2=torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size // 2,
+            dtype=torch.uint8,
+        ),
+        topk_weights=torch.empty(4, 1),
+        topk_ids=torch.empty(4, 1, dtype=torch.int64),
+        activation=MoEActivation.SILU,
+        global_num_experts=num_experts,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=None,
+        workspace2=workspace,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+    passed_workspace = moe_call["workspace_buffer"]
+    assert passed_workspace.dtype == torch.uint8
+    assert passed_workspace.data_ptr() == workspace.data_ptr()
+    assert passed_workspace.numel() >= 513
+    flashinfer_cutlass_moe._get_workspace_size_bytes.cache_clear()
+
 
 try:
     from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
