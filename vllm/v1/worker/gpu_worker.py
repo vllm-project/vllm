@@ -51,6 +51,7 @@ from vllm.distributed.parallel_state import (
     resume_device_comms,
     suspend_device_comms,
 )
+from vllm.distributed.pp_transport import PPTransportAllGatherPolicy
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
     WeightTransferEngineFactory,
@@ -1278,10 +1279,14 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        all_gather_tensors = (
+            PPTransportAllGatherPolicy() if self.use_v2_model_runner else None
+        )
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
+                    all_gather_tensors=all_gather_tensors,
                 )
             )
             assert tensor_dict is not None
@@ -1319,6 +1324,7 @@ class Worker(WorkerBase):
         handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=get_tp_group(),
+            all_gather_tensors=all_gather_tensors,
         )
         self._pp_send_work = handles[1:]
 

@@ -39,6 +39,7 @@ from vllm.distributed.aux_output_connector.worker import (
     get_aux_output_connector,
 )
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
+from vllm.distributed.pp_transport import PPTransportPayload
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -288,6 +289,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Speculative decoding.
         self.speculator = None
+        self.relay_draft_mm_embeddings = False
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -423,6 +425,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state = init_model_state(
             self.vllm_config, self.model, self.encoder_cache, self.device
         )
+        if (
+            self.use_pp
+            and self.supports_mm_inputs
+            and self.speculative_config is not None
+        ):
+            # Only the last stage loads the drafter and knows its MM capability.
+            pp_group = get_pp_group()
+            self.relay_draft_mm_embeddings = pp_group.broadcast_object(
+                self.speculator is not None and self.speculator.supports_mm_inputs,
+                src=pp_group.world_size - 1,
+            )
 
         self.decode_query_len = (
             self.num_speculative_steps
@@ -1942,6 +1955,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None
 
+        pp_payload = None
+        if self.is_first_pp_rank and self.relay_draft_mm_embeddings and not dummy_run:
+            # Match the draft's shifted positions, before request state advances.
+            mm_embeds, mm_mask = self.model_state.gather_mm_embeddings(
+                input_batch, draft_lookahead=1
+            )
+            if mm_embeds:
+                pp_payload = PPTransportPayload()
+                pp_payload.set_multimodal_embeddings(mm_embeds, mm_mask)
+
         model_inputs = {
             "input_ids": input_ids,
             "positions": input_batch.positions,
@@ -1959,6 +1982,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare the intermediate tensors.
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
+            if not dummy_run:
+                pp_payload = PPTransportPayload(intermediate_tensors.tensors)
             n = input_batch.num_tokens_after_padding
             new_tensors = {
                 k: v[:n]
@@ -2058,14 +2083,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
+            pp_payload=pp_payload,
         )
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
-            return self.pp_handler.relay_aux_hidden_states(
+            output_intermediate_tensors = self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
+            )
+            return (
+                pp_payload.relay(output_intermediate_tensors)
+                if pp_payload is not None
+                else output_intermediate_tensors
             )
         return None
 
@@ -2088,6 +2119,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        pp_payload = self.execute_model_state.pp_payload
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2178,8 +2210,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
-        # The encoder runner exists only on the first PP rank, so later ranks
-        # have no cached embeddings to gather.
+        if self.relay_draft_mm_embeddings and pp_payload is not None:
+            mm_inputs = pp_payload.get_multimodal_embeddings()
         if (
             self.speculator is not None
             and self.speculator.supports_mm_inputs
@@ -2397,6 +2429,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    pp_payload: PPTransportPayload | None = None
 
 
 class BatchReqState(NamedTuple):
