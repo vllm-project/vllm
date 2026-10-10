@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import torch
 from typing_extensions import override
 
 from vllm.platforms import current_platform
