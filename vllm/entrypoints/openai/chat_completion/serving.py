@@ -165,6 +165,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
@@ -231,6 +232,28 @@ class OpenAIServingChat(GenerateBaseServing):
         dict. The default forwards it unchanged.
         """
         return chat_template_kwargs
+
+    def _engine_reasoning_kwargs(
+        self,
+        request: ChatCompletionRequest,
+        parser: Parser | None,
+        chat_template_kwargs: dict[str, Any],
+        prompt_token_ids: list[int] | None,
+    ) -> dict[str, Any]:
+        """`reasoning_ended` and `reasoning_parser_kwargs` for `generate()`."""
+        reasoning_parser_kwargs = None
+        if parser is not None and parser.reasoning_parser is not None:
+            reasoning_parser_kwargs = {
+                "chat_template_kwargs": self._engine_chat_template_kwargs(
+                    chat_template_kwargs
+                ),
+            }
+        return {
+            "reasoning_ended": request.resolve_reasoning_ended(
+                parser, prompt_token_ids or []
+            ),
+            "reasoning_parser_kwargs": reasoning_parser_kwargs,
+        }
 
     async def render_chat_request(
         self,
@@ -363,18 +386,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     session_id=session_id,
                 )
             else:
-                if not request.include_reasoning:
-                    reasoning_ended = True
-                elif request._grammar_from_parser:
-                    # The Mistral grammar already includes an optional
-                    # `think?` rule that handles both reasoning and
-                    # non-reasoning outputs.
-                    reasoning_ended = True
-                elif parser is not None and parser.reasoning_parser is not None:
-                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
-                else:
-                    reasoning_ended = None
-
                 generator = self.engine_client.generate(
                     engine_input,
                     sampling_params,
@@ -384,14 +395,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
-                    reasoning_ended=reasoning_ended,
-                    reasoning_parser_kwargs={
-                        "chat_template_kwargs": self._engine_chat_template_kwargs(
-                            chat_template_kwargs
-                        ),
-                    }
-                    if parser is not None and parser.reasoning_parser is not None
-                    else None,
+                    **self._engine_reasoning_kwargs(
+                        request, parser, chat_template_kwargs, prompt_token_ids
+                    ),
                 )
 
             generators.append(generator)
@@ -630,9 +636,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     if finish_reason_sent[i]:
                         continue
 
-                    if request.logprobs and (
-                        request.top_logprobs is not None or request.logprob_token_ids
-                    ):
+                    self._raise_if_error(output.finish_reason, request_id)
+
+                    if request.logprobs:
                         assert output.logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_chat_logprobs(
                             token_ids=output.token_ids,
@@ -757,10 +763,6 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # if the model is finished generating
                     else:
-                        # check for error finish reason and abort streaming
-                        # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
-
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
                         # finish_reason is:
@@ -974,12 +976,12 @@ class OpenAIServingChat(GenerateBaseServing):
                 parser = self._make_parser(
                     request, tokenizer, self._effective_chat_template_kwargs(request)
                 )
+            if parser is not None and final_res.prompt_token_ids is not None:
+                parser.set_prompt_token_ids(final_res.prompt_token_ids)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
-            if request.logprobs and (
-                request.top_logprobs is not None or request.logprob_token_ids
-            ):
+            if request.logprobs:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,

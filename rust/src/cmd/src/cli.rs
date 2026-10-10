@@ -12,6 +12,7 @@ mod unsupported;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -268,11 +269,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     #[serde(default)]
     pub max_logprobs: Option<i32>,
-    /// TCP port for the gRPC Inference service. When not set, no gRPC server is
-    /// started.
-    #[arg(long)]
-    #[serde(default)]
-    pub grpc_port: Option<u16>,
+    /// The interval (or buffer size) for streaming in terms of token length.
+    /// A smaller value (1) makes streaming smoother by sending each token
+    /// immediately, while a larger value (e.g., 10) reduces host overhead and
+    /// may increase throughput by batching multiple tokens before sending.
+    #[arg(long, default_value_t = NonZeroU32::MIN)]
+    #[serde(default = "default_stream_interval")]
+    pub stream_interval: NonZeroU32,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -505,8 +508,9 @@ impl SharedRuntimeArgs {
     fn into_bootstrapped_config(
         self,
         listen_fd: i32,
-        input_address: String,
-        output_address: String,
+        grpc_listen_fd: Option<i32>,
+        input_listener_fd: i32,
+        output_listener_fd: i32,
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
@@ -522,8 +526,8 @@ impl SharedRuntimeArgs {
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index,
                 engine_count,
                 data_parallel_size,
@@ -539,6 +543,7 @@ impl SharedRuntimeArgs {
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+            grpc_listener_mode: grpc_listen_fd.map(|fd| HttpListenerMode::InheritedFd { fd }),
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -550,13 +555,15 @@ impl SharedRuntimeArgs {
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
+            // The engine is launched and supervised by another process.
+            manages_engine: false,
             keep_alive_timeout,
             profiler,
         }
@@ -567,11 +574,13 @@ impl SharedRuntimeArgs {
     fn into_managed_config(
         self,
         listener_mode: HttpListenerMode,
+        grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
         engine_count: usize,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
+        manages_engine: bool,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
@@ -597,6 +606,7 @@ impl SharedRuntimeArgs {
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
+            grpc_listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -608,13 +618,14 @@ impl SharedRuntimeArgs {
             lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
+            stream_interval: self.stream_interval,
             api_server_options,
             cors,
             tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
-            grpc_port: self.grpc_port,
             shutdown_timeout,
+            manages_engine,
             keep_alive_timeout,
             profiler,
         }
@@ -643,6 +654,10 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_stream_interval() -> NonZeroU32 {
+    NonZeroU32::MIN
 }
 
 fn default_cors_wildcard() -> JsonStringList {
@@ -692,14 +707,16 @@ pub struct FrontendArgs {
     /// supervisor.
     #[arg(long)]
     pub listen_fd: i32,
-    /// Frontend input ROUTER socket address that the Python engines will
-    /// connect to.
+    /// Inherited gRPC listening socket file descriptor passed by the Python
+    /// supervisor. When not set, no gRPC server is started.
     #[arg(long)]
-    pub input_address: String,
-    /// Frontend output PULL socket address that the Python engines will push
-    /// responses to.
+    pub grpc_listen_fd: Option<i32>,
+    /// Inherited frontend input ROUTER listener file descriptor.
     #[arg(long)]
-    pub output_address: String,
+    pub input_listener_fd: i32,
+    /// Inherited frontend output PULL listener file descriptor.
+    #[arg(long)]
+    pub output_listener_fd: i32,
     /// Optional Python-owned frontend-side DP coordinator socket address for
     /// external coordinator mode in the bootstrapped frontend path, i.e.,
     /// `stats_update_address`.
@@ -727,8 +744,9 @@ impl FrontendArgs {
         let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
-            self.input_address,
-            self.output_address,
+            self.grpc_listen_fd,
+            self.input_listener_fd,
+            self.output_listener_fd,
             self.coordinator_address,
             self.engine_start_index,
             self.engine_count,
@@ -756,6 +774,10 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
+    /// TCP port for the gRPC Inference and Control services. When not set, no
+    /// gRPC server is started.
+    #[arg(long)]
+    pub grpc_port: Option<u16>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -785,14 +807,27 @@ impl ServeArgs {
                 port: self.port,
             },
         };
+        // gRPC follows the HTTP TCP host. With a Unix socket it defaults to IPv4
+        // loopback rather than all interfaces, so the side-car is never
+        // accidentally network-exposed.
+        let grpc_listener_mode = self.grpc_port.map(|port| HttpListenerMode::BindTcp {
+            host: match self.uds {
+                Some(_) => "127.0.0.1".to_string(),
+                None => self.host.clone(),
+            },
+            port,
+        });
 
         self.runtime.clone().into_managed_config(
             listener_mode,
+            grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
             self.managed_engine.data_parallel_size,
             local_input_address,
             local_output_address,
+            // `--data-parallel-size-local 0` runs the frontend without a local engine.
+            self.managed_engine.data_parallel_size_local != Some(0),
         )
     }
 

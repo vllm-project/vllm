@@ -377,10 +377,8 @@ def iter_layer_registration_regions(
     )
     region_len = geometry.num_blocks * geometry.regions_per_block * geometry.block_len
     if geometry.regions_per_block == 1:
-        # With padded or interleaved pages the block stride exceeds the
-        # meaningful block_len; register the strided span. The span ends with
-        # the last block's meaningful bytes, not a whole stride, so it never
-        # runs past the backing allocation of a strided layer view.
+        # Padded/interleaved pages stride past block_len: register the strided
+        # span, ending at the last block's bytes so it stays in-allocation.
         block_stride_bytes = geometry.block_stride * kv_cache.element_size()
         region_len = max(
             region_len,
@@ -431,12 +429,8 @@ def compute_block_transfer_offsets(
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
 ) -> tuple[list[int], list[int], list[int]]:
-    # A shorter (or empty) local list is the READ-mode "drop the transfer, just
-    # free the prefill blocks" case (full-prefix-hit / aborted-before-scheduled):
-    # decode pulls fewer blocks than the prefill holds. The zip loop below pairs
-    # local[i]<->remote[i] and sizes by len(local), so a short local transfers
-    # only what decode allocated and an empty local is a no-op. A longer local
-    # list is a genuine bug and still fails loudly.
+    # A shorter/empty local list transfers only what decode allocated (READ-mode
+    # partial or full-prefix-hit); a longer local list is a genuine bug.
     if len(local_block_ids) > len(remote_block_ids):
         raise ValueError(
             "local_block_ids longer than remote_block_ids: "

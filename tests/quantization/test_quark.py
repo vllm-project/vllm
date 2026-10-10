@@ -22,7 +22,7 @@ from packaging import version
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.cache import CacheConfig
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
@@ -1081,6 +1081,7 @@ def test_quant_method_dispatch_mxfp8_moe_raises(default_vllm_config):
     )
     wk, ak, mcls = config.get_quant_method_target("experts", RoutedExperts)
     assert mcls is QuarkOCP_MX_MoEMethod
+    assert wk is not None
     # The OCP MX MoE constructor should fail loudly for MXFP8.
     fake_moe_config = MagicMock()
     with pytest.raises(ValueError, match="MXFP8 experts are not supported"):
@@ -1321,7 +1322,6 @@ def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
     scheme = QuarkW8A8Fp8.__new__(QuarkW8A8Fp8)
     scheme.weight_qscheme = "per_channel"
     scheme.is_static_input_scheme = False
-    scheme.input_qscheme = "per_channel"
     scheme.activation_quant_key = kFp8DynamicTokenSym
     scheme.weight_quant_key = kFp8StaticChannelSym
     scheme.out_dtype = dtype
@@ -1343,7 +1343,7 @@ def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_quark_fp8_w_per_tensor_a_per_tensor(
-    kv_cache_dtype: str, monkeypatch, dist_init, workspace_init
+    kv_cache_dtype: CacheDType, monkeypatch, dist_init, workspace_init
 ):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     checkpoint_scales = {}
@@ -2325,7 +2325,10 @@ class TestQuarkInt4Format:
                 torch.zeros(1, 16, 8 // tp_size, dtype=torch.uint8),
                 requires_grad=False,
             )
-            loader = method.get_weight_loader(layer, weight_loader=None)
+            loader = method.get_weight_loader(
+                layer,
+                weight_loader=None,
+            )
             loader(
                 param,
                 raw_zp.clone(),

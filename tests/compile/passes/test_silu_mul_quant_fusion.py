@@ -331,7 +331,7 @@ def test_fusion_silu_and_mul_quant(
         backend = TestBackend(*passes)
         model = model_class(
             hidden_size=hidden_size,
-            force_kernel=force_kernel,  # type: ignore[arg-type]
+            force_kernel=force_kernel,
             x=x,
             dtype=dtype,
         )

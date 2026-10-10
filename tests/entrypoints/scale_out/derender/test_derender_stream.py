@@ -20,11 +20,17 @@ Tests are split into two layers:
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
+from tokenizers.decoders import DecodeStream
 
+import vllm.renderers.online_derenderer as online_derenderer_module
 from tests.entrypoints.scale_out.derender.utils import stream_chat_derender
+from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -32,15 +38,33 @@ from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     SpeculativeDecodingMetrics,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.scale_out.derender.serving import ServingDerender
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    DerenderChatRequest,
+    DerenderChatStreamRequest,
+    DerenderCompletionRequest,
+    DerenderCompletionStreamRequest,
     DerenderStreamState,
-    GenerateResponse,
-    GenerateResponseChoice,
-    GenerateResponseStreamChoice,
     GenerateStreamResponse,
+    GenerateTokensChoice,
+    GenerateTokensResponse,
+    GenerateTokensStreamChoice,
+    GenerateTokensStreamResponse,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.parser import Parser
+from vllm.renderers.online_derenderer import (
+    OnlineDerenderer,
+    _decode_params,
+    _seed_stream_state,
+)
+from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.utils import random_uuid
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -170,12 +194,13 @@ def _make_stream_chunk(
     usage: dict | None = None,
     metrics: PerRequestMetrics | None = None,
     logprobs: dict | None = None,
+    prompt_token_ids: list[int] | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
-    return GenerateStreamResponse(
+    return GenerateTokensStreamResponse(
         request_id=request_id,
         choices=[
-            GenerateResponseStreamChoice(
+            GenerateTokensStreamChoice(
                 index=index,
                 token_ids=token_ids,
                 finish_reason=finish_reason,
@@ -184,20 +209,16 @@ def _make_stream_chunk(
         ],
         usage=UsageInfo(**usage) if usage else None,
         metrics=metrics,
+        prompt_token_ids=prompt_token_ids,
     )
 
 
-def _placeholder_logprobs(token_ids: list[int]) -> dict:
-    """Per-token logprob entries using token_id:N placeholders, as sent by
-    the generate worker."""
+def _generate_logprobs(token_ids: list[int]) -> dict:
+    """Per-token `GenerateLogProbs` entries (integer token ids, no token or
+    bytes), as sent by the generate worker."""
     return {
         "content": [
-            {
-                "token": f"token_id:{tid}",
-                "logprob": -0.5,
-                "bytes": None,
-                "top_logprobs": [],
-            }
+            {"token_id": tid, "logprob": -0.5, "rank": 1, "top_logprobs": []}
             for tid in token_ids
         ]
     }
@@ -209,7 +230,7 @@ def _make_usage_chunk(
     request_id: str = "test-req",
 ) -> GenerateStreamResponse:
     """Build a usage only final SSE chunk (empty choices)."""
-    return GenerateStreamResponse(
+    return GenerateTokensStreamResponse(
         request_id=request_id,
         choices=[],
         usage=UsageInfo(
@@ -228,18 +249,12 @@ def _make_usage_chunk(
 @pytest.fixture(scope="module")
 def tokenizer():
     """Load the tiny tokenizer used across unit tests."""
-    from vllm.tokenizers import get_tokenizer
-
     return get_tokenizer(MODEL_NAME)
 
 
 @pytest.fixture(scope="module")
 def derenderer(tokenizer, request):
     """Construct a minimal OnlineDerenderer backed by a stub renderer."""
-    from unittest.mock import MagicMock
-
-    from vllm.renderers.online_derenderer import OnlineDerenderer
-
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
 
@@ -273,10 +288,6 @@ def parsed_derenderer(tokenizer):
     `renderer._executor` must be a real `ThreadPoolExecutor`.
     `loop.run_in_executor` cannot submit work to a `MagicMock`.
     """
-    from unittest.mock import MagicMock
-
-    from vllm.renderers.online_derenderer import OnlineDerenderer
-
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = tokenizer
     renderer._executor = ThreadPoolExecutor(max_workers=2)
@@ -294,6 +305,45 @@ def parsed_derenderer(tokenizer):
     )
     dr.parser = _FakeParser
     return dr
+
+
+def test_non_streaming_derender_initializes_parser_prefix(
+    derenderer, tokenizer, monkeypatch
+):
+    from unittest.mock import MagicMock
+
+    from vllm.entrypoints.generate.base.protocol import FunctionCall
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [FunctionCall(name="tool", arguments="{}")],
+    )
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    generated_ids = tokenizer.encode("answer", add_special_tokens=False)
+    response = GenerateTokensResponse(
+        request_id="test",
+        prompt_token_ids=[11, 12],
+        choices=[
+            GenerateTokensChoice(
+                index=0,
+                token_ids=generated_ids,
+                finish_reason="length",
+            )
+        ],
+    )
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "question"}],
+    )
+
+    choices = derenderer._derender_chat(response, request)
+
+    parser.set_prompt_token_ids.assert_called_once_with([11, 12])
+    assert choices[0].message.tool_calls[0].function.name == "tool"
+    assert choices[0].finish_reason == "length"
 
 
 class TestDetokenizeDelta:
@@ -394,6 +444,57 @@ class TestDetokenizeDelta:
         # Bounded by a small constant independent of len(token_ids)
         assert max_window <= 32
 
+    def test_truncated_multibyte_char_is_held_back(self, derenderer, tokenizer):
+        """Output ending mid-character emits no U+FFFD: batch == stream == engine."""
+        emoji_ids = tokenizer.encode("🌈", add_special_tokens=False)
+        byte_ids = emoji_ids[-4:]
+        assert len(byte_ids) == 4
+        output_ids = byte_ids[:-1]
+
+        batch, _ = derenderer._detokenize_delta(
+            tokenizer, output_ids, DerenderStreamState()
+        )
+        streamed = self._chunked(derenderer, tokenizer, [[t] for t in output_ids])
+        engine = _decode_stream_expected(tokenizer, [], output_ids)
+
+        assert "�" not in batch
+        assert batch == streamed == engine
+
+        full, _ = derenderer._detokenize_delta(
+            tokenizer, byte_ids, DerenderStreamState()
+        )
+        assert full.endswith("🌈")
+
+    @pytest.mark.parametrize(
+        ("skip", "spaces", "preserve", "fast", "expected"),
+        [
+            (True, True, False, True, (True, True)),
+            (True, False, False, True, (True, True)),
+            (True, False, False, False, (True, False)),
+            (False, False, False, True, (False, False)),
+            (False, False, True, True, (False, False)),
+            (True, False, True, True, (False, False)),
+            (True, True, True, True, (False, True)),
+        ],
+    )
+    def test_decode_params_mirror_engine(
+        self, monkeypatch, skip, spaces, preserve, fast, expected
+    ):
+        """Flags match the engine's fast or slow detokenizer for the tokenizer."""
+        monkeypatch.setattr(
+            online_derenderer_module, "uses_fast_detokenizer", lambda _: fast
+        )
+        request = CompletionRequest(
+            model=MODEL_NAME,
+            prompt="x",
+            skip_special_tokens=skip,
+            spaces_between_special_tokens=spaces,
+        )
+        assert _decode_params(None, request, preserve_special=preserve) == expected
+
+    def test_decode_params_default_without_request(self, tokenizer):
+        assert _decode_params(tokenizer, None) == (True, True)
+
     def test_n_independent_streams_same_result(self, derenderer, tokenizer):
         """N parallel streams with the same token sequence give the same text."""
         token_ids = tokenizer.encode("parallel streams")[:8]
@@ -412,6 +513,242 @@ class TestDetokenizeDelta:
         assert results[0] == self._one_shot(tokenizer, token_ids)
 
 
+# ---------------------------------------------------------------------------
+# Prompt seeded detokenization (matches the engine's primed detokenizer)
+# ---------------------------------------------------------------------------
+
+
+def _decode_stream_expected(
+    tokenizer, prompt_ids: list[int], output_ids: list[int]
+) -> str:
+    """Engine-equivalent decode via `DecodeStream`, primed by stepping the
+    prompt (`DecodeStream(ids=...)` needs tokenizers >= 0.22)."""
+    stream = DecodeStream(skip_special_tokens=True)
+    for tid in prompt_ids:
+        stream.step(tokenizer.backend_tokenizer, tid)
+    return "".join(
+        s
+        for tid in output_ids
+        if (s := stream.step(tokenizer.backend_tokenizer, tid)) is not None
+    )
+
+
+@pytest.fixture(scope="module")
+def leading_space_ids(tokenizer):
+    """(prompt_ids, output_ids, expected) where seeded and unseeded decode
+    differ by the leading space."""
+    prompt_ids = tokenizer.encode("[INST] Hi [/INST]", add_special_tokens=False)
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+    expected = _decode_stream_expected(tokenizer, prompt_ids, output_ids)
+    unseeded = tokenizer.decode(output_ids, skip_special_tokens=True)
+    assert expected.startswith(" ") and not unseeded.startswith(" "), (
+        "fixture no longer reproduces the leading-space divergence; "
+        "pick a different prompt/output pair"
+    )
+    return prompt_ids, output_ids, expected
+
+
+class TestSeedStreamState:
+    """`_seed_stream_state`: pure helper building the initial decode state."""
+
+    def test_seeds_prev_tokens_from_prompt_tail(self, tokenizer, leading_space_ids):
+        prompt_ids, _, _ = leading_space_ids
+        state = _seed_stream_state(tokenizer, prompt_ids, skip_special_tokens=True)
+        assert state.prev_tokens
+        assert state.read_offset == len(state.prev_tokens)
+
+    def test_none_prompt_token_ids_returns_empty_state(self, tokenizer):
+        assert (
+            _seed_stream_state(tokenizer, None, skip_special_tokens=True)
+            == DerenderStreamState()
+        )
+
+    def test_empty_prompt_token_ids_returns_empty_state(self, tokenizer):
+        assert (
+            _seed_stream_state(tokenizer, [], skip_special_tokens=True)
+            == DerenderStreamState()
+        )
+
+
+class TestPromptSeededLeadingSpace:
+    """Every decode entry point keeps the first token's leading space when
+    given prompt_token_ids."""
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_seeded_via_explicit_prompt_token_ids(
+        self, derenderer, leading_space_ids
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        choices = await derenderer.derender_chat(
+            GenerateTokensResponse(
+                request_id="t",
+                choices=[
+                    GenerateTokensChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+            ),
+            prompt_token_ids=prompt_ids,
+        )
+        assert choices[0].message.content == expected
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_seeded_via_generate_response_fallback(
+        self, derenderer, leading_space_ids
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        choices = await derenderer.derender_chat(
+            GenerateTokensResponse(
+                request_id="t",
+                choices=[
+                    GenerateTokensChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+                prompt_token_ids=prompt_ids,
+            ),
+        )
+        assert choices[0].message.content == expected
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_explicit_takes_precedence_over_fallback(
+        self, derenderer, tokenizer, leading_space_ids
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        wrong_ids = tokenizer.encode("a different prompt", add_special_tokens=False)
+        choices = await derenderer.derender_chat(
+            GenerateTokensResponse(
+                request_id="t",
+                choices=[
+                    GenerateTokensChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+                prompt_token_ids=wrong_ids,
+            ),
+            prompt_token_ids=prompt_ids,
+        )
+        assert choices[0].message.content == expected
+
+    @pytest.mark.asyncio
+    async def test_chat_batch_without_prompt_context_stays_unseeded(
+        self, derenderer, leading_space_ids
+    ):
+        _, output_ids, _ = leading_space_ids
+        choices = await derenderer.derender_chat(
+            GenerateTokensResponse(
+                request_id="t",
+                choices=[
+                    GenerateTokensChoice(
+                        index=0, token_ids=output_ids, finish_reason="stop"
+                    )
+                ],
+            ),
+        )
+        assert not choices[0].message.content.startswith(" ")
+
+    @pytest.mark.asyncio
+    async def test_completion_batch_seeded(self, derenderer, leading_space_ids):
+        prompt_ids, output_ids, expected = leading_space_ids
+        choices, _, _ = await derenderer.derender_completion(
+            [
+                GenerateTokensResponse(
+                    request_id="t",
+                    choices=[
+                        GenerateTokensChoice(
+                            index=0, token_ids=output_ids, finish_reason="stop"
+                        )
+                    ],
+                )
+            ],
+            prompt_token_ids=[prompt_ids],
+        )
+        assert choices[0].text == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("from_generate_chunk", [False, True])
+    async def test_chat_stream_first_chunk_seeded(
+        self, derenderer, leading_space_ids, from_generate_chunk
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        mid = len(output_ids) // 2
+
+        chunk1, state = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                output_ids[:mid],
+                prompt_token_ids=prompt_ids if from_generate_chunk else None,
+            ),
+            prompt_token_ids=None if from_generate_chunk else prompt_ids,
+        )
+        # Only needed on the first chunk; the carried state already holds
+        # the seeded window from here on.
+        chunk2, _ = await derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(output_ids[mid:], finish_reason="stop"),
+            state=state,
+        )
+
+        streamed = (chunk1.choices[0].delta.content or "") + (
+            chunk2.choices[0].delta.content or ""
+        )
+        assert streamed == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("from_generate_chunk", [False, True])
+    async def test_completion_stream_first_chunk_seeded(
+        self, derenderer, leading_space_ids, from_generate_chunk
+    ):
+        prompt_ids, output_ids, expected = leading_space_ids
+        mid = len(output_ids) // 2
+
+        chunk1, state = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(
+                output_ids[:mid],
+                prompt_token_ids=prompt_ids if from_generate_chunk else None,
+            ),
+            prompt_token_ids=None if from_generate_chunk else prompt_ids,
+        )
+        chunk2, _ = await derenderer.derender_completion_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(output_ids[mid:], finish_reason="stop"),
+            state=state,
+        )
+
+        assert chunk1.choices[0].text + chunk2.choices[0].text == expected
+
+    @pytest.mark.asyncio
+    async def test_parser_path_ephemeral_state_seeded(
+        self, parsed_derenderer, monkeypatch, leading_space_ids
+    ):
+        """The parser path's per-call detok window is seeded too, so
+        `parse_delta` sees the same text as coupled serving."""
+
+        class _EchoParser(Parser):
+            def parse_delta(
+                self,
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids=None,
+                *,
+                finished,
+            ):
+                return DeltaMessage(content=delta_text) if delta_text else None
+
+        monkeypatch.setattr(parsed_derenderer, "parser", _EchoParser)
+        prompt_ids, output_ids, expected = leading_space_ids
+
+        chunk, _ = await parsed_derenderer.derender_chat_stream(
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk(output_ids, finish_reason="stop"),
+            chat_request=_chat_request(),
+            prompt_token_ids=prompt_ids,
+        )
+        assert chunk.choices[0].delta.content == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stream_method",
@@ -421,8 +758,6 @@ async def test_streaming_detokenization_runs_off_event_loop(
     derenderer, monkeypatch, stream_method
 ):
     """Streaming detokenization runs on the renderer executor."""
-    import vllm.renderers.online_derenderer as online_derenderer_module
-
     event_loop_thread_id = threading.get_ident()
     executor_thread_id = derenderer.renderer._executor.submit(
         threading.get_ident
@@ -522,8 +857,6 @@ class TestDerenderCompletionStream:
     @pytest.mark.asyncio
     async def test_skip_special_tokens_threaded(self, derenderer, tokenizer):
         """completion_request.skip_special_tokens is honored (not hardcoded True)."""
-        from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-
         eos = tokenizer.eos_token_id
         if eos is None:
             pytest.skip("tokenizer has no eos token to exercise special stripping")
@@ -555,12 +888,12 @@ class TestDerenderCompletionStream:
 
 
 class TestStreamLogprobs:
-    """Streaming derender must carry per-chunk logprobs with placeholders
-    resolved, matching what the generate streaming path emits."""
+    """Streaming derender must carry per-chunk logprobs with token ids
+    decoded, matching what the generate streaming path emits."""
 
     @pytest.mark.asyncio
     async def test_chat_stream_logprobs_resolved_per_chunk(self, derenderer, tokenizer):
-        """Each streamed chunk carries logprobs with token_id:N resolved."""
+        """Each streamed chunk carries logprobs with its token ids decoded."""
         token_ids = tokenizer.encode("hello world")[:6]
         mid = len(token_ids) // 2
 
@@ -569,17 +902,15 @@ class TestStreamLogprobs:
             chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
-                    part, logprobs=_placeholder_logprobs(part)
+                    part, logprobs=_generate_logprobs(part)
                 ),
                 state=state,
             )
             logprobs = chunk.choices[0].logprobs
             assert logprobs is not None and logprobs.content is not None
-            assert len(logprobs.content) == len(part)
-            for entry in logprobs.content:
-                assert not entry.token.startswith("token_id:"), (
-                    f"placeholder not resolved: {entry.token!r}"
-                )
+            assert [entry.token for entry in logprobs.content] == (
+                convert_ids_list_to_tokens(tokenizer, part)
+            )
 
     @pytest.mark.asyncio
     async def test_chat_stream_logprobs_multibyte_across_chunks(
@@ -599,7 +930,7 @@ class TestStreamLogprobs:
             last_chunk, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
-                    [tid], logprobs=_placeholder_logprobs([tid])
+                    [tid], logprobs=_generate_logprobs([tid])
                 ),
                 state=state,
             )
@@ -622,13 +953,13 @@ class TestStreamLogprobs:
         chunk1, state = await derenderer.derender_completion_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
-                token_ids[:mid], logprobs=_placeholder_logprobs(token_ids[:mid])
+                token_ids[:mid], logprobs=_generate_logprobs(token_ids[:mid])
             ),
         )
         chunk2, _ = await derenderer.derender_completion_stream(
             model=MODEL_NAME,
             generate_chunk=_make_stream_chunk(
-                token_ids[mid:], logprobs=_placeholder_logprobs(token_ids[mid:])
+                token_ids[mid:], logprobs=_generate_logprobs(token_ids[mid:])
             ),
             state=state,
         )
@@ -645,7 +976,7 @@ class TestStreamLogprobs:
             _, state = await derenderer.derender_chat_stream(
                 model=MODEL_NAME,
                 generate_chunk=_make_stream_chunk(
-                    [tid], logprobs=_placeholder_logprobs([tid])
+                    [tid], logprobs=_generate_logprobs([tid])
                 ),
                 state=state,
             )
@@ -750,8 +1081,6 @@ class TestDerenderChatStream:
 
 
 def _chat_request(**kwargs):
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-
     kwargs.setdefault("messages", [{"role": "user", "content": "hi"}])
     kwargs.setdefault("model", MODEL_NAME)
     return ChatCompletionRequest(**kwargs)
@@ -1033,8 +1362,6 @@ def harmony_encode():
 @pytest.fixture(scope="module")
 def harmony_tokenizer():
     pytest.importorskip("openai_harmony")
-    from vllm.tokenizers import get_tokenizer
-
     return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
 
 
@@ -1046,10 +1373,7 @@ def harmony_derenderer(harmony_tokenizer):
     with a real tokenizer and parser, so the replay path is exercised
     against Harmony's actual channel grammar rather than a stub.
     """
-    from unittest.mock import MagicMock
-
     from vllm.parser.harmony import HarmonyParser
-    from vllm.renderers.online_derenderer import OnlineDerenderer
 
     renderer = MagicMock()
     renderer.get_tokenizer.return_value = harmony_tokenizer
@@ -1165,10 +1489,10 @@ class TestDerenderChatStreamHarmony:
         content = "".join(d.content or "" for d in deltas)
 
         batch_choices = await harmony_derenderer.derender_chat(
-            GenerateResponse(
+            GenerateTokensResponse(
                 request_id="test-harmony-batch",
                 choices=[
-                    GenerateResponseChoice(
+                    GenerateTokensChoice(
                         index=0, token_ids=output_ids, finish_reason="stop"
                     )
                 ],
@@ -1185,20 +1509,14 @@ class TestDerenderStreamStateValidation:
     """DerenderStreamState rejects malformed caller supplied offsets/lengths."""
 
     def test_negative_prefix_offset_rejected(self):
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             DerenderStreamState(prefix_offset=-1)
 
     def test_negative_read_offset_rejected(self):
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             DerenderStreamState(read_offset=-1)
 
     def test_prev_tokens_over_cap_rejected(self):
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             DerenderStreamState(prev_tokens=["a"] * 1025)
 
@@ -1207,14 +1525,10 @@ class TestDerenderStreamStateValidation:
         assert len(state.prev_tokens) == 1024
 
     def test_output_chunk_lens_mismatch_rejected(self):
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             DerenderStreamState(output_token_ids=[1, 2, 3], output_chunk_lens=[1, 1])
 
     def test_output_chunk_lens_zero_entry_rejected(self):
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             DerenderStreamState(output_token_ids=[1, 2], output_chunk_lens=[0, 2])
 
@@ -1225,14 +1539,40 @@ class TestDerenderStreamStateValidation:
         assert state.output_chunk_lens == [1, 2]
 
 
+_GEN = {"request_id": "t", "choices": []}
+_GEN_BAD = {**_GEN, "prompt_token_ids": [-1]}
+
+
+@pytest.mark.parametrize(
+    "model_cls,payload",
+    [
+        (DerenderChatRequest, {"generate_response": _GEN, "prompt_token_ids": [-1]}),
+        (DerenderChatRequest, {"generate_response": _GEN_BAD}),
+        (
+            DerenderCompletionRequest,
+            {"generate_responses": [_GEN], "prompt_token_ids": [[-1]]},
+        ),
+        (
+            DerenderChatStreamRequest,
+            {"stream": True, "generate_chunk": _GEN, "prompt_token_ids": [-1]},
+        ),
+        (
+            DerenderCompletionStreamRequest,
+            {"stream": True, "generate_chunk": _GEN_BAD},
+        ),
+    ],
+)
+def test_negative_prompt_token_ids_rejected(model_cls, payload):
+    """Negative prompt ids would reach convert_ids_to_tokens, so they get a
+    400 at parse time like `GenerateRequest.token_ids` does."""
+    with pytest.raises(ValidationError, match="prompt_token_ids"):
+        model_cls.model_validate(payload)
+
+
 class TestServingDerenderStreamErrorHandling:
     """Malformed stream_state must surface as 400 and not an unhandled 500."""
 
     def _make_serving(self, side_effect: Exception):
-        from unittest.mock import AsyncMock, MagicMock
-
-        from vllm.entrypoints.scale_out.derender.serving import ServingDerender
-
         models = MagicMock()
         models.is_base_model.return_value = True
         models.model_config = MagicMock()
@@ -1250,10 +1590,6 @@ class TestServingDerenderStreamErrorHandling:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("exc", [KeyError("bad byte"), IndexError("oob")])
     async def test_completion_stream_bad_state_returns_400(self, exc):
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderCompletionStreamRequest,
-        )
-
         serving = self._make_serving(exc)
         request = DerenderCompletionStreamRequest(
             stream=True,
@@ -1268,10 +1604,6 @@ class TestServingDerenderStreamErrorHandling:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("exc", [KeyError("bad byte"), IndexError("oob")])
     async def test_chat_stream_bad_state_returns_400(self, exc):
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(exc)
         request = DerenderChatStreamRequest(
             stream=True,
@@ -1290,13 +1622,6 @@ class TestServingDerenderStreamValidation:
     before touching the tokenizer)."""
 
     def _make_serving(self, *, parser_configured: bool, max_model_len: int = 100_000):
-        from unittest.mock import AsyncMock, MagicMock
-
-        from vllm.entrypoints.openai.chat_completion.protocol import (
-            ChatCompletionStreamResponse,
-        )
-        from vllm.entrypoints.scale_out.derender.serving import ServingDerender
-
         models = MagicMock()
         models.is_base_model.return_value = True
         models.model_config = MagicMock()
@@ -1314,10 +1639,6 @@ class TestServingDerenderStreamValidation:
 
     @pytest.mark.asyncio
     async def test_missing_chat_request_with_parser_rejected(self):
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(parser_configured=True)
         request = DerenderChatStreamRequest(
             stream=True,
@@ -1332,10 +1653,6 @@ class TestServingDerenderStreamValidation:
 
     @pytest.mark.asyncio
     async def test_missing_chat_request_without_parser_ok(self):
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(parser_configured=False)
         request = DerenderChatStreamRequest(
             stream=True,
@@ -1351,10 +1668,6 @@ class TestServingDerenderStreamValidation:
         the same way it rejects a missing chat_request. Without it,
         parse_delta cannot tell whether the prompt left reasoning open and
         would misclassify reasoning content as plain content."""
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(parser_configured=True)
         request = DerenderChatStreamRequest(
             stream=True,
@@ -1370,10 +1683,6 @@ class TestServingDerenderStreamValidation:
 
     @pytest.mark.asyncio
     async def test_prompt_token_ids_present_with_parser_ok(self):
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(parser_configured=True)
         request = DerenderChatStreamRequest(
             stream=True,
@@ -1387,10 +1696,6 @@ class TestServingDerenderStreamValidation:
 
     @pytest.mark.asyncio
     async def test_oversized_output_token_ids_rejected(self):
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(parser_configured=False, max_model_len=4)
         request = DerenderChatStreamRequest(
             stream=True,
@@ -1412,10 +1717,6 @@ class TestServingDerenderStreamValidation:
         parser configured deployment rescans it in full on every chunk
         (is_reasoning_end / adjust_initial_state_from_prompt), so it must be
         bounded the same way output_token_ids is."""
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(parser_configured=True, max_model_len=4)
         request = DerenderChatStreamRequest(
             stream=True,
@@ -1436,15 +1737,11 @@ class TestServingDerenderStreamValidation:
         DerenderStreamState is threaded through every choice). The check
         could never fire since derender_chat_stream itself rejects anything
         above 1 first."""
-        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            DerenderChatStreamRequest,
-        )
-
         serving = self._make_serving(parser_configured=False)
-        two_choices = GenerateStreamResponse(
+        two_choices = GenerateTokensStreamResponse(
             request_id="t",
             choices=[
-                GenerateResponseStreamChoice(index=i, token_ids=[1]) for i in range(2)
+                GenerateTokensStreamChoice(index=i, token_ids=[1]) for i in range(2)
             ],
         )
         request = DerenderChatStreamRequest(
@@ -1464,16 +1761,12 @@ class TestServingDerenderStreamValidation:
 
 @pytest.fixture(scope="module")
 def server():
-    from tests.utils import RemoteLaunchRenderServer
-
     with RemoteLaunchRenderServer(MODEL_NAME, []) as remote_server:
         yield remote_server
 
 
 @pytest_asyncio.fixture
 async def client(server):
-    import httpx
-
     async with httpx.AsyncClient(
         base_url=server.url_for(""), timeout=30.0
     ) as http_client:
@@ -1737,8 +2030,6 @@ _PARSER_TOOLS = [
 
 @pytest.fixture(scope="module")
 def parser_server():
-    from tests.utils import RemoteLaunchRenderServer
-
     args = [
         "--enable-auto-tool-choice",
         "--tool-call-parser",
@@ -1752,8 +2043,6 @@ def parser_server():
 
 @pytest_asyncio.fixture
 async def parser_client(parser_server):
-    import httpx
-
     async with httpx.AsyncClient(
         base_url=parser_server.url_for(""), timeout=60.0
     ) as http_client:
@@ -1762,8 +2051,6 @@ async def parser_client(parser_server):
 
 @pytest.fixture(scope="module")
 def parser_tokenizer():
-    from vllm.tokenizers import get_tokenizer
-
     return get_tokenizer(PARSER_MODEL)
 
 

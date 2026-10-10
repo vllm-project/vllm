@@ -83,6 +83,8 @@ pub enum Error {
     ClientClosed { message: String },
     #[error("request output stream for `{request_id}` closed unexpectedly")]
     RequestStreamClosed { request_id: String },
+    #[error("profiling session is already active")]
+    ProfileAlreadyActive,
     #[error("utility call `{method}` failed (call_id={call_id}): {message}")]
     UtilityCallFailed {
         method: String,

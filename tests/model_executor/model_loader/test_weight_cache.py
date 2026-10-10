@@ -356,6 +356,52 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
 
 
+@pytest.mark.parametrize("hf_quant_config", [None, {"quant_algo": "NVFP4"}])
+def test_weight_cache_key_distinguishes_nvfp4_activation_override(
+    tmp_path, hf_quant_config
+):
+    """Cache keys isolate activation modes and reject ambiguous legacy hashes."""
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.utils.hashing import safe_hash
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="modelopt_fp4",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(
+            architectures=["NemotronHForCausalLM"],
+            quantization_config=hf_quant_config,
+        ),
+    )
+    static_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    model_config.quantization_config = QuantizationConfigArgs(
+        moe={"activation": "nvfp4_per_token"}
+    )
+    per_token_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    assert static_key.mismatched_fields(per_token_key) == ["quant_config_hash"]
+
+    legacy_hash = (
+        ""
+        if hf_quant_config is None
+        else safe_hash(
+            json.dumps(hf_quant_config, sort_keys=True).encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+    )
+    assert static_key.mismatched_fields(
+        replace(static_key, quant_config_hash=legacy_hash)
+    ) == ["quant_config_hash"]
+
+
 def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     """Copy mode clones the weights into the engine, so nothing is external
     (vllm_config is never touched)."""
@@ -368,4 +414,4 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
         load_format="ipc_cache", model_loader_extra_config={"mode": "copy"}
     )
     loader = IpcModelLoader(copy_mode)
-    assert loader.get_external_weight_memory(None) == 0  # type: ignore[arg-type]
+    assert loader.get_external_weight_memory(None) == 0

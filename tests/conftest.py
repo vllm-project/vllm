@@ -1163,7 +1163,7 @@ class VllmRunner:
                 output_logprobs = sample.logprobs
             if include_prompt_token_ids:
                 outputs.append(
-                    (  # type: ignore[arg-type]
+                    (
                         output_ids,
                         output_str,
                         output_logprobs,

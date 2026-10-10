@@ -29,6 +29,12 @@ from typing import ClassVar
 
 import torch
 from torch import nn
+from transformers import (
+    Qwen3_5Config,
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+    Qwen3_5TextConfig,
+)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -59,11 +65,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
-from vllm.transformers_utils.configs.qwen3_5_moe import (
-    Qwen3_5MoeConfig,
-    Qwen3_5MoeTextConfig,
-)
 
 from .interfaces import (
     HasInnerState,
@@ -329,14 +330,8 @@ class Qwen3_5ForCausalLMBase(
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
 
         scheduler_config = vllm_config.scheduler_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3.5 currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()

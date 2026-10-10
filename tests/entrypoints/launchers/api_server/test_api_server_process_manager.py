@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import multiprocessing
+import os
 import socket
 import threading
 import time
@@ -11,14 +12,10 @@ from unittest.mock import patch
 import pytest
 import zmq
 
-from tests.entrypoints.launchers.api_server._api_server_spawn_workers import (
-    exit_before_report_worker,
-)
-from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
+from vllm.utils.network_utils import make_zmq_listener, make_zmq_socket
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.utils import (
     APIServerProcessManager,
-    get_engine_client_zmq_addr,
     wait_for_completion_or_failure,
 )
 
@@ -46,36 +43,30 @@ def update_admission_stats_worker(listen_address, sock, args, client_config):
     args.results.put(stats.get_num_requests())
 
 
-# Module-level stub for the gather_actual_addresses test. Must be
-# importable by `multiprocessing.spawn` (no closures, no nesting).
-def defer_addresses_stub_worker(listen_address, sock, args, client_config):
-    """Bind ROUTER/PULL with a kernel-assigned port, report the actual
-    endpoints back via the pipe, then exit."""
+def _adopt_zmq_listener_worker(listen_address, sock, args, client_config):
     ctx = zmq.Context()
+    router = make_zmq_socket(
+        ctx,
+        client_config["input_address"],
+        zmq.ROUTER,
+        bind=True,
+        listener=client_config["input_listener"],
+    )
+    pull = make_zmq_socket(
+        ctx,
+        client_config["output_address"],
+        zmq.PULL,
+        bind=True,
+        listener=client_config["output_listener"],
+    )
     try:
-        in_sock = make_zmq_socket(
-            ctx, client_config["input_address"], zmq.ROUTER, bind=True
-        )
-        out_sock = make_zmq_socket(
-            ctx, client_config["output_address"], zmq.PULL, bind=True
-        )
-        try:
-            pipe = client_config["actual_address_pipe"]
-            try:
-                pipe.send(
-                    {
-                        "input_address": in_sock.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        "output_address": out_sock.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode(),
-                    }
-                )
-            finally:
-                pipe.close()
-        finally:
-            in_sock.close(linger=0)
-            out_sock.close(linger=0)
+        identity, payload = router.recv_multipart()
+        assert payload == b"input"
+        assert pull.recv() == b"output"
+        router.send_multipart([identity, b"ok"])
     finally:
+        router.close(linger=0)
+        pull.close(linger=0)
         ctx.term()
 
 
@@ -89,15 +80,11 @@ def api_server_args():
         "sock": sock,
         "args": "test_args",  # Simple string to avoid pickling issues
         "num_servers": 3,
-        "input_addresses": [
-            "tcp://127.0.0.1:5001",
-            "tcp://127.0.0.1:5002",
-            "tcp://127.0.0.1:5003",
+        "input_listeners": [
+            make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER) for _ in range(3)
         ],
-        "output_addresses": [
-            "tcp://127.0.0.1:6001",
-            "tcp://127.0.0.1:6002",
-            "tcp://127.0.0.1:6003",
+        "output_listeners": [
+            make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL) for _ in range(3)
         ],
         "stats_update_address": "tcp://127.0.0.1:7000",
     }
@@ -120,6 +107,13 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
     try:
         # Verify the manager was initialized correctly
         assert len(manager.processes) == 3
+        assert all(
+            listener.socket.fileno() == -1
+            for listener in (
+                *args["input_listeners"],
+                *args["output_listeners"],
+            )
+        )
 
         # Verify all processes are running
         for proc in manager.processes:
@@ -143,6 +137,70 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
         # Verify all processes were terminated
         for proc in manager.processes:
             assert not proc.is_alive()
+
+
+def _assert_endpoint_reserved(address: str) -> None:
+    """A competing bind must fail while the endpoint has a listener owner."""
+    if address.startswith("ipc://"):
+        competitor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bind_address: str | tuple[str, int] = address.removeprefix("ipc://")
+    else:
+        competitor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        bind_address = ("127.0.0.1", int(address.rsplit(":", 1)[1]))
+    with competitor, pytest.raises(OSError, match="Address already in use"):
+        competitor.bind(bind_address)
+
+
+@pytest.mark.parametrize("scheme", ["tcp", "ipc"])
+def test_api_server_child_adopts_inherited_zmq_listeners(tmp_path, scheme):
+    if scheme == "tcp":
+        input_path = output_path = "tcp://127.0.0.1:0"
+    else:
+        input_path = f"ipc://{tmp_path}/input.sock"
+        output_path = f"ipc://{tmp_path}/output.sock"
+    input_listener = make_zmq_listener(input_path, zmq.ROUTER)
+    output_listener = make_zmq_listener(output_path, zmq.PULL)
+    input_address = input_listener.address
+    output_address = output_listener.address
+    # The supervisor reserves each endpoint as soon as it allocates it.
+    _assert_endpoint_reserved(input_address)
+    _assert_endpoint_reserved(output_address)
+    http_socket = socket.socket()
+    manager = APIServerProcessManager(
+        target_server_fn=_adopt_zmq_listener_worker,
+        listen_address="localhost:8000",
+        sock=http_socket,
+        args="test_args",
+        num_servers=1,
+        input_listeners=[input_listener],
+        output_listeners=[output_listener],
+    )
+
+    ctx = zmq.Context()
+    dealer = make_zmq_socket(
+        ctx, input_address, zmq.DEALER, bind=False, identity=b"test"
+    )
+    push = make_zmq_socket(ctx, output_address, zmq.PUSH, bind=False)
+    dealer.setsockopt(zmq.RCVTIMEO, 30_000)
+    try:
+        assert input_listener.socket.fileno() == -1
+        assert output_listener.socket.fileno() == -1
+        # After the parent closes its copies, the child's inherited descriptors
+        # keep both endpoints reserved; closing must not unlink IPC paths.
+        assert manager.processes[0].is_alive()
+        _assert_endpoint_reserved(input_address)
+        _assert_endpoint_reserved(output_address)
+        dealer.send(b"input")
+        push.send(b"output")
+        assert dealer.recv() == b"ok"
+        manager.processes[0].join(timeout=10)
+        assert manager.processes[0].exitcode == 0
+    finally:
+        manager.shutdown()
+        dealer.close(linger=0)
+        push.close(linger=0)
+        ctx.term()
+        http_socket.close()
 
 
 @pytest.mark.skip_global_cleanup
@@ -308,7 +366,7 @@ def test_external_process_monitoring(api_server_args):
             try:
                 wait_for_completion_or_failure(
                     api_server_manager=manager,
-                    coordinator=mock_coordinator,  # type: ignore[arg-type]
+                    coordinator=mock_coordinator,
                 )
             except Exception as e:
                 result["exception"] = e
@@ -354,96 +412,7 @@ def test_external_process_monitoring(api_server_args):
         WORKER_RUNTIME_SECONDS = prev_worker_runtime
 
 
-@pytest.mark.timeout(60)
-def test_gather_actual_addresses_end_to_end():
-    """Each child binds ROUTER/PULL with a kernel-picked port and reports
-    the bound endpoints back via its per-child pipe; the manager surfaces
-    them via :py:meth:`gather_actual_addresses`."""
-    host = "127.0.0.1"
-    num_servers = 4
-
-    placeholder_inputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host)
-        for _ in range(num_servers)
-    ]
-    placeholder_outputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host)
-        for _ in range(num_servers)
-    ]
-    for addr in placeholder_inputs + placeholder_outputs:
-        assert addr == f"tcp://{host}:0", addr
-
-    sock = socket.socket()
-    manager = APIServerProcessManager(
-        listen_address=f"tcp://{host}:0",
-        sock=sock,
-        args="test_args",  # type: ignore[arg-type]
-        num_servers=num_servers,
-        input_addresses=placeholder_inputs,
-        output_addresses=placeholder_outputs,
-        target_server_fn=defer_addresses_stub_worker,
-    )
-
-    try:
-        assert len(manager.processes) == num_servers
-        actual_inputs, actual_outputs = manager.gather_actual_addresses(timeout=15.0)
-    finally:
-        manager.shutdown()
-        time.sleep(0.2)
-        sock.close()
-
-    assert len(actual_inputs) == num_servers
-    assert len(actual_outputs) == num_servers
-
-    for addr in actual_inputs + actual_outputs:
-        scheme, parsed_host, port = split_zmq_path(addr)
-        assert scheme == "tcp", addr
-        assert parsed_host == host, addr
-        assert port and int(port) > 0, addr
-
-    all_addrs = actual_inputs + actual_outputs
-    assert len(set(all_addrs)) == len(all_addrs), all_addrs
-
-
-@pytest.mark.timeout(30)
-def test_gather_actual_addresses_child_crash_before_report():
-    """A child that exits before sending its endpoints must surface a
-    clear ``RuntimeError`` rather than hang or return ``None`` slots."""
-    host = "127.0.0.1"
-    num_servers = 2
-    placeholder_inputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host)
-        for _ in range(num_servers)
-    ]
-    placeholder_outputs = [
-        get_engine_client_zmq_addr(local_only=False, host=host)
-        for _ in range(num_servers)
-    ]
-
-    sock = socket.socket()
-    manager = APIServerProcessManager(
-        listen_address=f"tcp://{host}:0",
-        sock=sock,
-        args="test_args",  # type: ignore[arg-type]
-        num_servers=num_servers,
-        input_addresses=placeholder_inputs,
-        output_addresses=placeholder_outputs,
-        # exit_before_report_worker exits without touching
-        # ``actual_address_pipe`` — simulates a child that dies before
-        # reporting its bound addresses.
-        target_server_fn=exit_before_report_worker,
-    )
-    try:
-        # Sentinel-first vs pipe-EOF-first both produce "reporting".
-        with pytest.raises(RuntimeError, match="reporting"):
-            manager.gather_actual_addresses(timeout=10.0)
-    finally:
-        manager.shutdown()
-        time.sleep(0.2)
-        sock.close()
-
-
-def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
+def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
     """The Rust frontend command carries every non-default arg as JSON.
     Credentials must not reach the log line."""
     import subprocess as subprocess_mod
@@ -469,15 +438,17 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
             return 0
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
     try:
         monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
-        with caplog.at_level("INFO", logger="vllm.v1.utils"):
+        with patch("vllm.v1.utils.logger.info") as log_info:
             RustFrontendProcessManager(
                 binary_path="/nonexistent/vllm-rs",
                 sock=sock,
                 args=args,
-                input_address="ipc:///tmp/in",
-                output_address="ipc:///tmp/out",
+                input_listener=input_listener,
+                output_listener=output_listener,
                 engine_start_index=0,
                 engine_count=1,
                 data_parallel_size=1,
@@ -485,11 +456,13 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
     finally:
         sock.close()
 
-    message = caplog.text
+    log_format, *log_args = log_info.call_args.args
+    message = log_format % tuple(log_args)
     assert "Launching Rust frontend:" in message
     assert hf_token not in message
     assert api_key not in message
     assert '"hf_token": "***"' in message
+    assert '"api_key": "***"' in message
 
 
 def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_path):
@@ -519,6 +492,8 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
             return 0
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
     try:
         monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
         with caplog.at_level("INFO", logger="vllm.v1.utils"):
@@ -526,8 +501,8 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
                 binary_path="/nonexistent/vllm-rs",
                 sock=sock,
                 args=args,
-                input_address="ipc:///tmp/in",
-                output_address="ipc:///tmp/out",
+                input_listener=input_listener,
+                output_listener=output_listener,
                 engine_start_index=0,
                 engine_count=1,
                 data_parallel_size=1,
@@ -536,3 +511,97 @@ def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_p
         sock.close()
 
     assert '"model_tag": "org/model"' in caplog.text
+
+
+def test_rust_frontend_inherits_grpc_listener(monkeypatch):
+    """The Python-bound gRPC socket is passed to Rust like the HTTP one."""
+    import subprocess as subprocess_mod
+
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model", "--grpc-port", "50051"]
+    )
+
+    class _FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs))
+        return _FakeProc()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    grpc_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    input_fd = input_listener.socket.fileno()
+    output_fd = output_listener.socket.fileno()
+    try:
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
+        RustFrontendProcessManager(
+            binary_path="/nonexistent/vllm-rs",
+            sock=sock,
+            args=args,
+            input_listener=input_listener,
+            output_listener=output_listener,
+            engine_start_index=0,
+            engine_count=1,
+            data_parallel_size=1,
+            grpc_sock=grpc_sock,
+        )
+        [(cmd, kwargs)] = popen_calls
+        grpc_fd = grpc_sock.fileno()
+        flag_index = cmd.index("--grpc-listen-fd")
+        assert cmd[flag_index + 1] == str(grpc_fd)
+        assert list(kwargs["pass_fds"]) == [
+            sock.fileno(),
+            input_fd,
+            output_fd,
+            grpc_fd,
+        ]
+    finally:
+        sock.close()
+        grpc_sock.close()
+
+
+def test_rust_frontend_spawn_failure_cleans_up_listeners(tmp_path):
+    """No child owns the listeners when Popen fails, so the parent removes them."""
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.utils import RustFrontendProcessManager
+
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        ["--model", "org/model"]
+    )
+    input_listener = make_zmq_listener(f"ipc://{tmp_path}/input.sock", zmq.ROUTER)
+    output_listener = make_zmq_listener(f"ipc://{tmp_path}/output.sock", zmq.PULL)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(FileNotFoundError):
+            RustFrontendProcessManager(
+                binary_path=str(tmp_path / "missing-vllm-rs"),
+                sock=sock,
+                args=args,
+                input_listener=input_listener,
+                output_listener=output_listener,
+                engine_start_index=0,
+                engine_count=1,
+                data_parallel_size=1,
+            )
+    finally:
+        sock.close()
+
+    for listener in (input_listener, output_listener):
+        assert listener.socket.fileno() == -1
+        assert not os.path.exists(listener.address.removeprefix("ipc://"))

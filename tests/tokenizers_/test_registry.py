@@ -6,11 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from transformers import AutoConfig
+from transformers import AutoConfig, Qwen3_5MoeConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.hf import CachedHfTokenizer
 from vllm.tokenizers.registry import (
     TokenizerRegistry,
     cached_get_tokenizer,
@@ -19,7 +18,6 @@ from vllm.tokenizers.registry import (
     get_tokenizer,
     resolve_tokenizer_args,
 )
-from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 
 class TestTokenizer(TokenizerLike):
@@ -93,54 +91,6 @@ def test_resolve_tokenizer_args_rejects_hf_mistral_format_true():
         )
 
 
-@pytest.mark.parametrize(
-    ("transformers_version", "model_type", "native_filename", "expect_error"),
-    [
-        pytest.param("5.14.0", "mistral", "tekken.json", True),
-        pytest.param("5.15.0", "mistral", "tekken.json", False),
-        pytest.param("5.14.0", "mistral3", "tekken.json", True),
-        pytest.param("5.15.0", "mistral3", "tekken.json", False),
-        pytest.param("5.14.0", "mixtral", "tokenizer.model.v1", True),
-        pytest.param("5.15.0", "mixtral", "tokenizer.model.v1", False),
-        pytest.param("5.14.0", "mistral", None, False),
-        pytest.param("5.14.0", "qwen3_5_moe", "tekken.json", False),
-    ],
-)
-def test_get_tokenizer_handles_hf_mistral_transformers_compatibility(
-    tmp_path: Path,
-    transformers_version: str,
-    model_type: str,
-    native_filename: str | None,
-    expect_error: bool,
-):
-    if native_filename is not None:
-        (tmp_path / native_filename).touch()
-
-    with (
-        patch(
-            "vllm.tokenizers.registry.get_config",
-            return_value=SimpleNamespace(model_type=model_type),
-        ),
-        patch(
-            "vllm.tokenizers.registry.transformers.__version__",
-            transformers_version,
-        ),
-        patch.object(
-            CachedHfTokenizer,
-            "from_pretrained",
-            return_value=SimpleNamespace(is_fast=True),
-        ) as from_pretrained,
-    ):
-        if expect_error:
-            with pytest.raises(ValueError, match="requires transformers>=5.15.0"):
-                get_tokenizer(str(tmp_path), tokenizer_mode="hf")
-        else:
-            tokenizer = get_tokenizer(str(tmp_path), tokenizer_mode="hf")
-            assert tokenizer.is_fast is True
-
-    assert from_pretrained.called == (not expect_error)
-
-
 def test_customized_tokenizer():
     TokenizerRegistry.register("test_tokenizer", __name__, TestTokenizer.__name__)
 
@@ -205,7 +155,7 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
                 side_effect=lambda tokenizer: tokenizer,
             ),
         ):
-            tokenizer = cached_tokenizer_from_config(model_config)  # type: ignore[arg-type]
+            tokenizer = cached_tokenizer_from_config(model_config)
 
         assert tokenizer.is_fast is True
     finally:

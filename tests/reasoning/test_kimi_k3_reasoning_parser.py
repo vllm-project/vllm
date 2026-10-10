@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import pytest
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
@@ -10,6 +12,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.parser.kimi_k3 import KimiK3Parser
 from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
+from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -25,15 +28,22 @@ RESPONSE_OPEN_IDS = [ord(ch) for ch in RESPONSE_OPEN]
 
 
 class DummyTokenizer:
+    def __len__(self) -> int:
+        return 1
+
     def get_vocab(self) -> dict[str, int]:
         return {}
 
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+    def encode(self, text: str, *args, **kwargs) -> list[int]:
         if text == THINK_OPEN:
             return [1, 2, 3]
         if text == THINK_CLOSE:
             return [4, 2, 3]
         return [ord(ch) for ch in text]
+
+
+def _dummy_tokenizer() -> TokenizerLike:
+    return cast(TokenizerLike, DummyTokenizer())
 
 
 class ReasoningOnlyParser(KimiK3Parser):
@@ -84,7 +94,7 @@ def test_extract_reasoning_with_generation_prefix_consumed():
 
 
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
-    parser = ReasoningOnlyParser(DummyTokenizer())
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
 
     reasoning, content, tool_calls = parser.parse(
@@ -165,7 +175,7 @@ def test_count_reasoning_tokens_is_zero_when_thinking_disabled():
 
 
 def test_count_reasoning_tokens_through_delegating_parser():
-    parser = ReasoningOnlyParser(DummyTokenizer())
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
 
     assert parser.count_reasoning_tokens([*OPEN_IDS, 9, *CLOSE_IDS, 11]) == 1
 
@@ -253,7 +263,8 @@ def test_thinking_disabled_streams_content():
 
 def test_delegating_parser_thinking_false_streams_response_content():
     parser = ReasoningOnlyParser(
-        DummyTokenizer(), chat_template_kwargs={"thinking": False}
+        _dummy_tokenizer(),
+        chat_template_kwargs={"thinking": False},
     )
     request = ChatCompletionRequest(
         model="test-model",

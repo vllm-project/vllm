@@ -370,7 +370,7 @@ def test_streaming_split_markers_do_not_leak():
     assert len(tool_deltas) == 1
     assert tool_deltas[0].function is not None
     assert tool_deltas[0].function.name == "calc"
-    assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}  # type: ignore[arg-type]
+    assert json.loads(tool_deltas[0].function.arguments) == {"x": 1}
 
 
 def test_tool_call_ids_are_unique_across_messages():

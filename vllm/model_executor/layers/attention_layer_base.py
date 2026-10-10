@@ -21,6 +21,8 @@ class AttentionLayerBase(ABC):
 
     impl: "AttentionImpl"
     supports_dcp: bool = True
+    # Set by the speculator on its draft model's layers.
+    is_draft_layer: bool = False
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Bind the allocated KV cache tensor to this layer.

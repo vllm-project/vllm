@@ -4,6 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Once;
@@ -311,10 +313,17 @@ fn bootstrapped_test_config(
     client_index: u32,
     coordinator_mode: Option<CoordinatorMode>,
 ) -> EngineCoreClientConfig {
+    fn listener(address: &str) -> i32 {
+        let path = address.strip_prefix("ipc://").expect("bootstrapped tests use IPC listeners");
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path).expect("bind inherited test listener");
+        listener.into_raw_fd()
+    }
+
     EngineCoreClientConfig {
         transport_mode: TransportMode::Bootstrapped {
-            input_address,
-            output_address,
+            input_listener_fd: listener(&input_address),
+            output_listener_fd: listener(&output_address),
             engine_start_index: 0,
             engine_count,
             data_parallel_size: engine_count,
@@ -362,15 +371,22 @@ fn bootstrapped_test_config_with_start_index(
 
 #[test]
 fn client_config_validates_bootstrapped_dp_range() {
-    let mut config = bootstrapped_test_config_with_start_index(
-        "ipc://unused-input".to_string(),
-        "ipc://unused-output".to_string(),
-        1,
-        2,
-        Duration::from_secs(1),
-        0,
-        None,
-    );
+    // Validation never consumes the descriptors, so placeholders avoid opening
+    // listeners that nothing would close.
+    let mut config = EngineCoreClientConfig {
+        transport_mode: TransportMode::Bootstrapped {
+            input_listener_fd: -1,
+            output_listener_fd: -1,
+            engine_start_index: 1,
+            engine_count: 2,
+            data_parallel_size: 3,
+            ready_timeout: Duration::from_secs(1),
+        },
+        coordinator_mode: None,
+        model_name: "test-model".to_string(),
+        client_index: 0,
+        engine_stats_enabled: true,
+    };
     config.validate().expect("frontend may own a subset of global DP ranks");
 
     let TransportMode::Bootstrapped {
@@ -739,8 +755,8 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     )
     .await;
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     let final_1 = timeout(Duration::from_secs(1), stream_1.next())
         .await
@@ -762,7 +778,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap();
+    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap().into_outputs();
     let final_3 = timeout(Duration::from_secs(1), stream_3.next())
         .await
         .unwrap()
@@ -917,7 +933,7 @@ async fn coordinator_accepts_stats_only_outputs() {
     )
     .await;
 
-    let mut stream = client.call(sample_request_with_id("req-stats")).await.unwrap();
+    let mut stream = client.call(sample_request_with_id("req-stats")).await.unwrap().into_outputs();
     let final_output =
         timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(final_output.request_id, "req-stats");
@@ -1010,8 +1026,8 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     assert!(client.ready_responses()[0].max_model_len > 0);
     assert_eq!(client.vllm_version(), "test-vllm-version");
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     let error_2 = timeout(Duration::from_secs(1), stream_2.next())
         .await
@@ -1087,7 +1103,7 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
     )
     .await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
     let error = match client.call(sample_request()).await {
         Ok(_) => panic!("expected duplicate request error"),
         Err(error) => error,
@@ -1154,7 +1170,7 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
     )
     .await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
     let error = timeout(Duration::from_secs(1), stream.next())
         .await
         .unwrap()
@@ -1217,7 +1233,7 @@ async fn dropping_a_live_stream_triggers_abort() {
     )
     .await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
     let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(first.new_token_ids, vec![99]);
     drop(stream);
@@ -1300,7 +1316,7 @@ async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
     // emits outputs, then drain the first token from each stream.
     let mut streams = Vec::new();
     for id in request_ids {
-        streams.push(client.call(sample_request_with_id(id)).await.unwrap());
+        streams.push(client.call(sample_request_with_id(id)).await.unwrap().into_outputs());
     }
     for stream in streams.iter_mut() {
         let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
@@ -1347,8 +1363,8 @@ async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     )
     .await;
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     let error_1 = timeout(Duration::from_secs(1), stream_1.next())
         .await
@@ -1846,7 +1862,7 @@ async fn client_decodes_multipart_logprob_outputs() {
     )
     .await;
 
-    let stream = client.call(sample_request()).await.unwrap();
+    let stream = client.call(sample_request()).await.unwrap().into_outputs();
     let outputs = stream.collect::<Vec<_>>().await;
     assert_eq!(outputs.len(), 1);
 
@@ -1934,7 +1950,7 @@ async fn client_sends_large_multimodal_tensor_as_aux_frame() {
     )
     .await;
 
-    let outputs = client.call(request).await.unwrap().collect::<Vec<_>>().await;
+    let outputs = client.call(request).await.unwrap().into_outputs().collect::<Vec<_>>().await;
     assert_eq!(outputs.len(), 1);
     assert!(outputs[0].is_ok());
 
@@ -2063,8 +2079,8 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(client.ready_responses().len(), 2);
     assert_eq!(client.engine_identities()[0], b"engine-0");
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
     assert_eq!(
         timeout(Duration::from_secs(1), engine_0_seen_rx.recv()).await.unwrap().unwrap(),
         "req-1"
@@ -2084,7 +2100,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(final_1.new_token_ids, vec![10]);
     assert_eq!(final_1.finish_reason, Some(EngineCoreFinishReason::Length));
 
-    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap();
+    let mut stream_3 = client.call(sample_request_with_id("req-3")).await.unwrap().into_outputs();
     assert_eq!(
         timeout(Duration::from_secs(1), engine_0_seen_rx.recv()).await.unwrap().unwrap(),
         "req-3"
@@ -2255,8 +2271,8 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 
     assert!(client.is_sleeping().await.unwrap());
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap().into_outputs();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap().into_outputs();
 
     client
         .abort(&[
@@ -2287,6 +2303,89 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     let _ = shutdown_tx_1.send(());
     engine_task_0.await.unwrap();
     engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wake_up_requires_every_engine_to_be_fully_awake() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let mut engines = Vec::new();
+    for engine_index in 0..2 {
+        let engine = spawn_mock_engine_task(
+            handshake_address.clone(),
+            EngineId::from_engine_index(engine_index).into_frame().to_vec(),
+            move |dealer, push| {
+                Box::pin(async move {
+                    let results = if engine_index == 0 {
+                        [true, false, true]
+                    } else {
+                        [false, true, true]
+                    };
+                    for (attempt, fully_awake) in results.into_iter().enumerate() {
+                        let utility = recv_engine_message(dealer).await;
+                        assert_eq!(utility[0].as_ref(), &[0x03]);
+                        let payload = decode_value(&utility[1]);
+                        let array = payload.as_array().expect("utility payload array");
+                        let call_id = array[1].as_u64().expect("call_id");
+                        assert_eq!(array[2], Value::from("wake_up"));
+                        let tags = if attempt == 1 {
+                            Value::Array(vec![Value::from("weights")])
+                        } else {
+                            Value::Nil
+                        };
+                        assert_eq!(array[3], Value::Array(vec![tags]));
+                        send_outputs(
+                            push,
+                            UtilityCallOutput {
+                                engine_index: u32::from(engine_index),
+                                timestamp: 0.0,
+                                output: UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: Some(utility_result_value(fully_awake)),
+                                },
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        );
+        engines.push(engine);
+    }
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    for (tags, expected) in [
+        (None, false),
+        (Some(vec!["weights".to_owned()]), false),
+        (None, true),
+    ] {
+        assert_eq!(
+            timeout(Duration::from_secs(2), client.wake_up(tags))
+                .await
+                .expect("wake timeout")
+                .expect("wake result"),
+            expected
+        );
+    }
+    for (shutdown_tx, engine_task) in engines {
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
     client.shutdown().await.unwrap();
 }
 
@@ -2704,6 +2803,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            stream_interval: None,
         },
     );
 
@@ -3167,7 +3267,7 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
 
     let wakeup = timeout(
         Duration::from_secs(1),
@@ -3253,7 +3353,7 @@ async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
     send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 5_u32, true)).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut stream = client.call(sample_request()).await.unwrap();
+    let mut stream = client.call(sample_request()).await.unwrap().into_outputs();
 
     assert!(
         timeout(

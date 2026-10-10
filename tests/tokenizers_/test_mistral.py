@@ -975,7 +975,7 @@ class TestMistralTokenizer:
         mistral_tokenizer: MistralTokenizer,
     ):
         assert mistral_tokenizer.batch_decode(
-            [[]],  # type: ignore[arg-type]
+            [[]],
         ) == [""]
 
     def test_convert_tokens_to_string(self, mistral_tokenizer: MistralTokenizer):
@@ -2246,7 +2246,7 @@ class TestMistralTokenizer:
         ]
 
         output = mistral_tokenizer.apply_chat_template(
-            messages,  # type: ignore[arg-type]
+            messages,
             add_generation_prompt=True,
         )
         decoded = mistral_tokenizer.tokenizer.decode(output, SpecialTokenPolicy.KEEP)
@@ -2352,7 +2352,7 @@ def test_v15_apply_chat_template_passes_reasoning_effort_high(
     )
 
     v15_mistral_tokenizer.apply_chat_template(
-        messages=_PASSTHROUGH_MESSAGES,  # type: ignore[arg-type]
+        messages=_PASSTHROUGH_MESSAGES,
         reasoning_effort="high",
     )
 
@@ -2375,7 +2375,7 @@ def test_v15_apply_chat_template_passes_reasoning_effort_none_by_default(
         fake_apply_chat_template,
     )
 
-    v15_mistral_tokenizer.apply_chat_template(messages=_PASSTHROUGH_MESSAGES)  # type: ignore[arg-type]
+    v15_mistral_tokenizer.apply_chat_template(messages=_PASSTHROUGH_MESSAGES)
 
     assert "reasoning_effort" in captured_kwargs[-1]
     assert captured_kwargs[-1]["reasoning_effort"] is None
@@ -2398,7 +2398,7 @@ def test_pre_v15_apply_chat_template_omits_reasoning_effort(
     )
 
     v13_mistral_tokenizer.apply_chat_template(
-        messages=_PASSTHROUGH_MESSAGES,  # type: ignore[arg-type]
+        messages=_PASSTHROUGH_MESSAGES,
         reasoning_effort="high",
     )
 

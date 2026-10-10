@@ -50,6 +50,19 @@ class LightOnOCRMultiModalProcessor(BaseMultiModalProcessor[LightOnOCRProcessing
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
+    def _call_hf_processor(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # The checkpoint sets `do_pad: null`, which disables padding since
+        # Transformers v5.18, so images of different sizes cannot be stacked.
+        return self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**hf_kwargs),
+            hf_data,
+            {**hf_kwargs, "do_pad": True},
+        )
+
     def _postprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],

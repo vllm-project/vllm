@@ -18,6 +18,7 @@ from vllm.utils.cpu_resource_utils import (
     get_visible_memory_node,
 )
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -26,6 +27,10 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backends.mla.prefill.base import (
+        MLAPrefillBackend,
+    )
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -174,6 +179,21 @@ class CpuPlatform(Platform):
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend]":
+        """Get the MLA prefill backend class of a device."""
+        for backend_enum in (MLAPrefillBackendEnum.ZEN_CPU, MLAPrefillBackendEnum.CPU):
+            try:
+                cpu_backend_cls = backend_enum.get_class()
+            except ImportError:
+                continue
+            if cpu_backend_cls.is_available():
+                return cpu_backend_cls
+        raise ValueError("No valid CPU MLA prefill backend found.")
+
+    @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         meminfo = get_memory_node_info(device_id)
 
@@ -303,7 +323,7 @@ class CpuPlatform(Platform):
                     mamba_backend,
                 )
 
-        # Lagecy setting
+        # Legacy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
         if env_key in os.environ and os.environ[env_key] != "":
             kv_cache_space = int(os.environ[env_key])
@@ -523,7 +543,9 @@ class CpuPlatform(Platform):
         if not backend_classes:
             return
 
+        pre_block_size = vllm_config.cache_config.block_size
         cls._align_hybrid_block_size(vllm_config, backend_classes[0])
+        cls._check_aligned_block_size(vllm_config, backend_classes, pre_block_size)
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:

@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
@@ -20,10 +20,9 @@ from pydantic import (
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
-    MM_PARSER_MAP,
-    TEXT_PART_TYPES,
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    has_non_text_content,
 )
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
@@ -34,6 +33,7 @@ from vllm.entrypoints.generate.base.protocol import (
     StopParam,
     StreamOptions,
     ToolCall,
+    TopLogprobsParam,
     structured_outputs_from_response_format,
     validate_cache_salt,
     validate_structural_tag_response_format,
@@ -54,16 +54,14 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid
 
+if TYPE_CHECKING:
+    from vllm.parser.abstract_parser import Parser
+
 logger = init_logger(__name__)
 
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
-
-# Content part types that carry no multimodal data.
-_TEXT_CONTENT_PART_TYPES = TEXT_PART_TYPES | {"tool_reference"}
-# Keys that mark a content part as multimodal, whatever its ``type``.
-_MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -225,7 +223,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     max_tokens: int | None = Field(
         default=None,
         deprecated="max_tokens is deprecated in favor of "
@@ -274,7 +272,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
-    watermarking: bool = True
+    watermarking: bool | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -460,6 +458,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
+        ),
+    )
+
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -572,6 +582,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
+    def resolve_reasoning_ended(
+        self, parser: "Parser | None", prompt_token_ids: list[int]
+    ) -> bool | None:
+        """Resolve the engine's `reasoning_ended` for structured outputs.
+
+        Call after `adjust_request`, which may set `_grammar_from_parser`.
+        `True` constrains from the first generated token; `None` lets the
+        engine check the prompt with its own reasoning parser.
+        """
+        if not self.include_reasoning:
+            return True
+        if self._grammar_from_parser:
+            # The Mistral grammar already includes an optional `think?`
+            # rule that handles both reasoning and non-reasoning outputs.
+            return True
+        if parser is not None and parser.reasoning_parser is not None:
+            return parser.is_reasoning_end(prompt_token_ids)
+        return None
+
     def build_chat_params(
         self,
         default_template: str | None,
@@ -653,6 +682,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
             skip_special_tokens=self.skip_special_tokens,
@@ -991,29 +1021,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         kv_transfer_params = data.get("kv_transfer_params")
-        messages = data.get("messages")
         if (
-            not isinstance(kv_transfer_params, dict)
-            or kv_transfer_params.get("prompt_token_ids") is None
-            or not isinstance(messages, list)
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+            and has_non_text_content(data.get("messages"))
         ):
-            return data
-        for msg in messages:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if isinstance(part, dict) and (
-                    any(key in part for key in _MEDIA_CONTENT_PART_KEYS)
-                    or not isinstance(part_type := part.get("type", "text"), str)
-                    or part_type not in _TEXT_CONTENT_PART_TYPES
-                ):
-                    logger.debug(
-                        "Ignoring kv_transfer_params['prompt_token_ids']: "
-                        "messages have non-text content and are rendered instead."
-                    )
-                    kv_transfer_params.pop("prompt_token_ids")
-                    return data
+            logger.debug(
+                "Ignoring kv_transfer_params['prompt_token_ids']: "
+                "messages have non-text content and are rendered instead."
+            )
+            kv_transfer_params.pop("prompt_token_ids")
         return data
 
     @model_validator(mode="before")
@@ -1088,10 +1105,10 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     model: str | None = None
 
     # Shared sampling / generation fields — mirror ChatCompletionRequest.
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -1103,7 +1120,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     n: int | None = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = Field(default_factory=list)
@@ -1119,6 +1136,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    watermarking: bool | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None

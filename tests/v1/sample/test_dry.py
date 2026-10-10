@@ -917,7 +917,10 @@ def test_loads_through_the_loader_by_fqcn():
         total_len=None,
     )
     procs = loader.build_custom_logits_processors(
-        _make_vllm_config(), req_states, False, [DRY_FQCN]
+        _make_vllm_config(),
+        req_states,
+        False,
+        [DRY_FQCN],
     )
     assert [type(p) for p in procs] == [DryState]
 

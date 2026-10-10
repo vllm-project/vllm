@@ -601,13 +601,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
+        verify_route = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.lower()
         asm_dcp_verify_config = (
             _asm_dcp_verify_configured(
                 parallel_config.decode_context_parallel_size,
                 parallel_config.cp_kv_cache_interleave_size,
                 multi_token_decode=vllm_config.speculative_config is not None,
             )
-            and envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY == "asm"
+            and verify_route != "segmented"
         )
         super().__init__(
             kv_cache_spec,
@@ -627,14 +628,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._asm_dcp_verify_heads = _asm_dcp_verify_heads(
                 self.num_heads * self.dcp_world_size
             )
-            if not self._asm_dcp_verify_heads:
+            if self._asm_dcp_verify_heads:
+                self._asm_dcp_verify = True
+            elif verify_route == "asm" or not supports_segmented_dcp_verify:
                 raise ValueError(
-                    "VLLM_ROCM_AITER_MLA_DCP_VERIFY=asm, but the round-robin asm "
-                    f"decode has no kernel for {self.num_heads * self.dcp_world_size} "
-                    f"DCP-gathered heads (native counts: {_NATIVE_CPRR_HEADS}). "
-                    "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
+                    f"VLLM_ROCM_AITER_MLA_DCP_VERIFY={verify_route}, but the "
+                    "round-robin asm decode has no kernel for "
+                    f"{self.num_heads * self.dcp_world_size} DCP-gathered heads "
+                    f"(native counts: {_NATIVE_CPRR_HEADS}). "
+                    + (
+                        "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented."
+                        if supports_segmented_dcp_verify
+                        else "This AITER build also lacks segmented MLA decode."
+                    )
                 )
-            self._asm_dcp_verify = True
         self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
         self._mla_max_split_per_batch = 0
         if self._asm_dcp_verify:
@@ -948,6 +955,31 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
+        # get_ps_metadata_v1 builds the plan on the host and writes its outputs with
+        # blocking hipMemcpy that is not ordered on the current stream. Writing the
+        # device buffers directly lets step N+1's build (async scheduling) overwrite a
+        # plan that step N's prefill kernels are still reading. Build into pinned host
+        # staging instead and copy on the current stream. Two staging slots, each
+        # reused only after its previous H2D copy has completed.
+        self._fp8_ps_device_outputs = (
+            self.fp8_ps_work_indptr,
+            self.fp8_ps_work_info,
+            self.fp8_ps_reduce_indptr,
+            self.fp8_ps_reduce_final_map,
+            self.fp8_ps_reduce_partial_map,
+        )
+        self._fp8_ps_staging = [
+            tuple(
+                torch.empty(t.shape, dtype=t.dtype, device="cpu", pin_memory=True)
+                for t in self._fp8_ps_device_outputs
+            )
+            for _ in range(2)
+        ]
+        # One event per slot, recorded after that slot's H2D copy. synchronize()
+        # on an event that has not been recorded yet returns immediately.
+        self._fp8_ps_staging_free = [torch.cuda.Event(), torch.cuda.Event()]
+        self._fp8_ps_slot = 0
+
         from vllm.platforms import current_platform
         from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -1043,6 +1075,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         kvlen_granularity = 128
         block_size = 1  # non-paged: each "page" is one token
 
+        slot = self._fp8_ps_slot
+        self._fp8_ps_slot ^= 1
+        staging_free = self._fp8_ps_staging_free[slot]
+        with gpu_sync_allowed():
+            staging_free.synchronize()
+        (
+            work_indptr_host,
+            work_info_host,
+            reduce_indptr_host,
+            reduce_final_map_host,
+            reduce_partial_map_host,
+        ) = self._fp8_ps_staging[slot]
+
+        # work_metadata is not written by the host planner; it stays on device.
         get_ps_metadata_v1(
             qo_indptr_cpu,
             kv_indptr_cpu,
@@ -1050,17 +1096,20 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             gqa_ratio,
             num_head_k,
             self.fp8_ps_work_metadata,
-            self.fp8_ps_work_indptr,
-            self.fp8_ps_work_info,
-            self.fp8_ps_reduce_indptr,
-            self.fp8_ps_reduce_final_map,
-            self.fp8_ps_reduce_partial_map,
+            work_indptr_host,
+            work_info_host,
+            reduce_indptr_host,
+            reduce_final_map_host,
+            reduce_partial_map_host,
             qhead_granularity=qhead_granularity,
             qlen_granularity=qlen_granularity,
             kvlen_granularity=kvlen_granularity,
             block_size=block_size,
             is_causal=True,
         )
+        for dst, src in zip(self._fp8_ps_device_outputs, self._fp8_ps_staging[slot]):
+            dst.copy_(src, non_blocking=True)
+        staging_free.record()
 
         total_prefill_tokens = int(qo_indptr_cpu[-1].item())
         kv_indices = torch.arange(
@@ -1068,12 +1117,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
 
         # The actual number of active partial tiles for this batch is the
-        # final value of reduce_indptr.  Resolving it here (during metadata
-        # build) keeps it off the per-layer forward path where a sync would
-        # break CUDA Graph capture.  Using the device-side reduce_indptr is
-        # acceptable since build is allowed to incur an occasional sync.
-        with gpu_sync_allowed():
-            num_partial_tiles = int(self.fp8_ps_reduce_indptr[-1].item())
+        # final value of reduce_indptr, read from the host plan (no GPU sync).
+        num_partial_tiles = int(reduce_indptr_host[-1])
 
         # Attach PS metadata to the metadata object so forward_mha can read it.
         metadata.fp8_prefill_qo_indptr = qo_indptr
@@ -1293,10 +1338,17 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # to the original _copy_page_indices_kernel).
             # When kernel_block_size=K>1, block_table entry b covering K tokens
             # gets expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
-            _expand_page_indices_kernel[(num_reqs,)](
+            # Chunk count comes from the block table width, an upper bound on
+            # tokens per request that is available host-side, so this adds no
+            # device synchronisation. Programs whose chunk lies past
+            # num_tokens mask out entirely.
+            max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
+            num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
+            _expand_page_indices_kernel[(num_reqs, num_chunks)](
                 self.paged_kv_indices,
                 block_table_tensor,
                 block_table_tensor.stride(0),
+                block_table_tensor.stride(1),
                 paged_kv_indptr,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
                 BLOCK_SIZE=1024,
@@ -1535,7 +1587,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 def _expand_page_indices_kernel(
     page_indices,
     block_table,
-    block_table_stride,
+    block_table_stride_0,
+    block_table_stride_1,
     cu_num_tokens,
     KERNEL_BLOCK_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -1553,32 +1606,44 @@ def _expand_page_indices_kernel(
     When KERNEL_BLOCK_SIZE=K: block table entry b (covering K tokens)
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
     """
+    # One program per (request, token-chunk). Parallelising over requests
+    # alone degenerates at low concurrency: with num_reqs == 1 a single
+    # workgroup walked the whole sequence in a serial loop.
     req_idx = tl.program_id(0)
-    row_ptr = block_table + req_idx * block_table_stride
+    chunk_idx = tl.program_id(1)
+    row_ptr = block_table + req_idx * block_table_stride_0
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(cu_num_tokens + req_idx + 1) - start_idx
 
-    offset = tl.arange(0, BLOCK_SIZE)
-    for i in tl.range(0, num_tokens, BLOCK_SIZE):
-        token_offsets = i + offset
-        mask = token_offsets < num_tokens
+    # The grid is sized from the block table width, an upper bound over all
+    # requests, so a ragged batch launches chunks past a short request's end.
+    # Returning here keeps those programs from issuing masked-out loads and
+    # stores at all.
+    chunk_start = chunk_idx * BLOCK_SIZE
+    if chunk_start >= num_tokens:
+        return
 
-        # Which block in the block table does this token belong to?
-        block_idx = token_offsets // KERNEL_BLOCK_SIZE
-        # Offset within that block
-        offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
+    token_offsets = chunk_start + tl.arange(0, BLOCK_SIZE)
+    mask = token_offsets < num_tokens
 
-        # Load the block ID from the block table
-        block_ids = tl.load(row_ptr + block_idx, mask=mask)
+    # Which block in the block table does this token belong to?
+    block_idx = token_offsets // KERNEL_BLOCK_SIZE
+    # Offset within that block
+    offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
 
-        # Compute flat index in the flattened kv_buffer
-        flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
+    # Load the block ID from the block table
+    # Both strides are taken from the caller: the block table is a view owned
+    # elsewhere, so a unit column stride must not be assumed.
+    block_ids = tl.load(row_ptr + block_idx * block_table_stride_1, mask=mask)
 
-        tl.store(
-            page_indices + start_idx + token_offsets,
-            flat_indices,
-            mask=mask,
-        )
+    # Compute flat index in the flattened kv_buffer
+    flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
+
+    tl.store(
+        page_indices + start_idx + token_offsets,
+        flat_indices,
+        mask=mask,
+    )
 
 
 class AiterMLAHelper:

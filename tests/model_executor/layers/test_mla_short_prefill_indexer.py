@@ -46,7 +46,7 @@ def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
 
     with pytest.raises(BatchStateRefreshed):
         DeepseekV32Attention._sparse_indexer_and_attn(
-            layer,  # type: ignore[arg-type]
+            layer,
             torch.empty(1, dtype=torch.long),
             torch.empty(1, 1),
             torch.empty(1, 1, 1),
@@ -80,7 +80,7 @@ def make_indexer_metadata(
         num_decode_tokens=num_decode_tokens,
         num_prefills=num_prefills,
         num_prefill_tokens=num_prefill_tokens,
-        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,  # type: ignore[arg-type]
+        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,
     )
 
 
@@ -129,7 +129,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
         slot_mapping=slot_mapping,
     )
     if indexer_metadata.num_decodes:
-        indexer_metadata.decode = object()  # type: ignore[assignment]
+        indexer_metadata.decode = object()
     mla_metadata = make_mla_metadata(
         use_dense_mha=batch_kind != "force_mqa",
         num_decode_tokens=mla_num_decode_tokens,
@@ -205,6 +205,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
             topk_indices,
             False,
             False,
+            False,
             MLA_LAYER,
         )
 
@@ -259,6 +260,7 @@ def test_skipped_k_cache_insert_accepts_no_k(
         topk_indices,
         True,
         False,
+        False,
         "",
     )
 
@@ -267,9 +269,11 @@ def test_skipped_k_cache_insert_accepts_no_k(
 
 
 @pytest.mark.parametrize("fp8_query", [False, True])
+@pytest.mark.parametrize("prepared_mha", [False, True])
 def test_deepseek_v32_dispatches_selected_mha(
     monkeypatch: pytest.MonkeyPatch,
     fp8_query: bool,
+    prepared_mha: bool,
 ) -> None:
     attn_metadata = SimpleNamespace(num_actual_tokens=2)
     kv_cache = torch.empty(1)
@@ -301,13 +305,17 @@ def test_deepseek_v32_dispatches_selected_mha(
     q_nope = torch.randn(2, 1, 2)
     q_pe = torch.randn(2, 1, 2)
     mqa_q = torch.randn(2, 1, 2)
-    mha_q = torch.cat((q_nope, q_pe + 1 if fp8_query else mqa_q), dim=-1)
+    if fp8_query and not prepared_mha:
+        mqa_q = mqa_q.to(torch.float8_e4m3fn)
+    mha_q = torch.cat(
+        (q_nope, q_pe + 1 if fp8_query and not prepared_mha else mqa_q), dim=-1
+    )
     kv_c = torch.empty(2, 2)
     k_pe = torch.empty(2, 2)
     output = torch.empty(2, 2)
 
     DeepseekV32Attention._sparse_indexer_and_attn(
-        layer,  # type: ignore[arg-type]
+        layer,
         torch.arange(2),
         torch.empty(2, 2),
         q_nope,

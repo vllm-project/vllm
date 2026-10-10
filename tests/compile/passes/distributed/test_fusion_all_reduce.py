@@ -111,7 +111,7 @@ def test_fused_ar_workspace_hidden_dim(
     target_hidden: int, draft_hidden: int | None, expected: int
 ):
     config = _make_workspace_hidden_config(target_hidden, draft_hidden)
-    assert _fused_ar_workspace_hidden_dim(config) == expected  # type: ignore[arg-type]
+    assert _fused_ar_workspace_hidden_dim(config) == expected
 
 
 def test_fused_ar_workspace_hidden_dim_spec_without_draft():
@@ -120,7 +120,7 @@ def test_fused_ar_workspace_hidden_dim_spec_without_draft():
         model_config=SimpleNamespace(get_hidden_size=lambda: 2048),
         speculative_config=SimpleNamespace(draft_model_config=None),
     )
-    assert _fused_ar_workspace_hidden_dim(config) == 2048  # type: ignore[arg-type]
+    assert _fused_ar_workspace_hidden_dim(config) == 2048
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):

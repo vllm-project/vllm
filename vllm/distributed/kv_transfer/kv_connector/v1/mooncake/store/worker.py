@@ -74,7 +74,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
-    resolve_dcp_kv_cache_spec,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -711,61 +710,63 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
-    def _snapshot_blocks(
-        self,
-        req_meta: ReqMeta,
-        entries: list[tuple[int, int, int]],
-    ) -> list[StoreBlock]:
-        """Blocks for committed mamba "align" boundary-state snapshots.
+    def _handoff_blocks(self, req_meta: ReqMeta) -> list[StoreBlock]:
+        """Blocks for the state the core handed off for this request.
 
-        These are block-aligned boundaries, i.e. exactly what the normal save
-        would key — but ``store_mask`` masks mamba groups out of it entirely, so
-        this is their *only* writer. The exclusion is not an optimization: the
-        normal save resolves a chunk's address as
-        ``req_meta.block_ids[g][start // block_size]``, and ``block_ids`` is the
-        connector's append-only mirror of the core's per-group table. An
-        align-mode table is mutated in place (a superseded state block is freed
-        and nulled; speculative blocks relocate), and the connector is never
-        told, so a stale mirror entry is indistinguishable from a live one — a
-        retry of a failed or pressure-skipped chunk would read a block that now
-        belongs to another request.
+        ``req_meta.boundary_puts`` carry the committed mamba "align"
+        boundary-state snapshots and the other groups' partial-tail blocks, each
+        keyed by the hash of the prefix ending at its ``num_tokens``.
 
-        Each entry's handed-off block *is* the boundary state and is pinned by
-        the core, so it is uploaded under its boundary-end hash key and never
-        resolved positionally.
+        The scheduler resolves and pins every block, so none is looked up
+        positionally here. That matters for mamba "align" states: ``store_mask``
+        masks mamba groups out of the normal save, which resolves a chunk's
+        address as ``req_meta.block_ids[g][start // block_size]``. An align-mode
+        table is mutated in place (a superseded state block is freed and
+        nulled; speculative blocks relocate) without telling the connector, so
+        a retried positional read could hit a block that now belongs to another
+        request. The handed-off block *is* the state.
         """
+        if not req_meta.boundary_puts or not req_meta.block_hashes:
+            return []
         hash_block_size = self.coord.hash_block_size
         blocks: list[StoreBlock] = []
-        for group_id, block_id, boundary in entries:
-            if boundary == 0 or block_id == NULL_BLOCK_ID:
+        for group_id, block_id, num_tokens in req_meta.boundary_puts:
+            if not self.group_participates[group_id] or num_tokens == 0:
+                continue
+            if block_id == NULL_BLOCK_ID:
                 logger.warning_once(
-                    "Discarding a mamba boundary-state snapshot with no usable "
-                    "source block; that state is not persisted and cannot be hit "
-                    "later. This indicates the hand-off and the connector "
-                    "disagree about the block table."
+                    "Discarding a boundary-state hand-off with no usable source "
+                    "block; that state is not persisted and cannot be hit later. "
+                    "This indicates the hand-off and the connector disagree about "
+                    "the block table."
                 )
                 logger.debug(
-                    "Unusable boundary snapshot (req=%s, group=%d, block=%d, "
-                    "boundary=%d)",
+                    "Unusable boundary hand-off (req=%s, group=%d, block=%d, "
+                    "tokens=%d)",
                     req_meta.req_id,
                     group_id,
                     block_id,
-                    boundary,
+                    num_tokens,
                 )
                 continue
-            hash_idx = boundary // hash_block_size - 1
+            # A negative index would silently key the block by the last hash.
+            assert num_tokens % hash_block_size == 0, (
+                f"Boundary put at {num_tokens} tokens is not a multiple of the "
+                f"hash block size {hash_block_size}"
+            )
+            hash_idx = num_tokens // hash_block_size - 1
             if hash_idx >= len(req_meta.block_hashes):
                 logger.warning_once(
-                    "Discarding a mamba boundary-state snapshot whose boundary "
-                    "is past the request's hashed prefix; that state is not "
-                    "persisted and cannot be hit later."
+                    "Discarding a boundary-state hand-off whose boundary is past "
+                    "the request's hashed prefix; that state is not persisted and "
+                    "cannot be hit later."
                 )
                 logger.debug(
-                    "Unhashed boundary snapshot (req=%s, group=%d, boundary=%d, "
+                    "Unhashed boundary hand-off (req=%s, group=%d, tokens=%d, "
                     "num_hashes=%d)",
                     req_meta.req_id,
                     group_id,
-                    boundary,
+                    num_tokens,
                     len(req_meta.block_hashes),
                 )
                 continue
@@ -773,159 +774,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[group_id]
             put_step_rank = (self.tp_rank + group_id) % put_step
-            if (boundary // db.block_size - 1) % put_step != put_step_rank:
+            if (cdiv(num_tokens, db.block_size) - 1) % put_step != put_step_rank:
                 continue
             addr, size = db.prepare_value_for_block(block_id)
-            block_start = boundary - db.block_size
+            # The block covers the tokens up to its boundary: a full block for a
+            # block-aligned boundary, the sub-block remainder otherwise.
+            block_start = num_tokens - (num_tokens % db.block_size or db.block_size)
             block_hash = req_meta.block_hashes[hash_idx]
             blocks.append(
                 StoreBlock(
                     group_idx=group_id,
                     block_hash=block_hash,
-                    token_span=(block_start, boundary),
+                    token_span=(block_start, num_tokens),
                     parent_hash=_parent_hash(
                         req_meta.block_hashes, hash_block_size, block_start
                     ),
                     objects=(StoreObject(db.key_for(block_hash), addr, size),),
                 )
             )
-        return blocks
-
-    def _sub_block_tail_blocks(
-        self,
-        req_meta: ReqMeta,
-        entries: list[tuple[int, int, int]],
-    ) -> list[StoreBlock]:
-        """Blocks for the request's sub-block partial tail (its last prompt hash
-        boundary), so a later request can hit the sub-block prefix.
-
-        Covers every group's blocks from the normal save's lcm floor to the
-        boundary: the normal save floors to ``lcm_block_size``, so a
-        smaller-block group's full blocks in that gap are never persisted
-        elsewhere, and the consumer's lookup needs every group at every probed
-        boundary. Full blocks are keyed by their block-end hash and the partial
-        boundary block by the boundary sub-hash; a mamba "align" group
-        contributes only its boundary block, from the core-provided CoW block.
-        """
-        boundaries = {boundary for _, _, boundary in entries}
-        if len(boundaries) != 1:
-            raise ValueError(
-                "Sub-block partial-tail offloads for one request must share a boundary"
-            )
-        boundary = boundaries.pop()
-        hash_block_size = self.coord.hash_block_size
-        if boundary == 0 or boundary // hash_block_size - 1 >= len(
-            req_meta.block_hashes
-        ):
-            logger.warning_once(
-                "Discarding a mamba sub-block tail hand-off whose boundary is "
-                "past the request's hashed prefix; no group's tail is persisted "
-                "for it and it cannot be hit later."
-            )
-            return []
-
-        mamba_offloads = {group_id: block_id for group_id, block_id, _ in entries}
-        saved = self._saved_offset.get(req_meta.req_id, 0)
-        blocks: list[StoreBlock] = []
-        for g_idx, db in enumerate(self.token_databases):
-            if not self.group_participates[g_idx]:
-                continue
-            group_blocks = req_meta.block_ids[g_idx]
-            # Distribute across ranks by the same rule as normal chunks.
-            put_step = self.group_put_steps[g_idx]
-            put_step_rank = (self.tp_rank + g_idx) % put_step
-            # Always include the boundary block: its sub-hash key is written
-            # only here, even if normal saves already advanced past it.
-            last_block = cdiv(boundary, db.block_size) - 1
-            for block_idx in range(
-                min(saved // db.block_size, last_block), last_block + 1
-            ):
-                if block_idx % put_step != put_step_rank:
-                    continue
-                valid_end = min((block_idx + 1) * db.block_size, boundary)
-                key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
-                if g_idx in mamba_offloads:
-                    if valid_end != boundary:
-                        # Interior align-mode state positions are null or
-                        # stale (the block table is not append-only) and never
-                        # valid gap content; only the boundary block is
-                        # persisted, from the core-provided hand-off.
-                        continue
-                    block_id = mamba_offloads[g_idx]
-                elif g_idx in self.coord.mamba_group_ids:
-                    continue
-                elif block_idx < len(group_blocks):
-                    block_id = group_blocks[block_idx]
-                else:
-                    logger.debug(
-                        "Skipping partial-tail block past the connector's "
-                        "block mirror (req=%s, group=%d, block=%d, mirror=%d)",
-                        req_meta.req_id,
-                        g_idx,
-                        block_idx,
-                        len(group_blocks),
-                    )
-                    continue
-                if block_id == NULL_BLOCK_ID:
-                    logger.debug(
-                        "Skipping unavailable partial-tail source block "
-                        "(req=%s, group=%d, block=%d)",
-                        req_meta.req_id,
-                        g_idx,
-                        block_idx,
-                    )
-                    continue
-                addr, size = db.prepare_value_for_block(block_id)
-                block_start = block_idx * db.block_size
-                blocks.append(
-                    StoreBlock(
-                        group_idx=g_idx,
-                        block_hash=key_hash,
-                        token_span=(block_start, valid_end),
-                        parent_hash=_parent_hash(
-                            req_meta.block_hashes, hash_block_size, block_start
-                        ),
-                        objects=(StoreObject(db.key_for(key_hash), addr, size),),
-                    )
-                )
-        return blocks
-
-    def _handoff_blocks(self, req_meta: ReqMeta) -> list[StoreBlock]:
-        """Blocks for the connector-pinned state handed off for this request.
-
-        Two kinds, keyed and sourced differently:
-
-        - block-aligned for its group: a committed mamba "align" boundary-state
-          snapshot, the handed-off block itself;
-        - not block-aligned: the sub-block CoW partial tail, which also has to
-          cover the other groups' blocks in the normal save's lcm gap.
-        """
-        offloads = req_meta.boundary_state_offloads
-        if not offloads or not req_meta.block_hashes:
-            return []
-
-        snapshots: list[tuple[int, int, int]] = []
-        sub_block: list[tuple[int, int, int]] = []
-        for group_id, block_id, boundary in offloads:
-            entry = (group_id, block_id, boundary)
-            if boundary % self.token_databases[group_id].block_size == 0:
-                snapshots.append(entry)
-            else:
-                sub_block.append(entry)
-
-        blocks = self._snapshot_blocks(req_meta, snapshots)
-        if sub_block:
-            if self.coord.enable_partial_hash_hits:
-                blocks.extend(self._sub_block_tail_blocks(req_meta, sub_block))
-            else:
-                # Nothing would ever probe a sub-block key, so the whole class
-                # of tail hand-offs is unwritable for this configuration.
-                logger.warning_once(
-                    "Discarding sub-block mamba boundary-state hand-offs "
-                    "because partial hash hits are disabled; a request whose "
-                    "prefix ends inside a block persists no mamba state and "
-                    "cannot be hit on that group later."
-                )
         return blocks
 
     def _write(self, blocks: Sequence[StoreBlock], req_meta: ReqMeta) -> bool:
@@ -1070,7 +936,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         store_masks = self.coord.store_mask(
             token_len,
             save_start,
-            num_prompt_tokens=req_meta.num_prompt_tokens,
+            num_prompt_tokens=req_meta.prefill_end_tokens,
         )
         blocks: list[StoreBlock] = []
         for g_idx, db in enumerate(self.token_databases):
@@ -1180,9 +1046,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Offload the handed-off mamba boundary states (independent of the
             # normal positional save, which may be skipped this step).
-            if req_meta.boundary_state_offloads is not None and not (
-                self._offload_handoff(req_meta)
-            ):
+            if not self._offload_handoff(req_meta):
                 return
 
             if token_len == 0:
@@ -1670,31 +1534,10 @@ class MooncakeStoreWorker:
             )
             return
 
-        self._kv_cache_groups = [
-            dataclasses.replace(
-                group,
-                kv_cache_spec=resolve_dcp_kv_cache_spec(
-                    group.kv_cache_spec,
-                    self.dcp_size,
-                ),
-            )
-            for group in kv_cache_config.prefix_cacheable_groups
-        ]
-        spec_cfg = getattr(vllm_config, "speculative_config", None)
-        use_eagle_block_drop = bool(
-            spec_cfg.use_eagle_block_drop()
-            if spec_cfg is not None
-            and callable(getattr(spec_cfg, "use_eagle_block_drop", None))
-            else False
+        self.coord = MooncakeStoreCoordinator.from_kv_cache_config(
+            kv_cache_config, vllm_config, self.block_size, self.hash_block_size
         )
-        self.coord = MooncakeStoreCoordinator(
-            self._kv_cache_groups,
-            scheduler_block_size=self.block_size,
-            hash_block_size=self.hash_block_size,
-            use_eagle=use_eagle_block_drop,
-            retention_interval=kv_cache_config.prefix_cache_retention_interval,
-            dcp_world_size=self.dcp_size,
-        )
+        self._kv_cache_groups = self.coord.kv_cache_groups
         self.store_tp_size, store_namespace, store_layout_cls = (
             self._select_store_layout(extra_config)
         )
