@@ -11,6 +11,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
@@ -105,7 +107,26 @@ def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
     )
 
 
-def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
+def _use_deepseek_v41_hopper_indexed(
+    moe_config: FusedMoEConfig, weight_key: QuantKey | None
+) -> bool:
+    """DeepSeek V4.1 MXFP4 on SM90 is faster on the indexed GEMM, incl. AG/RS EP."""
+    parallel = moe_config.moe_parallel_config
+    model_config = getattr(get_current_vllm_config_or_none(), "model_config", None)
+    return (
+        weight_key == kMxfp4Static
+        and moe_config.routing_method == RoutingMethodType.DeepseekV4
+        and current_platform.is_device_capability(90)
+        and (not parallel.use_all2all_kernels or parallel.use_ag_rs_all2all_kernels)
+        and getattr(getattr(model_config, "hf_config", None), "model_type", None)
+        in ("deepseek_v41", "deepseek_v41_text")
+    )
+
+
+def get_humming_moe_gemm_type(
+    moe_config: FusedMoEConfig | None = None,
+    weight_key: QuantKey | None = None,
+) -> str:
     env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
     if env_gemm_type is not None and env_gemm_type.lower() != "auto":
         env_gemm_type = env_gemm_type.lower()
@@ -113,6 +134,10 @@ def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
             gemm_type = "grouped_contiguous"
         else:
             gemm_type = env_gemm_type
+    elif moe_config is not None and _use_deepseek_v41_hopper_indexed(
+        moe_config, weight_key
+    ):
+        gemm_type = "indexed"
     elif moe_config is not None and moe_config.moe_parallel_config.use_ep:
         gemm_type = "grouped_contiguous"
     else:
@@ -635,7 +660,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if supported:
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
-            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
+            preferred_gemm_type = get_humming_moe_gemm_type(moe_config, weight_key)
             supported = preferred_gemm_type.lower() == gemm_type
             if not supported:
                 reason = (

@@ -91,10 +91,12 @@ vllm serve <model> --quantization-config.moe.activation mxfp8
 For checkpoint-quantized models, `quantization_config` lets you pick an
 activation format independently of the baked-in weights. The supported
 overrides are checkpoint-specific; today this is wired up for MXFP4 MoE
-checkpoints (gpt-oss) where you can opt into FP8 activations:
+checkpoints (gpt-oss, DeepSeek V4) where you can opt into FP8 activations:
 
 ```bash
 vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash --moe-backend humming \
+    --quantization-config.moe.activation fp8_per_token
 ```
 
 Combine with `--moe-backend` to pin a specific kernel family.

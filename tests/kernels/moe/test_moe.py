@@ -8,6 +8,7 @@ Run `pytest tests/kernels/test_moe.py`.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    RoutingMethodType,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
@@ -1395,6 +1397,102 @@ def test_humming_selects_gemm_from_parallelism_and_override(
     moe_config.moe_parallel_config.use_ep = use_ep
 
     assert get_humming_moe_gemm_type(moe_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("model_type", "capability", "all2all_backend", "indexed"),
+    [
+        ("deepseek_v41", 90, None, True),
+        ("deepseek_v41", 90, "allgather_reducescatter", True),
+        ("deepseek_v41", 90, "deepep_high_throughput", False),
+        ("deepseek_v41", 100, None, False),
+        ("deepseek_v4", 90, None, False),
+    ],
+)
+def test_humming_deepseek_v41_hopper_uses_indexed_gemm_with_ep(
+    monkeypatch: pytest.MonkeyPatch,
+    model_type: str,
+    capability: int,
+    all2all_backend: str | None,
+    indexed: bool,
+):
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+
+    monkeypatch.delenv("VLLM_HUMMING_MOE_GEMM_TYPE", raising=False)
+    platform = humming.current_platform
+    monkeypatch.setattr(platform, "is_device_capability", lambda c, *_: c == capability)
+    hf_config = SimpleNamespace(model_type=model_type)
+    monkeypatch.setattr(
+        humming,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config)),
+    )
+    moe_config = make_dummy_moe_config()
+    moe_config.routing_method = RoutingMethodType.DeepseekV4
+    moe_config.moe_parallel_config.use_ep = True
+    if all2all_backend is not None:
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.all2all_backend = all2all_backend
+
+    assert humming.get_humming_moe_gemm_type(moe_config, humming.kMxfp4Static) == (
+        "indexed" if indexed else "grouped_contiguous"
+    )
+
+
+def _select_with(
+    monkeypatch: pytest.MonkeyPatch, backend: str, name: str, env: str | None = None
+):
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as oracle
+    from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+
+    args = QuantizationConfigArgs(moe=QuantSpec(activation=name))
+    monkeypatch.setattr(
+        oracle,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(quantization_config=args)),
+    )
+    monkeypatch.delenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", raising=False)
+    if env:
+        monkeypatch.setenv("VLLM_HUMMING_INPUT_QUANT_CONFIG", env)
+    config = make_dummy_moe_config()
+    config.moe_backend = backend
+    config.routing_method = RoutingMethodType.DeepseekV4
+    return oracle.select_deepseek_v4_mxfp4_moe_backend(config)
+
+
+@pytest.mark.parametrize(
+    ("backend", "env", "match"),
+    [
+        ("auto", None, "No auto-selected"),
+        ("flashinfer_trtllm", None, "does not run"),
+        ("humming", '{"dtype":"float8e4m3"}', "not both"),
+    ],
+)
+def test_deepseek_v4_mxfp4_backend_must_run_named_activation(
+    monkeypatch: pytest.MonkeyPatch, backend: str, env: str | None, match: str
+):
+    with pytest.raises(ValueError, match=match):
+        _select_with(monkeypatch, backend, "fp8_per_token", env)
+
+
+@pytest.mark.parametrize(
+    ("name", "runs"),
+    [("fp8_per_token", True), ("mxfp8", False)],
+)
+def test_humming_deepseek_v4_activation_on_sm90(
+    monkeypatch: pytest.MonkeyPatch, name: str, runs: bool
+):
+    pytest.importorskip("humming")
+    if not current_platform.is_device_capability(90):
+        pytest.skip("needs SM90")
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    if runs:
+        backend, _ = _select_with(monkeypatch, "humming", name)
+        assert backend == Mxfp4MoeBackend.HUMMING
+    else:
+        with pytest.raises(ValueError, match="Humming MoE cannot run"):
+            _select_with(monkeypatch, "humming", name)
 
 
 @pytest.mark.parametrize(

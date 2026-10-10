@@ -10,6 +10,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 import vllm.model_executor.layers.quantization.utils.humming.schema as humming_schema
 from vllm import envs
+from vllm.config.quantization import quant_key_name
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -622,5 +623,18 @@ def convert_to_humming_moe_kernel_format(
         layer.input_schemas[sublayer_name] = final_input_schema
         humming_configs[sublayer_name] = humming_config
 
+    schema = layer.input_schemas["w13"]
+    try:
+        name = quant_key_name(
+            humming_schema.input_schema_to_quant_key(schema, param_dtype)
+        )
+    except KeyError:  # a format with no QuantKey, e.g. int4
+        name = str(schema.a_dtype)
+    logger.info_once(
+        "Humming MoE activations: %s (group size %d, scale dtype %s)",
+        name,
+        schema.input_scale_group_size,
+        humming_configs["w13"].as_dtype,
+    )
     layer.humming_configs = humming_configs
     return humming_configs
