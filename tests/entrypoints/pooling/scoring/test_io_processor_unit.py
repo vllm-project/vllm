@@ -62,6 +62,8 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     processor.supports_score_template = False
     processor.use_sep_token = False
     processor.model = None
+    processor.saved_chat_template = None
+    processor.saved_chat_template_kwargs = {}
     return processor
 
 
@@ -78,6 +80,31 @@ def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(
     expected = [1, 3, 5, 6, 2]
     assert uncapped["prompt_token_ids"] == expected
     assert nonbinding["prompt_token_ids"] == expected
+
+
+def test_saved_sentence_transformers_chat_template_precedence(
+    llm_reranker_processor: CrossEncoderIOProcessor,
+):
+    """Request kwargs override the saved settings, and an explicit template
+    overrides the saved template."""
+    processor = llm_reranker_processor
+    processor.saved_chat_template = (
+        "{{ messages[0].content }} {{ messages[1].content }}"
+        "{% if add_generation_prompt %} a{% endif %}"
+    )
+    processor.saved_chat_template_kwargs = {"add_generation_prompt": True}
+
+    saved, _ = processor.get_score_prompt("a", "bc", {})
+    overridden, _ = processor.get_score_prompt(
+        "a", "bc", {}, chat_template_kwargs={"add_generation_prompt": False}
+    )
+    explicit, _ = processor.get_score_prompt(
+        "a", "bc", {}, chat_template="{{ messages[1].content }}"
+    )
+
+    assert saved == "a bc a"
+    assert overridden == "a bc"
+    assert explicit == "bc"
 
 
 def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():

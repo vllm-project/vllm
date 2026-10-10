@@ -8,15 +8,18 @@ import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.logger import init_logger
-from vllm.renderers import TokenizeParams
+from vllm.renderers import TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateResolutionError
-from vllm.renderers.hf import safe_apply_chat_template
+from vllm.renderers.hf import resolve_chat_template, safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_target_prompt,
     parse_model_prompt,
     prompt_to_seq,
 )
 from vllm.tasks import PoolingTask
+from vllm.transformers_utils.config import (
+    get_sentence_transformers_chat_template_kwargs,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
@@ -457,9 +460,22 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
 
+        self.saved_chat_template: str | None = None
+        self.saved_chat_template_kwargs: dict[str, Any] = {}
+        if not self.supports_score_template:
+            try:
+                self.saved_chat_template, self.saved_chat_template_kwargs = (
+                    self._get_saved_chat_template()
+                )
+            except ValueError:
+                # An explicit chat template takes precedence anyway.
+                if self.chat_template is None:
+                    raise
+
         if (
             getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
             and self.chat_template is None
+            and self.saved_chat_template is None
         ):
             suggested_template = (
                 "examples/pooling/score/template/qwen3_vl_reranker.jinja"
@@ -474,6 +490,40 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 self.model_config.model,
                 suggested_template,
             )
+
+    def _get_saved_chat_template(self) -> tuple[str | None, dict[str, Any]]:
+        """Get the chat template and kwargs declared by the Sentence
+        Transformers config, if any."""
+        saved_kwargs = get_sentence_transformers_chat_template_kwargs(
+            self.model_config.model, self.model_config.revision
+        )
+        if saved_kwargs is None:
+            return None, {}
+
+        saved_kwargs = dict(saved_kwargs)
+        name = saved_kwargs.pop("chat_template", None)
+        if name == "default":
+            name = None
+        template = resolve_chat_template(
+            self.tokenizer,
+            chat_template=name,
+            tools=None,
+            model_config=self.model_config,
+        )
+        # Hugging Face returns an unknown template name unchanged.
+        if template is None or template == name:
+            raise ValueError(
+                "The Sentence Transformers config declares message inputs, but "
+                f"the checkpoint has no {name or 'default'!r} chat template."
+            )
+
+        logger.info_once(
+            "Scoring with the %r chat template declared by the Sentence "
+            "Transformers config. Its suffix is not restored after truncation; "
+            "use max_tokens_per_doc to truncate documents.",
+            name or "default",
+        )
+        return template, saved_kwargs
 
     #######################################
     # online APIs
@@ -644,6 +694,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         model_config = self.model_config
         tokenizer = self.tokenizer
 
+        if chat_template is None and self.saved_chat_template is not None:
+            chat_template = self.saved_chat_template
+            chat_template_kwargs = merge_kwargs(
+                self.saved_chat_template_kwargs, chat_template_kwargs
+            )
+
         prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
             data_1,
             data_2,
@@ -699,7 +755,8 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
-        # FIXME: For now, we only apply a template when one is explicitly provided.
+        # FIXME: For now, we only apply a template when one is explicitly provided,
+        # either directly or by the Sentence Transformers config.
         # We cannot rely on the tokenizer's chat template because many models
         # inherit junk templates from their base LLM, which breaks both the models
         # and the tests that use them.
