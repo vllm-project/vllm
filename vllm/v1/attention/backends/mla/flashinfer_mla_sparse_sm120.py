@@ -122,6 +122,9 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
         index_group = self.index_group
         if isinstance(index_group, HiSparseMLAIndexGroup):
             num_decode_tokens = attn_metadata.num_decode_tokens
+            output: torch.Tensor | None = None
+            if 0 < num_decode_tokens < num_actual_toks:
+                output = self._new_mqa_output(q)
             outputs = []
             if num_decode_tokens:
                 topk_indices_physical = cast(
@@ -139,6 +142,7 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                         q[:num_decode_tokens],
                         index_group.physical_kv_cache(self.index_group_index),
                         topk_indices_physical,
+                        out=None if output is None else output[:num_decode_tokens],
                     )
                 )
             if num_decode_tokens < num_actual_toks:
@@ -180,10 +184,10 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                         q[num_decode_tokens:],
                         prefill_cache,
                         topk_indices_physical,
+                        out=None if output is None else output[num_decode_tokens:],
                     )
                 )
-            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
-            return output, None
+            return (outputs[0] if output is None else output), None
 
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
@@ -209,18 +213,17 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             None,
         )
 
+    def _new_mqa_output(self, q: torch.Tensor) -> torch.Tensor:
+        return q.new_empty((q.shape[0], self.num_heads, self.kv_lora_rank))
+
     def _run_mqa_kernel(
         self,
         q: torch.Tensor,
         kv_cache: torch.Tensor,
         topk_indices_physical: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        num_actual_toks = q.shape[0]
-
-        output = q.new_empty(
-            (num_actual_toks, self.num_heads, self.kv_lora_rank),
-            dtype=q.dtype,
-        )
+        output = self._new_mqa_output(q) if out is None else out
 
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)
