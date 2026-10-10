@@ -268,6 +268,43 @@ STRING_SUPPORTED_FORMATS = {
     "relative-json-pointer",
 }
 
+_COMBINATOR_KEYWORDS = ("anyOf", "oneOf", "allOf")
+
+# Keywords that constrain the instance. xgrammar silently drops these when they
+# sit on the same node as a combinator (mlc-ai/xgrammar#858). Annotations such
+# as title, default, $defs and discriminator are left out on purpose, because
+# pydantic emits them next to anyOf/oneOf and xgrammar can ignore them safely.
+_CONSTRAINT_KEYWORDS = frozenset(
+    {
+        "type",
+        "enum",
+        "const",
+        "properties",
+        "required",
+        "additionalProperties",
+        "patternProperties",
+        "propertyNames",
+        "unevaluatedProperties",
+        "minProperties",
+        "maxProperties",
+        "items",
+        "prefixItems",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "contains",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
+    }
+)
+
 
 def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
     return ("pattern" in schema or "format" in schema) and (
@@ -285,6 +322,24 @@ def _schema_types(schema: dict[str, Any]) -> set[str]:
     if isinstance(schema_type, list):
         return {item for item in schema_type if isinstance(item, str)}
     return set()
+
+
+def _branches_imply_type(obj: dict[str, Any], sibling_types: set[str]) -> bool:
+    """True if every branch of every combinator on `obj` declares a type that
+    falls within `sibling_types`, so a dropped sibling `type` changes nothing."""
+    for key in _COMBINATOR_KEYWORDS:
+        if key not in obj:
+            continue
+        branches = obj[key]
+        if not isinstance(branches, list) or not branches:
+            return False
+        for branch in branches:
+            if not isinstance(branch, dict):
+                return False
+            branch_types = _schema_types(branch)
+            if not branch_types or not branch_types <= sibling_types:
+                return False
+    return True
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
@@ -370,6 +425,14 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
             # patternProperties + patternProperties is unsupported by xgrammar
             # Tracking issue: https://github.com/mlc-ai/xgrammar/issues/965
             if len(obj["patternProperties"]) > 1:
+                return True
+
+        if any(k in obj for k in _COMBINATOR_KEYWORDS):
+            sibling_constraints = {k for k in obj if k in _CONSTRAINT_KEYWORDS}
+            if sibling_constraints and not (
+                sibling_constraints == {"type"}
+                and _branches_imply_type(obj, schema_types)
+            ):
                 return True
 
         # Note(arpera):
