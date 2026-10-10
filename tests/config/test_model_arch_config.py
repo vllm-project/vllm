@@ -468,7 +468,8 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
     text-only DeepSeek-V4; the convertor routes it to the VL wrapper class
     by rewriting hf_config.architectures (model-class resolution reads the
     raw attribute)."""
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config
+
     from vllm.transformers_utils.model_arch_config_convertor import (
         DeepseekV4ModelArchConfigConvertor,
     )

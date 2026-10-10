@@ -12,7 +12,6 @@ import importlib
 __all__ = [
     "BagelProcessor",
     "CohereASRProcessor",
-    "Cosmos3EdgeProcessor",
     "DeepseekVLV2Processor",
     "FireRedASR2Processor",
     "FunASRProcessor",
@@ -40,15 +39,11 @@ __all__ = [
     "Ovis2_5Processor",
     "Qwen3ASRProcessor",
     "Step3VLProcessor",
-    "InklingProcessor",
-    "InklingImageProcessor",
-    "InklingAudioFeatureExtractor",
 ]
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelProcessor": "vllm.transformers_utils.processors.bagel",
     "CohereASRProcessor": "vllm.transformers_utils.processors.cohere_asr",
-    "Cosmos3EdgeProcessor": "vllm.transformers_utils.processors.cosmos3_edge",
     "DeepseekVLV2Processor": "vllm.transformers_utils.processors.deepseek_vl2",
     "FireRedASR2Processor": "vllm.transformers_utils.processors.fireredasr2",
     "FunASRProcessor": "vllm.transformers_utils.processors.funasr",
@@ -76,9 +71,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Ovis2_5Processor": "vllm.transformers_utils.processors.ovis2_5",
     "Qwen3ASRProcessor": "vllm.transformers_utils.processors.qwen3_asr",
     "Step3VLProcessor": "vllm.transformers_utils.processors.step3_vl",
-    "InklingProcessor": "vllm.transformers_utils.processors.inkling",
-    "InklingImageProcessor": "vllm.transformers_utils.processors.inkling",
-    "InklingAudioFeatureExtractor": "vllm.transformers_utils.processors.inkling",
 }
 
 

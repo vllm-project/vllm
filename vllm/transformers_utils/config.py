@@ -82,15 +82,11 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     bagel="BagelConfig",
     bailing_moe_v3_vl="BailingMoeV3VLConfig",
     chatglm="ChatGLMConfig",
-    modernvbert="ColModernVBertConfig",
-    colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
-    cosmos3_edge="Cosmos3EdgeConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
-    deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
@@ -101,18 +97,13 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="Kimi_K25Config",  # Upstream class, hub remote code uses old schema
-    muse_glimmer="MuseGlimmerConfig",
-    muse_glimmer_text="MuseGlimmerTextConfig",
-    muse_glimmer_vision="MuseGlimmerVisionConfig",
-    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
     kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     mlp_speculator="MLPSpeculatorConfig",
     medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
-    minimax_m3_vl="MiniMaxM3Config",
-    minimax_m3_mtp="MiniMaxM3MTPConfig",
+    minimax_m3_vl="MiniMaxM3VLConfig",  # Upstream class, hub code uses old schema
     moondream3="Moondream3Config",
     moss_transcribe_diarize="MossTranscribeDiarizeConfig",
     eagle="EAGLEConfig",
@@ -122,8 +113,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
-    step3p5="Step3p5Config",
-    qianfan_ocr="QianfanOCRConfig",
+    step3p5="Step3p7TextConfig",  # Upstream class, hub remote code fails validation
     qwen3_asr="Qwen3ASRConfig",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
     **{"deepseek_v41": "DeepseekV41Config"},
@@ -180,7 +170,10 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     # Cannot be nested if rope_parameters is empty
     if not rope_parameters:
         return False
-    return set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES)
+    # DeepSeek-V4 nests by rope type ("main", "compress") instead
+    return set(rope_parameters.keys()).issubset(
+        {*ALLOWED_LAYER_TYPES, "main", "compress"}
+    )
 
 
 @contextmanager

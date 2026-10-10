@@ -5,8 +5,9 @@
 # The model architecture and weights are fully compatible with InternVLChatModel,
 # only the config model_type / architectures strings differ.
 
-from transformers import PreTrainedConfig
+from transformers import PreTrainedConfig, QianfanOCRConfig
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
@@ -17,8 +18,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.processors.internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
+    InternVLChatImageProcessor,
+    InternVLChatProcessor,
 )
 
 from .internvl import (
@@ -29,10 +30,28 @@ from .internvl import (
 )
 
 
+def _add_intern_vit_fields(config: QianfanOCRConfig) -> QianfanOCRConfig:
+    """Expose the upstream vision config under the field names InternViT reads."""
+    vision_config = config.vision_config
+    for name in ("image_size", "patch_size"):
+        if isinstance(size := getattr(vision_config, name), (list, tuple)):
+            setattr(vision_config, name, size[0])
+    if not hasattr(vision_config, "qkv_bias"):
+        vision_config.qkv_bias = vision_config.attention_bias
+    if not hasattr(vision_config, "qk_normalization"):
+        vision_config.qk_normalization = vision_config.use_qk_norm
+    if not hasattr(vision_config, "initializer_factor"):
+        vision_config.initializer_factor = vision_config.layer_scale_init_value
+    return config
+
+
 class QianfanOCRProcessingInfo(BaseInternVLProcessingInfo):
     """Image-only ProcessingInfo for QianfanOCR (no video support)."""
 
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_config(self) -> QianfanOCRConfig:
+        return _add_intern_vit_fields(self.ctx.get_hf_config(QianfanOCRConfig))
+
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         config = self.get_hf_config()
         vision_config = config.vision_config
 
@@ -43,13 +62,13 @@ class QianfanOCRProcessingInfo(BaseInternVLProcessingInfo):
         merged_kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         merged_kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        image_processor = InternVLImageProcessor(**merged_kwargs)
+        image_processor = InternVLChatImageProcessor(**merged_kwargs)
         image_size = image_processor.image_size
         patch_size = vision_config.patch_size
         downsample_ratio = config.downsample_ratio
         image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
 
-        return InternVLProcessor(
+        return InternVLChatProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             video_processor=None,
@@ -71,6 +90,10 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
     solely to register the ``QianfanOCRForConditionalGeneration`` architecture
     name that appears in the model's config.json.
     """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        _add_intern_vit_fields(vllm_config.model_config.hf_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def _patch_quant_config(
         self, config: PreTrainedConfig, quant_config: QuantizationConfig | None

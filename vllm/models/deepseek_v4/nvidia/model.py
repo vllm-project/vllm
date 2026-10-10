@@ -89,6 +89,7 @@ from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.deepseek_v4_utils import get_num_hash_layers
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -1083,7 +1084,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
-            num_hash_layers=config.num_hash_layers,
+            num_hash_layers=get_num_hash_layers(config),
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -1346,7 +1347,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         self.has_local_hash_moe = self.start_layer < min(
-            self.end_layer, config.num_hash_layers
+            self.end_layer, get_num_hash_layers(config)
         )
 
         if get_pp_group().is_last_rank:

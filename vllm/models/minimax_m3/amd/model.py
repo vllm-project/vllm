@@ -9,11 +9,11 @@ RMSNorm kernels are CUDA-only, so ``MiniMAXGemmaRMSNorm`` here uses a native
 
 The MiniMax-M3-preview config selects a single set of branches:
     * qk_norm_type == "per_head"
-    * hidden_act == "swigluoai"
+    * SwiGLU-OAI MLPs (Transformers reports hidden_act as "silu")
     * use_gemma_norm == True  -> Gemma-style RMSNorm everywhere
     * attention_output_gate == False
     * scoring_func == "sigmoid" with a routing-bias correction term
-    * sparse_attention_config present -> a subset of layers run the extra
+    * "minimax_m3_sparse" layer_types -> a subset of layers run the extra
       "index" attention branch.
 """
 
@@ -140,13 +140,7 @@ logger = init_logger(__name__)
 
 def _sparse_attention_layer_ids(config: PreTrainedConfig) -> set[int]:
     """Layer ids whose attention runs the extra sparse "index" branch."""
-    cfg = getattr(config, "sparse_attention_config", None)
-    if not cfg:
-        return set()
-    freq = cfg.get("sparse_attention_freq")
-    if freq is None:
-        return set()
-    return {i for i, f in enumerate(freq) if f != 0}
+    return {i for i, t in enumerate(config.layer_types) if t == "minimax_m3_sparse"}
 
 
 def _sparse_attention_layer_ordinals(config: PreTrainedConfig) -> dict[int, int]:
@@ -182,43 +176,32 @@ def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
 
 def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
-    moe_layer_freq = getattr(config, "moe_layer_freq", None)
-    if moe_layer_freq is None:
-        return True
-    return moe_layer_freq[layer_id] != 0
+    return config.mlp_layer_types[layer_id] == "sparse"
 
 
 def _build_rotary_emb(config: PreTrainedConfig, head_dim: int):
-    """Build the (partial NeoX) RoPE, honoring an optional ``rope_scaling`` config.
+    """Build the (partial NeoX) RoPE from ``config.rope_parameters``.
 
     Without scaling the cos/sin cache is sized to ``max_position_embeddings``
     (524288 native); a request whose positions exceed that reads the cache out of
-    bounds and the worker hard-crashes (no Python traceback). When ``rope_scaling``
-    is set (e.g. YaRN ``factor: 2`` to reach 1M), thread it into ``get_rope`` so the
+    bounds and the worker hard-crashes (no Python traceback). When scaling is set
+    (e.g. YaRN ``factor: 2`` to reach 1M), it is threaded into ``get_rope`` so the
     proper scaled embedding is built and its cache covers
     ``original_max_position_embeddings * factor`` positions. Default behavior
     (no scaling) is unchanged. Shared by the dense and sparse attention layers, and
     the index branch reuses the returned module.
 
-    Note: for the VL checkpoint, set ``rope_scaling`` on the *text* config
-    (``--hf-overrides '{"text_config":{"rope_scaling":{...}}}'``) -- that is the
-    config the decoder reads here; a top-level override does not reach it.
+    Note: for the VL checkpoint, set the scaling on the *text* config
+    (``--hf-overrides '{"text_config":{"rope_parameters":{...}}}'``) -- that is
+    the config the decoder reads here; a top-level override does not reach it.
     """
-    rope_parameters = {
-        "rope_theta": config.rope_theta,
-        "partial_rotary_factor": config.partial_rotary_factor,
-    }
+    rope_parameters = dict(config.rope_parameters)
     max_position = config.max_position_embeddings
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling:
-        rope_parameters.update(rope_scaling)
-        # HF uses "rope_type" (older configs: "type"); get_rope reads "rope_type".
-        if "rope_type" not in rope_parameters and "type" in rope_scaling:
-            rope_parameters["rope_type"] = rope_scaling["type"]
+    if rope_parameters.get("rope_type", "default") != "default":
         rope_parameters.setdefault(
             "original_max_position_embeddings", config.max_position_embeddings
         )
-        factor = float(rope_scaling.get("factor", 1.0))
+        factor = float(rope_parameters.get("factor", 1.0))
         # Cover the extended range (informational for get_rope's default branch;
         # the YaRN embedding sizes its own cache from original * factor).
         max_position = int(rope_parameters["original_max_position_embeddings"] * factor)
@@ -288,18 +271,13 @@ class MiniMaxM3MLP(nn.Module):
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
-        if config.hidden_act != "swigluoai":
-            raise ValueError(
-                f"Unsupported activation: {config.hidden_act}. "
-                "Only swigluoai is supported."
-            )
-        # gate * sigmoid(alpha * gate) * (up + beta), with both halves clamped.
+        # gate * sigmoid(alpha * gate) * (up + 1), with both halves clamped.
         # Kept as our fp32 Triton kernel (not the #22 SWIGLUOAI_UNINTERLEAVE op
         # ``silu_and_mul_with_clamp``): that op IS built on ROCm but rounds
         # intermediates to bf16 (rel ~3e-3 vs our fp32 ~1e-6), which costs gsm8k
         # accuracy since this activation feeds the MXFP8 quant + MoE.
         self.swiglu_alpha = config.swiglu_alpha
-        self.swiglu_beta = config.swiglu_beta
+        self.swiglu_beta = 1.0
         self.swiglu_limit = config.swiglu_limit
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -456,7 +434,7 @@ class MiniMaxM3MoE(nn.Module):
             activation="swigluoai_uninterleave",
             swiglu_limit=config.swiglu_limit,
             swiglu_alpha=config.swiglu_alpha,
-            swiglu_beta=config.swiglu_beta,
+            swiglu_beta=1.0,
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=not self.use_aiter_moe_fse,
             router_logits_dtype=self.gate.out_dtype,
@@ -543,7 +521,7 @@ class MiniMaxM3Attention(nn.Module):
         self.k_norm = MiniMAXGemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Partial RoPE: rotary_dim == head_dim * partial_rotary_factor. Honors
-        # config.rope_scaling (e.g. YaRN) so long-context positions are covered.
+        # rope scaling (e.g. YaRN) so long-context positions are covered.
         self.rotary_emb = _build_rotary_emb(config, self.head_dim)
 
         self.attn = Attention(
@@ -661,12 +639,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.skip_index_topk = _should_skip_index_topk(config, layer_id)
 
         # Sparse "index" branch dims. index_q has the same head count as the KV
-        # heads (sparse_num_index_heads == num_key_value_heads), so it shards
+        # heads (index_n_heads == num_key_value_heads), so it shards
         # identically -- including replication when tp_size > num_key_value_heads.
-        sparse_cfg = config.sparse_attention_config
-        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.total_idx_heads = config.index_n_heads
         self.num_idx_heads = self.num_kv_heads
-        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+        self.idx_head_dim = config.index_head_dim
         self.index_q_size = self.num_idx_heads * self.idx_head_dim
 
         # Single fused projection: q, k, v, index_q, index_k in one GEMM.
@@ -698,7 +675,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.k_norm = MiniMAXGemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Partial RoPE: rotary_dim == head_dim * partial_rotary_factor. Honors
-        # config.rope_scaling (e.g. YaRN) so long-context positions are covered.
+        # rope scaling (e.g. YaRN) so long-context positions are covered.
         self.rotary_emb = _build_rotary_emb(config, self.head_dim)
 
         self.index_q_norm = MiniMAXGemmaRMSNorm(
@@ -737,12 +714,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # ROCm-only, so it is selected here rather than inside the neutral
         # MiniMaxM3Indexer, which knows nothing about it and would pick Triton.
         indexer_impl_cls = select_aiter_indexer_impl_cls(
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
-            sparse_block_size=sparse_cfg["sparse_block_size"],
+            topk_blocks=config.index_topk_blocks,
+            sparse_block_size=config.index_block_size,
             num_index_heads=self.num_idx_heads,
             index_head_dim=self.idx_head_dim,
             indexer_kv_dtype=self.indexer_kv_dtype,
-            score_type=sparse_cfg.get("sparse_score_type", "max"),
         )
         # The attend gate below needs this: an emitted table is what lets it
         # serve more than one KV head per rank. Buffers to write the table into
@@ -755,7 +731,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # the one that rebases the block table the indexer's top-k resolves
         # through, so both have to come from the same selection.
         self.attn_backend, main_impl_cls = select_main_backend_and_impl_cls(
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            topk_blocks=config.index_topk_blocks,
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
             emits_sparse_block_table=self.indexer_emits_table,
@@ -767,8 +743,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.scaling,
             self.num_kv_heads,
             kv_cache_dtype=self.kv_cache_dtype,
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
-            sparse_block_size=sparse_cfg["sparse_block_size"],
+            topk_blocks=config.index_topk_blocks,
+            sparse_block_size=config.index_block_size,
         )
         self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
             self.num_kv_heads, emits_sparse_block_table=self.indexer_emits_table
@@ -780,14 +756,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         indexer_kwargs = dict(
             num_kv_heads=self.num_kv_heads,
             scale=self.scaling,
-            topk_blocks=sparse_cfg["sparse_topk_blocks"],
-            sparse_block_size=sparse_cfg["sparse_block_size"],
+            topk_blocks=config.index_topk_blocks,
+            sparse_block_size=config.index_block_size,
             num_index_heads=self.num_idx_heads,
             index_head_dim=self.idx_head_dim,
             prefix=self.layer_name,
-            init_blocks=sparse_cfg.get("sparse_init_block", 0),
-            local_blocks=sparse_cfg.get("sparse_local_block", 0),
-            score_type=sparse_cfg.get("sparse_score_type", "max"),
+            local_blocks=config.index_local_blocks,
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
@@ -1387,16 +1361,15 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # Reserved top-k indices buffer shared by all sparse-attention indexer
         # layers (mirrors DeepseekV4); the indexer writes its per-head decode/
         # prefill block selection into it, the attend reads it back.
-        sparse_cfg = getattr(config, "sparse_attention_config", None)
         self.sparse_table_buffers: tuple[torch.Tensor, torch.Tensor] | None = None
-        if sparse_cfg is not None:
+        if _sparse_attention_layer_ids(config):
             tp_size = get_tensor_model_parallel_world_size()
-            num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+            num_index_heads = max(1, config.index_n_heads // tp_size)
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self.topk_indices_buffer = torch.empty(
                 num_index_heads,
                 max_tokens,
-                sparse_cfg["sparse_topk_blocks"],
+                config.index_topk_blocks,
                 dtype=torch.int32,
             )
 
@@ -1405,17 +1378,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 "bf16"
             )
             # Probed with the head count the layer will pass (it derives
-            # num_idx_heads from num_kv_heads, not from sparse_num_index_heads),
+            # num_idx_heads from num_kv_heads, not from index_n_heads),
             # so this cannot land on the other side of the MFMA column limit
             # from the selection the layer makes.
             emits_table = (
                 select_aiter_indexer_impl_cls(
-                    topk_blocks=sparse_cfg["sparse_topk_blocks"],
-                    sparse_block_size=sparse_cfg["sparse_block_size"],
+                    topk_blocks=config.index_topk_blocks,
+                    sparse_block_size=config.index_block_size,
                     num_index_heads=num_kv_heads,
-                    index_head_dim=sparse_cfg["sparse_index_dim"],
+                    index_head_dim=config.index_head_dim,
                     indexer_kv_dtype=indexer_kv_dtype,
-                    score_type=sparse_cfg.get("sparse_score_type", "max"),
                 )
                 is not None
             )
@@ -1428,8 +1400,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 self.sparse_table_buffers = (
                     torch.empty(
                         rows,
-                        sparse_cfg["sparse_topk_blocks"]
-                        * (sparse_cfg["sparse_block_size"] // ASM_PAGE_SIZE),
+                        config.index_topk_blocks
+                        * (config.index_block_size // ASM_PAGE_SIZE),
                         dtype=torch.int32,
                     ),
                     torch.empty(rows, dtype=torch.int32),
@@ -1747,9 +1719,8 @@ class MiniMaxM3SparseForConditionalGeneration(
         projector_hidden_size = getattr(config, "projector_hidden_size", None)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            vision_config = config.vision_config
             self.vision_tower = MiniMaxVLVisionModel(
-                config=PreTrainedConfig.from_dict(vision_config),
+                config=config.vision_config,
                 text_hidden_size=text_hidden_size,
                 projector_hidden_size=projector_hidden_size,
                 quant_config=self.quant_config,

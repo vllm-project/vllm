@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
 
 import numpy as np
 import regex as re
 import torch
+from PIL import Image
+from transformers import InklingProcessor
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config.multimodal import (
@@ -29,17 +32,18 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.processors.inkling import (
-    AUDIO_MARKER_ID,
-    AUDIO_TOKEN_ID,
-    IMAGE_MARKER_ID,
-    IMAGE_TOKEN_ID,
-    InklingAudioFeatureExtractor,
-    InklingImageProcessor,
-    InklingProcessor,
-)
 
 from ..configs import InklingMMConfig
+
+# Block-start markers (<|content_image|>, <|content_audio_input|>), kept verbatim
+IMAGE_MARKER_ID = 200005
+AUDIO_MARKER_ID = 200020
+# Per-patch / per-frame placeholders (<|unused_200054|>, <|unused_200053|>)
+IMAGE_TOKEN_ID = 200054
+AUDIO_TOKEN_ID = 200053
+
+# Long-edge upscale applied before patchifying (upstream defaults to no rescale)
+DEFAULT_RESCALE_IMAGE_FRAC = 2.0
 
 # Maximum audio tokens accepted per clip. At the dMel rate of 20 tokens/s
 # (50 ms hop) this is ~10 minutes of audio. It bounds the persistent per-request
@@ -57,6 +61,24 @@ class InklingMultiModalDataParser(MultiModalDataParser):
         return super()._parse_audio_data(data)
 
 
+def _rescale_image(
+    image: Image.Image, frac: float | None, max_upscaled_long_edge: int | None
+) -> Image.Image:
+    """Scale the long edge by `frac` with PIL LANCZOS, as the reference does."""
+    image = image.convert("RGB")
+    if frac is None:
+        return image
+    long_edge = max(image.size)
+    target_long_edge = long_edge * frac
+    if max_upscaled_long_edge is not None:
+        target_long_edge = min(target_long_edge, max(max_upscaled_long_edge, long_edge))
+    ratio = target_long_edge / long_edge
+    if ratio == 1.0:
+        return image
+    size = tuple(max(1, math.floor(d * ratio + 0.5)) for d in image.size)
+    return image.resize(size, resample=Image.Resampling.LANCZOS)
+
+
 def inkling_vision_enabled(config: InklingMMConfig) -> bool:
     return getattr(config.vision_config, "decoder_dmodel", None) is not None
 
@@ -70,38 +92,13 @@ class InklingProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(InklingMMConfig)
 
     def get_hf_processor(self, **kwargs: object) -> InklingProcessor:
-        config = self.get_hf_config()
-        vision_config = config.vision_config
-        audio_config = config.audio_config
-
-        image_processor = InklingImageProcessor(
-            patch_size=getattr(vision_config, "patch_size", None) or 40,
-        )
-
-        if inkling_audio_enabled(config):
-            audio_params = {
-                "n_mels": audio_config.n_mel_bins,
-                "num_dmel_bins": audio_config.mel_vocab_size,
-                "dmel_min_value": audio_config.dmel_min_value,
-                "dmel_max_value": audio_config.dmel_max_value,
-            }
-        else:
-            audio_params = {}
-        audio_extractor = InklingAudioFeatureExtractor(params=audio_params)
-
-        return InklingProcessor(
-            image_processor=image_processor,
-            audio_feature_extractor=audio_extractor,
-            tokenizer=self.get_tokenizer(),
-        )
+        return self.ctx.get_hf_processor(InklingProcessor, **kwargs)
 
     def get_data_parser(self) -> MultiModalDataParser:
-        # Audio inputs must be resampled to the dMel feature extractor's rate
-        # before `process_audios` (see InklingAudioFeatureExtractor._decode_one).
-        # Without a target_sr the default parser raises on any audio input.
-        extractor = self.get_hf_processor().audio_feature_extractor
+        # The feature extractor requires audio at its sampling rate
+        feature_extractor = self.get_hf_processor().feature_extractor
         return InklingMultiModalDataParser(
-            target_sr=extractor.params.sample_rate,
+            target_sr=feature_extractor.sampling_rate,
             target_channels=1,
             expected_hidden_size=self._get_expected_hidden_size(),
         )
@@ -163,9 +160,8 @@ class InklingDummyInputsBuilder(BaseDummyInputsBuilder[InklingProcessingInfo]):
         if num_audios:
             # Size the dummy at the maximum allowed audio so memory/encoder
             # budgeting reflects the largest clip we accept (MAX_AUDIO_TOKENS).
-            params = self.info.get_hf_processor().audio_feature_extractor.params
-            hop = int(round(params.audio_token_duration_s * params.sample_rate))
-            audio_len = MAX_AUDIO_TOKENS * hop
+            feature_extractor = self.info.get_hf_processor().feature_extractor
+            audio_len = MAX_AUDIO_TOKENS * feature_extractor.hop_length
             mm_data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
@@ -203,31 +199,37 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
         data: dict[str, Any] = {"input_ids": [prompt_ids]}
 
         if images:
-            img_feat = processor.process_images(images)
-            data["pixel_values"] = img_feat["vision_patches_bthwc"]
-            data["num_patches"] = torch.tensor(
-                img_feat["num_patches"], dtype=torch.int64
+            image_processor = processor.image_processor
+            frac = image_processor.rescale_image_frac or DEFAULT_RESCALE_IMAGE_FRAC
+            max_long_edge = image_processor.rescale_image_max_upscaled_long_edge
+            # Resize with PIL: torchvision LANCZOS does not match the reference
+            images = [_rescale_image(img, frac, max_long_edge) for img in images]
+            img_feat = image_processor(
+                images, rescale_image_frac=None, return_tensors="pt"
             )
+            data["pixel_values"] = img_feat["pixel_values"].to(torch.bfloat16)
+            data["num_patches"] = img_feat["num_patches"].to(torch.int64)
 
         if audios:
-            aud_feat = processor.process_audios(audios)
-            per_clip = aud_feat["dmel_bins"]
-            num_audio_tokens = aud_feat["num_audio_tokens"]
-            for i, n in enumerate(num_audio_tokens):
-                if int(n) > MAX_AUDIO_TOKENS:
+            feature_extractor = processor.feature_extractor
+            aud_feat = feature_extractor(
+                audios,
+                sampling_rate=feature_extractor.sampling_rate,
+                return_tensors="pt",
+            )
+            audio_input_ids = processor._extract_dmel_bins(aud_feat["input_features"])
+            num_audio_tokens = aud_feat["input_features_mask"].sum(-1)
+            for i, n in enumerate(num_audio_tokens.tolist()):
+                if n > MAX_AUDIO_TOKENS:
                     raise ValueError(
-                        f"Audio clip {i} produces {int(n)} tokens, exceeding the "
+                        f"Audio clip {i} produces {n} tokens, exceeding the "
                         f"maximum of {MAX_AUDIO_TOKENS} (~10 min at 20 tokens/s). "
                         "Provide a shorter clip."
                     )
-            if per_clip:
-                input_audio_features = torch.cat(
-                    [torch.as_tensor(c) for c in per_clip], dim=0
-                )
-            else:
-                input_audio_features = torch.empty(0)
-            data["input_audio_features"] = input_audio_features
-            data["num_audio_tokens"] = torch.tensor(num_audio_tokens, dtype=torch.int64)
+            data["audio_input_ids"] = torch.cat(
+                [ids[:n] for ids, n in zip(audio_input_ids, num_audio_tokens)]
+            )
+            data["num_audio_tokens"] = num_audio_tokens.to(torch.int64)
 
         processed_data = BatchFeature(data=data, tensor_type=None)
         return self._finalize_hf_mm_data(
@@ -297,7 +299,7 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
             num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             # Ragged per-audio frames, grouped by num_audio_tokens.
-            input_audio_features=MultiModalFieldConfig.flat_from_sizes(
+            audio_input_ids=MultiModalFieldConfig.flat_from_sizes(
                 "audio", num_audio_tokens
             ),
             num_audio_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),

@@ -14,8 +14,8 @@ from PIL import Image
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
+    InternVLChatImageProcessor,
+    InternVLChatProcessor,
     build_transform,
     find_closest_aspect_ratio,
     get_internvl_target_ratios,
@@ -213,7 +213,7 @@ def image_to_pixel_values_h2ovl(
     return pixel_values
 
 
-class H2OVLImageProcessor(InternVLImageProcessor):
+class H2OVLImageProcessor(InternVLChatImageProcessor):
     def __init__(
         self,
         image_size: int,
@@ -286,7 +286,7 @@ class H2OVLImageProcessor(InternVLImageProcessor):
         ]
 
 
-class H2OVLProcessor(InternVLProcessor):
+class H2OVLProcessor(InternVLChatProcessor):
     def __init__(
         self,
         image_processor: H2OVLImageProcessor,

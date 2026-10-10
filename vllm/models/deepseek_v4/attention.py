@@ -50,6 +50,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -230,7 +231,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # we do this for because MTP layer is not included
         # in the compress ratio list
         if layer_id < config.num_hidden_layers:
-            self.compress_ratio = max(1, config.compress_ratios[layer_id])
+            self.compress_ratio = max(1, get_compress_ratios(config)[layer_id])
         else:
             self.compress_ratio = 1
         self.eps = config.rms_norm_eps

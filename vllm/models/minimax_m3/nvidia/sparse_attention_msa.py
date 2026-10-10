@@ -127,7 +127,7 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.num_q_heads = config.num_attention_heads // tp_size
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.topk_blocks = config.sparse_attention_config["sparse_topk_blocks"]
+        self.topk_blocks = config.index_topk_blocks
         # AttentionSpec stores every FP8 mode as uint8, so retain the configured
         # format to distinguish E4M3 (supported) from E5M2 before planning.
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype

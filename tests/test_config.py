@@ -1983,9 +1983,7 @@ def test_draft_inherits_ep_only_for_moe(
     draft_is_moe: bool,
 ):
     """Validate final draft configs without loading weights or mocking validation."""
-    from transformers import LlamaConfig, MixtralConfig
-
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config, LlamaConfig, MixtralConfig
 
     common = dict(
         hidden_size=128,
@@ -2002,7 +2000,7 @@ def test_draft_inherits_ep_only_for_moe(
             n_routed_experts=4,
             num_experts_per_tok=2,
             num_nextn_predict_layers=1,
-            compress_ratios=[1, 1],
+            layer_types=["sliding_attention"] * 2,
             head_dim=32,
             **common,
         )
