@@ -817,6 +817,17 @@ class DelegatingParser(Parser):
                     delta_message = DeltaMessage()
                 delta_message.content = (delta_message.content or "") + promoted
 
+        # Legacy tool parsers that hold text back (e.g. waiting to see whether
+        # a marker completes) get one chance to release it at end of stream,
+        # same opt-in shape as the reasoning fallback above.
+        tool_finish = getattr(self._tool_parser, "finish_streaming", None)
+        if tool_finish is not None:
+            released = tool_finish()
+            if released is not None and released.content:
+                if delta_message is None:
+                    delta_message = DeltaMessage()
+                delta_message.content = (delta_message.content or "") + released.content
+
         self._append_unstreamed_tool_args(delta_message)
         return delta_message
 

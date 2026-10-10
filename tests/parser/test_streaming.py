@@ -12,6 +12,7 @@ from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
 
 
 @pytest.fixture(autouse=True)
@@ -833,3 +834,37 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
     )
     assert json.loads(tool_args) == {"city": city}
     assert content == ""
+
+
+# ── Legacy tool parser end-of-stream flush (InternLM2) ──
+
+
+class Internlm2DelegatingParser(DelegatingParser):
+    reasoning_parser_cls = None
+    tool_parser_cls = Internlm2ToolParser
+
+
+def test_finalize_releases_internlm2_held_action_start(tokenizer, request_obj):
+    """finalize_generation gives a legacy tool parser's finish_streaming()
+    one chance to release text held back at end of stream.
+
+    InternLM2 holds everything from <|action_start|> until it knows whether
+    a plugin call follows; a stream ending inside that window used to drop
+    the held text, while the non-streaming path returns it verbatim."""
+    parser = Internlm2DelegatingParser(tokenizer)
+    chunks = ["Let me compute that. ", "<|action_start|>"]
+    results: list[DeltaMessage | None] = []
+    for i, chunk in enumerate(chunks):
+        results.append(
+            parser.parse_delta(
+                chunk,
+                tokenizer.encode(chunk, add_special_tokens=False),
+                request_obj,
+                prompt_token_ids=[] if i == 0 else None,
+                finished=i == len(chunks) - 1,
+            )
+        )
+
+    _, content, tool_calls = collect_fields(results)
+    assert content == "Let me compute that. <|action_start|>"
+    assert not tool_calls
