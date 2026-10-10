@@ -30,6 +30,7 @@ class BlockTables:
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
+        sliding_window_reach: list[int] | None = None,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -50,6 +51,16 @@ class BlockTables:
             dcp_sharded = [True] * self.num_kv_cache_groups
         assert len(dcp_sharded) == self.num_kv_cache_groups
         self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
+        # Per group, how many tokens below a request's first scheduled position
+        # attention can still read (sliding_window - 1 + extra_retained_tokens);
+        # 0 for groups without a sliding window. Under context parallelism a
+        # block-table column does not map to a contiguous token range, so the
+        # masking in gather_block_tables is disabled.
+        if sliding_window_reach is None or cp_size > 1:
+            sliding_window_reach = [0] * self.num_kv_cache_groups
+        assert len(sliding_window_reach) == self.num_kv_cache_groups
+        self._sliding_window_reach = sliding_window_reach
+        self.has_sliding_window_groups = any(r > 0 for r in sliding_window_reach)
 
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
@@ -105,6 +116,9 @@ class BlockTables:
         self.slot_mapping_enabled = torch.tensor(
             self._slot_mapping_enabled, dtype=torch.bool, device=self.device
         )
+        self.sliding_window_reach = torch.tensor(
+            self._sliding_window_reach, dtype=torch.int32, device=self.device
+        )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
@@ -148,9 +162,28 @@ class BlockTables:
         num_reqs_padded: int,
         out: tuple[torch.Tensor, ...] | None = None,
         out_ptrs: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        seq_lens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
+        """Gather the batch's block-table rows into the forward-pass tables.
+
+        When query_start_loc and seq_lens are given, sliding-window groups get
+        every entry wholly below the window of the request's first scheduled
+        token replaced by the null block. Those blocks may already have been
+        freed by the sliding-window manager and reused, while attention kernels
+        can still load them as part of a KV tile that straddles the window
+        start: masked-out NaN in such a tile propagates into the output.
+        """
         if self.num_kv_cache_groups == 0:
             return ()
+        mask_sliding_window = (
+            self.has_sliding_window_groups
+            and query_start_loc is not None
+            and seq_lens is not None
+        )
+        if not mask_sliding_window:
+            # Unused by the kernel; any int32 tensor satisfies the signature.
+            query_start_loc = seq_lens = self.sliding_window_reach
         if out is None:
             out = tuple(self.input_block_tables)
             out_ptrs = self.input_block_table_ptrs
@@ -167,6 +200,11 @@ class BlockTables:
             self.num_blocks.gpu,
             self.num_blocks.gpu.stride(0),
             num_reqs,
+            query_start_loc,
+            seq_lens,
+            self.sliding_window_reach,
+            self.kernel_block_sizes_tensor,
+            MASK_SLIDING_WINDOW=mask_sliding_window,
             BLOCK_SIZE=1024,  # type: ignore
         )
         return tuple(bt[:num_reqs_padded] for bt in out)
@@ -238,6 +276,11 @@ def _gather_block_tables_kernel(
     num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
     num_blocks_stride,
     num_reqs,  # actual number of requests (for padding)
+    query_start_loc_ptr,  # [batch_size + 1]
+    seq_lens_ptr,  # [batch_size]
+    sliding_window_reach_ptr,  # [num_kv_cache_groups]
+    kernel_block_sizes_ptr,  # [num_kv_cache_groups]
+    MASK_SLIDING_WINDOW: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     # kv cache group id
@@ -263,9 +306,24 @@ def _gather_block_tables_kernel(
     src_block_table_ptr = _load_ptr(src_block_table_ptrs + group_id, tl.int32)
     src_row_ptr = src_block_table_ptr + req_idx * stride
 
+    # Leading entries no query of this step can attend: null them (see
+    # BlockTables.gather_block_tables).
+    num_null = 0
+    if MASK_SLIDING_WINDOW:
+        reach = tl.load(sliding_window_reach_ptr + group_id)
+        query_len = tl.load(query_start_loc_ptr + batch_idx + 1) - tl.load(
+            query_start_loc_ptr + batch_idx
+        )
+        first_pos = tl.load(seq_lens_ptr + batch_idx) - query_len
+        kernel_block_size = tl.load(kernel_block_sizes_ptr + group_id)
+        num_null = tl.where(
+            reach > 0, tl.maximum(first_pos - reach, 0) // kernel_block_size, 0
+        )
+
     for i in tl.range(0, num_blocks, BLOCK_SIZE):
         offset = i + tl.arange(0, BLOCK_SIZE)
         block_ids = tl.load(src_row_ptr + offset, mask=offset < num_blocks)
+        block_ids = tl.where(offset < num_null, 0, block_ids)
         tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
 
 
