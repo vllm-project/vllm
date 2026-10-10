@@ -999,6 +999,52 @@ def test_update_from_output_routes_multi_position_sampling_masks():
     ]
 
 
+def test_update_from_output_routes_last_hidden_states_by_request():
+    """Each request that asked for its last hidden states receives its own rows,
+    cut to the tokens it keeps; the others receive none."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=3, max_tokens=10, stop_token_ids=[7])
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1 for req in requests},
+        total_num_scheduled_tokens=3,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    hidden = {
+        requests[0].request_id: torch.arange(8, dtype=torch.bfloat16).view(1, 8),
+        # The third request stops on this step (token 7 is a stop token).
+        requests[2].request_id: -torch.arange(8, dtype=torch.bfloat16).view(1, 8),
+    }
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[1], [3], [7]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        last_hidden_states=hidden,
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+
+    assert [out.request_id for out in outputs] == [req.request_id for req in requests]
+    assert torch.equal(outputs[0].new_last_hidden_states, hidden["0"])
+    assert outputs[1].new_last_hidden_states is None
+    assert outputs[2].finished
+    assert torch.equal(outputs[2].new_last_hidden_states, hidden["2"])
+
+
 def test_stop_via_update_from_output():
     """Test stopping behavior through update_from_output."""
     scheduler = create_scheduler(num_speculative_tokens=1)

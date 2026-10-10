@@ -18,6 +18,7 @@ class MockModelConfig:
     max_logprobs: int = 20
     logits_processors: list | None = None
     return_sampling_mask: bool = False
+    enable_return_last_hidden_states: bool = False
 
     def get_vocab_size(self) -> int:
         return 1024
@@ -280,3 +281,20 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def test_return_last_hidden_states_requires_engine_flag():
+    params = SamplingParams(return_last_hidden_states=True)
+    with pytest.raises(VLLMValidationError, match="enable_return_last_hidden_states"):
+        params.verify(MockModelConfig(), None, None, None)
+    params.verify(
+        MockModelConfig(enable_return_last_hidden_states=True), None, None, None
+    )
+
+
+def test_last_hidden_states_engine_flag_alone_changes_nothing():
+    """An engine that allows the output does not impose it on any request."""
+    SamplingParams().verify(
+        MockModelConfig(enable_return_last_hidden_states=True), None, None, None
+    )
+    assert SamplingParams().return_last_hidden_states is False

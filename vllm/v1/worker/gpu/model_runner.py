@@ -334,6 +334,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
+        # Requests that asked for the hidden states their logits are computed
+        # from (SamplingParams.return_last_hidden_states); None when the engine
+        # does not allow it, so the default path does no work at all.
+        self.last_hidden_states_req_ids: set[str] | None = (
+            set() if self.model_config.enable_return_last_hidden_states else None
+        )
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
 
@@ -1134,6 +1140,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
+        if self.last_hidden_states_req_ids is not None:
+            self.last_hidden_states_req_ids.discard(req_id)
         self.lora_state.remove_request(req_id)
         return True
 
@@ -1214,6 +1222,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
                 )
+                if (
+                    self.last_hidden_states_req_ids is not None
+                    and new_req_data.sampling_params.return_last_hidden_states
+                ):
+                    self.last_hidden_states_req_ids.add(req_id)
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -1663,6 +1676,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert sampler_output is not None
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+
+    def gather_last_hidden_states(
+        self, hidden_states: torch.Tensor, input_batch: InputBatch
+    ) -> dict[str, torch.Tensor]:
+        """req_id -> [num_logits, hidden_size]: the rows of `hidden_states` that
+        `sample` passed to `compute_logits`, for the requests that asked for
+        them. Exact copies, in the model's dtype; read before the next step can
+        overwrite `hidden_states`."""
+        assert self.last_hidden_states_req_ids is not None
+        cu_num_logits = input_batch.cu_num_logits_np
+        return {
+            req_id: hidden_states[
+                input_batch.logits_indices[cu_num_logits[i] : cu_num_logits[i + 1]]
+            ]
+            for i, req_id in enumerate(input_batch.req_ids)
+            if req_id in self.last_hidden_states_req_ids
+        }
 
     def postprocess_sampled(
         self,
@@ -2162,6 +2192,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
             cudagraph_stats=cudagraph_stats,
         )
+        if self.last_hidden_states_req_ids:
+            model_runner_output.last_hidden_states = self.gather_last_hidden_states(
+                hidden_states, input_batch
+            )
         pending_aux_output = None
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
