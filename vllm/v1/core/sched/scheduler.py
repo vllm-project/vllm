@@ -2195,6 +2195,12 @@ class Scheduler(SchedulerInterface):
                 request.resumable = False
                 stopped = True
 
+            word_align = (
+                model_runner_output.word_align.get(req_id)
+                if model_runner_output.word_align
+                else None
+            )
+
             routed_experts = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
@@ -2281,6 +2287,7 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        word_align=word_align,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )

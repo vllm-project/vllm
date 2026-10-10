@@ -246,9 +246,12 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-def test_next_step_does_not_consume_pending_output(monkeypatch):
+@pytest.mark.parametrize("with_word_align", [False, True])
+def test_next_step_does_not_consume_pending_output(monkeypatch, with_word_align):
     """begin_step must not wait for or consume an unconsumed step output."""
     event = Mock()
+    word_align = {"request": [0.0, 0.2]}
+    readout = Mock(return_value=word_align)
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
     worker = _make_worker(1)
@@ -274,17 +277,25 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
         Mock(),
         check_ep_fault=False,
         pending_aux_output=pending,
+        word_align_fn=readout if with_word_align else None,
     )
     event.record.assert_called_once()
     assert worker._pending_outputs == [pending]
 
     worker.begin_step(_metadata(0, [], {}).metadata)
     process_output.assert_not_called()
+    readout.assert_not_called()
     assert worker._pending_outputs == [pending]
 
     result = output.get_output()
 
     assert result.sampled_token_ids == [[7]]
+    if with_word_align:
+        event.synchronize.assert_called_once()
+        readout.assert_called_once_with(["request"], [[7]])
+        assert result.word_align == word_align
+    else:
+        assert result.word_align is None
     np.testing.assert_array_equal(
         result.aux_output_connector_output["request"].rows, rows.numpy()
     )

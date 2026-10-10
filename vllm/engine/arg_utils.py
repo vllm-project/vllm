@@ -470,6 +470,7 @@ class EngineArgs:
     # AuxOutputConfig.
     enable_return_routed_experts: bool = False
     return_sampling_mask: bool = ModelConfig.return_sampling_mask
+    enable_word_timestamps: bool = ModelConfig.enable_word_timestamps
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
@@ -973,6 +974,10 @@ class EngineArgs:
         model_group.add_argument(
             "--return-sampling-mask",
             **model_kwargs["return_sampling_mask"],
+        )
+        model_group.add_argument(
+            "--enable-word-timestamps",
+            **model_kwargs["enable_word_timestamps"],
         )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
@@ -1964,6 +1969,7 @@ class EngineArgs:
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             return_sampling_mask=self.return_sampling_mask,
+            enable_word_timestamps=self.enable_word_timestamps,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
