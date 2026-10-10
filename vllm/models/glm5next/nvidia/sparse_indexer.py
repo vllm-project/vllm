@@ -15,6 +15,7 @@ from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
     PrefillRowShard,
     _merge_dcp_topk_global,
+    _reserve_row_shard_exchange_transient,
 )
 from vllm.models.glm5next.common.sparse_indexer import (
     RADIX_TOPK_WORKSPACE_SIZE,
@@ -171,6 +172,10 @@ def sparse_attn_indexer_kpool(
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
+
+        # The dummy run returns before exchange_topk executes, so reserve its
+        # worst-case transient for the memory profile.
+        _reserve_row_shard_exchange_transient(topk_indices_buffer, hidden_states.device)
 
         return topk_indices_buffer
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]

@@ -131,3 +131,83 @@ def test_row_sharding_gate_rejects_unsupported_configurations(
     # FULL captures mixed batches whole, so the exchange must stay out.
     assert not supported(cudagraph_mode=CUDAGraphMode.FULL)
     assert supported(cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE)
+
+
+def test_profiling_run_reserves_exchange_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dummy run returns before the exchange executes, so its all_gatherv
+    output plus staging copy must be reserved up front when row sharding is
+    active -- and only then."""
+    rows, topk = 128, 8
+    buffer = torch.empty((rows, topk), dtype=torch.int32)
+    peak = 2 * rows * topk * buffer.element_size()
+    specs = (((1,), torch.uint8), ((1,), torch.uint8))
+    numels: list[int] = []
+    real_empty = torch.empty
+
+    def recording_empty(*args, **kwargs):
+        out = real_empty(*args, **kwargs)
+        numels.append(out.numel())
+        return out
+
+    def run_dummy(tp_world: int) -> None:
+        numels.clear()
+        with monkeypatch.context() as m:
+            m.setattr(torch, "empty", recording_empty)
+            m.setattr(
+                sparse_indexer,
+                "get_forward_context",
+                lambda: SimpleNamespace(attn_metadata=None),
+            )
+            m.setattr(sparse_indexer, "_gather_workspace_shapes", lambda *a: specs)
+            m.setattr(
+                sparse_indexer,
+                "current_workspace_manager",
+                lambda: SimpleNamespace(get_simultaneous=lambda *s: None),
+            )
+            m.setattr(
+                sparse_indexer,
+                "get_tp_group",
+                lambda: SimpleNamespace(world_size=tp_world),
+            )
+            m.setattr(
+                sparse_indexer,
+                "get_current_vllm_config_or_none",
+                lambda: SimpleNamespace(
+                    compilation_config=SimpleNamespace(
+                        cudagraph_mode=CUDAGraphMode.PIECEWISE
+                    ),
+                    parallel_config=SimpleNamespace(
+                        decode_context_parallel_size=1,
+                        prefill_context_parallel_size=1,
+                    ),
+                ),
+            )
+            m.setattr(sparse_indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)
+            m.setattr(indexer.current_platform, "is_cuda", lambda: True)
+            sparse_indexer.sparse_attn_indexer(
+                hidden_states=torch.empty(4, 4),
+                k_cache_prefix="k",
+                kv_cache=torch.empty(4, 4),
+                q_quant=torch.empty(4, 4),
+                q_scale=None,
+                k=None,
+                weights=torch.empty(4),
+                quant_block_size=128,
+                scale_fmt=None,
+                topk_tokens=topk,
+                head_dim=64,
+                max_model_len=1024,
+                total_seq_lens=512,
+                topk_indices_buffer=buffer,
+                skip_k_cache_insert=True,
+                use_pcp=False,
+                pcp_shard_decode_requests=False,
+                dense_mha_metadata_layer_name="",
+            )
+
+    run_dummy(tp_world=2)
+    assert peak in numels
+    run_dummy(tp_world=1)
+    assert peak not in numels

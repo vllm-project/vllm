@@ -9,7 +9,11 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -48,6 +52,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    tp_prefill_row_sharding_supported,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
@@ -362,6 +367,35 @@ class PrefillRowShard:
         )
 
 
+def _reserve_row_shard_exchange_transient(
+    topk_indices_buffer: torch.Tensor, device: torch.device
+) -> None:
+    """Profiling/dummy runs return before ``exchange_topk`` executes; reserve
+    its worst-case transient so the memory profile accounts for it.
+
+    The exchange stages this rank's contiguous slice and the all_gatherv
+    wrapper allocates the full gathered tensor; each is bounded by the
+    buffer's row capacity times its (tile-padded) width.
+    """
+    cfg = get_current_vllm_config_or_none()
+    if cfg is None:
+        return
+    parallel = cfg.parallel_config
+    if not tp_prefill_row_sharding_supported(
+        cfg,
+        parallel.decode_context_parallel_size,
+        parallel.prefill_context_parallel_size > 1,
+        get_tp_group().world_size,
+    ):
+        return
+    rows, width = topk_indices_buffer.shape[:2]
+    _ = torch.empty(
+        2 * rows * width * topk_indices_buffer.element_size(),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -432,6 +466,10 @@ def sparse_attn_indexer(
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
+
+        # The dummy run returns before exchange_topk executes, so reserve its
+        # worst-case transient for the memory profile.
+        _reserve_row_shard_exchange_transient(topk_indices_buffer, hidden_states.device)
 
         return sparse_attn_indexer_fake(
             hidden_states,
