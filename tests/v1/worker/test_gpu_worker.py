@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm.config import MultiModalConfig
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -196,10 +197,15 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
 
-def _plan_worker(config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None):
+def _plan_worker(
+    config_hash="abc123", free_memory=78 * GiB_bytes, kv_bytes=None, mm_config=None
+):
     """The minimal Worker surface the startup-plan entry points touch."""
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(compute_hash=lambda: config_hash),
+        vllm_config=SimpleNamespace(
+            compute_hash=lambda: config_hash,
+            model_config=SimpleNamespace(multimodal_config=mm_config),
+        ),
         rank=0,
         parallel_config=SimpleNamespace(world_size=1),
         init_snapshot=SimpleNamespace(free_memory=free_memory),
@@ -221,7 +227,7 @@ def plan_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("VLLM_ENABLE_STARTUP_PLAN", "1")
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
     with patch.object(startup_plan, "current_platform", _plan_platform()):
-        yield
+        yield tmp_path
 
 
 def test_startup_plan_fingerprint_sensitivity(plan_env):
@@ -256,6 +262,57 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+@pytest.mark.parametrize(
+    "changed_config",
+    [
+        {"limit_per_prompt": {"image": 8}},
+        {"limit_per_prompt": {"image": {"count": 1, "width": 512}}},
+        {"mm_processor_kwargs": {"max_pixels": 1048576}},
+        {"skip_mm_profiling": True},
+        {"language_model_only": True},
+        {"mm_encoder_attn_backend": "FLASH_ATTN"},
+    ],
+)
+def test_startup_plan_rejects_changed_multimodal_config(plan_env, changed_config):
+    """A compiler-compatible config can require a different memory profile."""
+    config = {"limit_per_prompt": {"image": 1}}
+    maybe_save_startup_plan(
+        _plan_worker(mm_config=MultiModalConfig(**config)), 50 * GiB_bytes
+    )
+    unchanged = _plan_worker(mm_config=MultiModalConfig(**config))
+    maybe_apply_startup_plan(unchanged)
+    assert unchanged.cache_config.kv_cache_memory_bytes == 50 * GiB_bytes
+
+    changed = _plan_worker(mm_config=MultiModalConfig(**(config | changed_config)))
+    maybe_apply_startup_plan(changed)
+    assert changed.cache_config.kv_cache_memory_bytes is None
+
+
+def test_startup_plan_reuses_reordered_multimodal_kwargs(plan_env):
+    config = MultiModalConfig(
+        limit_per_prompt={"image": 1, "video": 2},
+        mm_processor_kwargs={"size": {"width": 512, "height": 256}},
+    )
+    maybe_save_startup_plan(_plan_worker(mm_config=config), 50 * GiB_bytes)
+    reordered = MultiModalConfig(
+        limit_per_prompt={"video": 2, "image": {"count": 1}},
+        mm_processor_kwargs={"size": {"height": 256, "width": 512}},
+    )
+    worker = _plan_worker(mm_config=reordered)
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes == 50 * GiB_bytes
+
+
+def test_startup_plan_skips_non_hashable_multimodal_config(plan_env):
+    """Unsupported processor kwargs must fall back to ordinary profiling."""
+    config = MultiModalConfig(mm_processor_kwargs={"custom_option": object()})
+    worker = _plan_worker(mm_config=config)
+    maybe_save_startup_plan(worker, 50 * GiB_bytes)
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes is None
+    assert not list(plan_env.glob("startup_plan/*.json"))
 
 
 # Memory accounting of the profiling run (Worker.determine_available_memory).
