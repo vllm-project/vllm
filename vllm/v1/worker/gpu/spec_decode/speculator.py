@@ -92,7 +92,7 @@ class BaseSpeculator(ABC):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -152,7 +152,7 @@ class DraftModelSpeculator(BaseSpeculator):
             device=device,
         )
         self.idx_mapping = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
+            self.max_num_reqs, dtype=torch.int64, device=device
         )
         self.temperature = torch.zeros(
             self.max_num_reqs, dtype=torch.float32, device=device
@@ -525,18 +525,18 @@ class DraftModelSpeculator(BaseSpeculator):
 
     def _build_uniform_batch_dp_sync(
         self,
-        target_dp_sync: DPSyncState,
+        target_dp_sync_state: DPSyncState,
         num_reqs: int,
         num_query_per_req: int = 1,
     ) -> tuple[DPSyncState, int]:
-        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        num_batch_tokens = target_dp_sync_state.num_reqs * num_query_per_req
         assert num_reqs * num_query_per_req <= num_batch_tokens, (
             "reusing a DP sync that does not cover this batch's requests"
         )
         return replace(
-            target_dp_sync,
+            target_dp_sync_state,
             num_tokens_across_dp=torch.full_like(
-                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+                target_dp_sync_state.num_tokens_across_dp, num_batch_tokens
             ),
             uniform_token_count=num_query_per_req,
             eager=False,

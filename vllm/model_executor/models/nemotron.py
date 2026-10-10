@@ -29,6 +29,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import NemotronConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -49,7 +50,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron import NemotronConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (

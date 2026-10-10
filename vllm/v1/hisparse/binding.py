@@ -55,8 +55,9 @@ def resolve_hisparse_specs(
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
+    specs = list(mla_specs.values())
     try:
-        block_size = select_common_block_size(block_sizes.pop(), backends)
+        block_size = select_common_block_size(block_sizes.pop(), backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "
@@ -104,16 +105,13 @@ def allocate_hisparse_kv_caches(
             if isinstance(host_spec, UniformTypeKVCacheSpecs)
             else host_spec
         )
-        kernel_block_size = kernel_block_sizes[host_group_id]
-        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
-            kernel_block_size = spec.storage_block_size
         views = create_kv_cache_views(
             backing,
             spec,
             kv_cache_config.num_blocks_of(tensor),
             layout,
             tensor,
-            kernel_block_size=kernel_block_size,
+            kernel_block_size=kernel_block_sizes[host_group_id],
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
@@ -147,7 +145,6 @@ def init_hisparse_kv_cache(
         initialize_hisparse_runtime_buffers(
             cache_handles,
             max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         )
         return kv_caches
     except Exception:
@@ -197,9 +194,6 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
         )
     )
     release_pinned_state(list(runtimes.values()), registered_pools, shared_region)
-    for cache in cache_handles:
-        cache.mirror_staging_cache = None
-        cache.mirror_staging_slots = None
 
 
 def bind_hisparse_kv_caches(
