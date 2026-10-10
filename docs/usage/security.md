@@ -278,6 +278,20 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 - Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
 - Implements additional authentication, rate limiting, and logging at the proxy layer
 
+### Optional In-Process Security Middleware
+
+Deployments that cannot sit behind a reverse proxy can enable an opt-in
+security middleware in the API server itself:
+[fastapi-guard](https://github.com/Guard-Core/fastapi-guard) adds IP
+block/allow lists, rate limiting with auto-ban, user-agent blocking, and
+penetration-attempt detection. Install it with `pip install "vllm[guard]"`
+and set `VLLM_GUARD_ENABLED=1`; see the `VLLM_GUARD_*` variables in
+`vllm/envs.py` for the available knobs. The middleware is disabled by
+default and nothing is imported or attached unless it is enabled.
+Single-process deployments keep state in memory; set
+`VLLM_GUARD_REDIS_URL` when running multiple API server replicas so
+rate-limit counters and bans are shared.
+
 ## Request Parameter Resource Limits
 
 Certain API request parameters can have a large impact on resource consumption and may be abused to exhaust server resources. The `n` parameter in the `/v1/completions` and `/v1/chat/completions` endpoints controls how many independent output sequences are generated per request. A very large value causes the engine to allocate memory, CPU, and GPU time proportional to `n`, which can lead to out-of-memory conditions on the host and block the server from processing other requests.
