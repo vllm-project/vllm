@@ -16,7 +16,10 @@ from transformers.audio_utils import mel_filter_bank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.transformers.utils import recursive_replace_linear
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.parakeet import ExtractorConfig, ParakeetConfig
 
@@ -24,7 +27,7 @@ logger = init_logger(__name__)
 
 
 class ParakeetProjection(nn.Module):
-    def __init__(self, config: ParakeetConfig) -> None:
+    def __init__(self, config: ParakeetConfig, *, prefix: str = "") -> None:
         super().__init__()
         sound_hidden_size = config.hidden_size
         proj_hidden_size = config.projection_hidden_size
@@ -32,9 +35,21 @@ class ParakeetProjection(nn.Module):
         bias = config.projection_bias
 
         self.norm = RMSNorm(sound_hidden_size, eps=config.projection_eps)
-        self.linear1 = nn.Linear(sound_hidden_size, proj_hidden_size, bias=bias)
+        self.linear1 = ReplicatedLinear(
+            sound_hidden_size,
+            proj_hidden_size,
+            bias=bias,
+            return_bias=False,
+            prefix=maybe_prefix(prefix, "linear1"),
+        )
         self.activation = ReLUSquaredActivation()
-        self.linear2 = nn.Linear(proj_hidden_size, llm_hidden_size, bias=bias)
+        self.linear2 = ReplicatedLinear(
+            proj_hidden_size,
+            llm_hidden_size,
+            bias=bias,
+            return_bias=False,
+            prefix=maybe_prefix(prefix, "linear2"),
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.norm(hidden_states)
@@ -52,15 +67,46 @@ class ProjectedParakeet(nn.Module):
         dtype: torch.dtype,
         llm_hidden_size: int,
         max_model_len: int,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = ParakeetConfig.from_hf_config(
             config, llm_hidden_size=llm_hidden_size, max_model_len=max_model_len
         )
         self.encoder = HFParakeetEncoder(self.config)
+        self._replace_encoder_linears(prefix=maybe_prefix(prefix, "encoder"))
         self.encoder = self.encoder.to(dtype)
-        self.projection = ParakeetProjection(self.config)
+        self.projection = ParakeetProjection(
+            self.config, prefix=maybe_prefix(prefix, "projection")
+        )
         self.projection = self.projection.to(dtype)
+
+    def _replace_encoder_linears(self, *, prefix: str) -> None:
+        """Use vLLM linears so Parakeet encoder modules can receive LoRA.
+
+        ``relative_k_proj`` operates on a shared positional sequence of length
+        ``2T - 1``, while the other encoder linears operate on each clip's
+        subsampled sequence of length ``T``. The multimodal LoRA runtime has one
+        tower mapping per modality, so that projection cannot safely share the
+        audio mapping in a batch containing different adapters, and is left as
+        a plain ``nn.Linear``.
+
+        The replaced linears are left freshly initialized -- ``load_weights``
+        finds them by their (unchanged) qualified name and overwrites them
+        with the real checkpoint values afterwards, same as every other
+        vLLM-native linear in the model.
+        """
+
+        def _is_relative_k_proj(qual_name: str, module: nn.Module) -> bool:
+            del module
+            return qual_name.rsplit(".", 1)[-1] == "relative_k_proj"
+
+        recursive_replace_linear(
+            self.encoder,
+            quant_config=None,
+            prefix=prefix,
+            skip_predicate=_is_relative_k_proj,
+        )
 
     def forward(
         self, input_features: torch.Tensor, attention_mask: torch.Tensor | None = None
