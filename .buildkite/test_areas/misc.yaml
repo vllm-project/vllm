@@ -226,6 +226,21 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
 
+- label: ":nvidia: (H200 MIG 18GB) Watermarking Nightly"
+  key: watermarking-nightly
+  timeout_in_minutes: 15
+  device: h200_18gb
+  optional: true
+  source_file_dependencies:
+    - vllm/config/watermarking.py
+    - vllm/sampling_params.py
+    - vllm/v1/sample/ops/topk_topp_sampler.py
+    - vllm/v1/watermarking/
+    - vllm/v1/worker/gpu/
+    - tests/watermarking
+  commands:
+    - pytest -v -s watermarking
+
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
   timeout_in_minutes: 20
