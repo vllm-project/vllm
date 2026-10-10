@@ -513,59 +513,44 @@ class GraniteMoeHybridModel(nn.Module):
 
             # Logic analogous to: https://github.com/vllm-project/vllm/blob/f49e5aff11c986ed4d45202b1716c5d74786efa9/vllm/model_executor/models/granitemoeshared.py#L215
             # Mapping different experts' layout:
-            #  from HF (input_linear, output_linear, router)
+            #  from HF (gate_up_proj, down_proj, router)
             #  to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
             # The renaming and parameter loading logic is the same for weight
             # and weight_scale tensors so we can reuse them without issues.
-            if n.endswith(".block_sparse_moe.input_linear.weight") or n.endswith(
-                ".block_sparse_moe.input_linear.weight_scale"
+            if n.endswith(
+                (
+                    ".block_sparse_moe.experts.gate_up_proj",
+                    ".block_sparse_moe.experts.gate_up_proj_scale",
+                )
             ):
+                w13_name = n.replace(".gate_up_proj", ".routed_experts.w13_weight")
                 for e in range(p.size(0)):
-                    w1_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w1.weight",
-                    )
-                    w3_name = n.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w3.weight",
-                    )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
-                    _load_expert(
-                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
-                        w1_param,
-                        w1_name,
-                        shard_id="w1",
-                        expert_id=e,
-                    )
-                    _load_expert(
-                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
-                        w3_param,
-                        w3_name,
-                        shard_id="w3",
-                        expert_id=e,
-                    )
-            elif n.endswith(".block_sparse_moe.output_linear.weight") or n.endswith(
-                ".block_sparse_moe.output_linear.weight_scale"
+                    for shard_id, shard in (("w1", w1_param), ("w3", w3_param)):
+                        _load_expert(
+                            w13_name,
+                            shard,
+                            n.replace(".gate_up_proj", f".{e}.{shard_id}.weight"),
+                            shard_id=shard_id,
+                            expert_id=e,
+                        )
+            elif n.endswith(
+                (
+                    ".block_sparse_moe.experts.down_proj",
+                    ".block_sparse_moe.experts.down_proj_scale",
+                )
             ):
+                w2_name = n.replace(".down_proj", ".routed_experts.w2_weight")
                 for e in range(p.size(0)):
-                    w2_name = n.replace(
-                        ".block_sparse_moe.output_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w2.weight",
-                    )
-                    w2_param = p[e]
                     _load_expert(
-                        n.replace(".output_linear.", ".experts.routed_experts.w2_"),
-                        w2_param,
                         w2_name,
+                        p[e],
+                        n.replace(".down_proj", f".{e}.w2.weight"),
                         shard_id="w2",
                         expert_id=e,
                     )
-            elif n.endswith(".block_sparse_moe.router.layer.weight"):
-                gate_name = n.replace(
-                    ".block_sparse_moe.router.layer.weight",
-                    ".block_sparse_moe.gate.weight",
-                )
-                _load(gate_name, p)
+            elif n.endswith(".block_sparse_moe.router.weight"):
+                _load(n.replace(".router.", ".gate."), p)
             else:
                 loaded = False
                 for param_name, weight_name, shard_id in stacked_params_mapping:

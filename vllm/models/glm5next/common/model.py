@@ -342,6 +342,14 @@ class Glm5NextMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
+class Glm5NextHyperConnection(nn.Module):
+    def __init__(self, mix_hc: int, d_model: int) -> None:
+        super().__init__()
+        self.fn = nn.Parameter(torch.empty(mix_hc, d_model, dtype=torch.float32))
+        self.base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
+        self.scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+
+
 class Glm5NextDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -453,19 +461,8 @@ class Glm5NextDecoderLayer(nn.Module):
 
             self.n = n
 
-            # attn hc
-            self.hc_attn_fn = nn.Parameter(
-                torch.empty(mix_hc, d_model, dtype=torch.float32)
-            )
-            self.hc_attn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-            self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
-
-            # ffn hc
-            self.hc_ffn_fn = nn.Parameter(
-                torch.empty(mix_hc, d_model, dtype=torch.float32)
-            )
-            self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
-            self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
+            self.attn_hc = Glm5NextHyperConnection(mix_hc, d_model)
+            self.ffn_hc = Glm5NextHyperConnection(mix_hc, d_model)
 
             self.mhc_pre_op = MHCPreOp()
             self.mhc_post_op = MHCPostOp()
@@ -561,9 +558,9 @@ class Glm5NextDecoderLayer(nn.Module):
             residual = x
             post, comb, x = self.hc_pre(
                 x,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
+                self.attn_hc.fn,
+                self.attn_hc.scale,
+                self.attn_hc.base,
                 norm_weight=self.input_layernorm.weight.data,
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
@@ -573,9 +570,9 @@ class Glm5NextDecoderLayer(nn.Module):
                 residual,
                 post,
                 comb,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
+                self.attn_hc.fn,
+                self.attn_hc.scale,
+                self.attn_hc.base,
                 norm_weight=self.input_layernorm.weight.data,
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
@@ -599,9 +596,9 @@ class Glm5NextDecoderLayer(nn.Module):
             residual,
             post,
             comb,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
+            self.ffn_hc.fn,
+            self.ffn_hc.scale,
+            self.ffn_hc.base,
             norm_weight=self.post_attention_layernorm.weight.data,
             norm_eps=self.post_attention_layernorm.variance_epsilon,
         )
@@ -872,7 +869,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".in_proj_qkvbfg_a", ".k_proj", 1),
             (".in_proj_qkvbfg_a", ".v_proj", 2),
             (".in_proj_qkvbfg_a", ".b_proj", 3),
-            (".in_proj_qkvbfg_a", ".f_a_proj", 4),
+            (".in_proj_qkvbfg_a", ".forget_gate.f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
         ]
         if _is_moe(self.config):

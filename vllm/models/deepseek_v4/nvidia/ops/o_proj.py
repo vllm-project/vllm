@@ -126,7 +126,7 @@ def rope_quant_unsupported_reason(layer: torch.nn.Module) -> str | None:
         return f"RopeQuant needs {_ROPE_QUANT_NUM_HEADS} local query heads"
     if layer.kv_cache_torch_dtype != torch.float8_e4m3fn:
         return "RopeQuant needs the per-tensor FP8 KV cache"
-    if layer.wo_a.weight.dtype != torch.float8_e4m3fn:
+    if layer.o_a_proj.weight.dtype != torch.float8_e4m3fn:
         return "RopeQuant needs an FP8 wo_a"
     return None
 

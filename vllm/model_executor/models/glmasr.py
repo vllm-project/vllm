@@ -904,7 +904,13 @@ class GlmAsrForConditionalGeneration(
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"audio_tower.embed_positions": None}
+        orig_to_new_prefix={
+            "model.audio_tower.embed_positions": None,
+            "model.language_model.": "language_model.model.",
+            "model.audio_tower.": "audio_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        }
     )
 
     packed_modules_mapping = {

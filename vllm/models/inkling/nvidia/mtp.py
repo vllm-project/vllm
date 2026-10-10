@@ -39,18 +39,12 @@ from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
-from .model import InklingDecoderLayer, InklingReplicatedEmbedding
+from .model import (
+    InklingDecoderLayer,
+    InklingReplicatedEmbedding,
+    _TmlForCausalLMBase,
+)
 from .ops.norm import embed_dual_rmsnorm_cat, embed_rmsnorm
-
-# Checkpoint attention projections (wq_du/wk_dv/wv_dv/wr_du) -> fused qkvr.
-# Mirrors the backbone's hf_to_vllm_mapper.orig_to_new_stacked; kept as a
-# local (pname, wname, shard) list since the MTP loader remaps by hand.
-_ATTENTION_PARAMS_MAPPING = [
-    ("qkvr", "wq_du", 0),
-    ("qkvr", "wk_dv", 1),
-    ("qkvr", "wv_dv", 2),
-    ("qkvr", "wr_du", 3),
-]
 
 
 def _mtp_depth_from_name(name: str) -> int | None:
@@ -346,9 +340,9 @@ def _load_inkling_mtp_weights(
 
     Checkpoint keys look like ``model.mtp.chain_norm.weight`` and
     ``model.mtp.layers.{i}.{...}``. The transformer block reuses the backbone
-    layer's fused-projection layout, so we apply the same qkvr / gate_up / down
-    remapping as ``_load_inkling_weights``. Token embedding and LM head are shared
-    (provided by ``load_eagle_model``) and are not present in mtp.safetensors.
+    layer, so we apply the backbone's ``hf_to_vllm_mapper``. Token embedding and LM
+    head are shared (provided by ``load_eagle_model``) and are not present in
+    mtp.safetensors.
     """
     # Per-depth attention is full or sliding-window (config.local_layer_ids);
     # each depth's qkvr MergedColumnParallelLinear is built with the matching
@@ -373,17 +367,17 @@ def _load_inkling_mtp_weights(
         loaded.add(name)
         return True
 
-    for name, weight in weights:
+    for name, weight in _TmlForCausalLMBase.hf_to_vllm_mapper.apply(weights):
         depth = _mtp_depth_from_name(name)
         # Token embedding and LM head are never materialized on the draft
         # (no params to load into); load_eagle_model attaches the target's.
-        if name in ("model.llm.embed.weight", "model.llm.unembed.weight"):
+        if name in ("model.embed_tokens.weight", "lm_head.weight"):
             continue
         # The backbone embed_norm, applied to the shared embedding before the
         # depth layers (see InklingMultiTokenPredictor.embed_input_ids). The
         # per-depth mtp.layers.{i}.embed_norm keys carry ".mtp." and are loaded
         # below. Only the shared backbone key routes here.
-        if name == "model.llm.embed_norm.weight":
+        if name == "model.embed_norm.weight":
             _load("model.backbone_embed_norm.weight", weight)
             continue
         # Only consume the MTP weights; everything else belongs to the target.
@@ -405,28 +399,9 @@ def _load_inkling_mtp_weights(
                 "chain_hidden_post_norm is disabled."
             )
 
-        # Fused attention qkvr (wq_du/wk_dv/wv_dv/wr_du -> qkvr).
-        matched = False
-        for pname, wname, shard in _ATTENTION_PARAMS_MAPPING:
-            if f".attn.{wname}." in name:
-                mapped_name = name.replace(f".{wname}.", f".{pname}.")
-                if not _load(mapped_name, weight, shard):
-                    raise ValueError(f"Unexpected Inkling MTP weight: {original_name}")
-                matched = True
-                break
-        if matched:
+        if name.endswith(".bias") and name not in params:
             continue
-
-        # Dense MLP fused gate/up + down.
-        if ".mlp.w13_dn.weight" in name:
-            loaded_weight = _load(name.replace(".w13_dn.", ".gate_up_proj."), weight)
-        elif ".mlp.w2_md.weight" in name:
-            loaded_weight = _load(name.replace(".w2_md.", ".down_proj."), weight)
-        else:
-            if name.endswith(".bias") and name not in params:
-                continue
-            loaded_weight = _load(name, weight)
-        if not loaded_weight:
+        if not _load(name, weight, getattr(weight, "shard_id", None)):
             raise ValueError(f"Unexpected Inkling MTP weight: {original_name}")
     required = {
         name

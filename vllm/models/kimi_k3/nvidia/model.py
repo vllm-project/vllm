@@ -6,6 +6,7 @@ import math
 from collections.abc import Hashable, Iterable
 from typing import Any, cast
 
+import regex as re
 import torch
 from torch import nn
 
@@ -1587,6 +1588,17 @@ class KimiLinearForCausalLM(
     SupportsEagle3,
     SupportsReplaySSM,
 ):
+    # The decoder layers are shared with Kimi-K3, whose checkpoints Transformers
+    # does not rename, so the Transformers names are mapped back to vLLM's
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(r"\.mlp\.(?=(experts|gate|shared_experts)(\.|$))"): (
+                ".block_sparse_moe."
+            ),
+        },
+        orig_to_new_substr={".self_attn.forget_gate.": ".self_attn."},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.model_config = vllm_config.model_config
@@ -1697,7 +1709,7 @@ class KimiLinearForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
         # A parent AutoWeightsLoader may invoke load_weights repeatedly for
@@ -1749,8 +1761,8 @@ class KimiK3ForConditionalGeneration(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language_model.layers.": "language_model.model.layers.",
-            "mm_projector.proj.0": "mm_projector.linear_1",
-            "mm_projector.proj.2": "mm_projector.linear_2",
+            "mm_projector.proj.0": "mm_projector.in_proj",
+            "mm_projector.proj.2": "mm_projector.out_proj",
         }
     )
 

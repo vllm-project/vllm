@@ -67,7 +67,7 @@ logger = init_logger(__name__)
 # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
 # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
-_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.attn\.wkv\.(.+)$")
+_CONTEXT_WKV_RE = re.compile(r"^mtp\.(\d+)\.self_attn\.kv_proj\.(.+)$")
 
 
 def _duplicate_context_wkv_weights(
@@ -201,7 +201,7 @@ class DSparkDeepseekV4Model(nn.Module):
 
         Mirrors the reference DSparkAttention: each layer derives its context KV
         from the SAME projected target hidden ``main_x``, via that layer's own
-        ``wkv`` + ``kv_norm`` + RoPE + quant, then writes it at the
+        ``kv_proj`` + ``kv_norm`` + RoPE + quant, then writes it at the
         layer's context slots.
 
         ``context_slot_mappings`` is a per-layer list (each entry is the context
@@ -218,7 +218,7 @@ class DSparkDeepseekV4Model(nn.Module):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
-            attn = layer.attn
+            attn = layer.self_attn
             kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue
@@ -385,7 +385,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         # DSV4 MLA path: each draft layer's sliding-window cache is a separate
         # layer, named by its prefix.
-        return [layer.attn.swa_cache_layer.prefix for layer in self.model.layers]
+        return [layer.self_attn.swa_cache_layer.prefix for layer in self.model.layers]
 
     def precompute_and_store_context_kv(
         self,
@@ -439,7 +439,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
         first_layer = self.model.layers[0]
-        use_native_mega_moe = first_layer.ffn.use_native_mega_moe
+        use_native_mega_moe = first_layer.mlp.use_native_mega_moe
         if use_native_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(
                 self.config.n_routed_experts
@@ -460,10 +460,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         # (param_name, ckpt_shard_name, shard_id) for non-expert stacked params.
         stacked_params_mapping = [
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("self_attn.fused_wqa_wkv", "self_attn.q_a_proj", 0),
+            ("self_attn.fused_wqa_wkv", "self_attn.kv_proj", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -486,15 +486,14 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_confidence_head = True
 
             # ``.scale`` -> per-method scale suffix.
-            if name.endswith(".scale"):
+            # The hyper-connection `*_hc.scale` params are not quantization scales
+            if name.endswith(".scale") and not name.endswith("_hc.scale"):
                 suffix = (
                     expert_scale_suffix
                     if _EXPERT_SCALE_RE.search(name)
                     else ".weight_scale_inv"
                 )
                 name = name.removesuffix(".scale") + suffix
-            if ".shared_experts.w2" in name:
-                name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
             if self.pad_shared_expert and ".shared_experts." in name:
                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
@@ -544,15 +543,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
+                if name.endswith(".sinks"):
                     narrow = loaded_weight[head_start:head_end]
                     params_dict[name][: narrow.shape[0]].copy_(narrow)
                     loaded_params.add(name)
                     continue
-                if name.endswith(".ffn.gate.bias"):
-                    name = name.replace(
-                        ".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"
-                    )
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -566,7 +561,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def _finalize_moe(self) -> None:
         for layer in self.model.layers:
-            layer.ffn.finalize_mega_moe_weights()
+            layer.mlp.finalize_mega_moe_weights()
 
     def process_weights_after_loading(self) -> None:
         self._finalize_moe()
@@ -587,8 +582,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             return None
         # Head-stack params live at model level (mtp.last), context combiner at
         # model level (mtp.0); everything else is a per-layer decoder block.
+        # Transformers renames the head-stack norm to `kv_norm`
+        if rest.startswith("kv_norm."):
+            return f"model.norm.{rest.removeprefix('kv_norm.')}"
         head_prefixes = (
-            "norm.",
             "hc_head_fn",
             "hc_head_base",
             "hc_head_scale",

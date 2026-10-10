@@ -49,11 +49,22 @@ class BaseModelLoader(ABC):
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         """Create a model with the given configurations."""
+        from vllm.model_executor.models.utils import get_checkpoint_renaming_mapper
+
+        # Drafts loaded from the target's checkpoint (e.g. MTP) rename it the same way
+        target_config = vllm_config.model_config
+        is_target_checkpoint = model_config.model == target_config.model
+        hf_config = (target_config if is_target_checkpoint else model_config).hf_config
+        mapper = get_checkpoint_renaming_mapper(hf_config)
+        if (quant_config := vllm_config.quant_config) is not None:
+            # Quantization configs name modules as the checkpoint does
+            quant_config.apply_vllm_mapper(mapper)
         model = initialize_model(
             vllm_config=vllm_config,
             model_config=model_config,
             prefix=prefix,
         )
+        model.checkpoint_renaming_mapper = mapper
         log_online_quantization(vllm_config)
         log_model_inspection(model)
         return model

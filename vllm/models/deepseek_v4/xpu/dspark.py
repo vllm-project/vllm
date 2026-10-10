@@ -132,15 +132,16 @@ class DSparkDeepseekV4Model(nn.Module):
         """Insert the sliding-window context KV for every draft layer.
 
         Each layer derives its context KV from the SAME projected target hidden
-        ``main_x``, via that layer's own wkv + kv_norm + RoPE + quant, then
+        ``main_x``, via that layer's own kv_proj + kv_norm + RoPE + quant, then
         writes it at the layer's context slots.
         """
         for i, layer in enumerate(self.layers):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
-            attn = layer.attn
-            # wkv part of the fused wq_a|wkv projection (q_lora part discarded)
+            attn = layer.self_attn
+            # kv_proj part of the fused q_a_proj|kv_proj projection (q_lora part
+            # discarded)
             qr_kv, _ = attn.fused_wqa_wkv(main_x)
             kv = qr_kv[..., attn.q_lora_rank :]
             kv = attn.kv_norm(kv)
@@ -252,7 +253,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         return self.model.combine_hidden_states(aux_hidden_states)
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
-        return [layer.attn.swa_cache_layer.prefix for layer in self.model.layers]
+        return [layer.self_attn.swa_cache_layer.prefix for layer in self.model.layers]
 
     def precompute_and_store_context_kv(
         self,
@@ -293,7 +294,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load ``mtp.{0,1,2}.*`` draft weights from the target checkpoint."""
         first_layer = self.model.layers[0]
-        use_mega_moe = first_layer.ffn.use_mega_moe
+        use_mega_moe = first_layer.mlp.use_mega_moe
         if use_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(
                 self.config.n_routed_experts
@@ -313,10 +314,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         )
 
         stacked_params_mapping = [
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("self_attn.fused_wqa_wkv", "self_attn.q_a_proj", 0),
+            ("self_attn.fused_wqa_wkv", "self_attn.kv_proj", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -335,7 +336,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             name = mapped
 
             # .scale -> per-method scale suffix
-            if name.endswith(".scale"):
+            # The hyper-connection `*_hc.scale` params are not quantization scales
+            if name.endswith(".scale") and not name.endswith("_hc.scale"):
                 suffix = (
                     expert_scale_suffix
                     if _EXPERT_SCALE_RE.search(name)
@@ -383,21 +385,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_params.add(name)
                 break
             else:
-                if "attn_sink" in name:
+                if name.endswith(".sinks"):
                     if name not in params_dict:
                         continue
                     narrow = loaded_weight[head_start:head_end]
                     params_dict[name][: narrow.shape[0]].copy_(narrow)
                     loaded_params.add(name)
                     continue
-                if ".shared_experts.w2" in name:
-                    name = name.replace(
-                        ".shared_experts.w2", ".shared_experts.down_proj"
-                    )
-                if name.endswith(".ffn.gate.bias"):
-                    name = name.replace(
-                        ".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"
-                    )
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
@@ -411,7 +405,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def _finalize_moe(self) -> None:
         for layer in self.model.layers:
-            layer.ffn.finalize_mega_moe_weights()
+            layer.mlp.finalize_mega_moe_weights()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map checkpoint ``mtp.{i}.*`` name to this model's parameter path."""
@@ -422,8 +416,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         rest = m.group(2)
         if rest.startswith("confidence_head."):
             return None
+        # Transformers renames the head-stack norm to `kv_norm`
+        if rest.startswith("kv_norm."):
+            return f"model.norm.{rest.removeprefix('kv_norm.')}"
         head_prefixes = (
-            "norm.",
             "hc_head_fn",
             "hc_head_base",
             "hc_head_scale",

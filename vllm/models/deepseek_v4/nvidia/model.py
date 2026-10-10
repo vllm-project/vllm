@@ -80,7 +80,14 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.attention import (
+    INDEXER_CHECKPOINT_MAPPING,
+    DeepseekV4Attention,
+)
+from vllm.models.deepseek_v4.common.hyper_connection import (
+    DeepseekV4HyperConnection,
+    DeepseekV4HyperConnectionHead,
+)
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -1071,72 +1078,30 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.rms_norm_eps = config.rms_norm_eps
-        self.attn = _select_dsv4_attn_cls(vllm_config)(
+        self.self_attn = _select_dsv4_attn_cls(vllm_config)(
             vllm_config,
-            prefix=f"{prefix}.attn",
+            prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
         if self.use_sequence_parallel:
-            self.attn.wo_b.reduce_results = False
-        self.ffn = DeepseekV4MoE(
+            self.self_attn.o_b_proj.reduce_results = False
+        self.mlp = DeepseekV4MoE(
             vllm_config,
-            prefix=f"{prefix}.ffn",
+            prefix=f"{prefix}.mlp",
             use_sequence_parallel=self.use_sequence_parallel,
             num_hash_layers=config.num_hash_layers,
         )
 
-        self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
-        self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
+        self.input_layernorm = RMSNorm(self.hidden_size, self.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.hc_mult = config.hc_mult
         self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
         self.hc_eps = config.hc_eps
         self.hc_post_alpha = 2.0
-        mix_hc = (2 + self.hc_mult) * self.hc_mult
-        hc_dim = self.hc_mult * self.hidden_size
-        self.hc_attn_fn = nn.Parameter(
-            torch.empty(
-                (mix_hc, hc_dim),
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
+        self.attn_hc = DeepseekV4HyperConnection(self.hc_mult, self.hidden_size)
+        self.ffn_hc = DeepseekV4HyperConnection(self.hc_mult, self.hidden_size)
         self.hc_attn_fn_broadcast: torch.Tensor | None = None
-        self.hc_ffn_fn = nn.Parameter(
-            torch.empty(
-                (mix_hc, hc_dim),
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_attn_base = nn.Parameter(
-            torch.empty(
-                mix_hc,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_ffn_base = nn.Parameter(
-            torch.empty(
-                mix_hc,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_attn_scale = nn.Parameter(
-            torch.empty(
-                3,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_ffn_scale = nn.Parameter(
-            torch.empty(
-                3,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
 
         if vllm_config.kernel_config.enable_jit_warmup:
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
@@ -1163,10 +1128,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                 hc_post_mult_value=self.hc_post_alpha,
                 sinkhorn_repeat=self.hc_sinkhorn_iters,
                 norm_eps=(
-                    self.attn_norm.variance_epsilon,
-                    self.ffn_norm.variance_epsilon,
+                    self.input_layernorm.variance_epsilon,
+                    self.post_attention_layernorm.variance_epsilon,
                 ),
-                broadcast_norm_eps=self.attn_norm.variance_epsilon,
+                broadcast_norm_eps=self.input_layernorm.variance_epsilon,
             )
             if not include_pre_gemm_splits:
                 _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
@@ -1195,17 +1160,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        attn_norm_weight = self.attn_norm.weight.data
-        attn_norm_eps = self.attn_norm.variance_epsilon
+        attn_norm_weight = self.input_layernorm.weight.data
+        attn_norm_eps = self.input_layernorm.variance_epsilon
         if residual is None:
             # Run standalone mhc_pre on first layer
             if x.dim() == 2:
                 assert self.hc_attn_fn_broadcast is not None
                 residual, post_mix, res_mix, x = mhc_pre_broadcast_tilelang(
                     x,
-                    self.hc_attn_fn,
-                    self.hc_attn_scale,
-                    self.hc_attn_base,
+                    self.attn_hc.fn,
+                    self.attn_hc.scale,
+                    self.attn_hc.base,
                     self.rms_norm_eps,
                     self.hc_eps,
                     self.hc_eps,
@@ -1219,9 +1184,9 @@ class DeepseekV4DecoderLayer(nn.Module):
                 residual = x
                 post_mix, res_mix, x = mhc_pre_tilelang(
                     x,
-                    self.hc_attn_fn,
-                    self.hc_attn_scale,
-                    self.hc_attn_base,
+                    self.attn_hc.fn,
+                    self.attn_hc.scale,
+                    self.attn_hc.base,
                     self.rms_norm_eps,
                     self.hc_eps,
                     self.hc_eps,
@@ -1236,9 +1201,9 @@ class DeepseekV4DecoderLayer(nn.Module):
                 residual,
                 post_mix,
                 res_mix,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
+                self.attn_hc.fn,
+                self.attn_hc.scale,
+                self.attn_hc.base,
                 self.rms_norm_eps,
                 self.hc_eps,
                 self.hc_eps,
@@ -1253,20 +1218,20 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
 
-        x = self.attn(positions, x, None)
+        x = self.self_attn(positions, x, None)
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        ffn_norm_weight = self.ffn_norm.weight.data
-        ffn_norm_eps = self.ffn_norm.variance_epsilon
+        ffn_norm_weight = self.post_attention_layernorm.weight.data
+        ffn_norm_eps = self.post_attention_layernorm.variance_epsilon
         residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
             x,
             residual,
             post_mix,
             res_mix,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
+            self.ffn_hc.fn,
+            self.ffn_hc.scale,
+            self.ffn_hc.base,
             self.rms_norm_eps,
             self.hc_eps,
             self.hc_eps,
@@ -1278,7 +1243,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=ffn_norm_eps,
         )
 
-        x = self.ffn(x, input_ids, mega_gate_metadata)
+        x = self.mlp(x, input_ids, mega_gate_metadata)
         return x, residual, post_mix, res_mix
 
 
@@ -1354,25 +1319,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             self.norm = PPMissingLayer()
 
-        self.hc_head_fn = nn.Parameter(
-            torch.empty(
-                self.hc_mult,
-                self.hc_dim,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_head_base = nn.Parameter(
-            torch.empty(
-                self.hc_mult,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        self.hc_head_scale = nn.Parameter(
-            torch.empty(1, dtype=torch.float32),
-            requires_grad=False,
-        )
+        self.hc_head = DeepseekV4HyperConnectionHead(self.hc_mult, config.hidden_size)
         spec_config = vllm_config.speculative_config
         needs_mtp_hidden_states = spec_config is not None and (
             spec_config.use_eagle() or spec_config.uses_draft_model()
@@ -1513,9 +1460,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         hidden_states = hc_head_fused_kernel_tilelang(
             hidden_states,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
+            self.hc_head.hc_fn,
+            self.hc_head.hc_scale,
+            self.hc_head.hc_base,
             self.rms_norm_eps,
             self.hc_eps,
         )
@@ -1528,12 +1475,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
-            ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
-            ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
+            ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
+            ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("self_attn.fused_wqa_wkv", "self_attn.q_a_proj", 0),
+            ("self_attn.fused_wqa_wkv", "self_attn.kv_proj", 1),
+            ("compressor.fused_wkv_wgate", "compressor.kv_proj", 0),
+            ("compressor.fused_wkv_wgate", "compressor.gate_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1620,7 +1567,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             break
                     loaded_params.add(name_mapped)
                     continue
-                elif "attn_sink" in name:
+                elif name.endswith(".sinks"):
                     if is_pp_missing_parameter(name, self):
                         continue
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
@@ -1656,8 +1603,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     ) -> torch.Tensor:
         """Zero-pad a block-FP8 shared-expert weight/scale on its intermediate
         axis so the standard TP loaders split it into even, block-aligned shards
-        (trailing ranks get the zero pad). gate (w1)/up (w3) [I, H] pad dim 0;
-        down (w2 -> down_proj) [H, I] pads dim 1.
+        (trailing ranks get the zero pad). gate/up [I, H] pad dim 0; down [H, I]
+        pads dim 1.
         """
         block_size = getattr(quant_config, "weight_block_size", None)
         assert block_size is not None
@@ -1675,7 +1622,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
-        if first_layer.ffn.use_native_mega_moe:
+        if first_layer.mlp.use_native_mega_moe:
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
@@ -1689,7 +1636,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            layer.ffn.finalize_mega_moe_weights()
+            layer.mlp.finalize_mega_moe_weights()
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1697,7 +1644,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         layer = self.layers[self.start_layer]
         if isinstance(layer, DeepseekV4DecoderLayer):
             broadcast = (
-                layer.hc_attn_fn.detach()
+                layer.attn_hc.fn.detach()
                 .view(-1, layer.hc_mult, layer.hidden_size)
                 .sum(dim=1)
             )
@@ -1719,7 +1666,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
                 r"(\.experts\.\d+\.w[123]\.base_layer)\.scale$"
             ): r"\1.weight_scale",
             re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
+            re.compile(r"(?<!_hc)\.scale$"): ".weight_scale_inv",
         }
     else:
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
@@ -1730,26 +1677,18 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
             re.compile(
                 r"(\.experts\.\d+\.w[123]\.base_layer)\.scale$"
             ): r"\1.weight_scale_inv",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
+            re.compile(r"(?<!_hc)\.scale$"): ".weight_scale_inv",
         }
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
-            "embed.": "model.embed.",
+            "embed_tokens.": "model.embed_tokens.",
             "norm.": "model.norm.",
-            "hc_head": "model.hc_head",
+            "hc_head.": "model.hc_head.",
             "mtp.": "model.mtp.",
         },
         orig_to_new_regex=scale_regex,
-        orig_to_new_suffix={
-            "head.weight": "lm_head.weight",
-            "embed.weight": "embed_tokens.weight",
-            ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
-        },
-        orig_to_new_substr={
-            ".shared_experts.w2": ".shared_experts.down_proj",
-            "mtp.": None,
-        },
+        orig_to_new_substr={**INDEXER_CHECKPOINT_MAPPING, "mtp.": None},
     )
 
 
@@ -1805,9 +1744,9 @@ class DeepseekV4ForCausalLM(
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
 
     packed_modules_mapping = {
-        "gate_up_proj": ["w1", "w3"],
-        "fused_wqa_wkv": ["wq_a", "wkv"],
-        "fused_wkv_wgate": ["wkv", "wgate"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "fused_wqa_wkv": ["q_a_proj", "kv_proj"],
+        "fused_wkv_wgate": ["kv_proj", "gate_proj"],
     }
 
     # The MTP draft head is not LoRA-adapted.
@@ -1851,10 +1790,10 @@ class DeepseekV4ForCausalLM(
                 continue
             if not isinstance(layer, DeepseekV4DecoderLayer):
                 continue
-            if isinstance(layer.ffn, DeepseekV4MoE):
-                example_moe = layer.ffn
-                self.moe_mlp_layers.append(layer.ffn)
-                self.moe_layers.append(layer.ffn.experts)
+            if isinstance(layer.mlp, DeepseekV4MoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
 
         self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)

@@ -225,7 +225,8 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
       * ``__init__`` — builds the encoder-free vision embedder instead of
         SigLIP/audio towers (LightOnOCR-style: ``nn.Module.__init__`` +
         full rebuild, no ``super().__init__()``).
-      * ``hf_to_vllm_mapper`` — adds the ``model.vision_embedder.`` prefix.
+      * ``hf_to_vllm_mapper`` — splits ``model.embed_vision.`` into the
+        vision embedder and its multimodal embedder.
       * ``_process_image_input`` / ``_process_video_input`` /
         ``_process_audio_input`` — encoder-free projection paths.
       * ``load_weights`` — ignore-prefix list excludes the absent towers.
@@ -235,9 +236,9 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.embed_audio.": "embed_audio.",
-            "model.embed_vision.": "embed_vision.",
+            "model.embed_vision.multimodal_embedder.": "embed_vision.",
+            "model.embed_vision.": "vision_embedder.",
             "model.language_model.": "language_model.model.",
-            "model.vision_embedder.": "vision_embedder.",
             "lm_head.": "language_model.lm_head.",
             "model": "language_model.model",
         }

@@ -6,10 +6,15 @@ import pytest
 import torch
 import transformers
 from transformers import AutoConfig, AutoModel, PreTrainedModel
+from transformers.conversion_mapping import get_model_conversion_mapping
+from transformers.core_model_loading import WeightConverter
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models.transformers.base import Base as TransformersBase
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.utils import (
+    WeightsMapper,
+    get_checkpoint_renaming_mapper,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.config import try_get_safetensors_metadata
 
@@ -23,16 +28,16 @@ def test_cosmos3_new_checkpoint_weights_mapper():
 
     assert mapper.apply_list(
         [
-            "layers.0.self_attn.to_q.weight",
-            "layers.0.self_attn.to_k.weight",
-            "layers.0.self_attn.to_v.weight",
-            "layers.0.self_attn.to_out.weight",
-            "layers.0.self_attn.norm_q.weight",
-            "layers.0.self_attn.norm_k.weight",
-            "embed_tokens.weight",
-            "norm.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.self_attn.k_proj.weight",
+            "model.language_model.layers.0.self_attn.v_proj.weight",
+            "model.language_model.layers.0.self_attn.o_proj.weight",
+            "model.language_model.layers.0.self_attn.q_norm.weight",
+            "model.language_model.layers.0.self_attn.k_norm.weight",
+            "model.language_model.embed_tokens.weight",
+            "model.language_model.norm.weight",
             "lm_head.weight",
-            "blocks.0.attn.qkv.weight",
+            "model.visual.blocks.0.attn.qkv.weight",
         ]
     ) == [
         "language_model.model.layers.0.self_attn.q_proj.weight",
@@ -50,14 +55,14 @@ def test_cosmos3_new_checkpoint_weights_mapper():
     assert (
         mapper.apply_list(
             [
-                "layers.0.self_attn.add_q_proj.weight",
-                "layers.0.self_attn.add_k_proj.weight",
-                "layers.0.self_attn.add_v_proj.weight",
-                "layers.0.self_attn.to_add_out.weight",
-                "layers.0.self_attn.norm_added_q.weight",
-                "layers.0.self_attn.norm_added_k.weight",
-                "layers.0.self_attn.q_proj_moe_gen.weight",
-                "layers.0.mlp_moe_gen.gate_up_proj.weight",
+                "model.language_model.layers.0.self_attn.add_q_proj.weight",
+                "model.language_model.layers.0.self_attn.add_k_proj.weight",
+                "model.language_model.layers.0.self_attn.add_v_proj.weight",
+                "model.language_model.layers.0.self_attn.to_add_out.weight",
+                "model.language_model.layers.0.self_attn.norm_added_q.weight",
+                "model.language_model.layers.0.self_attn.norm_added_k.weight",
+                "model.language_model.layers.0.self_attn.q_proj_moe_gen.weight",
+                "model.language_model.layers.0.mlp_moe_gen.gate_up_proj.weight",
                 "norm_moe_gen.weight",
                 "proj_in.weight",
                 "proj_out.weight",
@@ -87,10 +92,10 @@ def test_cosmos3_modelopt_quantizer_weights_mapper():
     assert (
         mapper.apply_list(
             [
-                "layers.0.self_attn.to_q.input_quantizer._amax",
-                "layers.0.self_attn.to_q.weight_quantizer._amax",
-                "layers.0.self_attn.to_q.weight_quantizer._scale",
-                "layers.0.mlp.down_proj.output_quantizer._amax",
+                "model.language_model.layers.0.self_attn.q_proj.input_quantizer._amax",
+                "model.language_model.layers.0.self_attn.q_proj.weight_quantizer._amax",
+                "model.language_model.layers.0.self_attn.q_proj.weight_quantizer._scale",
+                "model.language_model.layers.0.mlp.down_proj.output_quantizer._amax",
             ]
         )
         == []
@@ -99,10 +104,10 @@ def test_cosmos3_modelopt_quantizer_weights_mapper():
     # The FP8 scale sidecars vLLM actually consumes are kept and remapped.
     assert mapper.apply_list(
         [
-            "layers.0.self_attn.to_q.weight",
-            "layers.0.self_attn.to_q.weight_scale",
-            "layers.0.self_attn.to_q.input_scale",
-            "layers.0.mlp.down_proj.input_scale",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight_scale",
+            "model.language_model.layers.0.self_attn.q_proj.input_scale",
+            "model.language_model.layers.0.mlp.down_proj.input_scale",
         ]
     ) == [
         "language_model.model.layers.0.self_attn.q_proj.weight",
@@ -121,20 +126,20 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
 
     assert mapper.apply_list(
         [
-            "embed_tokens.weight",
-            "norm.weight",
-            "layers.0.input_layernorm.weight",
-            "layers.0.self_attn.to_q.weight",
-            "layers.0.self_attn.to_k.weight",
-            "layers.0.self_attn.to_v.weight",
-            "layers.0.self_attn.to_out.weight",
-            "layers.0.post_attention_layernorm.weight",
-            "layers.0.mlp.up_proj.weight",
-            "layers.0.mlp.down_proj.weight",
-            "layers.27.input_layernorm.weight",
-            "layers.27.self_attn.to_q.weight",
-            "layers.27.post_attention_layernorm.weight",
-            "layers.27.mlp.down_proj.weight",
+            "model.language_model.embed_tokens.weight",
+            "model.language_model.norm.weight",
+            "model.language_model.layers.0.input_layernorm.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.self_attn.k_proj.weight",
+            "model.language_model.layers.0.self_attn.v_proj.weight",
+            "model.language_model.layers.0.self_attn.o_proj.weight",
+            "model.language_model.layers.0.post_attention_layernorm.weight",
+            "model.language_model.layers.0.mlp.fc1.weight",
+            "model.language_model.layers.0.mlp.fc2.weight",
+            "model.language_model.layers.27.input_layernorm.weight",
+            "model.language_model.layers.27.self_attn.q_proj.weight",
+            "model.language_model.layers.27.post_attention_layernorm.weight",
+            "model.language_model.layers.27.mlp.fc2.weight",
             "model.visual.embeddings.patch_embedding.weight",
             "model.visual.encoder.layers.0.self_attn.q_proj.weight",
             "model.projector.linear_fc1.weight",
@@ -233,25 +238,26 @@ def create_dummy_base_model(repo: str, model_arch: str) -> PreTrainedModel:
 def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
     """Create weights from a dummy meta deserialized hf model with name conversion."""
     model_cls: PreTrainedModel = getattr(transformers, model_arch)
-    config = AutoConfig.from_pretrained(repo)
+    # Use the Transformers config class, which vLLM may have replaced in AutoConfig
+    config = model_cls.config_class.from_pretrained(repo)
     with torch.device("meta"):
         model = model_cls._from_config(config)
     return model
 
 
 def model_architectures_for_test() -> list[str]:
-    arch_to_test = list[str]()
-    for model_arch, info in _MULTIMODAL_EXAMPLE_MODELS.items():
-        if not info.trust_remote_code and hasattr(transformers, model_arch):
-            model_cls: PreTrainedModel = getattr(transformers, model_arch)
-            if getattr(model_cls, "_checkpoint_conversion_mapping", None):
-                arch_to_test.append(model_arch)
-    return arch_to_test
+    return [
+        model_arch
+        for model_arch, info in _MULTIMODAL_EXAMPLE_MODELS.items()
+        if not info.trust_remote_code and hasattr(transformers, model_arch)
+    ]
 
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model_arch", model_architectures_for_test())
 def test_hf_model_weights_mapper(model_arch: str):
+    """Checkpoint names, renamed by Transformers' conversion mapping, must map to
+    the same vLLM names as the Transformers model's own parameter names."""
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
@@ -298,13 +304,23 @@ def test_hf_model_weights_mapper(model_arch: str):
         )()
         TransformersBase._create_hf_to_vllm_mapper(model_cls)
 
-    original_weights = create_repo_dummy_weights(model_id)
+    original_weights = list(create_repo_dummy_weights(model_id))
+    renaming_mapper = get_checkpoint_renaming_mapper(model_config.hf_config)
+    if all(renaming_mapper.map_name(name) == name for name, _ in original_weights):
+        pytest.skip("Transformers does not rename this checkpoint")
     hf_dummy_model = create_dummy_model(model_id, model_arch)
+    if any(
+        isinstance(t, WeightConverter)
+        for t in get_model_conversion_mapping(hf_dummy_model)
+    ):
+        pytest.skip("Transformers fuses or splits weights that vLLM handles itself")
     hf_converted_weights = hf_dummy_model.named_parameters()
     hf_converted_buffers = hf_dummy_model.named_buffers()
+    if getattr(model_cls, "hf_to_vllm_mapper", None) is None:
+        pytest.skip("Model only loads its own checkpoint format")
     mapper: WeightsMapper = model_cls.hf_to_vllm_mapper
 
-    mapped_original_weights = mapper.apply(original_weights)
+    mapped_original_weights = (renaming_mapper | mapper).apply(original_weights)
     mapped_hf_converted_weights = mapper.apply(hf_converted_weights)
     mapped_hf_converted_buffers = mapper.apply(hf_converted_buffers)
 

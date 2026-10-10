@@ -181,7 +181,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _o_proj(
         self, o: "torch.Tensor | QuantizedActivation", positions: torch.Tensor
     ) -> torch.Tensor:
-        """Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        """Inverse-RoPE + o_a_proj + o_b_proj output projection (platform-specific).
 
         ``o`` is the live heads of the bf16 attention output, or the
         QuantizedActivation of a layer whose ``_alloc_attn_out`` returns one.
@@ -240,7 +240,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
         # Sink padded to the same head count, initialized to -inf (no sink
         # effect). Weight loading fills the first n_local_heads slots.
-        self.attn_sink = nn.Parameter(
+        self.sinks = nn.Parameter(
             torch.full((self.padded_heads,), -float("inf"), dtype=torch.float32),
             requires_grad=False,
         )
@@ -253,34 +253,34 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.fused_wqa_wkv",
             disable_tp=True,  # fused ReplicatedLinear
         )
-        self.q_norm = RMSNorm(self.q_lora_rank, self.eps)
-        self.wq_b = ColumnParallelLinear(
+        self.q_a_norm = RMSNorm(self.q_lora_rank, self.eps)
+        self.q_b_proj = ColumnParallelLinear(
             self.q_lora_rank,
             self.n_heads * self.head_dim,
             bias=False,
             quant_config=quant_config,
             return_bias=False,
-            prefix=f"{prefix}.wq_b",
+            prefix=f"{prefix}.q_b_proj",
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        self.wo_a = ColumnParallelLinear(
+        self.o_a_proj = ColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
             bias=False,
             quant_config=quant_config,
             return_bias=False,
-            prefix=f"{prefix}.wo_a",
+            prefix=f"{prefix}.o_a_proj",
         )
-        self.wo_a.is_bmm = True
-        self.wo_a.bmm_batch_size = self.n_local_groups
-        self.wo_b = RowParallelLinear(
+        self.o_a_proj.is_bmm = True
+        self.o_a_proj.bmm_batch_size = self.n_local_groups
+        self.o_b_proj = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
             return_bias=False,
-            prefix=f"{prefix}.wo_b",
+            prefix=f"{prefix}.o_b_proj",
         )
 
         # Initialize rotary embedding before the indexer/compressor consume it.
@@ -298,7 +298,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
             # aux_stream_list[2] is free here (outer GEMMs joined) for the inner
-            # overlap of wq_b+fused_indexer_q_rope_quant vs compressor. None on
+            # overlap of q_b_proj+fused_indexer_q_rope_quant vs compressor. None on
             # ROCm, where aux_stream_list is None.
             indexer_aux_stream = (
                 aux_stream_list[2] if aux_stream_list is not None else None
@@ -523,13 +523,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         ``qr_scale`` is None on the shared path. The ROCm subclass returns
         a pre-quantized fp8 ``qr`` together with its per-1x128 fp32 scales,
-        which the downstream wq_b projections consume directly.
+        which the downstream q_b_proj projections consume directly.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         qr, kv = fused_q_kv_rmsnorm(
             qr,
             kv,
-            self.q_norm.weight.data,
+            self.q_a_norm.weight.data,
             self.kv_norm.weight.data,
             self.eps,
         )
@@ -662,12 +662,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         the fp8 input again).
         """
         if qr_scale is None:
-            return self.wq_b(qr)
+            return self.q_b_proj(qr)
         from vllm.models.deepseek_v4.amd.rocm import (
             apply_pre_quantized_block_scaled_mm,
         )
 
-        return apply_pre_quantized_block_scaled_mm(self.wq_b, qr, qr_scale)
+        return apply_pre_quantized_block_scaled_mm(self.q_b_proj, qr, qr_scale)
 
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
@@ -925,6 +925,14 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         return DeepseekV4IndexerBackend
 
 
+# Transformers nests the indexer in the compressor and flattens its compressor
+INDEXER_CHECKPOINT_MAPPING = {
+    ".compressor.indexer.scorer.weights_proj.": ".indexer.weights_proj.",
+    ".compressor.indexer.q_b_proj.": ".indexer.q_b_proj.",
+    ".compressor.indexer.": ".indexer.compressor.",
+}
+
+
 class DeepseekV4Indexer(nn.Module):
     def __init__(
         self,
@@ -972,12 +980,12 @@ class DeepseekV4Indexer(nn.Module):
                 indexer_q_kernel.register_warmup()
 
         # no tensor parallel, just replicated
-        self.wq_b = ReplicatedLinear(
+        self.q_b_proj = ReplicatedLinear(
             self.q_lora_rank,
             self.head_dim * self.n_head,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.wq_b",
+            prefix=f"{prefix}.q_b_proj",
         )
         self.weights_proj = ReplicatedLinear(
             hidden_size,
@@ -1148,10 +1156,10 @@ class DeepseekV4Indexer(nn.Module):
         """
         if qr_scale is None:
             # ReplicatedLinear returns (output, bias); bias is None.
-            q, _ = self.wq_b(qr)
+            q, _ = self.q_b_proj(qr)
             return q
         from vllm.models.deepseek_v4.amd.rocm import (
             apply_pre_quantized_block_scaled_mm,
         )
 
-        return apply_pre_quantized_block_scaled_mm(self.wq_b, qr, qr_scale)
+        return apply_pre_quantized_block_scaled_mm(self.q_b_proj, qr, qr_scale)

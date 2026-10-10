@@ -130,12 +130,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         compressed-tensors targets can be:
         - Layer paths: "layers.0.self_attn.q_proj" -> transformed
         - Module class names: "Linear" -> preserved (no ".")
-        - Regex patterns: "re:.*proj" -> preserved (starts with "re:")
+        - Regex patterns: "re:.*proj" -> checkpoint renamings applied
         """
 
         def _map_target(target: str) -> str | None:
-            is_layer_path = "." in target and not target.startswith("re:")
-            if is_layer_path:
+            if target.startswith("re:"):
+                return f"re:{hf_to_vllm_mapper.map_regex(target[3:])}"
+            if "." in target:
                 return hf_to_vllm_mapper._map_name(target)
             return target
 

@@ -35,6 +35,7 @@ from vllm.sequence import IntermediateTensors
 from .model import (
     MiniMAXGemmaRMSNorm,
     MiniMaxM3DecoderLayer,
+    MiniMaxM3SparseForCausalLM,
 )
 
 
@@ -209,12 +210,17 @@ class MiniMaxM3MTP(nn.Module):
         # "language_model". The standalone MTP checkpoint has no such prefix.
         # Strip it if present.
         name = name.removeprefix("language_model.")
+        name = name.replace("model.language_model.", "model.", 1)
 
         if name == "model.embed_tokens.weight":
             return "model.embed_tokens.weight"
         if name == "lm_head.weight":
             return "lm_head.weight"
         if "model.mtp.layers" in name:
+            mapped = MiniMaxM3SparseForCausalLM.hf_to_vllm_mapper.map_name(name)
+            if mapped is None:
+                return None
+            name = mapped
             if "weight_scale_inv" in name:
                 # The checkpoint stores block scales as "weight_scale_inv".
                 # The ModelOpt MXFP8 layers expose them as "weight_scale".
@@ -263,7 +269,7 @@ class MiniMaxM3MTP(nn.Module):
 
                 # Routed experts (w1/w2/w3) are handled below. Don't let the
                 # stacked mapping rewrite them.
-                if ("block_sparse_moe.experts." in name) and name not in params_dict:
+                if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
                 if name not in params_dict:

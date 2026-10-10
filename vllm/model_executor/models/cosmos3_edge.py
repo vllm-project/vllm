@@ -451,14 +451,11 @@ def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
     checkpoint block ``N`` maps its attention to layer ``2N`` and its MLP to
     layer ``2N + 1``.
     """
-    mappings = {
-        "embed_tokens.": "language_model.model.embed_tokens.",
-        "norm.": "language_model.model.norm_f.",
-    }
+    mappings = {"model.language_model.norm.": "language_model.model.norm_f."}
     for physical_idx in range(28):
         attention_idx = 2 * physical_idx
         mlp_idx = attention_idx + 1
-        source_prefix = f"layers.{physical_idx}"
+        source_prefix = f"model.language_model.layers.{physical_idx}"
         attention_prefix = f"language_model.model.layers.{attention_idx}"
         mlp_prefix = f"language_model.model.layers.{mlp_idx}"
         mappings.update(
@@ -471,7 +468,8 @@ def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
                     f"{attention_prefix}.mixer.o_proj."
                 ),
                 f"{source_prefix}.post_attention_layernorm.": (f"{mlp_prefix}.norm."),
-                f"{source_prefix}.mlp.": f"{mlp_prefix}.mixer.",
+                f"{source_prefix}.mlp.fc1.": f"{mlp_prefix}.mixer.up_proj.",
+                f"{source_prefix}.mlp.fc2.": f"{mlp_prefix}.mixer.down_proj.",
             }
         )
     return mappings
@@ -524,10 +522,6 @@ class Cosmos3EdgeForConditionalGeneration(
             ".to_add_out.": None,
             ".norm_added_q.": None,
             ".norm_added_k.": None,
-            ".self_attn.to_q.": ".self_attn.q_proj.",
-            ".self_attn.to_k.": ".self_attn.k_proj.",
-            ".self_attn.to_v.": ".self_attn.v_proj.",
-            ".self_attn.to_out.": ".self_attn.o_proj.",
             "language_model.embeddings": "language_model.embed_tokens",
         },
     )

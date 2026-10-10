@@ -908,19 +908,19 @@ class KimiK25MultiModalProjector(nn.Module):
         self.hidden_size = config.hidden_size * merge_h * merge_w
 
         if self.mm_projector_type == "patchmergerv2":
-            self.linear_1 = ReplicatedLinear(
+            self.in_proj = ReplicatedLinear(
                 self.hidden_size,
                 self.hidden_size,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.linear_1",
+                prefix=f"{prefix}.in_proj",
             )
-            self.linear_2 = ReplicatedLinear(
+            self.out_proj = ReplicatedLinear(
                 self.hidden_size,
                 out_hidden_size,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.linear_2",
+                prefix=f"{prefix}.out_proj",
             )
             self.post_norm = torch.nn.RMSNorm(
                 out_hidden_size,
@@ -930,32 +930,32 @@ class KimiK25MultiModalProjector(nn.Module):
             return
 
         self.pre_norm = torch.nn.LayerNorm(config.hidden_size, eps=1e-5)
-        self.linear_1 = ReplicatedLinear(
+        self.in_proj = ReplicatedLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.linear_1",
+            prefix=f"{prefix}.in_proj",
         )
-        self.linear_2 = ReplicatedLinear(
+        self.out_proj = ReplicatedLinear(
             self.hidden_size,
             out_hidden_size,
             bias=True,
             quant_config=quant_config,
-            prefix=f"{prefix}.linear_2",
+            prefix=f"{prefix}.out_proj",
         )
         self.act = GELUActivation()
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         if self.mm_projector_type == "patchmergerv2":
             hidden_states = image_features.view(image_features.shape[0], -1)
-            hidden_states, _ = self.linear_1(hidden_states)
+            hidden_states, _ = self.in_proj(hidden_states)
             hidden_states = self.act(hidden_states)
-            hidden_states, _ = self.linear_2(hidden_states)
+            hidden_states, _ = self.out_proj(hidden_states)
             return self.post_norm(hidden_states)
 
         hidden_states = self.pre_norm(image_features).view(-1, self.hidden_size)
-        hidden_states, _ = self.linear_1(hidden_states)
+        hidden_states, _ = self.in_proj(hidden_states)
         hidden_states = self.act(hidden_states)
-        hidden_states, _ = self.linear_2(hidden_states)
+        hidden_states, _ = self.out_proj(hidden_states)
         return hidden_states
