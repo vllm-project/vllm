@@ -20,13 +20,16 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("strided_mixed_qkv", [False, True])
+# Batch sizes on both sides of every per-arch launch-config switch
+# (B <= 1, 2, 4 and 63) and the large decode batches the configs were tuned for;
+# dtype covers both state element sizes (2 and 4 bytes).
+@pytest.mark.parametrize("B", [1, 2, 4, 32, 64, 128, 256, 512])
 def test_fused_recurrent_packed_decode_matches_reference(
-    dtype: torch.dtype, strided_mixed_qkv: bool
+    dtype: torch.dtype, strided_mixed_qkv: bool, B: int
 ):
     torch.manual_seed(0)
 
     # Small but representative GDN config (Qwen3Next defaults are K=128, V=128).
-    B = 32
     H = 4
     HV = 8  # grouped value attention: HV must be divisible by H
     K = 128
