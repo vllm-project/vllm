@@ -11,6 +11,12 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.sample.ops.topk_topp_cake import (
+    CAKE_MASK_MAX_ROWS,
+    apply_top_k_top_p_cake,
+    cake_eligible,
+    cake_sample,
+)
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -458,10 +464,27 @@ def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
 
 
 def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    k_max: int | None = None,
 ) -> torch.Tensor:
+    """Masks logits outside each row's top-k, then outside its top-p.
+
+    ``k_max`` is the largest ``k`` in the batch, taken from host-side sampling
+    state. When given, small batches in which every row sets top-k use
+    FlashInfer's Cake kernels instead of Triton.
+    """
     if p is None and k is None:
         return logits
+
+    if (
+        k is not None
+        and k_max is not None
+        and logits.shape[0] <= CAKE_MASK_MAX_ROWS
+        and cake_eligible(logits, k_max)
+    ):
+        return apply_top_k_top_p_cake(logits, k, p, k_max)
 
     if HAS_TRITON:
         return apply_top_k_top_p_triton(logits, k, p)
@@ -582,6 +605,7 @@ def flashinfer_sample(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     generators: dict[int, torch.Generator] = {},  # noqa
+    k_max: int | None = None,
 ) -> torch.Tensor:
     """Sample from the logits using FlashInfer.
 
@@ -592,10 +616,15 @@ def flashinfer_sample(
     NOTE: The outputs of this function do not necessarily match the outputs of
     the `random_sample` function. It only guarantees that the outputs are
     statistically equivalent.
+
+    ``k_max`` is the largest ``k`` in the batch from host-side sampling state;
+    when every row sets top-k, it routes the batch to FlashInfer's Cake kernels.
     """
     import flashinfer
 
     assert not (k is None and p is None)
+    if k is not None and k_max is not None and cake_eligible(logits, k_max):
+        return cake_sample(logits, k, p, k_max).view(-1)
     if k is None:
         # Top-p only.
         probs = logits.softmax(dim=-1, dtype=torch.float32)
