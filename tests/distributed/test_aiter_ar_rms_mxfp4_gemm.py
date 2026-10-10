@@ -158,8 +158,29 @@ def test_falls_back_to_the_unfused_sequence(
         (4, 8200, torch.bfloat16, None),
     ],
 )
-def test_mxfp4_fused_ar_rms_stage_at_tp8(m, k, dtype, expected):
+def test_mxfp4_fused_ar_rms_stage_at_tp8(
+    monkeypatch: pytest.MonkeyPatch, m, k, dtype, expected
+):
+    monkeypatch.setattr(
+        AiterCustomAllreduce,
+        "build_supports_gemma_mxfp4_quant",
+        staticmethod(lambda: True),
+    )
     ar = AiterCustomAllreduce.__new__(AiterCustomAllreduce)
     ar._impl = SimpleNamespace(world_size=8)
 
     assert ar.mxfp4_fused_ar_rms_stage(torch.empty(m, k, dtype=dtype)) is expected
+
+
+def test_mxfp4_fused_ar_rms_stage_needs_the_gemma_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        AiterCustomAllreduce,
+        "build_supports_gemma_mxfp4_quant",
+        staticmethod(lambda: False),
+    )
+    ar = AiterCustomAllreduce.__new__(AiterCustomAllreduce)
+    ar._impl = SimpleNamespace(world_size=8)
+
+    assert ar.mxfp4_fused_ar_rms_stage(torch.empty(4, 8192)) is None
