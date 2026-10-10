@@ -216,6 +216,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
+    VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS: int = 0
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1671,6 +1672,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
+    # Kimi-K3 on ROCm only (TP, no PP). Eager steps with at least this many
+    # tokens run the decoder with a token-sharded residual stream (padded to a
+    # multiple of the TP size): each attention / MLP output all-reduce
+    # becomes a reduce-scatter plus an all-gather before the next block, the
+    # attention-residual mixing runs on the local shard, and latent-MoE routing
+    # runs once per shard instead of on every rank. Speeds up long prefills;
+    # CUDA-graph decode is unaffected. 0 disables it; 1024 is a good value.
+    "VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_KIMI_K3_AMD_PREFILL_SP_MIN_TOKENS", "0")
+    ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP

@@ -8,9 +8,11 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.models.kimi_k3.amd import sp
 
 logger = init_logger(__name__)
 
@@ -61,6 +63,18 @@ class ROCmLatentMoERunner(MoERunner):
             )
         self._logged_sharded_tail = False
 
+    def sp_route_shard(
+        self, hidden_shard: torch.Tensor, router_logits: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Latent projection and top-k for this rank's token shard only."""
+        latent, _ = self.apply_routed_input_transform(hidden_shard)
+        topk_weights, topk_ids = self.router.select_experts(
+            hidden_states=latent,
+            router_logits=router_logits,
+            topk_indices_dtype=self._quant_method.topk_indices_dtype,
+        )
+        return latent, topk_weights, topk_ids
+
     def _shard_up_proj_tail(
         self,
         fused_output: torch.Tensor,
@@ -79,6 +93,9 @@ class ROCmLatentMoERunner(MoERunner):
         transform = self.routed_output_transform
         assert transform is not None
 
+        if sp.ACTIVE:
+            return self._sp_tail(fused_output, shared_output, trunc_size)
+
         latent = tensor_model_parallel_all_reduce(fused_output)
         if transform.norm is not None:
             latent = transform.norm(latent)
@@ -93,13 +110,32 @@ class ROCmLatentMoERunner(MoERunner):
         )
         hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
 
-        # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
-        # beta-add epilogue so folding in the shared partial costs no kernel.
-        hidden_shard.addmm_(latent, up_proj_shard.t())
+        # Not addmm_: hipBLASLt's C-accumulating bf16 GEMM faults at some row
+        # counts for this shape (e.g. 23393-23405 rows at 896x3584).
+        hidden_shard += latent @ up_proj_shard.t()
 
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
         )
+
+    def _sp_tail(
+        self,
+        fused_output: torch.Tensor,
+        shared_output: torch.Tensor,
+        trunc_size: int | None,
+    ) -> torch.Tensor:
+        """Token-sharded tail: reduce-scatter the latent (half the bytes of an
+        all-reduce) and up-project this rank's tokens with the full weight."""
+        transform = self.routed_output_transform
+        assert transform is not None
+        latent = tensor_model_parallel_reduce_scatter(fused_output.contiguous(), dim=0)
+        if transform.norm is not None:
+            latent = transform.norm(latent)
+        out = tensor_model_parallel_reduce_scatter(shared_output, dim=0)
+        # Not addmm_: hipBLASLt's C-accumulating bf16 GEMM faults at some row
+        # counts for this shape (e.g. 2914-2925 rows at 7168x3584).
+        out += latent.to(out.dtype) @ transform.up_proj.weight.t()
+        return out[..., :trunc_size] if trunc_size is not None else out
 
     def forward(
         self,
@@ -112,9 +148,13 @@ class ROCmLatentMoERunner(MoERunner):
             return self._fused_forward(
                 hidden_states, router_logits, input_ids, shared_experts_input
             )
-        return super().forward(
+        out = super().forward(
             hidden_states, router_logits, input_ids, shared_experts_input
         )
+        if sp.ACTIVE:
+            shard = out.size(0) // get_tensor_model_parallel_world_size()
+            out = out.narrow(0, get_tensor_model_parallel_rank() * shard, shard)
+        return out
 
     def _fused_forward(
         self,

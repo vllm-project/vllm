@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from collections.abc import Iterable
 from typing import Any, cast
 
@@ -11,7 +12,10 @@ from vllm import envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
@@ -70,6 +74,8 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import sp_shard
+from vllm.models.kimi_k3.amd import sp
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
@@ -361,7 +367,7 @@ class KimiMoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        return final_hidden_states.view(num_tokens, hidden_size)
+        return final_hidden_states.view(-1, hidden_size)
 
 
 class KimiMLAAttention(nn.Module):
@@ -637,6 +643,66 @@ class KimiDecoderLayer(nn.Module):
             positions=positions,
         )
 
+    @contextlib.contextmanager
+    def _output_unreduced(self, module: nn.Module):
+        # Row-parallel outputs stay partial so the caller can reduce-scatter.
+        rows = [
+            m
+            for m in module.modules()
+            if isinstance(m, RowParallelLinear) and m.reduce_results
+        ]
+        for m in rows:
+            m.reduce_results = False
+        try:
+            yield
+        finally:
+            for m in rows:
+                m.reduce_results = True
+
+    def _run_self_attn_sp(
+        self, positions: torch.Tensor, hidden_shard: torch.Tensor
+    ) -> torch.Tensor:
+        hidden_states = sp.gather_tokens(hidden_shard, sp.NUM_TOKENS)
+        with self._output_unreduced(self.self_attn):
+            out = self._run_self_attn(positions, hidden_states)
+        return sp.scatter_tokens(out)
+
+    def _run_moe_sp_shard_routed(self, hidden_shard: torch.Tensor) -> torch.Tensor:
+        runner = self.mlp.experts
+        router_logits, _ = self.mlp.gate(hidden_shard)
+        latent, topk_weights, topk_ids = runner.sp_route_shard(
+            hidden_shard, router_logits
+        )
+        hidden_states = tensor_model_parallel_all_gather(hidden_shard, dim=0)
+        latent = tensor_model_parallel_all_gather(latent.contiguous(), dim=0)
+        topk = sp.all_gather_routing(topk_weights, topk_ids)
+        # Only read by select_experts, which returns the gathered top-k instead.
+        logits = router_logits.new_empty((latent.size(0), router_logits.size(1)))
+        with sp.pre_routed(runner.router, topk):
+            return runner(
+                hidden_states=latent,
+                router_logits=logits,
+                shared_experts_input=hidden_states,
+            )
+
+    def _run_mlp_sp(self, hidden_shard: torch.Tensor) -> torch.Tensor:
+        # MLPs are per-token, so they run on the TP-padded token set as is.
+        if isinstance(self.mlp, KimiMoE):
+            if self.mlp.use_latent_moe and self.mlp.experts._tail_shardable:
+                return self._run_moe_sp_shard_routed(hidden_shard)
+            hidden_states = tensor_model_parallel_all_gather(hidden_shard, dim=0)
+            out = self.mlp(hidden_states)
+            if self.mlp.use_latent_moe:
+                # ROCmLatentMoERunner already narrows to this rank's tokens.
+                return out
+            # The MoE output is fully reduced; keep this rank's tokens.
+            shard = hidden_shard.size(0)
+            return out.narrow(0, get_tensor_model_parallel_rank() * shard, shard)
+        hidden_states = tensor_model_parallel_all_gather(hidden_shard, dim=0)
+        with self._output_unreduced(self.mlp):
+            out = self.mlp(hidden_states)
+        return tensor_model_parallel_reduce_scatter(out, dim=0)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -697,7 +763,10 @@ class KimiDecoderLayer(nn.Module):
         if self.is_block_write_layer:
             prefix_sum = None
 
-        hidden_states = self._run_self_attn(positions, hidden_states)
+        if sp.ACTIVE:
+            hidden_states = self._run_self_attn_sp(positions, hidden_states)
+        else:
+            hidden_states = self._run_self_attn(positions, hidden_states)
 
         if prefix_sum is None:
             prefix_sum = hidden_states
@@ -723,7 +792,10 @@ class KimiDecoderLayer(nn.Module):
             ),
         )
 
-        hidden_states = self.mlp(hidden_states)
+        if sp.ACTIVE:
+            hidden_states = self._run_mlp_sp(hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states)
         return prefix_sum, block_residual, hidden_states
 
 
@@ -873,6 +945,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             return hidden_states
 
         attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
+        num_tokens = hidden_states.size(0)
+        use_sp = sp.should_shard(
+            num_tokens,
+            has_residual=residual is not None,
+            has_aux_layers=bool(self.aux_hidden_state_layers),
+        )
+        if use_sp:
+            hidden_states = sp_shard(hidden_states)
         block_residual = hidden_states.new_empty(
             hidden_states.size(0), attn_res_block_num, hidden_states.size(1)
         )
@@ -881,6 +961,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         residual = block_residual
         prefix_delta = None
 
+        sp.ACTIVE, sp.NUM_TOKENS = use_sp, num_tokens
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
@@ -898,6 +979,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                     hidden_states + prefix_delta,
                     residual,
                 )
+        sp.ACTIVE = False
 
         if not get_pp_group().is_last_rank:
             hidden_states = hidden_states + prefix_delta
@@ -913,6 +995,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             attn_res_block_num,
             delta=prefix_delta,
         )
+        if use_sp:
+            hidden_states = sp.gather_tokens(hidden_states, num_tokens)
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
         if aux_hidden_states:
