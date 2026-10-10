@@ -19,6 +19,7 @@ from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
     FlexAttentionMetadataBuilder,
     physical_to_logical_mapping,
+    unique_static_unsorted,
 )
 
 from ..models.utils import check_embeddings_close, check_logprobs_close
@@ -468,6 +469,25 @@ def test_physical_to_logical_mapping_handles_reused_blocks():
         block_table=block_table2, seq_lens=seq_lens2, block_size=16, total_blocks=8
     )
     assert out2[0, 2].item() == 1
+
+
+def test_unique_static_unsorted():
+    """First occurrences are kept in order, ignored values dropped, rest padded."""
+    x = torch.tensor(
+        [
+            [3, 1, 0, 1, 2],  # docstring example
+            [0, 0, 0, 0, 0],  # nothing to keep
+            [5, 4, 3, 2, 1],  # no duplicates
+            [0, 7, 7, 0, 7],  # one value, interleaved with ignored
+        ]
+    )
+    expected = [
+        [3, 1, 2, -1, -1],
+        [-1, -1, -1, -1, -1],
+        [5, 4, 3, 2, 1],
+        [7, -1, -1, -1, -1],
+    ]
+    assert unique_static_unsorted(x, M=7).tolist() == expected
 
 
 @pytest.mark.skipif(
