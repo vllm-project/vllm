@@ -7,7 +7,11 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
+import psutil
+
+from vllm.utils import system_utils
 from vllm.utils.system_utils import (
     _maybe_force_spawn,
     suppress_stdout,
@@ -48,3 +52,25 @@ def test_suppress_stdout_keeps_stderr_when_sys_stdout_is_stderr(capfd, monkeypat
     out, err = capfd.readouterr()
     assert "c library output" not in out
     assert "error message" in err
+
+
+def test_kill_process_tree_skips_child_that_exits_mid_walk(monkeypatch):
+    class Child:
+        def __init__(self, pid: int, exited: bool = False):
+            self.pid = pid
+            self.exited = exited
+
+        def name(self) -> str:
+            if self.exited:
+                raise psutil.NoSuchProcess(self.pid)
+            return "VLLM::Worker"
+
+    children = [Child(101), Child(102, exited=True), Child(103)]
+    parent = SimpleNamespace(children=lambda recursive: children)
+    killed: list[int] = []
+    monkeypatch.setattr(system_utils.psutil, "Process", lambda pid: parent)
+    monkeypatch.setattr(system_utils.os, "kill", lambda pid, sig: killed.append(pid))
+
+    system_utils.kill_process_tree(100)
+
+    assert killed == [101, 103, 100]
