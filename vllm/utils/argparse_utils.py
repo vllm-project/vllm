@@ -140,8 +140,18 @@ class FlexibleArgumentParser(ArgumentParser):
         self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
         self._show_serve_task_hint = False
+        self._short_alias_hint_actions = self._option_string_actions
 
     def error(self, message: str) -> NoReturn:
+        unrecognized = re.match(
+            r"unrecognized arguments: (--[\w-]+)(?==|\s|$)", message
+        )
+        if unrecognized:
+            option = unrecognized.group(1)
+            action = self._short_alias_hint_actions.get(option[1:])
+            if action is not None and option not in self._short_alias_hint_actions:
+                alternatives = " or ".join(action.option_strings)
+                message += f"\n\nHint: use {alternatives} instead of {option}."
         if (
             (self.prog.endswith(" serve") or self._show_serve_task_hint)
             and message.startswith("unrecognized arguments:")
@@ -280,6 +290,21 @@ class FlexibleArgumentParser(ArgumentParser):
     ):
         if args is None:
             args = sys.argv[1:]
+        hint_parser = self
+        for arg in args:
+            selected = next(
+                (
+                    action.choices[arg]
+                    for action in hint_parser._actions
+                    if isinstance(action, argparse._SubParsersAction)
+                    and arg in action.choices
+                ),
+                None,
+            )
+            if selected is None:
+                break
+            hint_parser = selected
+        self._short_alias_hint_actions = hint_parser._option_string_actions
         self._show_serve_task_hint = args[:1] == ["serve"] and any(
             re.match(r"^--task(=.+|$)", arg) for arg in args[1:]
         )

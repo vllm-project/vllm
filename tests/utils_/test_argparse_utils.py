@@ -88,6 +88,74 @@ def test_invalid_choice(parser):
         parser.parse_args(["--image_input_type", "invalid_choice"])
 
 
+@pytest.mark.parametrize(
+    "short, long", [("-cc", "--compilation-config"), ("-ac", "--attention-config")]
+)
+@pytest.mark.parametrize("suffix", [".mode=none", ".mode", "=none"])
+def test_double_dash_short_alias_reports_registered_spellings(
+    short, long, suffix, capsys
+):
+    parser = FlexibleArgumentParser()
+    parser.add_argument(short, long, type=json.loads)
+    argv = [f"-{short}{suffix}"]
+    if suffix == ".mode":
+        argv.append("none")
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(argv)
+    assert error.value.code == 2
+    assert (
+        f"Hint: use {short} or {long} instead of -{short}." in capsys.readouterr().err
+    )
+
+
+def test_unknown_long_option_does_not_invent_an_alias(parser, capsys):
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--unknown.mode=none"])
+    assert "Hint:" not in capsys.readouterr().err
+
+
+def test_unrecognized_value_does_not_suggest_a_registered_long_option(capsys):
+    parser = FlexibleArgumentParser()
+    parser.add_argument("-cc", "--cc", action="store_true")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--cc", "extra"])
+    assert "Hint:" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", [["serve"], ["bench", "serve"]])
+def test_double_dash_alias_hint_uses_the_selected_subcommand(command, capsys):
+    parser = FlexibleArgumentParser(prog="vllm")
+    active = parser
+    for name in command:
+        active = active.add_subparsers().add_parser(name)
+    active.add_argument("model")
+    active.add_argument("--compilation-config", "-cc", type=json.loads)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args([*command, "MODEL", "--cc.mode=none"])
+    assert (
+        "Hint: use --compilation-config or -cc instead of --cc."
+        in capsys.readouterr().err
+    )
+
+
+def test_alias_hint_does_not_leak_across_sibling_commands(capsys):
+    parser = FlexibleArgumentParser(prog="vllm")
+    commands = parser.add_subparsers(dest="subparser")
+    serve = commands.add_parser("serve")
+    serve.add_argument("model")
+    serve.add_argument("--compilation-config", "-cc", type=json.loads)
+    chat = commands.add_parser("chat")
+    chat.add_argument("model")
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["serve", "MODEL", "--cc.mode=none"])
+    assert "Hint:" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        parser.parse_args(["chat", "MODEL", "--cc.mode=none"])
+    assert "Hint:" not in capsys.readouterr().err
+
+
 def test_missing_required_argument(parser):
     parser.add_argument("--required-arg", required=True)
     with pytest.raises(SystemExit):
