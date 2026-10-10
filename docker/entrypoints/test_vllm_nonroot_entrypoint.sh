@@ -21,6 +21,11 @@ if [ ! -x "$WRAPPER" ]; then
 fi
 
 WORKDIR="$(mktemp -d)"
+# Resolve WORKDIR to its physical path. On macOS, mktemp returns a path under
+# /var/folders which is a symlink to /private/var/folders. When run_wrapper
+# invokes the wrapper via `env -i`, the shell loses the $PWD hint and `pwd`
+# resolves symlinks, so assertions against WORKDIR must use the same form.
+WORKDIR="$(cd "$WORKDIR" && pwd -P)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 # Stub `vllm` on PATH. It dumps env + argv + cwd to stdout so we can assert.
