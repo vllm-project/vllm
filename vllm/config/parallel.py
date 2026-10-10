@@ -382,13 +382,6 @@ class ParallelConfig:
     the process world size. Without PCP, DCP reuses TP ranks. With PCP, DCP
     either spans the PCP axis or the full TP x PCP block."""
 
-    dcp_kv_cache_interleave_size: int = 1
-    """
-    Interleave size of kv_cache storage while using DCP.
-    dcp_kv_cache_interleave_size has been replaced by cp_kv_cache_interleave_size,
-    and will be deprecated when PCP is fully supported.
-
-    """
     dcp_comm_backend: DCPCommBackend | None = None
     """Communication backend for Decode Context Parallel (DCP).
     - "ag_rs": AllGather + ReduceScatter (existing behavior)

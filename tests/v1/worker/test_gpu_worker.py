@@ -9,14 +9,63 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups_from_workers
+from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+from vllm.v1.worker.worker_base import WorkerBase
+
+
+def test_resolved_layout_finalizes_nixl_dcp_interleave_before_profiling() -> None:
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(block_size=16),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+    kv_cache_specs = {
+        "full": FullAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float16,
+        ),
+        "sliding": SlidingWindowSpec(
+            block_size=64,
+            num_kv_heads=2,
+            head_size=64,
+            dtype=torch.float16,
+            sliding_window=128,
+        ),
+    }
+    record_kv_cache_layout(vllm_config.cache_config, "BLHNC")
+    kv_cache_groups = get_kv_cache_groups_from_workers(vllm_config, [kv_cache_specs])
+    worker = SimpleNamespace(vllm_config=vllm_config)
+
+    WorkerBase.set_kv_cache_layout(worker, "BLHNC", kv_cache_groups)
+
+    assert vllm_config.parallel_config.cp_kv_cache_interleave_size == 64
 
 
 def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):

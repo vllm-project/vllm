@@ -50,7 +50,8 @@ from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
+    get_kv_cache_configs_from_groups,
+    get_kv_cache_groups_from_workers,
     get_request_block_hasher,
     init_none_hash,
     resolve_cache_hit_alignment_tokens,
@@ -293,7 +294,11 @@ class EngineCore:
             self.model_executor.get_supported_kv_cache_layouts(),
             [s for specs in kv_cache_specs for s in specs.values()],
         )
-        self.model_executor.set_kv_cache_layout(layout.name)
+        global_kv_cache_groups = get_kv_cache_groups_from_workers(
+            vllm_config, kv_cache_specs
+        )
+        vllm_config.finalize_kv_cache_layout(global_kv_cache_groups)
+        self.model_executor.set_kv_cache_layout(layout.name, global_kv_cache_groups)
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
@@ -318,8 +323,11 @@ class EngineCore:
         # Track max_model_len before KV cache config to detect auto-fit changes
         max_model_len_before = vllm_config.model_config.max_model_len
 
-        kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory
+        kv_cache_configs = get_kv_cache_configs_from_groups(
+            vllm_config,
+            kv_cache_specs,
+            available_gpu_memory,
+            global_kv_cache_groups,
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout

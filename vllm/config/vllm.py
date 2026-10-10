@@ -61,13 +61,13 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
     from vllm.sampling_params import BeamSearchParams, SamplingParams
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 else:
     PreTrainedConfig = Any
 
     QuantizationConfig = Any
 
-    KVCacheConfig = Any
+    KVCacheGroupSpec = Any
 
 logger = init_logger(__name__)
 
@@ -3227,54 +3227,34 @@ class VllmConfig:
                 f"Model Runner V1 does not support: {', '.join(unsupported)}"
             )
 
-    def adjust_dcp_kv_cache_interleave_size(
-        self, kv_cache_config: "KVCacheConfig"
+    def finalize_kv_cache_layout(
+        self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
-        """Normalize DCP interleave size against block_size for NIXL P/D.
-
-        Called by each worker (via ensure_kv_transfer_initialized), once it knows its
-        own final block_size via kv_cache_config.
-        """
-        dcp_size = self.parallel_config.decode_context_parallel_size
-        if dcp_size <= 1:
-            return
-        if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-            self.parallel_config.cp_kv_cache_interleave_size
-            != self.parallel_config.dcp_kv_cache_interleave_size
+        """Finalize configuration that depends on resolved KV cache groups."""
+        parallel_config = self.parallel_config
+        kv_transfer_config = self.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.has_connector("NixlConnector")
+            and parallel_config.decode_context_parallel_size > 1
+            and parallel_config._allow_auto_resolve_cp_interleave_size
         ):
-            self.parallel_config.cp_kv_cache_interleave_size = (
-                self.parallel_config.dcp_kv_cache_interleave_size
+            # Use the local kernel block size rather than the DCP-scaled size.
+            local_block_size = min(
+                group.kv_cache_spec.block_size for group in kv_cache_groups
             )
-            logger.warning_once(
-                "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                "deprecated when PCP is fully supported."
-            )
-
-        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
-            "NixlConnector"
-        ):
-            return
-        if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
-            return
-
-        # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
-        # scaling by dcp_size (we need the local block_size here).
-        local_block_size = min(
-            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
-        )
-        if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
-            interleave = self.parallel_config.cp_kv_cache_interleave_size
-            self.parallel_config.cp_kv_cache_interleave_size = local_block_size
-            logger.info_once(
-                "When using PD disaggregation with DCP "
-                "(decode_context_parallel_size=%d), "
-                "cp_kv_cache_interleave_size is automatically adjusted "
-                "from %d to block_size %d for block-level alignment.",
-                dcp_size,
-                interleave,
-                local_block_size,
-            )
+            if parallel_config.cp_kv_cache_interleave_size != local_block_size:
+                interleave = parallel_config.cp_kv_cache_interleave_size
+                parallel_config.cp_kv_cache_interleave_size = local_block_size
+                logger.info_once(
+                    "When using PD disaggregation with DCP "
+                    "(decode_context_parallel_size=%d), "
+                    "cp_kv_cache_interleave_size is automatically adjusted "
+                    "from %d to block_size %d for block-level alignment.",
+                    parallel_config.decode_context_parallel_size,
+                    interleave,
+                    local_block_size,
+                )
 
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.

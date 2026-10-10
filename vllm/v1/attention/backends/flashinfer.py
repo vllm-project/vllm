@@ -813,7 +813,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.dcp_world_size, self.dcp_rank = get_dcp_world_size_and_rank(
             kv_cache_spec.dcp_sharded
         )
-        self.dcp_kv_cache_interleave_size = (
+        self.cp_kv_cache_interleave_size = (
             vllm_config.parallel_config.cp_kv_cache_interleave_size
         )
         self.use_dcp = self.dcp_world_size > 1
@@ -1566,7 +1566,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 seq_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
+                self.cp_kv_cache_interleave_size,
             )
 
         # Native paged attention consumes rank-local lengths (context only

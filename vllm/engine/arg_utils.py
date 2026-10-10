@@ -526,7 +526,6 @@ class EngineArgs:
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
     dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
-    dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int | None = None
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
@@ -1180,11 +1179,8 @@ class EngineArgs:
             **parallel_kwargs["dcp_q_replicate"],
         )
         parallel_group.add_argument(
-            "--dcp-kv-cache-interleave-size",
-            **parallel_kwargs["dcp_kv_cache_interleave_size"],
-        )
-        parallel_group.add_argument(
             "--cp-kv-cache-interleave-size",
+            "--dcp-kv-cache-interleave-size",
             **{
                 **parallel_kwargs["cp_kv_cache_interleave_size"],
                 "default": None,
@@ -2559,7 +2555,6 @@ class EngineArgs:
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
             dcp_q_replicate=self.dcp_q_replicate,
-            dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=(
                 self.cp_kv_cache_interleave_size
                 if self.cp_kv_cache_interleave_size is not None
