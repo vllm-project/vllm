@@ -219,7 +219,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -299,7 +299,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=dp_sync,
+            dp_sync_state=dp_sync_state,
         )
         num_tokens_across_dp = (
             prefill_batch_sync.num_tokens_across_dp
@@ -352,8 +352,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
 
         decode_batch_sync, num_batch_tokens = (
-            self._build_uniform_batch_dp_sync(dp_sync, num_reqs, num_query_per_req=1)
-            if dp_sync is not None
+            self._build_uniform_batch_dp_sync(
+                dp_sync_state, num_reqs, num_query_per_req=1
+            )
+            if dp_sync_state is not None
             else (None, num_reqs)
         )
         # Each request produces exactly 1 token per draft generation step,
@@ -366,7 +368,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=decode_batch_sync,
+            dp_sync_state=decode_batch_sync,
         )
         if self.decode_cudagraph_manager is not None:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
