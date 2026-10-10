@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
@@ -923,8 +924,13 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
 
 
 class _StubLookupClient:
-    def __init__(self, hit_tokens: int) -> None:
+    def __init__(
+        self,
+        hit_tokens: int,
+        boundaries: tuple[TailKeyBoundary, ...] = (),
+    ) -> None:
         self._hit_tokens = hit_tokens
+        self._boundaries = boundaries
         self.num_tokens: list[int] = []
 
     def lookup(
@@ -935,7 +941,7 @@ class _StubLookupClient:
         non_block: bool = False,
     ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
-        return MooncakeLookupResult(self._hit_tokens)
+        return MooncakeLookupResult(self._hit_tokens, self._boundaries)
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
@@ -1764,3 +1770,120 @@ def test_worker_metadata_aggregates_completions_across_ranks():
         MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
     )
     assert merged.completed_saves == {1: 2, 2: 1}
+
+
+def test_full_prompt_lookup_capped_to_aligned_suffix():
+    # A lookup reporting the full prompt length is capped at num_tokens - 1
+    # floored to the lookup alignment, mirroring the server's own
+    # rederivation of full hits: the last prompt token must be recomputed
+    # locally for logits, and an aligned end takes no substitute tail key,
+    # so the boundaries the server computed for its uncapped hit are
+    # dropped. Without the cap a sync load (`load_async=False`) forces
+    # num_new_tokens == 0 in Scheduler.schedule().
+    scheduler = _make_bare_scheduler()
+    scheduler.load_async = False
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=32,
+        block_hashes=[b"h0", b"h1"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+
+    assert need_to_allocate == 16, (
+        f"expected 16 after the aligned num_tokens-1 cap, got {need_to_allocate}"
+    )
+    assert load_async is False
+    load_spec = scheduler.load_specs["req-0"]
+    # Round-trip consistent: the connector cached the same capped value it
+    # returned, so update_state_after_alloc's equality assert on
+    # num_external_tokens == kvpool_cached_tokens - vllm_cached holds.
+    assert load_spec.vllm_cached_tokens == 0
+    assert load_spec.kvpool_cached_tokens == 16
+    # The stale boundaries for the uncapped hit must not survive the cap.
+    assert load_spec.tail_key_boundaries == ()
+
+
+def test_aligned_hit_keeps_server_tail_boundaries():
+    # A hit already at or below the cap is a value the in-tree server could
+    # have returned (it rederives full hits itself), so its boundaries stay.
+    boundaries = (TailKeyBoundary(group_id=0, num_tokens=12),)
+    scheduler = _make_bare_scheduler()
+    scheduler.load_async = False
+    scheduler.client = _StubLookupClient(hit_tokens=16, boundaries=boundaries)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=32,
+        block_hashes=[b"h0", b"h1"],
+    )
+
+    need_to_allocate, _ = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=0
+    )
+
+    assert need_to_allocate == 16
+    assert scheduler.load_specs["req-0"].tail_key_boundaries == boundaries
+
+
+def test_full_prompt_lookup_does_not_crash_scheduler(monkeypatch):
+    # Reproduces the num_new_tokens == 0 crash in Scheduler.schedule()
+    # driven end-to-end through the real Scheduler via the real
+    # MooncakeStoreConnector scheduler side (no mocks of the CUT; only
+    # the ZMQ boundary is mocked, per AGENTS.md allowed mocks). Verifies
+    # the connector-side cap from get_num_new_matched_tokens flows
+    # through update_state_after_alloc round-trip-consistent.
+    # Patch at the boundary only: the ZMQ context open so the client is
+    # buildable without a server, and the lookup call returns the full
+    # prompt length to drive the overshoot path. monkeypatch auto-stops.
+    from unittest.mock import MagicMock
+
+    from tests.v1.core.utils import create_requests, create_scheduler
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+        worker as store_worker,
+    )
+
+    monkeypatch.setattr(store_worker.zmq, "Context", MagicMock)
+
+    def fake_lookup(self, req_id, num_tokens, block_hashes, non_block=False):
+        # Lookup claims the entire prompt is in the remote store.
+        return MooncakeLookupResult(num_tokens)
+
+    monkeypatch.setattr(store_worker.LookupKeyClient, "lookup", fake_lookup)
+
+    scheduler = create_scheduler(
+        use_kv_connector="MooncakeStoreConnector",
+        kv_role="kv_consumer",
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    # Force the production-reachable sync config: load_async=False.
+    scheduler.connector.connector_scheduler.load_async = False
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        max_tokens=16,
+        same_prompt=False,
+        req_ids=["r1"],
+    )[0]
+    scheduler.add_request(request)
+
+    out = scheduler.schedule()
+    # The 16-token block-aligned suffix is covered by the connector's
+    # external hit (capped from the raw full-prompt 32); the remaining 16
+    # tokens, including the last one that must be recomputed for logits,
+    # are scheduled locally. 16 is a value the in-tree pair could actually
+    # return and load at key granularity, unlike an unaligned 31.
+    assert out.num_scheduled_tokens[request.request_id] == 16, (
+        f"expected 16 local scheduled tokens, got "
+        f"{out.num_scheduled_tokens.get(request.request_id)}"
+    )
+    assert request.num_computed_tokens == 32, (
+        f"expected full prompt counted as computed (16 external + 16 local), "
+        f"got {request.num_computed_tokens}"
+    )

@@ -230,6 +230,18 @@ class MooncakeStoreScheduler:
             return None, False
         num_external_hit_tokens = lookup_result.hit_length
 
+        # Cap at num_tokens - 1 floored to the lookup alignment, mirroring
+        # the server's own rederivation of full hits (LookupKeyServer.lookup):
+        # the last prompt token must be recomputed locally for logits, and an
+        # aligned end identifies its store key without a substitute boundary.
+        # Without this cap a sync (`load_async=False`) lookup covering the
+        # full prompt drives num_new_tokens==0 in Scheduler.schedule().
+        aligned_cap = align * ((request.num_tokens - 1) // align)
+        tail_key_boundaries = lookup_result.tail_key_boundaries
+        if num_external_hit_tokens > aligned_cap:
+            num_external_hit_tokens = aligned_cap
+            tail_key_boundaries = ()
+
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
         else:
@@ -250,7 +262,7 @@ class MooncakeStoreScheduler:
             vllm_cached_tokens=num_computed_tokens,
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=False,
-            tail_key_boundaries=lookup_result.tail_key_boundaries,
+            tail_key_boundaries=tail_key_boundaries,
         )
 
         return need_to_allocate, self.load_async
