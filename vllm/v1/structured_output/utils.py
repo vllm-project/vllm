@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.metadata
 import os
+import queue
+import signal
 import sqlite3
 import tempfile
+import threading
+import time
+import weakref
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import regex as re
 import torch
@@ -44,6 +49,13 @@ _T = TypeVar("_T")
 
 CACHE = None
 
+# Separate from the compile deadline so interpreter startup is not counted
+# against a legitimate pattern. The worker is reused after the first start.
+_WORKER_STARTUP_TIMEOUT_S = 120
+_xgr_tokenizer_cache: LRUCache = LRUCache(maxsize=2)
+_compile_pool: _RegexCompilePool | None = None
+_compile_pool_lock = threading.Lock()
+
 
 def strip_speculative_padding(token_ids: list[int]) -> list[int]:
     """Drop speculative-decoding padding from a token block.
@@ -59,43 +71,280 @@ def strip_speculative_padding(token_ids: list[int]) -> list[int]:
     return token_ids
 
 
-def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
-    """Run a regex compilation callable with a timeout.
+def _pattern_excerpt(pattern: str) -> str:
+    return pattern[:200]
 
-    Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
-    quantifiers like ``(a+)+b``) cause exponential DFA state-space explosion,
-    hanging the inference worker indefinitely.
+
+def _timeout_error(timeout: float, pattern: str) -> str:
+    excerpt = _pattern_excerpt(pattern)
+    return (
+        f"Regex compilation timed out after {timeout}s. "
+        "The pattern may be too complex or contain constructs that "
+        "cause exponential state-space explosion (e.g. nested "
+        f"quantifiers). Pattern: {excerpt}"
+    )
+
+
+def _process_exit_error(exitcode: int | None, pattern: str) -> str:
+    excerpt = _pattern_excerpt(pattern)
+    return f"Regex compilation process exited with code {exitcode}. Pattern: {excerpt}"
+
+
+def _regex_compile_worker_main(job_queue: Any, result_queue: Any) -> None:
+    """Run compilation jobs until the parent kills this process."""
+    result_queue.put(("ready", None))
+    while True:
+        item = job_queue.get()
+        if item is None:
+            return
+        fn, args = item
+        try:
+            payload: tuple[str, Any] = ("ok", fn(*args))
+        except Exception as exc:
+            payload = ("err", exc)
+        try:
+            result_queue.put(payload)
+        except Exception as exc:
+            result_queue.put(("err", RuntimeError(f"{type(exc).__name__}: {exc}")))
+
+
+class _CompileWorker:
+    """One long-lived compiler process and the queues that talk to it."""
+
+    def __init__(self) -> None:
+        self.process: Any = None
+        self.job_queue: Any = None
+        self.result_queue: Any = None
+        self.last_pid: int | None = None
+        self.start_method: str | None = None
+
+    def is_alive(self) -> bool:
+        return self.process is not None and self.process.is_alive()
+
+    @property
+    def exitcode(self) -> int | None:
+        if self.process is None:
+            return None
+        return self.process.exitcode
+
+    def ensure_started(self) -> None:
+        if self.is_alive():
+            return
+        self.kill()
+        self._start()
+
+    def _start(self) -> None:
+        # Resolve the start method at process creation. Caching an earlier
+        # fork context would ignore a CUDA init that happened since then.
+        from vllm.utils.system_utils import get_mp_context
+
+        ctx = get_mp_context()
+        self.start_method = ctx.get_start_method()
+        self.job_queue = ctx.Queue()
+        self.result_queue = ctx.Queue()
+        self.process = ctx.Process(
+            target=_regex_compile_worker_main,
+            args=(self.job_queue, self.result_queue),
+            daemon=True,
+            name="RegexCompileWorker",
+        )
+        self.process.start()
+        self.last_pid = self.process.pid
+        try:
+            status, _payload = self.result_queue.get(timeout=_WORKER_STARTUP_TIMEOUT_S)
+        except queue.Empty:
+            self.kill()
+            raise ValueError(
+                "Regex compilation worker failed to start within "
+                f"{_WORKER_STARTUP_TIMEOUT_S}s."
+            ) from None
+        if status != "ready":
+            self.kill()
+            raise ValueError(
+                "Regex compilation worker sent an unexpected startup message."
+            )
+
+    def kill(self) -> None:
+        """SIGKILL the child and drop its queues so they cannot be reused."""
+        proc = self.process
+        job_queue = self.job_queue
+        result_queue = self.result_queue
+        self.process = None
+        self.job_queue = None
+        self.result_queue = None
+        if proc is not None and proc.pid is not None and proc.is_alive():
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.join(timeout=5)
+        elif proc is not None:
+            proc.join(timeout=1)
+        for worker_queue in (job_queue, result_queue):
+            if worker_queue is None:
+                continue
+            worker_queue.cancel_join_thread()
+            with contextlib.suppress(ValueError, OSError):
+                worker_queue.close()
+
+
+def _kill_compile_workers(workers: list[_CompileWorker]) -> None:
+    for worker in workers:
+        worker.kill()
+
+
+class _RegexCompilePool:
+    """Bounded pool of reusable regex-compilation workers."""
+
+    def __init__(self, size: int) -> None:
+        if size < 1:
+            raise ValueError(
+                f"VLLM_REGEX_COMPILATION_MAX_CONCURRENT must be at least 1, got {size}."
+            )
+        self._size = size
+        self._idle: queue.Queue[_CompileWorker] = queue.Queue()
+        self._workers: list[_CompileWorker] = []
+        for _ in range(size):
+            worker = _CompileWorker()
+            self._workers.append(worker)
+            self._idle.put(worker)
+        self._finalizer = weakref.finalize(self, _kill_compile_workers, self._workers)
+
+    def submit(
+        self,
+        fn: Callable[..., _T],
+        args: tuple[Any, ...],
+        timeout: float,
+        pattern: str,
+    ) -> _T:
+        try:
+            worker = self._idle.get(timeout=timeout)
+        except queue.Empty:
+            excerpt = _pattern_excerpt(pattern)
+            raise ValueError(
+                "Regex compilation could not acquire a compile slot within "
+                f"{timeout}s (max concurrent: {self._size}). Pattern: {excerpt}"
+            ) from None
+        try:
+            return self._run(worker, fn, args, timeout, pattern)
+        finally:
+            self._idle.put(worker)
+
+    def _run(
+        self,
+        worker: _CompileWorker,
+        fn: Callable[..., _T],
+        args: tuple[Any, ...],
+        timeout: float,
+        pattern: str,
+    ) -> _T:
+        worker.ensure_started()
+        assert worker.job_queue is not None
+        assert worker.result_queue is not None
+        worker.job_queue.put((fn, args))
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                worker.kill()
+                raise ValueError(_timeout_error(timeout, pattern)) from None
+            try:
+                status, payload = worker.result_queue.get(timeout=min(remaining, 0.2))
+            except queue.Empty:
+                if not worker.is_alive():
+                    exitcode = worker.exitcode
+                    worker.kill()
+                    raise ValueError(_process_exit_error(exitcode, pattern)) from None
+                continue
+            except (EOFError, OSError, BrokenPipeError):
+                exitcode = worker.exitcode
+                worker.kill()
+                raise ValueError(_process_exit_error(exitcode, pattern)) from None
+            if status == "ok":
+                return payload
+            if status == "err":
+                raise payload
+            worker.kill()
+            raise ValueError(
+                "Regex compilation process produced no result. "
+                f"Pattern: {_pattern_excerpt(pattern)}"
+            ) from None
+
+    def shutdown(self) -> None:
+        if self._finalizer.alive:
+            self._finalizer()
+
+
+def _get_compile_pool() -> _RegexCompilePool:
+    global _compile_pool
+    if _compile_pool is None:
+        with _compile_pool_lock:
+            if _compile_pool is None:
+                _compile_pool = _RegexCompilePool(
+                    envs.VLLM_REGEX_COMPILATION_MAX_CONCURRENT
+                )
+    return _compile_pool
+
+
+def shutdown_regex_compile_pool() -> None:
+    """Stop compiler workers and drop the pool so the next compile starts fresh."""
+    global _compile_pool
+    with _compile_pool_lock:
+        pool = _compile_pool
+        _compile_pool = None
+    if pool is not None:
+        pool.shutdown()
+
+
+def compile_regex_with_timeout(fn: Callable[..., _T], *args: Any, pattern: str) -> _T:
+    """Run a regex compilation callable with a timeout in a killable process.
+
+    The compile runs in a worker started via ``get_mp_context()``, so the
+    start method follows vLLM's multiprocessing policy (spawn once CUDA is
+    initialized). Workers are reused across compiles. On timeout the worker
+    is SIGKILL'd and a replacement is started on the next job, so the work
+    cannot keep running after the error is returned.
+
+    A timeout of 0 or less runs ``fn`` in-process and does not start a worker.
 
     Args:
-        fn: Single-argument callable that takes the pattern and performs
-            the regex compilation.
-        pattern: The regex pattern string, passed to *fn* and included in
-            timeout error messages.
+        fn: Picklable callable that performs the compilation.
+        *args: Picklable arguments passed to ``fn``.
+        pattern: Regex text included in timeout error messages. Not passed
+            to ``fn`` unless it is also one of ``args``.
 
     Raises:
-        ValueError: If compilation exceeds the configured timeout.
+        ValueError: If compilation exceeds the configured timeout or a
+            worker cannot be acquired in time.
 
     """
     timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
     if timeout <= 0:
-        return fn(pattern)
+        return fn(*args)
+    return _get_compile_pool().submit(fn, args, timeout, pattern)
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(fn, pattern)
-    try:
-        result = future.result(timeout=timeout)
-    except TimeoutError:
-        future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise ValueError(
-            f"Regex compilation timed out after {timeout}s. "
-            "The pattern may be too complex or contain constructs that "
-            "cause exponential state-space explosion (e.g. nested "
-            f"quantifiers). Pattern: {pattern[:200]}"
-        ) from None
-    else:
-        executor.shutdown(wait=False)
-        return result
+
+def _xgr_grammar_from_regex(pattern: str) -> str:
+    """Picklable worker: compile regex via xgrammar, return serialized JSON."""
+    import xgrammar as xgr
+
+    return xgr.Grammar.from_regex(pattern).serialize_json()
+
+
+def _xgr_compile_regex(tokenizer_info_json: str, pattern: str) -> str:
+    """Picklable worker: rebuild compiler in subprocess and compile regex."""
+    import xgrammar as xgr
+
+    info = _xgr_tokenizer_cache.get(tokenizer_info_json)
+    if info is None:
+        info = xgr.TokenizerInfo.deserialize_json(tokenizer_info_json)
+        _xgr_tokenizer_cache[tokenizer_info_json] = info
+    compiler = xgr.GrammarCompiler(info, max_threads=1)
+    return compiler.compile_regex(pattern).serialize_json()
+
+
+def _outlines_compile_index(pattern: str, vocabulary: Any) -> Any:
+    """Picklable worker: build outlines Index from pattern + vocabulary."""
+    import outlines_core as oc
+
+    return oc.Index(pattern, vocabulary)
 
 
 def apply_grammar_bitmask(
