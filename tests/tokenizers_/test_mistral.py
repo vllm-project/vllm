@@ -2,20 +2,42 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import json
 from typing import Any
 
 import llguidance
 import pytest
 from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.guidance.grammar_factory import GrammarFactory
+from mistral_common.protocol.instruct.request import (
+    JsonSchema as MistralJsonSchema,
+)
+from mistral_common.protocol.instruct.request import (
+    ResponseFormat as MistralResponseFormat,
+)
+from mistral_common.protocol.instruct.request import ResponseFormats
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
+from mistral_common.tokens.tokenizers.model_settings_builder import (
+    JSONSchemaBuilder,
+    ModelSettingsBuilder,
+)
 
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat as OpenAIJsonSchemaResponseFormat,
+)
+from vllm.entrypoints.generate.base.protocol import (
+    ResponseFormat as OpenAIResponseFormat,
+)
+from vllm.entrypoints.generate.base.protocol import (
+    StructuralTagResponseFormat as OpenAIStructuralTagResponseFormat,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _validate_apply_chat_template_args,
+    to_mistral_response_format,
     validate_request_params,
 )
 
@@ -2379,9 +2401,10 @@ def test_v15_apply_chat_template_passes_reasoning_effort_none_by_default(
 
     assert "reasoning_effort" in captured_kwargs[-1]
     assert captured_kwargs[-1]["reasoning_effort"] is None
+    assert "response_format" not in captured_kwargs[-1]
 
 
-def test_pre_v15_apply_chat_template_omits_reasoning_effort(
+def test_pre_v15_apply_chat_template_omits_model_settings(
     monkeypatch: pytest.MonkeyPatch,
     v13_mistral_tokenizer: MistralTokenizer,
 ) -> None:
@@ -2400,6 +2423,123 @@ def test_pre_v15_apply_chat_template_omits_reasoning_effort(
     v13_mistral_tokenizer.apply_chat_template(
         messages=_PASSTHROUGH_MESSAGES,
         reasoning_effort="high",
+        response_format=MistralResponseFormat(type=ResponseFormats.json),
     )
 
     assert "reasoning_effort" not in captured_kwargs[-1]
+    assert "response_format" not in captured_kwargs[-1]
+
+
+_RESPONSE_FORMAT_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+}
+
+
+@pytest.mark.skip_global_cleanup
+def test_to_mistral_response_format_conversions() -> None:
+    convert = to_mistral_response_format
+
+    assert convert(None) is None
+    assert convert(OpenAIResponseFormat(type="text")) is None
+    assert (
+        convert(OpenAIStructuralTagResponseFormat(type="structural_tag", format={}))
+        is None
+    )
+    assert convert(OpenAIResponseFormat(type="json_object")) == MistralResponseFormat(
+        type=ResponseFormats.json
+    )
+
+    schema = OpenAIJsonSchemaResponseFormat(
+        name="answer",
+        schema=_RESPONSE_FORMAT_SCHEMA,
+        strict=True,
+    )
+    assert convert(
+        OpenAIResponseFormat(type="json_schema", json_schema=schema)
+    ) == MistralResponseFormat(
+        type=ResponseFormats.json_schema,
+        json_schema=MistralJsonSchema(
+            name="answer", schema=_RESPONSE_FORMAT_SCHEMA, strict=True
+        ),
+    )
+
+    non_strict_schema = OpenAIJsonSchemaResponseFormat(
+        name="answer",
+        schema=_RESPONSE_FORMAT_SCHEMA,
+        strict=False,
+    )
+    assert convert(
+        OpenAIResponseFormat(type="json_schema", json_schema=non_strict_schema)
+    ) == MistralResponseFormat(
+        type=ResponseFormats.json_schema,
+        json_schema=MistralJsonSchema(
+            name="answer", schema=_RESPONSE_FORMAT_SCHEMA, strict=False
+        ),
+    )
+
+    empty_schema = OpenAIJsonSchemaResponseFormat(name="answer", schema={})
+    assert convert(
+        OpenAIResponseFormat(type="json_schema", json_schema=empty_schema)
+    ) == MistralResponseFormat(
+        type=ResponseFormats.json_schema,
+        json_schema=MistralJsonSchema(name="answer", schema={}, strict=False),
+    )
+
+    schemaless = OpenAIJsonSchemaResponseFormat(name="answer")
+    assert (
+        convert(OpenAIResponseFormat(type="json_schema", json_schema=schemaless))
+        is None
+    )
+
+
+@pytest.mark.parametrize("strict", [True, False], ids=["strict", "non_strict"])
+@pytest.mark.skip_global_cleanup
+def test_response_format_renders_settings_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    v15_mistral_tokenizer: MistralTokenizer,
+    strict: bool,
+) -> None:
+    settings_builder = ModelSettingsBuilder(
+        json_schema=JSONSchemaBuilder(accepts_none=False, default=None)
+    )
+    (
+        v15_mistral_tokenizer.mistral._instruct_request_normalizer._model_settings_builder
+    ) = settings_builder
+    monkeypatch.setattr(
+        type(v15_mistral_tokenizer.tokenizer),
+        "model_settings_builder",
+        property(lambda _tokenizer: settings_builder),
+    )
+    response_format = OpenAIResponseFormat(
+        type="json_schema",
+        json_schema=OpenAIJsonSchemaResponseFormat(
+            name="answer",
+            schema=_RESPONSE_FORMAT_SCHEMA,
+            strict=strict,
+        ),
+    )
+    converted_response_format = to_mistral_response_format(response_format)
+    assert converted_response_format is not None
+
+    token_ids = v15_mistral_tokenizer.apply_chat_template(
+        messages=_PASSTHROUGH_MESSAGES,
+        response_format=converted_response_format,
+    )
+    decoded = v15_mistral_tokenizer.mistral.decode(
+        token_ids, special_token_policy=SpecialTokenPolicy.KEEP
+    )
+    assert "[MODEL_SETTINGS]" in decoded
+    settings_json = decoded.split("[MODEL_SETTINGS]", 1)[1].split(
+        "[/MODEL_SETTINGS]", 1
+    )[0]
+    assert json.loads(settings_json)["json_schema"] == _RESPONSE_FORMAT_SCHEMA
+
+    token_ids_without_format = v15_mistral_tokenizer.apply_chat_template(
+        messages=_PASSTHROUGH_MESSAGES
+    )
+    decoded_without_format = v15_mistral_tokenizer.mistral.decode(
+        token_ids_without_format, special_token_policy=SpecialTokenPolicy.KEEP
+    )
+    assert "[MODEL_SETTINGS]" not in decoded_without_format

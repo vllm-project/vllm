@@ -8,8 +8,23 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from mistral_common.protocol.instruct.request import (
+    JsonSchema as MistralJsonSchema,
+)
+from mistral_common.protocol.instruct.request import (
+    ResponseFormat as MistralResponseFormat,
+)
+from mistral_common.protocol.instruct.request import (
+    ResponseFormats,
+)
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat as OpenAIJsonSchemaResponseFormat,
+)
+from vllm.entrypoints.generate.base.protocol import (
+    ResponseFormat as OpenAIResponseFormat,
+)
 from vllm.renderers import ChatParams
 from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -92,6 +107,54 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
         "Mocked blocking tokenizer was not called"
     )
     assert blocked_count == 0, "Event loop blocked during tokenization"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("render_async", [False, True], ids=["sync", "async"])
+@pytest.mark.skip_global_cleanup
+async def test_renderer_passes_response_format_to_tokenizer(
+    monkeypatch: pytest.MonkeyPatch,
+    render_async: bool,
+) -> None:
+    mock_model_config = MockModelConfig(skip_tokenizer_init=True)
+    mock_tokenizer = Mock(spec=MistralTokenizer)
+    mock_tokenizer.apply_chat_template = Mock(return_value=[1])
+    renderer = MistralRenderer(
+        MockVllmConfig(mock_model_config, parallel_config=MockParallelConfig()),
+        tokenizer=mock_tokenizer,
+    )
+
+    async def fake_parse_chat_messages_async(*_args, **_kwargs):
+        return [], None, None
+
+    monkeypatch.setattr(
+        "vllm.renderers.mistral.parse_chat_messages",
+        lambda *_args, **_kwargs: ([], None, None),
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.mistral.parse_chat_messages_async",
+        fake_parse_chat_messages_async,
+    )
+
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    openai_response_format = OpenAIResponseFormat(
+        type="json_schema",
+        json_schema=OpenAIJsonSchemaResponseFormat(
+            name="answer", schema=schema, strict=True
+        ),
+    )
+    params = ChatParams(response_format=openai_response_format)
+    if render_async:
+        await renderer.render_messages_async([], params)
+    else:
+        renderer.render_messages([], params)
+
+    assert mock_tokenizer.apply_chat_template.call_args.kwargs["response_format"] == (
+        MistralResponseFormat(
+            type=ResponseFormats.json_schema,
+            json_schema=MistralJsonSchema(name="answer", schema=schema, strict=True),
+        )
+    )
 
 
 def test_apply_mistral_chat_template_thinking_chunk():

@@ -11,7 +11,16 @@ from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
 from mistral_common.protocol.instruct.request import (
+    JsonSchema as MistralJsonSchema,
+)
+from mistral_common.protocol.instruct.request import (
     ReasoningEffort,
+)
+from mistral_common.protocol.instruct.request import (
+    ResponseFormat as MistralResponseFormat,
+)
+from mistral_common.protocol.instruct.request import (
+    ResponseFormats as MistralResponseFormats,
 )
 from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
@@ -32,6 +41,7 @@ from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
 from transformers.tokenization_mistral_common import MistralCommonBackend
 
+from vllm.entrypoints.generate.base.protocol import AnyResponseFormat
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -43,6 +53,39 @@ if TYPE_CHECKING:
     from transformers import BatchEncoding
 
 logger = init_logger(__name__)
+
+
+def to_mistral_response_format(
+    response_format: AnyResponseFormat | None,
+) -> MistralResponseFormat | None:
+    """Convert an OpenAI response format to its mistral-common equivalent.
+
+    Returns:
+        The converted format, or `None` for formats that do not affect Mistral
+        prompt rendering (`text`, structural tags, schema-less `json_schema`).
+
+    """
+    if response_format is None:
+        return None
+
+    if response_format.type == "json_object":
+        return MistralResponseFormat(type=MistralResponseFormats.json)
+
+    if response_format.type != "json_schema":
+        return None
+
+    json_schema = response_format.json_schema
+    if json_schema is None or json_schema.json_schema is None:
+        return None
+
+    return MistralResponseFormat(
+        type=MistralResponseFormats.json_schema,
+        json_schema=MistralJsonSchema(
+            name=json_schema.name,
+            schema=json_schema.json_schema,
+            strict=bool(json_schema.strict),
+        ),
+    )
 
 
 def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
@@ -401,6 +444,8 @@ class MistralTokenizer(TokenizerLike):
         # Transformers should be passed arguments it knows.
         if self.version >= 15:
             version_kwargs["reasoning_effort"] = kwargs.get("reasoning_effort")
+            if (response_format := kwargs.get("response_format")) is not None:
+                version_kwargs["response_format"] = response_format
 
         _validate_apply_chat_template_args(
             messages, continue_final_message, add_generation_prompt
