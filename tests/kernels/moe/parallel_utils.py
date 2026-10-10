@@ -4,6 +4,7 @@
 
 import dataclasses
 import os
+import tempfile
 import traceback
 from collections.abc import Callable
 from typing import Concatenate
@@ -14,7 +15,6 @@ from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUs
 from typing_extensions import ParamSpec
 
 from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
-from vllm.utils.network_utils import get_open_port
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -99,19 +99,24 @@ def parallel_launch(
 ) -> None:
     assert not kwargs
     try:
-        spawn(
-            _worker_parallel_launch,
-            args=(
-                world_size,
-                world_size,
-                0,
-                f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
-                worker,
+        # Use a file:// rendezvous rather than tcp://<host>:<get_open_port()>.
+        # get_open_port() closes its probe socket before the workers' TCPStore
+        # binds it, so on busy CI hosts another process can claim the port in
+        # between (EADDRINUSE flakes).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spawn(
+                _worker_parallel_launch,
+                args=(
+                    world_size,
+                    world_size,
+                    0,
+                    f"file://{os.path.join(tmpdir, 'rdzv_init')}",
+                    worker,
+                )
+                + args,
+                nprocs=world_size,
+                join=True,
             )
-            + args,
-            nprocs=world_size,
-            join=True,
-        )
     except Exception as exc:
         # pytest.skip cannot propagate directly through torch.multiprocessing.
         if "GINNotAvailableError" in str(exc):
