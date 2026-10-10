@@ -298,6 +298,85 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k=None, p=p)
 
+    @pytest.mark.parametrize("batch_size", [1, 65])
+    @pytest.mark.parametrize("background_logit", [-200.0, -100.0])
+    @pytest.mark.parametrize("hot_tokens", [(0, 2000), (1000, 2000), (10000, 20000)])
+    def test_topp_sparse_probabilities(
+        self, batch_size: int, background_logit: float, hot_tokens: tuple[int, int]
+    ):
+        """Top-p must trim sparse rows regardless of hot-token positions."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((batch_size, 151936), background_logit)
+        logits[:, list(hot_tokens)] = 0.0
+        p = torch.full((batch_size,), 0.5)
+
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+        expected_kept = torch.isfinite(expected).sum(dim=-1)
+        actual_kept = torch.isfinite(actual).sum(dim=-1)
+
+        assert torch.equal(actual_kept, expected_kept)
+        assert (actual_kept == 1).all()
+        assert (actual[torch.isfinite(actual)] == 0.0).all()
+
+    @pytest.mark.parametrize("batch_size", [1, 65])
+    @pytest.mark.parametrize(
+        "vocab_size, background_logit", [(1024, -10.0), (32000, -20.0)]
+    )
+    def test_topp_tied_probabilities(
+        self, batch_size: int, vocab_size: int, background_logit: float
+    ):
+        """Boundary ties must be trimmed without reconstructing their logits."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((batch_size, vocab_size), background_logit)
+        logits[:, [1, 50, 100]] = 0.0
+        p = torch.full((batch_size,), 0.3)
+
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+
+        assert torch.equal(
+            torch.isfinite(actual).sum(dim=-1), torch.isfinite(expected).sum(dim=-1)
+        )
+        assert (torch.isfinite(actual).sum(dim=-1) == 1).all()
+        assert (actual[torch.isfinite(actual)] == 0.0).all()
+
+    @pytest.mark.parametrize("batch_size", [1, 65])
+    def test_topp_large_tied_group(self, batch_size: int):
+        """A near-tied maximum must not disable the boundary duplicate budget."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.full((batch_size, 16384), -float("inf"))
+        logits[:, :8190] = 0.0
+        logits[:, 8192] = 1e-4
+        logits[:, 8193] = -1e-4
+        p = torch.full((batch_size,), 0.5)
+
+        expected = apply_top_k_top_p_pytorch(logits.clone(), None, p)
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+
+        assert torch.equal(
+            torch.isfinite(actual).sum(dim=-1), torch.isfinite(expected).sum(dim=-1)
+        )
+        assert (torch.isfinite(actual).sum(dim=-1) == 4096).all()
+        assert (actual[:, 8192] == 1e-4).all()
+        assert torch.isneginf(actual[:, 8193]).all()
+
+    @pytest.mark.parametrize("top_p", [0.1, 0.9])
+    def test_topp_nan_row_unchanged(self, top_p: float):
+        """Monolithic normalization must preserve the existing NaN-row fallback."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        logits = torch.randn(65, 32000, generator=self.generator)
+        logits[:, 16000] = float("nan")
+        p = torch.full((65,), top_p)
+
+        actual = apply_top_k_top_p_triton(logits.clone(), None, p)
+
+        torch.testing.assert_close(actual, logits, rtol=0, atol=0, equal_nan=True)
+
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
     def test_topk_and_topp(self, batch_size: int, vocab_size: int):
