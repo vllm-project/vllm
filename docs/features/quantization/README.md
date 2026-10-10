@@ -40,6 +40,27 @@ layers use CUTLASS. Per-quantization overrides take precedence over
 `--linear-backend`; schemes without an override continue to use the global
 setting, including automatic selection when it is `auto`.
 
+### Triton MXFP8 W8A8
+
+On SM90 GPUs, MXFP8 linear layers can use the experimental Triton W8A8 backend
+with BF16 activations:
+
+```bash
+vllm serve <model> \
+  --kernel-config '{"linear_backend_per_quant":{"mxfp8":"triton"}}'
+```
+
+This backend keeps E4M3 weights with decoded per-row K32 scales and dynamically
+quantizes activations to FP8 with power-of-two scales. It handles both prefill
+and decode without switching to Marlin or storing Marlin-packed weights.
+It supports two-dimensional weights with K divisible by 32; batched weights
+use separate backend selection. Automatic selection is unchanged.
+
+Activation quantization changes results relative to Marlin W8A16. Validate
+quality and performance for the intended workload before selecting this backend.
+The kernel comparison is available in
+`benchmarks/kernels/benchmark_triton_mxfp8.py`.
+
 ## Supported Hardware
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:

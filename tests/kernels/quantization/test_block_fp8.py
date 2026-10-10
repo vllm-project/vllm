@@ -421,3 +421,176 @@ def test_w8a8_block_fp8_b12x_matmul(M, N, K):
     # ordering can flap an output between adjacent BF16 values one ULP apart.
     assert rel_diff < 0.003
     assert cosine >= 0.99999
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="Triton MXFP8 kernel requires SM90",
+)
+@pytest.mark.parametrize(
+    "m,n,k",
+    [
+        (m, 129, 96)
+        for m in [0, 1, 2, 4, 8, 9, 32, 33, 63, 64, 65, 1023, 1024, 1025, 8193]
+    ]
+    + [(1, n, k) for n, k in [(576, 5120), (1792, 5120), (4096, 1280), (5120, 288)]]
+    + [(8, 576, 5120), (32, 129, 288)]
+    + [(16, 1792, 5120), (16, 4096, 1280), (32, 576, 5120)]
+    + [(8, 4096, 1280), (8, 5120, 288), (8, 2049, 2048), (8, 2049, 2080)]
+    + [(m, 576, 5120) for m in [33, 128, 129, 512, 1024, 8192]]
+    + [(33, 1792, 5120), (129, 1792, 5120), (33, 4096, 1280)]
+    + [(9, 4993, 320), (16, 5120, 288), (32, 5120, 288), (33, 4993, 320)],
+)
+@torch.inference_mode()
+def test_triton_mxfp8_matches_quantized_reference(m, n, k):
+    """Keep tail rows/columns and per-output-row MX32 scales independent."""
+    from vllm.model_executor.layers.quantization.utils.triton_mxfp8 import (
+        triton_mxfp8_linear,
+    )
+
+    torch.manual_seed(1729)
+    x = torch.randn((m, k), dtype=torch.bfloat16)
+    weight = torch.randn((n, k)).to(torch.float8_e4m3fn)
+    scales = torch.exp2(torch.randint(-10, 2, (n, k // 32)).float())
+    actual = triton_mxfp8_linear(x, weight, scales)
+    assert actual.shape == (m, n)
+    assert actual.dtype == x.dtype
+    if not m:
+        return
+
+    # Independently reproduce the E8M0 activation grid in torch. Compare the
+    # contraction after quantization, separately from W8A16 model-quality tests.
+    groups = x.float().reshape(m, k // 32, 32)
+    amax = groups.abs().amax(dim=-1).clamp_min(1e-10)
+    a_scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)))
+    a_fp8 = (groups / a_scale[..., None]).to(torch.float8_e4m3fn)
+    a_dequant = (a_fp8.float() * a_scale[..., None]).reshape(m, k)
+    w_dequant = weight.float() * scales.repeat_interleave(32, dim=1)
+    expected = a_dequant @ w_dequant.T
+    assert torch.isfinite(actual).all()
+    relative_rmse = (actual.float() - expected).square().mean().sqrt()
+    relative_rmse /= expected.square().mean().sqrt()
+    assert relative_rmse < 0.006
+
+    x.zero_()
+    assert torch.count_nonzero(triton_mxfp8_linear(x, weight, scales)) == 0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="Triton MXFP8 requires SM90",
+)
+@pytest.mark.parametrize("m", [0, 1, 1023, 1024, 8193])
+@torch.inference_mode()
+def test_triton_mxfp8_backend_owns_weights_for_all_rows(m):
+    """Load padded scales without Marlin packing, including decode and large M."""
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.triton import TritonMxfp8LinearKernel
+    from vllm.model_executor.layers.quantization.utils.triton_mxfp8 import (
+        triton_mxfp8_linear,
+    )
+
+    torch.manual_seed(1729)
+    n, k = 129, 96
+    weight = torch.randn((n, k)).to(torch.float8_e4m3fn)
+    encoded = torch.randint(120, 126, (n + 1, k // 32 + 1), dtype=torch.uint8)
+    scales = encoded[:n, : k // 32].contiguous().view(torch.float8_e8m0fnu).float()
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    layer.weight_scale = torch.nn.Parameter(encoded, requires_grad=False)
+    kernel = TritonMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+    weight_ptr = weight.data_ptr()
+    kernel.process_weights_after_loading(layer)
+    assert layer.weight.data_ptr() == weight_ptr
+    assert set(dict(layer.named_parameters())) == {"weight", "weight_scale"}
+    assert not list(layer.buffers())
+    torch.testing.assert_close(layer.weight_scale, scales, atol=0, rtol=0)
+    # Exercise leading dimensions, non-contiguous activations, and bias.
+    x = torch.randn((2, m, k * 2), dtype=torch.bfloat16)[..., ::2]
+    bias = torch.randn(n, dtype=torch.bfloat16)
+    expected = triton_mxfp8_linear(x, weight, scales) + bias
+    actual = kernel.apply_weights(layer, x, bias)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    if m == 1:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = kernel.apply_weights(layer, x, bias)
+        graph.replay()
+        torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.is_device_capability(90),
+    reason="Triton MXFP8 requires SM90",
+)
+@pytest.mark.parametrize("n,k", [(576, 5120), (129, 1024), (4993, 320)])
+@torch.inference_mode()
+def test_triton_mxfp8_compiles_across_dispatch_boundaries(n, k):
+    """Dynamic fullgraph compilation must preserve GEMV/GEMM dispatch results."""
+    from vllm.model_executor.layers.quantization.utils.triton_mxfp8 import (
+        triton_mxfp8_linear,
+    )
+
+    torch.manual_seed(1729)
+    weight = torch.randn(n, k).to(torch.float8_e4m3fn)
+    scales = torch.exp2(torch.randint(-8, 0, (n, k // 32)).float())
+    torch.compiler.reset()
+    compiled = torch.compile(triton_mxfp8_linear, fullgraph=True, dynamic=True)
+    for m in (1, 8, 16, 33, 129):
+        x = torch.randn(m, k, dtype=torch.bfloat16)
+        expected = triton_mxfp8_linear(x, weight, scales)
+        torch.testing.assert_close(
+            compiled(x, weight, scales), expected, rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize("backend", ["auto", "marlin", "triton"])
+def test_triton_mxfp8_backend_selection(backend):
+    """An explicit MXFP8 override selects W8A8 without changing auto/Marlin."""
+    from vllm.config import set_current_vllm_config
+    from vllm.config.kernel import KernelConfig
+    from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
+    from vllm.model_executor.kernels.linear.mxfp8.marlin import MarlinMxfp8LinearKernel
+    from vllm.model_executor.kernels.linear.mxfp8.triton import TritonMxfp8LinearKernel
+
+    if not current_platform.is_device_capability(90):
+        pytest.skip("Backend selection is validated on SM90")
+    config = VllmConfig(
+        kernel_config=KernelConfig(linear_backend_per_quant={"mxfp8": backend})
+    )
+    with set_current_vllm_config(config):
+        kernel = init_mxfp8_linear_kernel()
+    expected = (
+        TritonMxfp8LinearKernel if backend == "triton" else MarlinMxfp8LinearKernel
+    )
+    assert isinstance(kernel, expected)
+
+
+@torch.inference_mode()
+def test_triton_mxfp8_rejects_unsafe_offsets_before_allocation():
+    """A broadcast view must not allow an overflowing output pointer offset."""
+    from vllm.model_executor.layers.quantization.utils.triton_mxfp8 import (
+        triton_mxfp8_linear,
+    )
+
+    x = torch.zeros((1, 32), dtype=torch.bfloat16).expand(2**24, 32)
+    weight = torch.zeros((128, 32), dtype=torch.float8_e4m3fn)
+    scales = torch.ones((128, 1), dtype=torch.float32)
+    with pytest.raises(ValueError, match="offsets below"):
+        triton_mxfp8_linear(x, weight, scales)
+
+
+@torch.inference_mode()
+def test_triton_mxfp8_rejects_mismatched_input_features():
+    """Do not silently reshape incompatible features into a different batch."""
+    from vllm.model_executor.layers.quantization.utils.triton_mxfp8 import (
+        triton_mxfp8_linear,
+    )
+
+    x = torch.zeros((2, 64), dtype=torch.bfloat16)
+    weight = torch.zeros((128, 32), dtype=torch.float8_e4m3fn)
+    scales = torch.ones((128, 1), dtype=torch.float32)
+    with pytest.raises(ValueError, match="matching positive K"):
+        triton_mxfp8_linear(x, weight, scales)
