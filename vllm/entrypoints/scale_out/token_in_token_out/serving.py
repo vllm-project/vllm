@@ -532,7 +532,8 @@ class ServingTokens(GenerateBaseServing):
                         token_ids, out_logprobs, sampling_params.logprobs
                     )
                     if rendered is None:
-                        # Irregular rows: the per-entry path, in one pass.
+                        # Irregular rows: the per-entry path. Iterating once
+                        # is cheaper than indexing each position.
                         top_logprobs = list(out_logprobs)
                 if rendered is not None:
                     fragments[len(tokens_choices)] = rendered
