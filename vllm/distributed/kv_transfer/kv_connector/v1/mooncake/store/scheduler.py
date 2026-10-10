@@ -172,15 +172,26 @@ class MooncakeStoreScheduler:
             for group_id, group in enumerate(store_groups)
             if isinstance(group.kv_cache_spec, MambaSpec)
         }
-        assert all(
-            spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
-        ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+        # Capacity-only workers do not read or write KV to Mooncake;
+        # they only contribute cache capacity.
+        capacity_only = (
+            self.kv_role == "kv_consumer"
+            and not self.enable_lookup
+            and not self.save_decode_cache
+        )
+        if not capacity_only:
+            assert all(
+                spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
+            ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
 
-        self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
-            kv_cache_config, vllm_config, self._block_size, self._hash_block_size
-        )
-        self.enable_partial_hash_hits = self._store_coord.enable_partial_hash_hits
+        self._store_coord: MooncakeStoreCoordinator | None = None
+        self.enable_partial_hash_hits = False
+        if not capacity_only:
+            self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
+                kv_cache_config, vllm_config, self._block_size, self._hash_block_size
+            )
+            self.enable_partial_hash_hits = self._store_coord.enable_partial_hash_hits
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -546,6 +557,9 @@ class MooncakeStoreScheduler:
         """
         pool = self._gpu_block_pool
         coord = self._store_coord
+        if coord is None:
+            assert not any(req_meta.can_save for req_meta in meta.requests)
+            return
         block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
         for req_meta in meta.requests:
             if not req_meta.can_save:
@@ -629,6 +643,7 @@ class MooncakeStoreScheduler:
             completed_token_len=request.num_computed_tokens,
         )
         coord = self._store_coord
+        assert coord is not None
         req_meta.boundary_puts = [
             *_partial_tail_non_mamba_puts(
                 coord,
