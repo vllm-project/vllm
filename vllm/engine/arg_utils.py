@@ -120,6 +120,7 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import configure_logging_if_needed, init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
+from vllm.plugins.model_metadata import MetadataSource, prepare_model_metadata_source
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import maybe_override_with_speculators
 from vllm.transformers_utils.repo_utils import get_model_path
@@ -847,6 +848,12 @@ class EngineArgs:
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
     ) = None
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
+    _metadata_source: MetadataSource | None = dataclasses.field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _metadata_source_identity: tuple[
+        str, str | None, str | None, str | None, str | None
+    ] = dataclasses.field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -897,6 +904,18 @@ class EngineArgs:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
+        self._metadata_source = prepare_model_metadata_source(
+            MetadataSource(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                tokenizer_revision=self.tokenizer_revision,
+                code_revision=self.code_revision,
+                cache_root=str(huggingface_hub.constants.HF_HUB_CACHE),
+                offline=bool(huggingface_hub.constants.HF_HUB_OFFLINE),
+                use_modelscope=envs.VLLM_USE_MODELSCOPE,
+            )
+        )
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
             # Skip cloud storage URIs (s3://, gs://, az://) — they are not
@@ -922,6 +941,13 @@ class EngineArgs:
                         tokenizer_id,
                         self.tokenizer,
                     )
+        self._metadata_source_identity = (
+            self.model,
+            self.tokenizer,
+            self.revision,
+            self.tokenizer_revision,
+            self.code_revision,
+        )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -1921,7 +1947,7 @@ class EngineArgs:
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
-        attrs = [attr.name for attr in dataclasses.fields(cls)]
+        attrs = [attr.name for attr in dataclasses.fields(cls) if attr.init]
 
         # Set the attributes from the parsed arguments.
         engine_args = cls(
@@ -1941,6 +1967,7 @@ class EngineArgs:
 
         return ModelConfig(
             model=self.model,
+            metadata_source=self._metadata_source,
             model_weights=self.model_weights,
             hf_config_path=self.hf_config_path,
             runner=self.runner,

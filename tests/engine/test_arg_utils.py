@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from argparse import ArgumentError
+from argparse import ArgumentError, Namespace
 from contextlib import AbstractContextManager, nullcontext
+from importlib import import_module
+from pathlib import Path
 from typing import Annotated, Literal
+from unittest.mock import Mock
 
+import huggingface_hub
 import pytest
 from pydantic import Field
 
+import vllm.envs as envs
+import vllm.plugins as plugins
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -16,6 +22,7 @@ from vllm.config import (
     ModelConfig,
     config,
 )
+from vllm.engine import arg_utils
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -28,6 +35,12 @@ from vllm.engine.arg_utils import (
     literal_to_kwargs,
     optional_type,
     parse_type,
+)
+from vllm.plugins import model_metadata
+from vllm.plugins.model_metadata import (
+    MetadataProvider,
+    MetadataSource,
+    register_model_metadata_provider,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -50,6 +63,196 @@ def test_optional_type():
     optional_type_func = optional_type(int)
     assert optional_type_func("None") is None
     assert optional_type_func("42") == 42
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_metadata_source_runs_before_offline_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    events: list[str] = []
+    commit = "a" * 40
+    repo = tmp_path / "models--org--model"
+    snapshot = repo / "snapshots" / commit
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path))
+    monkeypatch.setitem(vars(envs), "VLLM_USE_MODELSCOPE", False)
+    monkeypatch.setattr(model_metadata, "_provider", None)
+    modules = [
+        import_module(name)
+        for name in (
+            "huggingface_hub",
+            "huggingface_hub.hf_api",
+            "huggingface_hub._snapshot_download",
+        )
+    ]
+    missing = object()
+    original = [getattr(module, "snapshot_download", missing) for module in modules]
+    received: list[MetadataSource] = []
+    repo_existed_before_prepare: list[bool] = []
+
+    def prepare_source(source: MetadataSource) -> None:
+        events.append("source")
+        received.append(source)
+        repo_existed_before_prepare.append(repo.exists())
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}", encoding="utf-8")
+        (repo / "refs").mkdir()
+        (repo / "refs" / "release").write_text(commit, encoding="utf-8")
+
+    provider = Mock(spec=MetadataProvider)
+    provider.prepare_source.side_effect = prepare_source
+    monkeypatch.setattr(
+        plugins,
+        "load_general_plugins",
+        lambda: register_model_metadata_provider(provider),
+    )
+    native_get_model_path = arg_utils.get_model_path
+
+    def get_model_path(model: str, revision: str | None = None):
+        events.append("native")
+        return native_get_model_path(model, revision)
+
+    monkeypatch.setattr(arg_utils, "get_model_path", get_model_path)
+    args = EngineArgs(
+        model="org/model", revision="release", code_revision="code-release"
+    )
+
+    assert events == ["source", "native"]
+    # Asserted outside the provider: exceptions raised inside prepare_source
+    # are swallowed by design and would only surface as a warning.
+    assert received == [
+        MetadataSource(
+            model="org/model",
+            tokenizer=None,
+            revision="release",
+            tokenizer_revision=None,
+            code_revision="code-release",
+            cache_root=str(tmp_path),
+            offline=True,
+            use_modelscope=False,
+        )
+    ]
+    assert repo_existed_before_prepare == [False]
+    assert args._metadata_source is not None
+    assert args._metadata_source.model == "org/model"
+    assert args._metadata_source.revision == "release"
+    assert Path(args.model) == snapshot
+    assert Path(args.model).name == commit
+    assert args._metadata_source_identity == (
+        str(snapshot),
+        None,
+        "release",
+        None,
+        "code-release",
+    )
+    for before, module in zip(original, modules):
+        assert getattr(module, "snapshot_download", missing) is before
+
+    model_config = Mock()
+    monkeypatch.setattr(arg_utils, "ModelConfig", model_config)
+    args.create_model_config()
+    assert model_config.call_args.kwargs["metadata_source"] is args._metadata_source
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_from_cli_args_ignores_metadata_source(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(model_metadata, "_provider", None)
+    monkeypatch.setattr(plugins, "load_general_plugins", lambda: None)
+
+    args = EngineArgs.from_cli_args(
+        Namespace(
+            model="org/model",
+            _metadata_source=object(),
+            _metadata_source_identity=object(),
+        )
+    )
+    assert args.model == "org/model"
+    assert args._metadata_source is None
+    assert args._metadata_source_identity == ("org/model", None, None, None, None)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("has_metadata_source", [False, True])
+def test_llm_from_engine_args_preserves_metadata_source(
+    monkeypatch: pytest.MonkeyPatch, has_metadata_source: bool
+):
+    from vllm.entrypoints import llm
+    from vllm.entrypoints.serve.utils.api_utils import get_non_default_args
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(model_metadata, "_provider", None)
+    monkeypatch.setattr(plugins, "load_general_plugins", lambda: None)
+    args = EngineArgs(model="resolved/model")
+    if has_metadata_source:
+        args._metadata_source = MetadataSource(
+            model="org/model",
+            tokenizer=None,
+            revision="release",
+            tokenizer_revision=None,
+            code_revision=None,
+            cache_root="cache",
+            offline=True,
+            use_modelscope=False,
+        )
+
+    class StopBeforeEngine(Exception):
+        pass
+
+    create_engine = Mock(side_effect=StopBeforeEngine)
+    monkeypatch.setattr(llm.LLMEngine, "from_engine_args", create_engine)
+    with pytest.raises(StopBeforeEngine):
+        llm.LLM.from_engine_args(args)
+
+    rebuilt_args = create_engine.call_args.kwargs["engine_args"]
+    assert rebuilt_args._metadata_source is args._metadata_source
+    assert rebuilt_args.model == args.model
+    non_default_args = get_non_default_args(rebuilt_args)
+    assert "_metadata_source" not in non_default_args
+    assert "_metadata_source_identity" not in non_default_args
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model", "org/other-model"),
+        ("tokenizer", "org/other-tokenizer"),
+        ("revision", "other-revision"),
+        ("tokenizer_revision", "other-tokenizer-revision"),
+        ("code_revision", "other-code-revision"),
+    ],
+)
+def test_llm_from_engine_args_refreshes_changed_metadata_source(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str
+):
+    from vllm.entrypoints import llm
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(model_metadata, "_provider", None)
+    monkeypatch.setattr(plugins, "load_general_plugins", lambda: None)
+    register_model_metadata_provider(Mock(spec=MetadataProvider))
+    args = EngineArgs(model="org/model")
+    original_source = args._metadata_source
+    assert original_source is not None
+    setattr(args, field, value)
+
+    class StopBeforeEngine(Exception):
+        pass
+
+    create_engine = Mock(side_effect=StopBeforeEngine)
+    monkeypatch.setattr(llm.LLMEngine, "from_engine_args", create_engine)
+    with pytest.raises(StopBeforeEngine):
+        llm.LLM.from_engine_args(args)
+
+    rebuilt_args = create_engine.call_args.kwargs["engine_args"]
+    assert rebuilt_args._metadata_source is not None
+    assert rebuilt_args._metadata_source is not original_source
+    assert getattr(rebuilt_args._metadata_source, field) == value
 
 
 def test_watermark_config_cli():

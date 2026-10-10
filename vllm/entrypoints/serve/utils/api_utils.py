@@ -221,6 +221,8 @@ def get_non_default_args(args: Namespace | EngineArgs) -> dict[str, Any]:
     elif isinstance(args, EngineArgs):
         default_args = EngineArgs(model=args.model)  # Create default instance
         for field in dataclasses.fields(args):
+            if not field.init:
+                continue
             current_val = getattr(args, field.name)
             default_val = getattr(default_args, field.name)
             if current_val != default_val:
