@@ -136,8 +136,15 @@ impl OpenAIChatBackend {
                         }
                     }
 
+                    if first_token_received {
+                        output.success = true;
+                    } else {
+                        output.success = false;
+                        output.error = "Never received a valid chunk to calculate TTFT. \
+                                        This response will be marked as failed!"
+                            .to_string();
+                    }
                     output.generated_text = generated_text;
-                    output.success = true;
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
                 } else {
                     let status = response.status();
@@ -425,6 +432,28 @@ mod tests {
         assert!(
             (decode_time - itl_sum).abs() < 1e-6,
             "latency - ttft ({decode_time}s) != sum(itl) ({itl_sum}s)"
+        );
+    }
+
+    /// A clean 200 stream that never carries a token must fail, as in the
+    /// completions backend and Python; otherwise it counts as a success with
+    /// zero TTFT and E2EL.
+    #[tokio::test]
+    async fn test_tokenless_stream_is_failed() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(0, std::time::Duration::ZERO),
+            model: "test-model".to_string(),
+            output_len: 3,
+            ..Default::default()
+        };
+
+        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
+
+        assert!(!output.success);
+        assert!(
+            output.error.contains("Never received a valid chunk"),
+            "{}",
+            output.error
         );
     }
 
