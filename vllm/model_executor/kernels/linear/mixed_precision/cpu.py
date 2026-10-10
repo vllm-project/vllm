@@ -5,6 +5,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
@@ -13,6 +14,8 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
+
+logger = init_logger(__name__)
 
 _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
 
@@ -166,13 +169,22 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 zp.data = zp.t().contiguous()
 
         supports_amx = torch.cpu._is_amx_tile_supported()
+        # int4_scaled_mm_cpu is an AVX-512 kernel: its inner gemm goes through
+        # oneDNN brgemm, which uses VNNI when AMX tiles are unavailable.
+        supports_avx512_bf16 = torch.cpu._is_avx512_bf16_supported()
         supports_riscv = current_platform.get_cpu_architecture() == CpuArchEnum.RISCV
         layer.use_w4a8 = (
             envs.VLLM_CPU_INT4_W4A8
             and self.config.act_type == torch.bfloat16
-            and (supports_amx or supports_riscv)
+            and (supports_amx or supports_avx512_bf16 or supports_riscv)
         )
-        # layer.use_w4a8 = False
+        logger.info_once(
+            "CPUWNA16 linear using %s (amx=%s, avx512_bf16=%s, riscv=%s)",
+            "W4A8" if layer.use_w4a8 else "W4A16",
+            supports_amx,
+            supports_avx512_bf16,
+            supports_riscv,
+        )
         # AWQ format will be converted to GPTQ format in `AutoAWQMarlinLinearMethod`
         if layer.use_w4a8:
             self._process_gptq_weights_w4a8(layer)
