@@ -1087,6 +1087,18 @@ class RocmPlatform(Platform):
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
 
+        # Ensure gated RMSNorm kernel is always enabled, unless disabled by user
+        # or the model is quantized (need two-stage kernel decomposition to
+        # enable RocmAiterRMSNormQuantFusionPass)
+        model_config = vllm_config.model_config
+        if (
+            model_config is not None
+            and model_config.quantization is None
+            and "+rms_norm_gated" not in compilation_config.custom_ops
+            and "-rms_norm_gated" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rms_norm_gated")
+
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm.config.compilation import CUDAGraphMode
