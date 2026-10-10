@@ -1089,13 +1089,42 @@ def zero_experts_compute_triton(
     return output
 
 
+def get_candidate_device_names(device_name: str) -> list[str]:
+    """Return prioritized candidate device names for MoE config lookup.
+
+    Allows variants within the same architecture family (e.g. H100 PCIe,
+    H100 NVL, H100 SXM5, H800, A100 PCIe/SXM4, A800) to fall back to
+    shared tuned configurations.
+    """
+    candidates = [device_name]
+    tokens = device_name.replace("-", "_").split("_")
+    if "H200" in tokens:
+        if "NVIDIA_H200" not in candidates:
+            candidates.append("NVIDIA_H200")
+    elif "H100" in tokens or "H800" in tokens:
+        for fallback in ("NVIDIA_H100_80GB_HBM3", "NVIDIA_H100"):
+            if fallback not in candidates:
+                candidates.append(fallback)
+    elif "A100" in tokens or "A800" in tokens:
+        for fallback in ("NVIDIA_A100-SXM4-80GB", "NVIDIA_A100-SXM4-40GB"):
+            if fallback not in candidates:
+                candidates.append(fallback)
+    return candidates
+
+
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
 def get_config_file_name(
-    E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
+    E: int,
+    N: int,
+    dtype: str | None,
+    block_shape: list[int] | None = None,
+    device_name: str | None = None,
 ) -> str:
-    device_name = get_device_name_as_file_name()
+    """Construct the JSON filename for a tuned fused MoE configuration."""
+    if device_name is None:
+        device_name = get_device_name_as_file_name()
     # Set device_name to H200 if a device from the H200 family is detected
-    if "H200" in device_name.split("_"):
+    if "H200" in device_name.replace("-", "_").split("_"):
         device_name = "NVIDIA_H200"
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     block_shape_selector = (
@@ -1125,24 +1154,26 @@ def get_moe_configs(
         return None
 
     # First look up if an optimized configuration is available in the configs
-    # directory
+    # directory across candidate device names in the family hierarchy
     block_shape = [block_n, block_k] if block_n and block_k else None
-    json_file_name = get_config_file_name(E, N, dtype, block_shape)
+    base_device_name = get_device_name_as_file_name()
+    device_candidates = get_candidate_device_names(base_device_name)
+
+    candidate_file_names = []
+    for dev in device_candidates:
+        fn = get_config_file_name(E, N, dtype, block_shape, device_name=dev)
+        if fn not in candidate_file_names:
+            candidate_file_names.append(fn)
 
     config_file_paths = []
-
-    # note that we prioritize user defined config
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    if user_defined_config_folder is not None:
-        user_defined_config_file_path = os.path.join(
-            user_defined_config_folder, json_file_name
-        )
-        config_file_paths.append(user_defined_config_file_path)
+    configs_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "configs")
 
-    default_config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
-    )
-    config_file_paths.append(default_config_file_path)
+    if user_defined_config_folder is not None:
+        for fn in candidate_file_names:
+            config_file_paths.append(os.path.join(user_defined_config_folder, fn))
+    for fn in candidate_file_names:
+        config_file_paths.append(os.path.join(configs_dir, fn))
 
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
@@ -1339,11 +1370,24 @@ def get_default_config(
         else:
             block_n = block_shape[0]
             num_stages = 3
+        tokens_per_expert = (M * topk) // max(E, 1)
+        if E >= 64:
+            block_m = (
+                16
+                if tokens_per_expert <= 8
+                else (32 if tokens_per_expert <= 16 else 64)
+            )
+            block_m = max(16, min(block_m, block_shape[0]))
+            group_m = 1 if tokens_per_expert < 2 * block_m else 32
+        else:
+            block_m = 16 if M <= 64 else 64
+            block_m = max(16, min(block_m, block_shape[0]))
+            group_m = 1 if M <= 16 else 32
         config = {
-            "BLOCK_SIZE_M": 16 if M <= 64 else 64,
+            "BLOCK_SIZE_M": block_m,
             "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_shape[1],
-            "GROUP_SIZE_M": 1 if M <= 16 else 32,
+            "GROUP_SIZE_M": group_m,
             "SPLIT_K": 1,
             "num_warps": 4,
             "num_stages": num_stages,
@@ -1371,31 +1415,49 @@ def get_default_config(
         # Tile sizes scale with batch: small batches are memory-bound
         # (favor tall-K tiles), large batches are compute-bound (favor
         # large M/N tiles with more warps).
-        if M <= 32:
-            block_m = 16
-        elif M <= 96:
-            block_m = 32
-        elif M <= 512:
-            block_m = 64
+        if E >= 64:
+            tokens_per_expert = (M * topk) // max(E, 1)
+            if tokens_per_expert <= 8:
+                block_m = 16
+            elif tokens_per_expert <= 16:
+                block_m = 32
+            elif tokens_per_expert <= 64 or N <= 176:
+                block_m = 64
+            else:
+                block_m = 128
+            block_n = 64 if (tokens_per_expert <= 8 or N <= 176) else 128
+            block_k = (
+                64
+                if N < 128
+                else (128 if dtype == "fp8_w8a8" or tokens_per_expert <= 8 else 64)
+            )
+            group_m = 16 if tokens_per_expert > 128 else 1
         else:
-            block_m = 128
+            if M <= 32:
+                block_m = 16
+            elif M <= 96:
+                block_m = 32
+            elif M <= 512:
+                block_m = 64
+            else:
+                block_m = 128
 
-        block_n = 64 if M <= 64 else 128
+            block_n = 64 if M <= 64 else 128
 
-        # Small batches benefit from longer reduction (larger K tile),
-        # while large batches prefer more output parallelism.
-        # FP8 elements are half-width so larger K tiles are always cheap.
-        block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
+            # Small batches benefit from longer reduction (larger K tile),
+            # while large batches prefer more output parallelism.
+            # FP8 elements are half-width so larger K tiles are always cheap.
+            block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
 
-        # Grouping adjacent M-blocks lets them share weight tiles in L2.
-        # Only helps when there are enough M-blocks per expert to group;
-        # with many experts each one sees few tokens so grouping is useless.
-        tokens_per_expert = M // max(E, 1)
-        group_m = 16 if tokens_per_expert > 128 else 1
+            # Grouping adjacent M-blocks lets them share weight tiles in L2.
+            # Only helps when there are enough M-blocks per expert to group;
+            # with many experts each one sees few tokens so grouping is useless.
+            tokens_per_expert = M // max(E, 1)
+            group_m = 16 if tokens_per_expert > 128 else 1
 
         # Large batches have enough blocks to saturate the GPU, so we
         # use more warps per block to increase arithmetic intensity.
-        num_warps = 4 if M <= 128 else 8
+        num_warps = 8 if (M > 128 or (block_m >= 64 and block_n >= 128)) else 4
 
         if current_platform.is_rocm():
             num_stages = num_stages_rocm
