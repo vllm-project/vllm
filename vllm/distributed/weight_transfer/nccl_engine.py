@@ -11,7 +11,9 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.weight_transfer.nccl_common import (
+        WeightTransferCommunicator,
+    )
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -37,6 +39,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
+from vllm.utils.torch_utils import current_stream
 
 # NCCLWeightTransferInitInfo is re-exported here for convenience; its canonical
 # home is nccl_common, shared with the sparse backend.
@@ -47,6 +50,25 @@ __all__ = [
     "NCCLWeightTransferEngine",
     "NCCLTrainerWeightTransferEngine",
 ]
+
+
+def _release_communicator(
+    comm: "WeightTransferCommunicator | None",
+) -> None:
+    """Leave the transfer group if this engine's communicator holds one.
+
+    Only the `torch.distributed` transport needs this: its group stays
+    registered process-wide until someone leaves it, and holding it keeps the
+    peer's own teardown waiting. `PyNcclCommunicator` is deliberately left
+    untouched -- it has a `destroy()` of its own that calls `ncclCommAbort`, and
+    calling it here would change CUDA/ROCm teardown, which is out of scope.
+    """
+    from vllm.distributed.weight_transfer.torch_dist_transport import (
+        TorchDistTransport,
+    )
+
+    if isinstance(comm, TorchDistTransport):
+        comm.destroy()
 
 
 @dataclass
@@ -132,7 +154,7 @@ class NCCLWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        self.model_update_group: PyNcclCommunicator | None = None
+        self.model_update_group: WeightTransferCommunicator | None = None
         # Set from the trainer-supplied init info at the handshake; defaults are
         # only for the (unreachable) receive-before-init case.
         self.packed = False
@@ -222,15 +244,14 @@ class NCCLWeightTransferEngine(
                     dtype = getattr(torch, dtype_name)
                     weight = torch.empty(shape, dtype=dtype, device=self.device)
                     self.model_update_group.broadcast(
-                        weight, src=0, stream=torch.cuda.current_stream()
+                        weight, src=0, stream=current_stream()
                     )
                     self.model.load_weights([(name, weight)])
                     del weight
 
     def shutdown(self) -> None:
-        if self.model_update_group is not None:
-            # Clean up the communicator by removing the reference
-            self.model_update_group = None
+        _release_communicator(self.model_update_group)
+        self.model_update_group = None
 
 
 class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerInitInfo]):
@@ -265,7 +286,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.packed_num_buffers = packed_num_buffers
-        self.model_update_group: PyNcclCommunicator | None = None
+        self.model_update_group: WeightTransferCommunicator | None = None
 
     @classmethod
     def trainer_init(
@@ -383,7 +404,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 num_buffers=self.packed_num_buffers,
             )
         else:
-            stream = torch.cuda.current_stream()
+            stream = current_stream()
             for _name, tensor in pairs:
                 # NCCL sends `numel` elements straight from `data_ptr()`, so a
                 # non-contiguous view would ship whatever follows its base
@@ -452,8 +473,9 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         only add a dependency on the default process group that this backend
         otherwise does not have.
         """
-        if torch.cuda.is_available():
-            torch.cuda.current_stream().synchronize()
+        if torch.accelerator.is_available():
+            current_stream().synchronize()
 
     def shutdown(self) -> None:
+        _release_communicator(self.model_update_group)
         self.model_update_group = None

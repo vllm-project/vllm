@@ -11,6 +11,8 @@ from typing import Any
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
+from vllm.platforms import current_platform
+
 # Default values for packed tensor transfer.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
@@ -20,8 +22,8 @@ DEFAULT_PACKED_NUM_BUFFERS = 2
 # stream they were allocated on, so fresh streams at every call would strand the
 # packed buffers' reserved memory per call. See gh-52950.
 @cache
-def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.cuda.Stream, ...]:
-    return tuple(torch.cuda.Stream(device=device_idx) for _ in range(num_buffers))
+def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.Stream, ...]:
+    return tuple(current_platform.Stream(device=device_idx) for _ in range(num_buffers))
 
 
 def unpack_tensor(
@@ -177,7 +179,7 @@ def packed_nccl_broadcast_producer(
         # Previous chunk on this buffer slot is now safe to free
         in_flight[buffer_idx] = None
         # Start tasks for the new buffer in a new stream
-        with torch.cuda.stream(streams[buffer_idx]):
+        with current_platform.stream(streams[buffer_idx]):
             chunk = pack_tensors(iterator, post_iter_func, buffer_size_bytes)
             if chunk is None:
                 break
@@ -234,7 +236,7 @@ def packed_nccl_broadcast_consumer(
     while True:
         # Synchronize the current stream
         streams[buffer_idx].synchronize()
-        with torch.cuda.stream(streams[buffer_idx]):
+        with current_platform.stream(streams[buffer_idx]):
             # Initialize the packing tensor meta data
             packing_tensor_meta_data[buffer_idx] = []
             packing_tensor_sizes[buffer_idx] = 0
