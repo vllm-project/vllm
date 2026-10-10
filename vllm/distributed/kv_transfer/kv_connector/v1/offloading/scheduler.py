@@ -4,7 +4,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from itertools import chain, islice
+from itertools import chain
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -421,14 +421,9 @@ class RequestOffloadState:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            for req_block_hash in islice(
-                self.req.block_hashes,
-                group_config.hashes_per_chunk * len(group_state.offload_keys)
-                + group_config.hashes_per_chunk
-                - 1,
-                None,
-                group_config.hashes_per_chunk,
-            ):
+            stride = group_config.hashes_per_chunk
+            start = stride * (len(group_state.offload_keys) + 1) - 1
+            for req_block_hash in self.req.block_hashes[start::stride]:
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
                 self.req_context.set_offload_key_position(
