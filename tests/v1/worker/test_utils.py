@@ -94,6 +94,9 @@ def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeyp
         "host_to_device_bytes": [64],
         "host_cache_usage_perc": [],
         "pending_page_transfers": [],
+        "host_block_lifetime_seconds": [],
+        "host_block_idle_before_evict_seconds": [],
+        "host_block_reuse_gap_seconds": [],
     }
 
 
@@ -1065,6 +1068,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1076,6 +1080,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1149,6 +1154,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )

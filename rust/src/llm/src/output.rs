@@ -16,7 +16,9 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
-use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
+use vllm_engine_core_client::{
+    AbortCause, EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput,
+};
 
 use crate::error::Result;
 use crate::inflight::RequestGuard;
@@ -195,6 +197,35 @@ impl GenerateOutput {
     pub fn finished(&self) -> bool {
         self.finish_reason.is_some()
     }
+
+    /// Append a later output of the same request, as if both were produced in
+    /// one step. Per-token data is concatenated; per-output fields take the
+    /// later output's value, like Python's `RequestState.make_request_output()`
+    /// does for the output that flushes a stream interval.
+    fn merge(&mut self, next: GenerateOutput) {
+        debug_assert!(
+            next.prompt_info.is_none(),
+            "only the first output carries prompt info"
+        );
+        self.token_ids.extend(next.token_ids);
+        if let Some(next_logprobs) = next.logprobs {
+            match &mut self.logprobs {
+                Some(logprobs) => logprobs.positions.extend(next_logprobs.positions),
+                None => self.logprobs = Some(next_logprobs),
+            }
+        }
+        if let Some(next_mask) = next.sampling_mask {
+            match &mut self.sampling_mask {
+                Some(mask) => mask.rows.extend(next_mask.rows),
+                None => self.sampling_mask = Some(next_mask),
+            }
+        }
+        self.cached_token_count = self.cached_token_count.max(next.cached_token_count);
+        self.finish_reason = next.finish_reason;
+        self.kv_transfer_params = next.kv_transfer_params;
+        self.ec_transfer_params = next.ec_transfer_params;
+        self.spec_decode_metrics = next.spec_decode_metrics;
+    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -266,18 +297,27 @@ impl GenerateOutputStream {
     pub fn request_id(&self) -> &str {
         self.raw_stream.request_id()
     }
-}
 
-impl Stream for GenerateOutputStream {
-    type Item = Result<GenerateOutput>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let raw = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
-            Some(Ok(raw)) => raw,
-            Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
-            None => return Poll::Ready(None),
+    /// Merge the outputs of one delivery into one output, like Python
+    /// `RequestState.make_request_output()` does for outputs held back by
+    /// `stream_interval`. Request metrics still observe every raw output.
+    fn merge_delivery(&mut self, delivery: EngineCoreStreamDelivery) -> Result<GenerateOutput> {
+        // Match rather than iterate, so the common single output is converted
+        // without first being moved into an iterator.
+        let mut outputs = match delivery {
+            EngineCoreStreamDelivery::One(output) => return self.convert_output(output),
+            EngineCoreStreamDelivery::Many(outputs) => outputs.into_iter(),
         };
+        let first = outputs.next().expect("deliveries are never empty");
+        let mut merged = self.convert_output(first)?;
+        for raw in outputs {
+            merged.merge(self.convert_output(raw)?);
+        }
+        Ok(merged)
+    }
 
+    /// Convert one raw engine-core output.
+    fn convert_output(&mut self, raw: EngineCoreStreamOutput) -> Result<GenerateOutput> {
         let received_at = current_unix_timestamp_secs();
         self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
 
@@ -301,11 +341,11 @@ impl Stream for GenerateOutputStream {
         if let Some(mask) = sampling_mask.as_ref()
             && mask.rows.len() != raw.new_token_ids.len()
         {
-            return Poll::Ready(Some(Err(crate::Error::SamplingMaskTokenCountMismatch {
+            return Err(crate::Error::SamplingMaskTokenCountMismatch {
                 request_id: raw.request_id,
                 token_count: raw.new_token_ids.len(),
                 row_count: mask.rows.len(),
-            })));
+            });
         }
         let cached_token_count = raw
             .prefill_stats
@@ -331,7 +371,20 @@ impl Stream for GenerateOutputStream {
             spec_decode_metrics: raw.spec_decode_metrics,
         };
 
-        Poll::Ready(Some(Ok(output)))
+        Ok(output)
+    }
+}
+
+impl Stream for GenerateOutputStream {
+    type Item = Result<GenerateOutput>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let delivery = match ready!(Pin::new(&mut self.raw_stream).poll_next(cx)) {
+            Some(Ok(delivery)) => delivery,
+            Some(Err(error)) => return Poll::Ready(Some(Err(error.into()))),
+            None => return Poll::Ready(None),
+        };
+        Poll::Ready(Some(self.merge_delivery(delivery)))
     }
 }
 

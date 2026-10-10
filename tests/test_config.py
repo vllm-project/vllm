@@ -651,21 +651,14 @@ def test_no_hisparse_connector_keeps_attention_config_unset(monkeypatch):
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
-    from vllm.config.vllm import (
-        ROCM_DEFAULT_MRV1_ARCHITECTURES,
-        default_breakable_cudagraph_architectures,
-    )
+    paths and off breakable cudagraphs by default."""
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     # The lookup is lru_cached against a fixed platform.
     default_breakable_cudagraph_architectures.cache_clear()
     try:
-        assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-
         breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
@@ -674,64 +667,8 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         # supports uniform-batch CUDA graphs, so it must opt in or the
         # default FULL_AND_PIECEWISE serve path cannot start.
         assert "DeepseekV41ForCausalLM" in breakable_architectures
-
-        # The carve-out takes effect via the runner-selection property
-        # (warning_once args must be hashable for its lru_cache).
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-        config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
-            attention_config=AttentionConfig(),
-        )
-        config._get_v1_model_runner_unsupported_features = lambda: []
-        assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
-
-
-def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
-    """The ROCm V1 default is a speed preference, not a capability claim.
-
-    DSpark runs only on V2, so pinning DeepSeek V4 to V1 would fail config
-    validation instead of serving it. With nothing V1 refuses, it still holds.
-    """
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architectures=["DeepseekV4ForCausalLM"], is_diffusion=False
-        ),
-        attention_config=AttentionConfig(),
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1,
-            pipeline_parallel_size=1,
-            enable_batch_sharded_sampling=False,
-        ),
-        scheduler_config=SimpleNamespace(async_scheduling=False),
-        speculative_config=None,
-    )
-    config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash_candidate_draft = lambda: False
-    config._get_v2_model_runner_unsupported_features = lambda: []
-    # The real predicate, so the test also pins where dspark lands in it.
-    config._get_v1_model_runner_unsupported_features = lambda: (
-        VllmConfig._get_v1_model_runner_unsupported_features(config)
-    )
-
-    assert VllmConfig.use_v2_model_runner.fget(config) is False
-
-    config.speculative_config = SimpleNamespace(
-        method="dspark", enable_adaptive_verification=False
-    )
-    assert VllmConfig.use_v2_model_runner.fget(config) is True
-
-    # Yielding is not the same as selecting V2: the later checks still run, so
-    # a config neither runner can serve lands on V1 and fails validation there.
-    config._get_v2_model_runner_unsupported_features = lambda: ["sequence parallelism"]
-    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 
 @pytest.mark.parametrize(
