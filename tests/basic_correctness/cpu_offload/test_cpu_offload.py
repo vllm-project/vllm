@@ -87,6 +87,29 @@ def test_mrv2_weight_offloading(
         envs.disable_envs_cache()
 
 
+def test_cpu_offload_respects_byte_budget(vllm_runner, monkeypatch):
+    """The real model-loading path must respect the configured byte budget."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    envs.disable_envs_cache()
+    original_offloader = get_offloader()
+
+    try:
+        with vllm_runner(
+            "hmellor/tiny-random-LlamaForCausalLM",
+            enforce_eager=True,
+            gpu_memory_utilization=0.1,
+            max_model_len=128,
+            max_num_seqs=1,
+            cpu_offload_gb=1 / (1024**3),
+        ):
+            offloader = get_offloader()
+            assert isinstance(offloader, UVAOffloader)
+            assert offloader.cpu_offload_bytes <= offloader.cpu_offload_max_bytes
+    finally:
+        set_offloader(original_offloader)
+        envs.disable_envs_cache()
+
+
 def _is_offloaded(p: nn.Parameter) -> bool:
     return p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False)
 
