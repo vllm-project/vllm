@@ -1112,9 +1112,10 @@ def main(args: argparse.Namespace):
             )
         total_num_tokens = total_prompt_tokens + total_output_tokens
     else:
-        total_num_tokens = sum(r.prompt_len + r.expected_output_len for r in requests)
-        total_output_tokens = sum(r.expected_output_len for r in requests)
-        total_prompt_tokens = total_num_tokens - total_output_tokens
+        # Each request generates args.n sequences of expected_output_len tokens.
+        total_prompt_tokens = sum(r.prompt_len for r in requests)
+        total_output_tokens = sum(r.expected_output_len for r in requests) * args.n
+        total_num_tokens = total_prompt_tokens + total_output_tokens
 
     if is_multi_modal and args.backend != "vllm-chat":
         print(
