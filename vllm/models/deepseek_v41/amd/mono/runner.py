@@ -18,8 +18,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
+
+from vllm.models.common.mono import check_tensors
 
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Dims
 from .common.plan import BLOCKS
@@ -36,10 +39,25 @@ from .layer import (
 from .stages.dims import Dims as MoeDims
 from .stages.moe_shape import EXPERTS
 
-__all__ = ["BLOCKS", "MAX_TOKENS", "AttnWeights", "DSV41MonoLayer", "MonoLayerWeights"]
+if TYPE_CHECKING:
+    from vllm.models.common.mono import MonoRuntime
+
+    from .common.peer_memory import PeerBuffer
+
+__all__ = [
+    "BLOCKS",
+    "EPOCH_WORDS",
+    "MAX_TOKENS",
+    "PEER",
+    "AttnWeights",
+    "DSV41MonoLayer",
+    "MonoLayerWeights",
+    "peer_factory",
+]
 
 _LOG2E = 1.4426950408889634
 HC = 4
+PEER = "peer"
 
 
 def _ensure_writable_flydsl_cache() -> None:
@@ -51,17 +69,6 @@ def _ensure_writable_flydsl_cache() -> None:
     path = Path.home() / ".flydsl" / "cache"
     path.mkdir(parents=True, exist_ok=True)
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = str(path)
-
-
-def _check_tensors(owner, tag: str, want: dict) -> None:
-    """Each named tensor of ``owner`` has the (shape, dtype) the kernels read,
-    contiguous: their buffer loads are unbounded, so a mismatch would read
-    garbage rather than fault."""
-    for name, (shape, dtype) in want.items():
-        t = getattr(owner, name)
-        assert tuple(t.shape) == shape and t.dtype == dtype and t.is_contiguous(), (
-            f"{tag} {name}: {tuple(t.shape)} {t.dtype}, want {shape} {dtype}"
-        )
 
 
 @dataclass
@@ -95,7 +102,7 @@ class AttnWeights:
             "wo_b": ((HIDDEN, g * 1024), torch.float8_e4m3fn),
             "wo_b_scale": ((HIDDEN // 32, g * 32), torch.uint8),
         }
-        _check_tensors(self, f"layer {self.layer_id}", want)
+        check_tensors(self, f"layer {self.layer_id}", want)
         assert self.cos_sin.dtype == torch.float32 and self.cos_sin.shape[-1] == 64
 
 
@@ -146,23 +153,34 @@ class MonoLayerWeights:
             "sw2": ((HIDDEN, d.sh_inter), e4m3),
             "sw2_s": ((HIDDEN // 32, d.sh_inter // 32), u8),
         }
-        _check_tensors(self, "MoE", want)
+        check_tensors(self, "MoE", want)
+
+
+def peer_factory(nbytes: int, rank: int, world: int, group, device) -> PeerBuffer:
+    """Zeroed symmetric peer memory for the in-kernel TP all-reduces."""
+    from .common.peer_memory import PeerBuffer
+
+    peer = PeerBuffer(nbytes, group, rank, world, device)
+    peer.bytes.zero_()
+    return peer
 
 
 class DSV41MonoLayer:
-    """The mono decode runner of one TP rank (``group``: its TP group, for the
-    peer-memory handle exchange; a gloo / CPU group)."""
+    """The mono decode kernels of one TP rank, over a shared ``MonoRuntime``.
 
-    def __init__(self, tp: int, rank: int, group, device: torch.device | str = "cuda"):
+    The runtime holds what the persistent launches wait on (a width's scratch,
+    the symmetric peer buffer, the mailbox epoch); this object holds what the
+    kernels read between steps (the staging buffers and the built kernels).
+    """
+
+    def __init__(self, rt: MonoRuntime):
         _ensure_writable_flydsl_cache()
-        from .common.peer_memory import PeerBuffer
-
-        self.tp, self.rank = tp, rank
-        self.d = Dims(tp)
-        dev = self.device = torch.device(device)
-        self._scratch: dict[int, torch.Tensor] = {}
-        # [epoch, -, -, -, a mark per CTA, the MoE's counters]
-        self.epoch = torch.zeros(EPOCH_WORDS, dtype=torch.int32, device=dev)
+        self.rt = rt
+        self.tp, self.rank = rt.world, rt.rank
+        self.d = Dims(self.tp)
+        dev = self.device = rt.device
+        assert rt.epoch is not None, "the mono runtime needs EPOCH_WORDS"
+        self.epoch = rt.epoch
         self.q = torch.zeros(
             MAX_TOKENS, self.d.heads, HEAD_DIM, dtype=torch.bfloat16, device=dev
         )
@@ -177,8 +195,7 @@ class DSV41MonoLayer:
         self.post_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
         self.comb_a = torch.zeros(MAX_TOKENS, HC, HC, dtype=torch.float32, device=dev)
         self.pre_a = torch.zeros(MAX_TOKENS, HC, dtype=torch.float32, device=dev)
-        self.peer = PeerBuffer(2 * peer_half_bytes(tp), group, rank, tp, dev)
-        self.peer.bytes.zero_()
+        self.peer = rt.reserve(PEER, peer_bytes=2 * peer_half_bytes(self.tp)).peer
         self._qk_scale = (
             torch.tensor([HEAD_DIM**-0.5 * _LOG2E], dtype=torch.float32)
             .view(torch.int32)
@@ -188,20 +205,12 @@ class DSV41MonoLayer:
 
     def scratch(self, tokens: int) -> torch.Tensor:
         """Step width ``tokens``'s scratch: a width's layout has memory of its own
-        (``layer.scratch_layout``). Allocated at the width's first step, which is
-        eager: vLLM runs every graph's batch eagerly before capturing it."""
-        buf = self._scratch.get(tokens)
-        if buf is None:
-            if torch.cuda.is_current_stream_capturing():
-                raise RuntimeError(
-                    f"DSv4.1 mono decode: step width {tokens} first reached inside "
-                    "a CUDA graph capture"
-                )
-            buf = torch.zeros(
-                scratch_bytes(tokens, self.tp), dtype=torch.uint8, device=self.device
-            )
-            self._scratch[tokens] = buf
-        return buf
+        (``layer.scratch_layout``)."""
+        res = self.rt.reserve(
+            (tokens, "layer"), scratch_bytes=scratch_bytes(tokens, self.tp)
+        )
+        assert res.scratch is not None
+        return res.scratch
 
     @staticmethod
     def supports(tokens: int) -> bool:

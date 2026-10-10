@@ -14,12 +14,13 @@ import torch
 
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.models.common.mono import MonoRuntime
 from vllm.models.deepseek_v41.amd import mono_decode as md
 
 M = 6
 
 
-class _Runner:
+class _Kernels:
     def __init__(self):
         self.calls = []
 
@@ -71,10 +72,21 @@ def _inputs(rows=M):
     )
 
 
+def _runtime(monkeypatch) -> MonoRuntime:
+    """The op's runtime on the CPU: the real step gate, no device resources."""
+    import vllm.distributed as distributed
+
+    group = SimpleNamespace(rank_in_group=0, world_size=2, cpu_group=None)
+    monkeypatch.setattr(distributed, "get_tp_group", lambda: group)
+    rt = MonoRuntime(md.DSV41_MONO, _config(), device=torch.device("cpu"))
+    monkeypatch.setattr(md, "_runtime", lambda vllm_config: rt)
+    return rt
+
+
 @pytest.fixture
 def run(monkeypatch):
     """Call the mono path for one layer under a forward context built from
-    ``mode`` and ``metadata``; returns (result, runner calls)."""
+    ``mode`` and ``metadata``; returns (result, kernel calls)."""
 
     def _run(
         mode=CUDAGraphMode.FULL, metadata=None, ffn_only=False, entry=None, **inputs
@@ -85,19 +97,23 @@ def run(monkeypatch):
                 "comp": SimpleNamespace(block_size=128, block_table=None),
             }
         fc = SimpleNamespace(cudagraph_runtime_mode=mode, attn_metadata=metadata)
-        runner = _Runner()
+        kernels = _Kernels()
         monkeypatch.setattr(md, "is_forward_context_available", lambda: True)
         monkeypatch.setattr(md, "get_forward_context", lambda: fc)
-        monkeypatch.setattr(md, "_mono_runner", lambda device: runner)
-        monkeypatch.setattr(md.MonoDecodeLayer, "weights", lambda self, layer: None)
+        monkeypatch.setattr(md.MonoDecodeLayer, "weights", property(lambda self: None))
         args = {**_inputs(), **inputs}
-        mono = md.MonoDecodeLayer(ffn_only)
-        if (entry or ("ffn" if ffn_only else "layer")) == "ffn":
-            # x stands for wo_b's unreduced output; the first layer's attention
-            # has no compressed cache
+        is_ffn = (entry or ("ffn" if ffn_only else "layer")) == "ffn"
+        # the first layer's attention has no compressed cache
+        mono = md.MonoDecodeLayer.__new__(md.MonoDecodeLayer)
+        mono.layer = _layer(comp=None if is_ffn else "comp")
+        mono.ffn_only = ffn_only
+        mono.rt = _runtime(monkeypatch)
+        mono._kernels = kernels
+        if is_ffn:
+            # x stands for wo_b's unreduced output
             part, _ = args.pop("x"), args.pop("positions")
-            return mono.ffn(_layer(comp=None), part, **args), runner.calls
-        return mono(_layer(), **args), runner.calls
+            return mono.ffn(part, **args), kernels.calls
+        return mono.forward(**args), kernels.calls
 
     return _run
 
@@ -219,7 +235,7 @@ def test_layers_take_whole_or_ffn_launch(monkeypatch, layer, path):
     """The whole-layer kernels serve the standard layers; every other backbone
     layer keeps vLLM's attention and runs its FFN half as one launch."""
     _deployment(monkeypatch)
-    mono = md.MonoDecodeLayer.create(layer, _config())
+    mono = md.MonoDecodeLayer.create(_config(), layer=layer)
     got = None if mono is None else "ffn" if mono.ffn_only else "whole"
     assert got == path
 
@@ -256,12 +272,26 @@ def test_other_steps_reduce_wo_b_themselves(run, case):
 
 def _config(**parallel):
     parallel = (
-        dict(enable_expert_parallel=False, enable_eplb=False, data_parallel_size=1)
+        dict(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
+            enable_expert_parallel=False,
+            enable_eplb=False,
+        )
         | parallel
     )
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40)),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(num_hidden_layers=40), dtype=torch.bfloat16
+        ),
         parallel_config=SimpleNamespace(**parallel),
+        cache_config=SimpleNamespace(cache_dtype="fp8_ds_mla"),
+        speculative_config=None,
+        lora_config=None,
+        kv_transfer_config=None,
+        aux_output_config=SimpleNamespace(enable_return_routed_experts=False),
     )
 
 
@@ -272,19 +302,20 @@ def _deployment(monkeypatch, cdna=4, cus=256):
     monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
-    monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(md, "_compute_units", lambda: cus)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(md.current_platform, "num_compute_units", lambda _: cus)
     name = "vllm.models.deepseek_v41.amd.mono.runner"
     runner = ModuleType(name)
     runner.BLOCKS = 256  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, name, runner)
+    _runtime(monkeypatch)
 
 
 @pytest.mark.parametrize("cdna", [3, 5])
 def test_opt_in_outside_the_kernels_cdna_raises(monkeypatch, cdna):
     _deployment(monkeypatch, cdna=cdna)
-    with pytest.raises(ValueError, match="needs CDNA4"):
-        md.MonoDecodeLayer.create(_decoder_layer(), _config())
+    with pytest.raises(ValueError, match="want CDNA4"):
+        md.MonoDecodeLayer.create(_config(), layer=_decoder_layer())
 
 
 def _other_backend():
@@ -297,9 +328,9 @@ def _other_backend():
 @pytest.mark.parametrize(
     "case, match",
     [
-        (dict(parallel=dict(enable_expert_parallel=True)), "no expert"),
-        (dict(parallel=dict(data_parallel_size=2)), "no expert"),
-        (dict(parallel=dict(enable_eplb=True)), "no expert"),
+        (dict(parallel=dict(enable_expert_parallel=True)), "expert parallelism is on"),
+        (dict(parallel=dict(data_parallel_size=2)), "data parallelism is on"),
+        (dict(parallel=dict(enable_eplb=True)), "expert load balancing"),
         (dict(a4w4=True), "A8W4"),
         (dict(layer=_other_backend), "AITER_MXFP4_BF16"),
         (dict(cus=128), "256 compute units"),
@@ -314,4 +345,4 @@ def test_opt_in_outside_the_kernels_moe_raises(monkeypatch, case, match):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
     layer = case.get("layer", _decoder_layer)()
     with pytest.raises(ValueError, match=match):
-        md.MonoDecodeLayer.create(layer, _config(**case.get("parallel", {})))
+        md.MonoDecodeLayer.create(_config(**case.get("parallel", {})), layer=layer)

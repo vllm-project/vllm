@@ -1,20 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU tests of the live-mode step logic (mono/live.py ``MonoLive``, built bare around
-fake kernel ops) and the dispatch custom op: the eager health check and its fail-stop,
-rank-uniform votes, the op schema and no-alias contract, the step decision outside the
-op, KV cache rebinding after CUDA-graph memory profiling, RoPE tables / metadata lookup,
-and ``Glm5MonoKernel.forward``'s launch caching (needs FlyDSL)."""
+fake kernel ops) and the library's mono-layer custom op: the eager health check and its
+fail-stop, rank-uniform votes, the op schema and no-alias contract, the step decision
+outside the op, KV cache rebinding after CUDA-graph memory profiling, RoPE tables /
+metadata lookup, and ``Glm5MonoKernel.forward``'s launch caching (needs FlyDSL)."""
 
+from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
 import torch
 
+from vllm.models.common.mono import MonoRuntime, StepDecision
+from vllm.models.common.mono.runtime import NO_STEP
 from vllm.models.deepseek_v32.amd.mono import dispatch as D
 from vllm.models.deepseek_v32.amd.mono import guards as G
 from vllm.models.deepseek_v32.amd.mono import live as LV
 from vllm.models.deepseek_v32.amd.mono.kernel.glm.layout import POLL_STAGES
+from vllm.models.deepseek_v32.amd.mono.spec import GLM5_MONO
 
 H = 16  # stand-in hidden size
 
@@ -35,8 +39,6 @@ def _single_rank_boundary_norm(monkeypatch):
 class ScratchOp:
     """Sticky poll-error words in a scratch buffer, as Glm5MonoKernel.poll_error."""
 
-    _owns_runtime = True
-
     def __init__(self):
         n = 4 * len(POLL_STAGES)
         self.scr_layout = {"poll_err": 0, "poll_abort": n}
@@ -53,17 +55,34 @@ class ScratchOp:
         return expired
 
 
-def bare_live(step_sync=True, check_every=1):
+def bare_rt(widths=(1,), vote=True, vote_each_step=False):
+    """A MonoRuntime on CPU whose vote is a recording single-rank identity."""
+    rt = MonoRuntime.__new__(MonoRuntime)
+    rt.spec = replace(GLM5_MONO, widths=widths)
+    rt.vllm_config = None
+    rt.rank, rt.world, rt.cpu_group = 0, 1, None
+    rt.device = torch.device("cpu")
+    rt._peer_factory, rt.epoch = None, None
+    rt._voting, rt._vote_each_step = vote, vote_each_step
+    rt._reserved, rt.enabled, rt._voted = {}, True, None
+    rt.step_index, rt.step = 0, NO_STEP
+    rt.votes = []
+    rt.vote = lambda ok: (rt.votes.append(ok), ok)[1]
+    return rt
+
+
+def bare_live(step_sync=True, check_every=1, widths=(1,)):
+    S = widths[0]
     lv = LV.MonoLive.__new__(LV.MonoLive)
     lv.cfg = LV.LiveConfig(ckpt="x", step_sync=step_sync, check_every=check_every)
-    lv.rank, lv.enabled = 0, True
+    lv.rank = 0
     lv.dev_nonfinite = None
-    lv.sizes = (1,)
-    lv.ops = {(3, 1): ScratchOp()}
-    lv._st = dict(T=1, S=1, md=None)
-    lv._n_mono, lv._voted = 1, None
-    lv.votes = []
-    lv._go = lambda ok: (lv.votes.append(ok), ok)[1]  # single-rank CPU group
+    lv.sizes = widths
+    lv.ops = {(3, S): ScratchOp()}
+    lv._st = dict(T=1, S=S, md=None)
+    lv.rt = bare_rt(widths, vote=step_sync, vote_each_step=check_every <= 0)
+    lv.rt.reserve((S, False), owner=lv.ops[(3, S)], width=S)
+    lv.rt.step_index = 1
     return lv
 
 
@@ -80,7 +99,7 @@ def test_health_check_disables(monkeypatch, bad):
     else:
         out[0, 0] = float("nan")
     lv._end_step(out)
-    assert lv.enabled is False and lv.votes == [False]
+    assert lv.rt.enabled is False and lv.rt.votes == [False]
 
 
 @pytest.mark.usefixtures("no_device_sync")
@@ -104,6 +123,7 @@ def test_eager_expiry_reaches_poll_watch(monkeypatch):
             watch.after_step()  # clean snapshot of step N-1
         op.words()[0] = 1  # step N: a wait expires
         if mode == "1":  # raise (default): the eager check fail-stops, words stay set
+            assert watch is not None
             with pytest.raises(RuntimeError, match="fail-stop"):
                 lv._end_step(out)
             watch.after_step()  # compute_logits of step N: snapshot
@@ -111,7 +131,7 @@ def test_eager_expiry_reaches_poll_watch(monkeypatch):
                 watch.after_step()  # step N+1: the watch fail-stops too
             continue
         lv._end_step(out)
-        assert lv.enabled is False
+        assert lv.rt.enabled is False
         if watch:  # warn: the watch still reports the incident, then clears
             assert op.words()[0] == 1
             watch.after_step()
@@ -122,54 +142,58 @@ def test_eager_expiry_reaches_poll_watch(monkeypatch):
 
 @pytest.mark.usefixtures("no_device_sync")
 def test_step_sync_votes():
-    """Rank-uniform votes only at the first step, while off and on check steps."""
+    """Rank-uniform votes only at the first step, while off and on check steps: the
+    runtime holds the state, MonoLive's end-of-step health check folds a vote into the
+    sync it already took."""
     out = torch.zeros(1, 4)
     # check_every=1: one vote per mono step, taken with the health check at its end
     lv = bare_live(check_every=1)
-    assert lv._state_reason() == "" and lv.votes == [True]  # first step: vote at begin
+    rt = lv.rt
+    assert rt._state_reason() == "" and rt.votes == [True]  # first step: vote at begin
     for n in range(1, 4):
-        lv._n_mono = n
+        rt.step_index = n
         lv._end_step(out)
-        assert lv._state_reason() == ""  # rides on the end-of-step vote
-    assert lv.votes == [True] * 4, lv.votes
+        assert rt._state_reason() == ""  # rides on the end-of-step vote
+    assert rt.votes == [True] * 4, rt.votes
     # a local disable applies through the next vote, on every rank at the same step
-    lv.enabled = False
-    assert lv._state_reason() == ""
-    lv._n_mono += 1
+    rt.enabled = False
+    assert rt._state_reason() == ""
+    rt.step_index += 1
     lv._end_step(out)
-    assert lv.votes[-1] is False and lv._state_reason() == "disabled"
-    nv = len(lv.votes)
-    assert lv._state_reason() == "disabled" and len(lv.votes) == nv + 1  # off: vote
-    lv.enabled = True
-    assert lv._state_reason() == "" and lv.votes[-1] is True
-    lv._go = lambda ok: False  # a peer is disabled
-    lv._voted = None
-    assert lv._state_reason() == "peer_no_go"
+    assert rt.votes[-1] is False and rt._state_reason() == "disabled"
+    nv = len(rt.votes)
+    assert rt._state_reason() == "disabled" and len(rt.votes) == nv + 1  # off: vote
+    rt.enabled = True
+    assert rt._state_reason() == "" and rt.votes[-1] is True
+    rt.vote = lambda ok: False  # a peer is disabled
+    rt._voted = None
+    assert rt._state_reason() == "peer_no_go"
     # check_every=3: votes only on check steps
     lv = bare_live(check_every=3)
-    lv._state_reason()
+    lv.rt._state_reason()
     for n in range(1, 7):
-        lv._n_mono = n
+        lv.rt.step_index = n
         lv._end_step(out)
-        assert lv._state_reason() == ""
-    assert len(lv.votes) == 1 + 2, lv.votes
+        assert lv.rt._state_reason() == ""
+    assert len(lv.rt.votes) == 1 + 2, lv.rt.votes
     # check_every=0 (no health check): a vote at every candidate step
-    lv = bare_live(check_every=0)
-    assert [lv._state_reason() for _ in range(3)] == [""] * 3 and len(lv.votes) == 3
+    rt = bare_live(check_every=0).rt
+    assert [rt._state_reason() for _ in range(3)] == [""] * 3 and len(rt.votes) == 3
     # no step_sync (FULL graphs): never a vote, enabled read directly
-    lv = bare_live(step_sync=False)
-    assert lv._state_reason() == ""
-    lv.enabled = False
-    assert lv._state_reason() == "disabled" and lv.votes == []
+    rt = bare_live(step_sync=False).rt
+    assert rt._state_reason() == ""
+    rt.enabled = False
+    assert rt._state_reason() == "disabled" and rt.votes == []
 
 
 class FakeDecode:
-    """active() stand-in: the first layer mutates residual, outputs are fresh."""
+    """A registered MonoOp stand-in: the first layer mutates residual, outputs are
+    fresh."""
 
     def __init__(self):
         self.zbuf = [torch.zeros(8, H) for _ in range(4)]
 
-    def forward_layer_impl(self, layer_idx, positions, hidden_states, residual):
+    def forward(self, positions, hidden_states, residual, layer_idx):
         if layer_idx == 3:
             residual.add_(hidden_states)
         T = hidden_states.shape[0]
@@ -177,28 +201,31 @@ class FakeDecode:
 
 
 _CPU_LIB: list = []
+MODEL_ID = 7
 
 
 def test_op_schema(monkeypatch):
-    """vllm::glm5_mono_decode_layer declares the hidden_states / residual mutation and
-    passes opcheck; compile(aot_eager) keeps the in-place residual update."""
-    from vllm.models.deepseek_v32.amd.ops import glm5_mono as M
+    """vllm::mono_layer declares the hidden_states / residual mutation and passes
+    opcheck; compile(aot_eager) keeps the in-place residual update."""
+    from vllm.models.common.mono import op as M
     from vllm.platforms import current_platform
 
     if current_platform.dispatch_key != "CPU" and not _CPU_LIB:
         _CPU_LIB.append(torch.library.Library("vllm", "IMPL"))  # the impl, for CPU
-        _CPU_LIB[0].impl("glm5_mono_decode_layer", M._glm5_mono_decode_layer, "CPU")
-    monkeypatch.setitem(D._ACTIVE, "obj", FakeDecode())
-    op = torch.ops.vllm.glm5_mono_decode_layer.default
+        _CPU_LIB[0].impl("mono_layer", M._mono_layer, "CPU")
+    M.register_mono_layer_op(FakeDecode(), MODEL_ID)
+    op = torch.ops.vllm.mono_layer.default
     assert "Tensor(a1!) hidden_states" in str(op._schema)
     assert "Tensor(a2!) residual" in str(op._schema)
     T = 4
     p = torch.arange(T, dtype=torch.float32)
     for L in (3, 4):
-        torch.library.opcheck(op, (p, torch.randn(T, H), torch.randn(T, H), L))
+        torch.library.opcheck(
+            op, (p, torch.randn(T, H), torch.randn(T, H), L, MODEL_ID)
+        )
 
     def f(p, h, r):
-        a, b = M.glm5_mono_decode_layer(p, h, r, 3)
+        a, b = M.mono_layer(p, h, r, 3, MODEL_ID)
         return a + 1, b
 
     h, r = torch.randn(T, H), torch.randn(T, H)
@@ -215,7 +242,7 @@ class KOp:
 
 
 def mono_live(layers=(3, 4, 5), T=2, S=2):
-    lv = bare_live(check_every=0)
+    lv = bare_live(check_every=0, widths=(S,))
     lv.order, lv.first, lv.last = list(layers), layers[0], layers[-1]
     lv.layers = {
         L: NS(layer_idx=L, input_layernorm=lambda x: x * 0.5, self_attn=None)
@@ -231,7 +258,8 @@ def mono_live(layers=(3, 4, 5), T=2, S=2):
     lv.b_x = torch.zeros(8, H)
     lv.b_curpos = lv.cos = lv.sin = lv.b_indices = torch.zeros(1)
     lv._sviews = {S: (torch.zeros(S), torch.zeros(S), torch.zeros(S + 1))}
-    lv.active, lv._st = True, dict(T=T, S=S, md=None)
+    lv._st = dict(T=T, S=S, md=None)
+    lv.rt.step = StepDecision(width=S)
     lv._convert_topk = lambda layer: None
     return lv
 
@@ -288,13 +316,16 @@ class Layer(NS):
         return h, r
 
 
-def decode(lv, calls, guard=None):
+def decode(lv, calls, monkeypatch, guard=None):
     obj = D.Glm5MonoDecode.__new__(D.Glm5MonoDecode)
-    obj.lv, obj._guarded = lv, None
+    obj.lv, obj.rt, obj._guarded = lv, lv.rt, None
     obj.model = obj.cfg = obj.vllm_config = None
+    obj.model_id = MODEL_ID
     if guard is not None:
         obj._maybe_guard = guard
-    obj._op = lambda p, h, r, L: (calls.append(("op", L)), (h, r))[1]
+    monkeypatch.setattr(
+        D, "mono_layer", lambda p, h, r, L, mid: (calls.append(("op", L)), (h, r))[1]
+    )
     return obj
 
 
@@ -306,19 +337,21 @@ def run_step(obj, calls, layers, residual=True):
     return list(calls)
 
 
-def test_dispatch_decision_outside_op():
+@pytest.mark.usefixtures("no_device_sync")
+def test_dispatch_decision_outside_op(monkeypatch):
     """forward_layer: the step decision and vLLM's fallback run outside the custom op;
     the op only sees go steps; no residual -> vLLM's layer, no decision."""
     calls: list = []
     lv = mono_live()
     go = dict(v=False)
 
-    def begin(layer, p, h, r):
+    def step_reason(layer, h, r):
         calls.append(("begin", layer.layer_idx))
-        lv.active = go["v"]
+        return "" if go["v"] else "no_metadata"
 
-    lv._begin_step = begin
-    obj = decode(lv, calls, guard=lambda layer: True)
+    lv.step_reason = step_reason
+    lv.prepare_step = lambda p, S: None
+    obj = decode(lv, calls, monkeypatch, guard=lambda layer: True)
     layers = {L: Layer(layer_idx=L, calls=calls) for L in (3, 4, 5)}
     for v, kind in ((False, "vllm"), (True, "op")):
         go["v"] = v
@@ -328,6 +361,7 @@ def test_dispatch_decision_outside_op():
     assert run_step(obj, calls, {3: layers[3]}, residual=False) == [("vllm", 3)]
 
 
+@pytest.mark.usefixtures("no_device_sync")
 def test_dispatch_guards_follow_cache_binding(monkeypatch):
     """forward_layer: no bound cache -> vLLM's layer and no stale go decision; the KV
     guards run again for every new binding of the first mono layer's cache."""
@@ -338,8 +372,9 @@ def test_dispatch_guards_follow_cache_binding(monkeypatch):
     monkeypatch.setattr(G, "check_after_install", lambda *a, **k: runs.append("after"))
     calls: list = []
     lv = mono_live()
-    lv._begin_step = lambda layer, p, h, r: setattr(lv, "active", True)
-    obj = decode(lv, calls)
+    lv.step_reason = lambda layer, h, r: ""
+    lv.prepare_step = lambda p, S: None
+    obj = decode(lv, calls, monkeypatch)
 
     def run(blocks):
         layers = {
@@ -351,7 +386,7 @@ def test_dispatch_guards_follow_cache_binding(monkeypatch):
     mono = [("op", 3), ("op", 4), ("op", 5)]
     assert run(8) == mono and len(runs) == 2
     # profiling caches freed, real ones not yet bound: vLLM's layers, active reset
-    assert run(0) == [("vllm", 3), ("vllm", 4), ("vllm", 5)] and not lv.active
+    assert run(0) == [("vllm", 3), ("vllm", 4), ("vllm", 5)] and not lv.rt.step
     assert run(64) == mono and len(runs) == 4
 
 
@@ -375,7 +410,7 @@ def test_caches_rebound_after_profiling():
     lv._flat, lv._index_tables_set, lv._index_ptrs = {}, False, None
     for blocks in (8, 8192):
         lv.layers = cache_layers((3, 4), blocks)
-        lv._ensure_caches(16)  # _begin_step's cache handling
+        lv._ensure_caches(16)  # prepare_step's cache handling
         if not lv._index_tables_set:
             assert lv._set_index_tables()
         mla = {L: lay.self_attn.kv_cache[0].data_ptr() for L, lay in lv.layers.items()}

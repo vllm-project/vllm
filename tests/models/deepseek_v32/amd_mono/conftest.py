@@ -32,12 +32,20 @@ def failstop_latch(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def mono_env(monkeypatch):
-    """The mono env vars unset; no dispatch object left active."""
-    from vllm.models.deepseek_v32.amd.mono import dispatch
+    """The mono env vars unset; no op left registered for the custom op."""
+    from vllm.models.common.mono import op as mono_op
 
     for name in (E.ENABLE, E.CONFIG, E.FAILSTOP):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setitem(dispatch._ACTIVE, "obj", None)
+    monkeypatch.setattr(mono_op, "_ACTIVE", {})
+
+
+@pytest.fixture
+def no_platform_check(monkeypatch):
+    """The spec's ROCm probe passes: these are CPU tests of everything around it."""
+    from vllm.models.common.mono import MonoSpec
+
+    monkeypatch.setattr(MonoSpec, "_platform", lambda self: [])
 
 
 @pytest.fixture

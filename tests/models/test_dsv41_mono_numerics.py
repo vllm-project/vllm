@@ -260,7 +260,7 @@ def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 def _check_layers(rank: int, tp: int, device) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
+    from vllm.distributed import tensor_model_parallel_all_reduce
     from vllm.engine.arg_utils import EngineArgs
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
@@ -279,6 +279,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         DSV41MonoLayer,
         MonoLayerWeights,
     )
+    from vllm.models.deepseek_v41.amd.mono_decode import _runtime as mono_runtime
     from vllm.models.deepseek_v41.amd.rocm import (
         compute_global_topk_ragged_indices_and_indptr,
     )
@@ -353,7 +354,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     sink = f32(H, gen=gs)
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
-    runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
+    runner = DSV41MonoLayer(mono_runtime(vc))
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
 
     def top6(x):

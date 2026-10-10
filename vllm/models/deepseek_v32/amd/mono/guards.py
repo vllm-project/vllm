@@ -213,7 +213,7 @@ class PollErrorWatch:
         self.views, self.aborts, self.xviews = {}, {}, {}
         self.steps = {}
         for S in lv.sizes:
-            for i, op in enumerate(lv.runtime_ops(S)):
+            for i, op in enumerate(lv.rt.owners(S)):
                 off, oa = op.scr_layout["poll_err"], op.scr_layout["poll_abort"]
                 self.views[(S, i)] = op.scratch[off : off + 4 * n].view(torch.int32)
                 self.aborts[(S, i)] = op.scratch[oa : oa + 4].view(torch.int32)

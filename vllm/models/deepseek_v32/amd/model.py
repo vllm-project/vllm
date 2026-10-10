@@ -7,7 +7,6 @@ from itertools import islice
 
 import torch
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
@@ -389,10 +388,13 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     def process_weights_after_loading(self) -> None:
         # Before memory profiling, KV allocation and graph capture. The kernel keeps
         # its own weight copy, so a second call (weight reload) raises.
-        if envs.VLLM_ROCM_USE_GLM5_MONOKERNEL:
+        # the spec is the cheap gate: only then is the kernel package imported
+        from vllm.models.deepseek_v32.amd.mono.spec import GLM5_MONO
+
+        if GLM5_MONO.wanted(self.vllm_config):
             from vllm.models.deepseek_v32.amd.mono.dispatch import Glm5MonoDecode
 
-            self.model.mono = Glm5MonoDecode.maybe_create(self.vllm_config, self)
+            self.model.mono = Glm5MonoDecode.create(self.vllm_config, model=self)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         if self.model.mono is not None:

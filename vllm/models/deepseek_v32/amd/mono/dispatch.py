@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Model-integrated MonoKernel dispatch.
 
-``Glm5MonoDecode.maybe_create`` (after weight loading,
-``VLLM_ROCM_USE_GLM5_MONOKERNEL=1``) builds kernels, buffers and IPC peers before memory
-profiling and graph capture. ``forward_layer`` takes the per-step go / no-go decision at
-the first mono layer and runs either the custom op
-``torch.ops.vllm.glm5_mono_decode_layer`` or vLLM's decoder layer. Config:
+``Glm5MonoDecode.create`` (after weight loading, ``VLLM_ROCM_USE_GLM5_MONOKERNEL=1``)
+builds kernels, buffers and IPC peers before memory profiling and graph capture.
+``forward_layer`` takes the per-step go / no-go decision at the first mono layer and
+runs either the library's ``torch.ops.vllm.mono_layer`` or vLLM's decoder layer. Config:
 ``LiveConfig`` defaults overridden by ``VLLM_ROCM_GLM5_MONOKERNEL_CONFIG`` (JSON);
 ``ckpt`` defaults to vLLM's local checkpoint dir, ``max_model_len`` to vLLM's. The
 kernel packs a private weight copy at creation: weight reloads are not supported.
@@ -15,59 +14,27 @@ kernel packs a private weight copy at creation: weight reloads are not supported
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.models.common.mono import (
+    MonoOp,
+    MonoRuntime,
+    StepDecision,
+    active_mono_layer_op,
+    mono_layer,
+    register_mono_layer_op,
+)
 from vllm.models.deepseek_v32.amd.mono import envs as mono_envs
 from vllm.models.deepseek_v32.amd.mono import guards
 from vllm.models.deepseek_v32.amd.mono.live import LiveConfig, MonoLive, _mla_cache
+from vllm.models.deepseek_v32.amd.mono.spec import GLM5_MONO
 
 logger = init_logger(__name__)
 
-_ACTIVE: dict = dict(obj=None)
 CKPT_INDEX = "model.safetensors.index.json"
-
-
-def active() -> Glm5MonoDecode:
-    if _ACTIVE["obj"] is None:
-        raise RuntimeError(
-            "glm5_mono_decode_layer called with no active Glm5MonoDecode"
-        )
-    return _ACTIVE["obj"]
-
-
-def refusal(vllm_config) -> str | None:
-    """None if this configuration can run the MonoKernel, else why not."""
-    mc, pc = vllm_config.model_config, vllm_config.parallel_config
-    model_type = getattr(mc.hf_config, "model_type", None)
-    aux = vllm_config.aux_output_config
-    checks = (
-        (model_type != "glm_moe_dsa", f"model_type {model_type} (GLM-5.2 only)"),
-        (pc.tensor_parallel_size != 8, f"TP {pc.tensor_parallel_size} (TP8 only)"),
-        (pc.pipeline_parallel_size != 1 or pc.data_parallel_size != 1, "PP/DP > 1"),
-        (pc.enable_expert_parallel, "expert parallel"),
-        (pc.decode_context_parallel_size != 1, "DCP"),
-        (vllm_config.speculative_config is not None, "speculative decoding"),
-        # the mono layers run their own weight copy and skip vLLM's attention layers
-        (vllm_config.lora_config is not None, "LoRA"),
-        (vllm_config.kv_transfer_config is not None, "KV transfer connector"),
-        (aux.enable_return_routed_experts, "routed-expert capture"),
-        (mc.dtype != torch.bfloat16, f"dtype {mc.dtype} (bf16 only)"),
-        (
-            vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16"),
-            f"kv_cache_dtype {vllm_config.cache_config.cache_dtype} (bf16 only)",
-        ),
-    )
-    for bad, why in checks:
-        if bad:
-            return why
-    try:
-        from vllm.platforms.rocm import on_gfx950
-
-        return None if on_gfx950() else "not gfx950"
-    except Exception as e:  # noqa: BLE001
-        return f"platform check failed: {e!r}"
 
 
 def resolve_ckpt_dir(vllm_config) -> str:
@@ -114,64 +81,84 @@ def resolve_ckpt_dir(vllm_config) -> str:
     return path
 
 
-def config_from_env(vllm_config) -> LiveConfig:
+def config_overrides(vllm_config) -> dict:
+    """``LiveConfig`` fields the environment overrides, without touching the disk.
+
+    Split out of :func:`config_from_env` so the widths and the graph-mode checks are
+    known before the checkpoint is resolved: a refusal should say the configuration is
+    unservable, not that the checkpoint is unreadable.
+    """
     over = mono_envs.config_overrides()
     if "sizes" in over:
         over["sizes"] = tuple(over["sizes"])
     # step_sync is illegal inside a graph capture: default it off under FULL graphs
     over.setdefault("step_sync", not guards.full_cudagraphs(vllm_config))
+    over.setdefault("max_model_len", int(vllm_config.model_config.max_model_len))
+    return over
+
+
+def config_from_env(vllm_config, over: dict | None = None) -> LiveConfig:
+    over = dict(config_overrides(vllm_config) if over is None else over)
     if "ckpt" not in over:
         over["ckpt"] = resolve_ckpt_dir(vllm_config)
-    over.setdefault("max_model_len", int(vllm_config.model_config.max_model_len))
     return LiveConfig(**over)
 
 
-class Glm5MonoDecode:
-    @classmethod
-    def maybe_create(cls, vllm_config, causal_lm) -> Glm5MonoDecode | None:
-        """None when the switch is off; raises with the reason when it is on and the
-        kernel cannot run the configuration (``refusal``, FULL-graph capture sizes that
-        differ from the kernel widths)."""
-        from vllm import envs
+class Glm5MonoDecode(MonoOp):
+    """GLM-5.2's mono decode layers, one op for the whole model.
 
-        if not envs.VLLM_ROCM_USE_GLM5_MONOKERNEL:
-            return None
-        if _ACTIVE["obj"] is not None:
-            raise RuntimeError(
-                "GLM-5.2 MonoKernel: already created in this process; reloading or "
-                "updating weights is not supported with the MonoKernel enabled "
-                "(restart the engine)"
+    One op serves every mono layer: the layers share the kernels, the peer buffers and
+    the step decision, so splitting them per layer would only duplicate state.
+    """
+
+    spec = GLM5_MONO
+
+    def __init__(self, vllm_config, model):
+        self.model = model
+        self.model_id = id(model)
+        self.over = config_overrides(vllm_config)
+        sizes = tuple(sorted(self.over.get("sizes", LiveConfig.sizes)))
+        self.spec = replace(
+            type(self).spec,
+            widths=sizes,
+            constraints=type(self).spec.constraints + (self._config_refusal,),
+        )
+        super().__init__(vllm_config)
+
+    def _config_refusal(self, vllm_config) -> str | None:
+        """What the static spec cannot see: this process and the parsed config."""
+        if active_mono_layer_op(self.model_id) is not None:
+            return (
+                "already built for this model; reloading or updating weights is not "
+                "supported with the MonoKernel enabled (restart the engine)"
             )
-        why = refusal(vllm_config)
-        if why is None:
-            cfg = config_from_env(vllm_config)
-            why = guards.graph_width_mismatch(cfg.sizes, vllm_config)
-        if why is not None:
-            raise RuntimeError(
-                f"GLM-5.2 MonoKernel cannot run this configuration: {why} (unset "
-                f"{mono_envs.ENABLE} to use vLLM's decode path)"
-            )
-        if guards.piecewise_graphs_only(vllm_config):
+        if self.over["step_sync"] and guards.full_cudagraphs(vllm_config):
+            return "step_sync syncs and all-reduces, which a FULL graph cannot capture"
+        return guards.graph_width_mismatch(self.spec.widths, vllm_config)
+
+    def build(self) -> None:
+        cfg = self.cfg = config_from_env(self.vllm_config, self.over)
+        # RoPE length, graph widths (the KV caches are not bound yet)
+        guards.check_before_install(self.model, cfg, self.vllm_config, check_kv=False)
+        self.rt = MonoRuntime(
+            self.spec,
+            self.vllm_config,
+            vote=cfg.step_sync,
+            vote_each_step=cfg.check_every <= 0,
+            enabled=cfg.enabled,
+        )
+        self.lv = MonoLive(self.model, cfg, self.vllm_config, self.rt)
+        self.layers = frozenset(self.lv.layers)
+        # (data_ptr, numel) of the first mono layer's KV cache the guards last ran on
+        self._guarded: tuple[int, int] | None = None
+        self.watch = self._poll_watch()
+        if guards.piecewise_graphs_only(self.vllm_config):
             logger.warning(
                 "GLM-5.2 MonoKernel: PIECEWISE-only breakable cudagraphs capture "
                 "decode steps without attention metadata, so captured steps never "
                 "take the mono path; use FULL decode graphs or eager mode"
             )
-        _ACTIVE["obj"] = obj = cls(vllm_config, causal_lm, cfg)
-        return obj
-
-    def __init__(self, vllm_config, causal_lm, cfg: LiveConfig):
-        from vllm.models.deepseek_v32.amd.ops.glm5_mono import glm5_mono_decode_layer
-
-        self.vllm_config, self.model, self.cfg = vllm_config, causal_lm, cfg
-        # RoPE length, graph widths (the KV caches are not bound yet)
-        guards.check_before_install(causal_lm, cfg, vllm_config, check_kv=False)
-        self.lv = MonoLive(causal_lm, cfg, vllm_config)
-        self.layers = frozenset(self.lv.layers)
-        # (data_ptr, numel) of the first mono layer's KV cache the guards last ran on
-        self._guarded: tuple[int, int] | None = None
-        self._op = glm5_mono_decode_layer
-        self.watch = self._poll_watch()
+        register_mono_layer_op(self, self.model_id)
         logger.info(
             "GLM-5.2 MonoKernel dispatch: layers %d..%d, widths %s",
             min(self.layers),
@@ -210,20 +197,37 @@ class Glm5MonoDecode:
         self._guarded = (kv.data_ptr(), kv.numel())
         return True
 
+    def eligible(self, layer, positions, hidden_states, residual) -> StepDecision:
+        """This step's decision, taken once at the first mono layer.
+
+        The reason is rank-uniform (metadata only); rank-local state enters through the
+        runtime's vote. A go step then fills the padded per-step inputs at the width the
+        runtime chose.
+        """
+        if residual is None:
+            why = "no_residual"
+        elif not self._maybe_guard(layer):
+            why = "no_kv_cache"
+        else:
+            why = self.lv.step_reason(layer, hidden_states, residual)
+        step = self.rt.step_begin(hidden_states.shape[0], why)
+        if step:
+            assert step.width is not None  # a go step was given a width
+            self.lv.prepare_step(positions, step.width)
+        return step
+
     def forward_layer(self, layer, positions, hidden_states, residual):
         """One mono layer index. The step decision and vLLM's layer on no-go steps stay
         outside the custom op; under FULL graphs this Python runs at capture only."""
-        lv = self.lv
-        if layer.layer_idx == lv.first:
-            if residual is None or not self._maybe_guard(layer):
-                lv.active = False
-                return layer(positions, hidden_states, residual)
-            lv._begin_step(layer, positions, hidden_states, residual)
-        if residual is None or not lv.active:
+        if layer.layer_idx == self.lv.first:
+            self.eligible(layer, positions, hidden_states, residual)
+        if residual is None or not self.rt.step:
             return layer(positions, hidden_states, residual)
-        return self._op(positions, hidden_states, residual, layer.layer_idx)
+        return mono_layer(
+            positions, hidden_states, residual, layer.layer_idx, self.model_id
+        )
 
-    def forward_layer_impl(self, layer_idx, positions, hidden_states, residual):
+    def forward(self, positions, hidden_states, residual, layer_idx):
         return self.lv.mono_forward(
             self.lv.layers[layer_idx], positions, hidden_states, residual
         )

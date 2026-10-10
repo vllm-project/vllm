@@ -31,7 +31,8 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.models.deepseek_v32.amd.mono.spec import step_reason, width_for
+from vllm.models.common.mono import MonoRuntime
+from vllm.models.deepseek_v32.amd.mono.spec import step_reason
 
 logger = init_logger(__name__)
 
@@ -105,12 +106,11 @@ class LiveConfig:
 
 
 class MonoLive:
-    def __init__(self, model, cfg: LiveConfig, vllm_config):
-        from vllm.distributed import get_tp_group
-        from vllm.models.deepseek_v32.amd.mono.guards import full_cudagraphs
+    def __init__(self, model, cfg: LiveConfig, vllm_config, rt: MonoRuntime):
         from vllm.models.deepseek_v32.amd.mono.kernel.config import AttentionWeight
 
         self.cfg = cfg
+        self.rt = rt
         sc = vllm_config.speculative_config
         num_spec = int(getattr(sc, "num_speculative_tokens", 0) or 0)
         self.spec_decode = num_spec > 0 if cfg.spec_decode is None else cfg.spec_decode
@@ -120,18 +120,11 @@ class MonoLive:
             )
         # verify steps carry 1 + k query rows per request; plain decode 1
         self.max_query_len = 1 + num_spec if self.spec_decode else 1
-        if full_cudagraphs(vllm_config) and cfg.step_sync:
-            raise ValueError(
-                "step_sync=True under FULL cudagraphs: its device sync and CPU "
-                "all-reduce cannot run inside a graph capture"
-            )
-        self.tp = get_tp_group()
-        self.rank = self.tp.rank_in_group
-        self.npes = self.tp.world_size
-        assert self.npes == 8, "GLM MonoKernel geometry is TP8"
-        self.cpu_group = self.tp.cpu_group
-        self.dev = torch.device("cuda", torch.accelerator.current_device_index())
-        self.sizes = tuple(sorted(cfg.sizes))
+        self.rank = rt.rank
+        self.npes = rt.world
+        self.cpu_group = rt.cpu_group
+        self.dev = rt.device
+        self.sizes = rt.spec.widths
         self.max_rows = self.sizes[-1]
         self.layers = {L: model.model.layers[L] for L in cfg.layers}
         for L, layer in self.layers.items():
@@ -181,12 +174,6 @@ class MonoLive:
             for L, lay in self.layers.items():
                 if self.has_indexer[L]:
                     prealloc(lay.self_attn, self.max_rows, torch.bfloat16, self.dev)
-        self.enabled = cfg.enabled
-        # step_sync: the last rank-uniform vote of `enabled` (None = none yet)
-        self._voted: bool | None = None
-        # mono steps since install; never reset, so check steps stay rank-aligned
-        self._n_mono = 0
-        self.active = False
         self.ops: dict[tuple[int, int], Any] = {}
         self.packed: dict[int, dict] = {}
         self.weights: dict[int, Any] = {}
@@ -208,9 +195,7 @@ class MonoLive:
             for _ in self.order
         ]
         self._zviews: dict[int, list] = {}
-        self._epoch_kw = {
-            L: dict(layer=L - self.first, advance=False) for L in self.order
-        }
+        self._launch_kw: dict[tuple[int, int], dict] = {}
         t0 = time.time()
         self._load_weights()
         self.cos, self.sin = rope_tables(self.layers[self.first], cfg.max_model_len)
@@ -309,25 +294,6 @@ class MonoLive:
             nb = -(-int(self.cfg.max_model_len) // 16) + 1
             self.b_bt = torch.zeros(R, nb, dtype=torch.int32, device=dev)
 
-    def runtime_ops(self, S: int) -> list:
-        """The ops owning a runtime (scratch / step counter / peers) for width S: one,
-        or two with the fused indexer."""
-        return [
-            op
-            for (_, s), op in self.ops.items()
-            if s == S and getattr(op, "_owns_runtime", False)
-        ]
-
-    def _go(self, ok: bool) -> bool:
-        """Rank-uniform go / no-go and launch alignment: device sync, then a MIN
-        all-reduce over the CPU group."""
-        import torch.distributed as dist
-
-        torch.accelerator.synchronize()
-        flag = torch.tensor([1 if ok else 0], dtype=torch.int32)
-        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=self.cpu_group)
-        return bool(flag.item())
-
     def _index_caches(self) -> dict | None:
         """{layer: uint8 [blocks, 16, 132] index cache} of the fused layers, or None
         while vLLM has not bound them."""
@@ -403,9 +369,11 @@ class MonoLive:
         return True
 
     def _build_ops(self, S: int):
-        """One Glm5MonoKernel per mono layer at width S, sharing the first op's runtime
-        (scratch, peer buffer, step counter); the fused-indexer layers (another scratch
-        geometry) share their own. Then one warm-up launch per runtime."""
+        """One Glm5MonoKernel per mono layer at width S, sharing the first op's kernel
+        resources (scratch, peer buffer, step counter); the fused-indexer layers (a
+        different scratch geometry) share their own. The sharing ops are reserved under
+        ``(S, is_fused)``, which is what the MonoRuntime advances and polls. Then one
+        warm-up launch per sharing op."""
         from vllm.models.deepseek_v32.amd.mono.kernel.glm.op import Glm5MonoKernel
 
         t0 = time.time()
@@ -440,8 +408,13 @@ class MonoLive:
                 **(fused if is_fused else {}),
                 **{k: v for k, v in stage.items() if v},
             )
-            runtimes.setdefault(is_fused, op)
+            if is_fused not in runtimes:
+                runtimes[is_fused] = op
+                self.rt.reserve((S, is_fused), owner=op, width=S)
             self.ops[(L, S)] = op
+            self._launch_kw[(L, S)] = self.rt.launch_args(
+                (S, is_fused), layer=L - self.first, advance=False
+            )
         if self.fused_layers:
             # inactive rows never touch it: a scratch index cache until the first step
             self._warm_index_cache = torch.zeros(
@@ -455,7 +428,7 @@ class MonoLive:
         wc = torch.zeros(64, MLA_ROW, dtype=torch.bfloat16, device=dev)
         z = torch.zeros(S, dtype=torch.int64, device=dev)
         for op in runtimes.values():
-            self._go(True)
+            self.rt.vote(True)
             op.forward(
                 torch.zeros(S, HIDDEN, dtype=torch.bfloat16, device=dev),
                 self.b_curpos,
@@ -470,7 +443,7 @@ class MonoLive:
             )
             torch.accelerator.synchronize()
             exp = op.poll_error()
-            if not self._go(not exp):
+            if not self.rt.vote(not exp):
                 raise RuntimeError(
                     f"mono live: warm-up launch S={S} expired polls {exp} on some rank"
                 )
@@ -482,36 +455,22 @@ class MonoLive:
         )
 
     # --------------------------------------------------------------- per step
-    def _state_reason(self) -> str:
-        """'' (go) or why not, for a step the metadata allows (rank-uniform)."""
-        if not self.cfg.step_sync:
-            return "" if self.enabled else "disabled"
-        if self._voted is not True or self.cfg.check_every <= 0:
-            self._voted = self._go(self.enabled)
-        if not self._voted:
-            return "disabled" if not self.enabled else "peer_no_go"
-        return ""
+    def step_reason(self, layer, hidden_states, residual) -> str:
+        """'' if this step's attention metadata allows the mono path, else why not.
 
-    def _begin_step(self, layer, positions, hidden_states, residual):
-        """Once per step, at the first mono layer: the rank-uniform go / no-go.
-
-        Metadata reasons need no vote (identical on every TP rank). Rank-local state
-        (``enabled``) enters only through a step_sync vote: the one taken at the end of
-        the last check step, or one taken here while no "on" vote stands. Without
-        step_sync (FULL graphs) ``enabled`` is read directly."""
+        Rank-uniform: every TP rank reads the same metadata, so no agreement is needed
+        on the answer. Reads the step's metadata into ``_st`` for ``prepare_step``."""
         T = hidden_states.shape[0]
         md, sm = layer_metadata(layer.self_attn.layer_name)
-        S = width_for(T, self.sizes)
         if md is None or sm is None or not hasattr(md, "paged_kv_indptr"):
-            self.active = False
-            return
-        reason = step_reason(
-            md, T, residual is not None, self.max_query_len, S is not None, TOPK
-        )
-        self.active = (reason or self._state_reason()) == ""
-        if not self.active:
-            return
-        assert S is not None
+            return "no_metadata"
+        self._st = dict(T=T, md=md, sm=sm)
+        return step_reason(md, T, residual is not None, self.max_query_len, TOPK)
+
+    def prepare_step(self, positions, S: int):
+        """Fill the padded per-step inputs, once per go step at the first mono layer."""
+        T, md, sm = self._st["T"], self._st["md"], self._st["sm"]
+        self._st["S"] = S
         self._ensure_caches(md.block_size)
         self._zret = {}
         # the only zero buffer written (by the fused final norm)
@@ -545,11 +504,6 @@ class MonoLive:
             # vLLM's table may be wider than cdiv(max_model_len, 16): copy the prefix
             w = min(md.block_table.shape[1], self.b_bt.shape[1])
             self.b_bt[:T, :w].copy_(md.block_table[:T, :w])
-        # one mailbox epoch per step; launch tag = step * lps + (L - first) + 1
-        for op in self.runtime_ops(S):
-            op.advance_step()
-        self._st = dict(T=T, S=S, md=md)
-        self._n_mono += 1
 
     def _convert_topk(self, layer):
         """Convert vLLM's logical per-row top-k to the kernel's CSR physical slot
@@ -566,15 +520,17 @@ class MonoLive:
             self.b_indptr[: T + 1],
             self.b_indices,
             BLOCK_SIZE=md.block_size,
+            # _bind_caches asserts contiguous blocks, so a block is block_size rows
+            BLOCK_STRIDE_ROWS=md.block_size,
             NUM_TOPK_TOKENS=TOPK,
         )
 
     def mono_forward(self, layer, positions, hidden_states, residual):
         """One mono layer of an active step -> (zeros_L, x_out[:T]), never aliasing the
-        inputs; may mutate the first mono layer's hidden_states / residual (the custom
-        op ops/glm5_mono.py wraps exactly this)."""
+        inputs; may mutate the first mono layer's hidden_states / residual (the
+        library's ``torch.ops.vllm.mono_layer`` wraps exactly this)."""
         L = layer.layer_idx
-        if not self.active:
+        if not self.rt.step:
             raise RuntimeError(
                 f"mono live: layer {L} called on a step without a mono go decision"
             )
@@ -633,7 +589,7 @@ class MonoLive:
             positions=pos_v,
             slot_mapping=slot_v,
             sparse_kv_indptr=indptr_v,
-            **self._epoch_kw[L],
+            **self._launch_kw[(L, S)],
         )
         out = x_out[:T]
         if self.last == L:
@@ -651,7 +607,7 @@ class MonoLive:
         Under FULL graphs the dispatch's PollErrorWatch does the check."""
         if self.dev_nonfinite is not None:  # capture-safe, no host sync
             self.dev_nonfinite.add_((~torch.isfinite(out)).any().to(torch.int32))
-        n = self._n_mono
+        n = self.rt.step_index
         every = self.cfg.check_every
         if not self.cfg.step_sync or every <= 0 or n % every:
             return
@@ -661,19 +617,14 @@ class MonoLive:
         torch.accelerator.synchronize()
         # the poll-error words are sticky: only the fail-stop watch clears them (warn
         # mode), so leave them set unless no watch runs
-        exp = tuple(
-            e
-            for op in self.runtime_ops(self._st["S"])
-            for e in op.poll_error(clear=mode == "off")
-        )
+        exp = self.rt.health(self._st["S"], clear=mode == "off")
         fin = bool(torch.isfinite(out).all())
         if exp or not fin:
-            why = f"mono live: step {n}: expired={exp} finite={fin}"
+            why = f"step {n}: expired={exp} finite={fin}"
             if exp and mode == "raise":
                 # this step's output and KV rows are already wrong: disabling would
                 # keep serving them
-                fail_stop(why, self.rank)
-            self.enabled = False
-            logger.error("%s -> disabling", why)
-        # rank-uniform (MIN) state for the next steps; replaces their begin-step vote
-        self._voted = self._go(self.enabled)
+                fail_stop(f"mono live: {why}", self.rank)
+            self.rt.disable(why)
+        # this sync already happened: fold the next step's vote into it
+        self.rt.revote()

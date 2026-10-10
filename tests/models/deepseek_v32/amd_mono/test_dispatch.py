@@ -17,28 +17,31 @@ import pytest
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.models.common.mono import register_mono_layer_op
 from vllm.models.deepseek_v32.amd.mono import dispatch as D
 from vllm.models.deepseek_v32.amd.mono import envs as E
 from vllm.models.deepseek_v32.amd.mono import guards as G
 from vllm.models.deepseek_v32.amd.mono.live import LiveConfig
+from vllm.models.deepseek_v32.amd.mono.spec import GLM5_MONO
 
 
 @pytest.mark.parametrize(
     "kw, frag",
     [
         (dict(model_type="deepseek_v32"), "model_type"),
-        (dict(tp=4), "TP 4"),
-        (dict(pp=2), "PP"),
-        (dict(ep=True), "expert"),
-        (dict(spec=object()), "speculative"),
-        (dict(kv="fp8"), "kv_cache"),
+        (dict(tp=4), "tensor parallel size 4"),
+        (dict(pp=2), "pipeline parallelism"),
+        (dict(ep=True), "expert parallelism"),
+        (dict(spec=object()), "speculative decoding"),
+        (dict(kv="fp8"), "kv cache dtype"),
         ("lora_config", "LoRA"),
         ("kv_transfer_config", "KV transfer"),
-        ("routed", "routed"),
+        ("routed", "routed-expert"),
         ("dtype", "dtype"),
     ],
 )
-def test_refusal(make_vc, kw, frag):
+def test_refusal(make_vc, no_platform_check, kw, frag):
+    """The spec is the whole deployment gate, and it reports every reason at once."""
     vc = make_vc(**kw) if isinstance(kw, dict) else make_vc()
     if kw == "routed":
         vc.aux_output_config.enable_return_routed_experts = True
@@ -46,21 +49,22 @@ def test_refusal(make_vc, kw, frag):
         vc.model_config.dtype = torch.float16
     elif isinstance(kw, str):
         setattr(vc, kw, object())
-    why = D.refusal(vc)
-    assert why is not None and frag in why, why
+    why = GLM5_MONO.refuse(vc)
+    assert why and any(frag in w for w in why), why
+    assert not GLM5_MONO.refuse(make_vc())
 
 
-def test_env_off_and_on(make_vc, monkeypatch):
-    """Off: maybe_create builds nothing. On: a refusal or a second creation (weight
-    reload: the kernel holds a private weight copy) raises."""
-    assert D.Glm5MonoDecode.maybe_create(make_vc(), object()) is None
-    assert D._ACTIVE["obj"] is None
+def test_env_off_and_on(make_vc, no_platform_check, monkeypatch):
+    """Off: create builds nothing. On: a refusal or a second creation (weight reload:
+    the kernel holds a private weight copy) raises."""
+    assert D.Glm5MonoDecode.create(make_vc(), model=object()) is None
     monkeypatch.setenv(E.ENABLE, "1")
-    with pytest.raises(RuntimeError, match="TP 4"):
-        D.Glm5MonoDecode.maybe_create(make_vc(tp=4), object())
-    D._ACTIVE["obj"] = object()
-    with pytest.raises(RuntimeError, match="already created"):
-        D.Glm5MonoDecode.maybe_create(make_vc(), object())
+    with pytest.raises(ValueError, match="tensor parallel size 4"):
+        D.Glm5MonoDecode.create(make_vc(tp=4), model=object())
+    model = object()
+    register_mono_layer_op(object(), id(model))
+    with pytest.raises(ValueError, match="already built"):
+        D.Glm5MonoDecode.create(make_vc(), model=model)
 
 
 @pytest.mark.parametrize(
@@ -112,33 +116,30 @@ def test_ckpt_resolution(make_vc, ckpt, tmp_path):
         assert E.CONFIG in str(e.value)
 
 
-def test_width_mismatch(make_vc, monkeypatch):
-    """Switch on + FULL-graph capture sizes != kernel widths -> RuntimeError naming the
-    sizes to use; matching sizes (or eager) -> created."""
+def test_width_mismatch(make_vc, no_platform_check, monkeypatch):
+    """Switch on + FULL-graph capture sizes != kernel widths -> a refusal naming the
+    sizes to use; matching sizes (or eager) -> built."""
 
     class Fake(D.Glm5MonoDecode):
-        def __init__(self, vllm_config, causal_lm, cfg=None):
-            self.cfg = cfg
+        def build(self):
+            self.cfg = D.config_from_env(self.vllm_config, self.over)
 
-    monkeypatch.setattr(D, "refusal", lambda v: None)  # the platform probe needs gfx950
     monkeypatch.setenv(E.ENABLE, "1")
     for sizes in ((1, 2, 4, 8, 16, 32), (1, 2, 4, 8), (1, 2, 4, 5, 6, 8, 16)):
-        with pytest.raises(RuntimeError, match=r"capture_sizes=\[1, 2, 4, 5, 6, 8\]"):
-            Fake.maybe_create(make_vc(graphs="full", sizes=sizes), object())
+        with pytest.raises(ValueError, match=r"capture_sizes=\[1, 2, 4, 5, 6, 8\]"):
+            Fake.create(make_vc(graphs="full", sizes=sizes), model=object())
     # capture sizes that are all kernel widths: the message also offers matching sizes
-    with pytest.raises(RuntimeError, match=r'"sizes": \[1, 2, 4, 8\]'):
-        Fake.maybe_create(make_vc(graphs="full", sizes=(1, 2, 4, 8)), object())
-    assert D._ACTIVE["obj"] is None
+    with pytest.raises(ValueError, match=r'"sizes": \[1, 2, 4, 8\]'):
+        Fake.create(make_vc(graphs="full", sizes=(1, 2, 4, 8)), model=object())
     for over, sizes in (
         (None, (1, 2, 4, 5, 6, 8)),
         ('{"sizes": [1, 2, 4, 8]}', (1, 2, 4, 8)),
     ):
         if over:
             monkeypatch.setenv(E.CONFIG, over)
-        obj = Fake.maybe_create(make_vc(graphs="full", sizes=sizes), object())
+        obj = Fake.create(make_vc(graphs="full", sizes=sizes), model=object())
         assert obj.cfg.sizes == sizes and obj.cfg.step_sync is False
-        D._ACTIVE["obj"] = None
-    assert Fake.maybe_create(make_vc(), object()) is not None  # eager
+    assert Fake.create(make_vc(), model=object()) is not None  # eager
 
 
 class FakeKV:
@@ -212,11 +213,14 @@ def test_live_config_defaults():
     assert not c.device_nonfinite and not c.failstop_nonfinite
 
 
-def test_step_sync_rejected_under_full_graphs(make_vc):
-    from vllm.models.deepseek_v32.amd.mono.live import MonoLive
-
+def test_step_sync_rejected_under_full_graphs(make_vc, no_platform_check, monkeypatch):
+    """step_sync syncs and all-reduces, so forcing it on under FULL graphs is refused;
+    it defaults off there."""
+    monkeypatch.setenv(E.ENABLE, "1")
+    assert D.config_from_env(make_vc(graphs="full")).step_sync is False
+    monkeypatch.setenv(E.CONFIG, '{"step_sync": true}')
     with pytest.raises(ValueError, match="step_sync"):
-        MonoLive(None, LiveConfig(ckpt="x", step_sync=True), make_vc(graphs="full"))
+        D.Glm5MonoDecode.create(make_vc(graphs="full"), model=object())
 
 
 def test_piecewise_graphs_only(monkeypatch):
@@ -311,11 +315,12 @@ def test_model_hooks(monkeypatch):
     assert calls == ["after_step"]
 
     created = []
-    monkeypatch.setattr(
-        D.Glm5MonoDecode,
-        "maybe_create",
-        classmethod(lambda c, vc, causal_lm: created.append((vc, causal_lm)) or "mono"),
-    )
+
+    def create(cls, vc, model):
+        created.append((vc, model))
+        return "mono"
+
+    monkeypatch.setattr(D.Glm5MonoDecode, "create", classmethod(create))
     lm.vllm_config, lm.model = object(), NS(mono=None)
     lm.process_weights_after_loading()
     assert lm.model.mono is None and not created
@@ -330,7 +335,11 @@ def test_model_hooks(monkeypatch):
     calls.clear()
 
     def layer(i):
-        return lambda p, h, r: (calls.append(i), (h + 1, h if r is None else r + h))[1]
+        def run(p, h, r):
+            calls.append(i)
+            return h + 1, h if r is None else r + h
+
+        return run
 
     def mono_layer(layer, p, h, r):
         calls.append("mono")

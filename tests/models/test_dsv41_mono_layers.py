@@ -212,10 +212,10 @@ class MonoProbe:
             else ["ffn" if m.mono.ffn_only else "whole", m.mono._weights is not None]
             for i, m in self._decoder_layers().items()
         }
-        runner = mono_decode._runner
+        rt = mono_decode._rt
         return {
             "layers": layers,
-            "epoch": -1 if runner is None else int(runner.epoch[0]),
+            "epoch": -1 if rt is None else int(rt.epoch[0]),
         }
 
 

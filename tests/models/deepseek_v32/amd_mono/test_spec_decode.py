@@ -5,12 +5,19 @@ rule (mono/spec.py) on synthetic metadata, the width map, and the kernel's per-r
 attention model of a verify step (kernel/glm/kernel.py split_keys / gather_old_kv /
 patch_new_kv) against a dense causal golden."""
 
+from dataclasses import replace
 from types import SimpleNamespace as NS
 
 import pytest
 import torch
 
 from vllm.models.deepseek_v32.amd.mono import spec as SP
+from vllm.models.deepseek_v32.amd.mono.live import TOPK
+
+
+def width_for(rows, widths):
+    """The runtime's width gate, read off a spec narrowed to ``widths``."""
+    return replace(SP.GLM5_MONO, widths=widths).width_for(rows)
 
 
 @pytest.mark.parametrize(
@@ -22,7 +29,7 @@ from vllm.models.deepseek_v32.amd.mono import spec as SP
         (8, 8, 0, 4, 2048, 8, True, 4, ""),
         (5, 5, 0, 4, 2048, 5, True, 4, ""),
         (12, 12, 0, 4, 2048, 12, True, 4, ""),
-        (16, 16, 0, 4, 2048, 16, True, 4, "too_many_rows"),
+        (16, 16, 0, 4, 2048, 16, True, 4, ""),  # the width gate refuses this one
         (8, 8, 0, 5, 2048, 8, True, 4, "query_len"),  # longer than the verify length
         (4, 40, 1, 36, 2048, 40, True, 4, "prefill_or_mixed"),
         (4, 8, 0, 4, 2048, 8, True, 4, "prefill_or_mixed"),
@@ -39,8 +46,8 @@ def test_step_reason(n_dec, T_md, prefills, qlen, topk, T, residual, max_qlen, w
         max_query_len=qlen,
         topk_tokens=topk,
     )
-    fits = SP.width_for(T, SP.KERNEL_WIDTHS) is not None
-    assert SP.step_reason(md, T, residual, max_qlen, fits) == want
+    assert SP.step_reason(md, T, residual, max_qlen, TOPK) == want
+    assert (width_for(T, SP.KERNEL_WIDTHS) is None) == (max(SP.KERNEL_WIDTHS) < T)
 
 
 def test_width_map():
@@ -49,7 +56,7 @@ def test_width_map():
     assert SP.spec_widths(4) == (5, 10)
     # B requests x (1 + k) rows -> kernel width
     got = {
-        (k, B): SP.width_for(B * (1 + k), SP.spec_widths(k))
+        (k, B): width_for(B * (1 + k), SP.spec_widths(k))
         for k, B in ((3, 1), (3, 2), (3, 3), (3, 4), (1, 4), (1, 6), (1, 7))
     }
     assert list(got.values()) == [4, 8, 12, None, 8, 12, None]
