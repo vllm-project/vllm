@@ -21,8 +21,9 @@ namespace {
 
 using bf16 = __nv_bfloat16;
 
-// One reduce-scatter inbox and one all-gather output region per rank.
+// Each rank exposes separate inbox and gather slots to every peer.
 constexpr int kTpspDataRegions = 2;
+// P2P flags are cleared by the receiver after each phase.
 constexpr int kTpspInboxReady = 0;
 constexpr int kTpspGatherReady = 1;
 constexpr int kTpspGatherConsumed = 2;
@@ -35,6 +36,7 @@ struct alignas(16) TpspBf16Vec {
 __global__ void pack_tpsp_chunk(const bf16* input, bf16* packed, int tokens,
                                 int width, int rows, int chunk_rows, int offset,
                                 int tp_size) {
+  // Group the same row range from each rank, padding the final shard with zero.
   int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   int64_t count = int64_t(tp_size) * chunk_rows * width;
   if (index >= count) {
@@ -51,6 +53,7 @@ __global__ void pack_tpsp_chunk(const bf16* input, bf16* packed, int tokens,
 __global__ void unpack_tpsp_chunk(const bf16* packed, bf16* output, int tokens,
                                   int width, int rows, int chunk_rows,
                                   int offset) {
+  // Undo the chunk-major layout and discard padded rows.
   int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   int64_t count = int64_t((tokens + rows - 1) / rows) * chunk_rows * width;
   if (index >= count) {
@@ -282,6 +285,7 @@ struct CudaEvent {
 };
 
 struct PipelineState {
+  // Reuse a scratch slot only after its communication has finished.
   std::array<CudaEvent, 2> gemm_ready;
   std::array<CudaEvent, 2> comm_done;
   cudaStream_t comm_stream{};
@@ -315,6 +319,8 @@ torch::stable::Tensor make_bf16(const torch::stable::Tensor& a, int64_t rows,
 
 }  // namespace
 
+// Project all tokens, reduce to local shards, normalize, then gather the
+// normalized result. Return the local residual and normalized shards as well.
 std::tuple<torch::stable::Tensor, torch::stable::Tensor, torch::stable::Tensor>
 tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     const torch::stable::Tensor& a, const torch::stable::Tensor& b,
@@ -484,6 +490,7 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
         reinterpret_cast<bf16*>(scratch.gathered.mutable_data_ptr());
     int chunk_rows = static_cast<int>(std::min(max_chunk, rows - offset));
     bool whole_input = tokens % tp_size == 0 && chunk_rows == rows;
+    // Stage 1: Project each rank's input rows; pack only for uneven shards.
     if (tokens % tp_size == 0) {
       STD_TORCH_CHECK(
           cublasGemmStridedBatchedEx(
@@ -516,6 +523,7 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     }
     int64_t shard_elems = int64_t(chunk_rows) * hidden;
     size_t shard_bytes = shard_elems * sizeof(bf16);
+    // Stage 2: Exchange projected shards via P2P or reduce-scatter with NCCL.
     if (p2p) {
       // The symmetric-memory peer mapping uses this device's virtual address.
       for (int dest = 0; dest < tp_size; ++dest) {
@@ -548,6 +556,8 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     auto* reduced_ptr = p2p ? partial_ptr + rank * shard_elems : local_ptr;
     auto* remote_ptr = p2p ? local_inbox : nullptr;
     int64_t remote_stride = slot_bytes / sizeof(bf16);
+    // Stage 3: Fuse the P2P sum, biases, residual add, and normalization.
+    // NCCL has already reduced the shard, so remote_ptr is null in that path.
     bool aligned =
         hidden % 8 == 0 && ((reinterpret_cast<uintptr_t>(reduced_ptr) |
                              reinterpret_cast<uintptr_t>(remote_ptr) |
@@ -588,6 +598,8 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
       }
     }
     STD_CUDA_CHECK(cudaGetLastError());
+    // Stage 4: All-gather normalized shards, waiting for P2P readers before
+    // peers can reuse their gather slots.
     if (p2p) {
       auto* target = whole_input ? output_ptr : chunk_ptr;
       auto* own_output = target + rank * shard_elems;
@@ -641,6 +653,8 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
                         ncclBfloat16, comm, comm_stream) == ncclSuccess,
           "TPSP all-gather failed");
     }
+    // Stage 5: Place chunked shards back in token order; a full chunk already
+    // has the output layout when the token count is divisible by tp_size.
     if (!whole_input) {
       int64_t output_elems = tp_size * chunk_rows * hidden;
       unpack_tpsp_chunk<<<(output_elems + threads - 1) / threads, threads, 0,
