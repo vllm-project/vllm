@@ -5,18 +5,24 @@
 Routes based on the activation shape:
   M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
       HIP skinny GEMM (wvSplitK_int4_g)
+  M >= MIN_DENSE_BATCH_SIZE:  dense GEMM on a cached dequantized copy, when
+      ``KernelConfig.w4a16_prefill_dequant`` is enabled
   otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
 paths read this single buffer: the HIP skinny kernel uses it directly, and
 the triton kernel reinterprets it as int32 [N, K//8] via a view (and
-transposes tiles in-register). No dual weight storage.
+transposes tiles in-register). No dual weight storage unless
+``w4a16_prefill_dequant`` caches the dense prefill copy.
 """
 
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 
 import torch
 
+from vllm.config import get_current_vllm_config
+from vllm.config.kernel import W4A16PrefillDequantMode
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     unpack_quantized_values_into_int32,
 )
@@ -26,11 +32,15 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemorySnapshot
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 SUPPORTED_GROUP_SIZES = [32, 64, 128]
+
+logger = init_logger(__name__)
 
 
 def _on_gfx12x() -> bool:
@@ -57,6 +67,35 @@ def _on_gfx1151() -> bool:
     return on_gfx1151()
 
 
+def _fits_in_memory_budget(nbytes: int, device: torch.device) -> bool:
+    # Same budget the KV cache is later sized from. Keep room for the
+    # activation peak and for KV of one max_model_len request (the floor the
+    # engine enforces), else startup fails later with a generic KV-cache error.
+    from vllm.v1.core.kv_cache_utils import max_memory_usage_bytes
+    from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
+
+    vllm_config = get_current_vllm_config()
+    util = vllm_config.cache_config.gpu_memory_utilization
+    min_kv_bytes = max_memory_usage_bytes(
+        vllm_config, get_kv_cache_spec(vllm_config).values()
+    )
+    # Peak activation + CUDA graph pool measured on gfx1151 at max_model_len
+    # 4096: 0.85 GiB (Qwen3-4B) to 3.27 GiB (Gemma-4-31B, MTP-3).
+    activation_headroom_bytes = 4 * GiB_bytes
+    snapshot = MemorySnapshot(device=device)
+    reserved = (
+        snapshot.total_memory * (1.0 - util) + activation_headroom_bytes + min_kv_bytes
+    )
+    return snapshot.free_memory - reserved >= nbytes
+
+
+def _profile_scope(name: str) -> AbstractContextManager:
+    # record_function is not torch.compile-safe.
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function(name)
+
+
 # Maximum activation rows supported by HIP skinny (Python M maps to C++ N_in).
 # When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
 # prefix in LDS and reads the remaining activation elements from global memory.
@@ -65,6 +104,9 @@ MAX_SKINNY_BATCH_SIZE = 5
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 MEDIUM_SKINNY_LIMIT_ELEMENTS = int(LDS_CAPACITY_ELEMENTS * 1.2)
+# The dense copy reads 4x the weight bytes of int4, so it only pays off once
+# the GEMM is compute bound.
+MIN_DENSE_BATCH_SIZE = 256
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +464,27 @@ def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
     return padded.view(torch.int8)[:, : k8 * 4]
 
 
+def dequantize_w4a16(
+    unpacked: torch.Tensor,
+    scales: torch.Tensor,
+    zp: torch.Tensor | None,
+    group_size: int,
+    zp_bias: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequantize [N, K] int32 uint4 values (natural K order) to [N, K] dtype.
+
+    ``scales`` and ``zp`` are [N, K//G]; without ``zp`` the constant
+    ``zp_bias`` is subtracted.
+    """
+    N_dim, K_dim = unpacked.shape
+    w = unpacked.view(N_dim, K_dim // group_size, group_size).to(dtype)
+    # q - zp is a small exact integer, so a single rounding in `dtype` is
+    # bit-identical to fp32 math and avoids [N, K] fp32 temporaries.
+    w.sub_(zp[..., None] if zp is not None else zp_bias).mul_(scales[..., None])
+    return w.view(N_dim, K_dim)
+
+
 # ---------------------------------------------------------------------------
 # Hybrid dispatch logic
 # ---------------------------------------------------------------------------
@@ -455,10 +518,12 @@ def _rdna_hybrid_w4a16_apply_impl(
     bias: torch.Tensor | None,
     cu_count: int,
     group_size: int,
+    w_dequant: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dispatch between skinny GEMM and Triton based on batch size M.
 
     ``w_zp`` is [N//8, K//G] int32 for asymmetric layers, None for symmetric.
+    ``w_dequant`` is the optional dense [N, K] copy used for prefill.
     """
     import vllm._custom_ops as ops
 
@@ -467,22 +532,14 @@ def _rdna_hybrid_w4a16_apply_impl(
     N = w_q.shape[0]
 
     if M <= MAX_SKINNY_BATCH_SIZE and K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
-        # record_function is not torch.compile-safe; use nullcontext when
-        # compiling to keep the op traceable.
-        ctx = (
-            nullcontext()
-            if torch.compiler.is_compiling()
-            else torch.profiler.record_function(f"wvsplitk_int4 {M}x{N}x{K}")
-        )
-        with ctx:
+        with _profile_scope(f"wvsplitk_int4 {M}x{N}x{K}"):
             return ops.wvSplitK_int4_g(w_q, x_2d, w_s, cu_count, group_size, w_zp, bias)
 
-    ctx = (
-        nullcontext()
-        if torch.compiler.is_compiling()
-        else torch.profiler.record_function(f"hybrid_triton_w4a16 {M}x{N}x{K}")
-    )
-    with ctx:
+    if w_dequant is not None and M >= MIN_DENSE_BATCH_SIZE:
+        with _profile_scope(f"hybrid_dequant_w4a16 {M}x{N}x{K}"):
+            return torch.nn.functional.linear(x_2d, w_dequant, bias)
+
+    with _profile_scope(f"hybrid_triton_w4a16 {M}x{N}x{K}"):
         output = triton_w4a16_skinny_fmt_gemm(
             a=_pad_activation_rows(x_2d),
             b_q=w_q.view(torch.int32),
@@ -503,6 +560,7 @@ def _rdna_hybrid_w4a16_apply_fake(
     bias: torch.Tensor | None,
     cu_count: int,
     group_size: int,
+    w_dequant: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M = x_2d.size(0)
     N = w_q.size(0)
@@ -523,13 +581,15 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     Stores the weights once as int8 [N, K//2] (ExLlama shuffle packed). The
     HIP skinny kernel reads it directly; the triton kernel reinterprets the
     same buffer as int32 [N, K//8] via a view, so there is no dual weight
-    storage.
+    storage unless ``w4a16_prefill_dequant`` caches a dense prefill copy.
     """
 
     SUPPORTED_QUANT_TYPES = [
         scalar_types.uint4b8,  # symmetric GPTQ (bias=8)
         scalar_types.uint4,  # asymmetric (zero_points)
     ]
+
+    DEQUANT_WEIGHT_NAME = "_w4a16_prefill_dequant"
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -573,6 +633,54 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
 
         return True, None
 
+    def _maybe_cache_dequant_weight(
+        self,
+        layer: torch.nn.Module,
+        unpacked: torch.Tensor,
+        w_s: torch.Tensor,
+        w_zp: torch.Tensor | None,
+        mode: W4A16PrefillDequantMode,
+    ) -> None:
+        c = self.config
+        N, K = unpacked.shape
+        nbytes = N * K * c.act_type.itemsize
+        if not _fits_in_memory_budget(nbytes, unpacked.device):
+            msg = (
+                "Not enough room in the gpu_memory_utilization budget to cache "
+                "a dequantized W4A16 prefill weight "
+                "(kernel_config.w4a16_prefill_dequant) while keeping KV cache "
+                "for one max_model_len request."
+            )
+            if mode == "hard":
+                raise ValueError(
+                    f"{msg} Increase `gpu_memory_utilization`, lower "
+                    "`max_model_len`, or use 'soft'."
+                )
+            logger.warning_once(
+                "%s Layers that do not fit keep the int4 prefill path.", msg
+            )
+            return
+
+        logger.info_once(
+            "Caching dense %s copies of W4A16 weights for prefill "
+            "(kernel_config.w4a16_prefill_dequant=%s). Each copy is 4x its int4 "
+            "weight and is reported in the model loading memory, at the expense "
+            "of KV cache.",
+            c.act_type,
+            mode,
+        )
+
+        zp = (
+            unpack_quantized_values_into_int32(w_zp, c.weight_type, packed_dim=0)
+            if w_zp is not None
+            else None
+        )
+        w_dequant = dequantize_w4a16(
+            unpacked, w_s, zp, c.group_size, c.weight_type.bias, c.act_type
+        )
+        # Derived from the int4 weight, so keep it out of state_dict.
+        layer.register_buffer(self.DEQUANT_WEIGHT_NAME, w_dequant, persistent=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         c = self.config
 
@@ -593,6 +701,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         permute_param_layout_(w_s_raw, input_dim=1, output_dim=0)
         w_s_skinny = w_s_raw.data.contiguous()
 
+        w_zp = None
         if c.zero_points:
             assert self.w_zp_name is not None
             w_zp_raw = getattr(layer, self.w_zp_name)
@@ -602,6 +711,10 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
 
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
         self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
+
+        mode = get_current_vllm_config().kernel_config.w4a16_prefill_dequant
+        if mode != "off":
+            self._maybe_cache_dequant_weight(layer, unpacked, w_s_skinny, w_zp, mode)
 
     def apply_weights(
         self,
@@ -627,5 +740,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             bias,
             cu_count,
             c.group_size,
+            getattr(layer, self.DEQUANT_WEIGHT_NAME, None),
         )
         return output.reshape(out_shape)
