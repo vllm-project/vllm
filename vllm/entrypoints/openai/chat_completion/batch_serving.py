@@ -8,7 +8,6 @@ from http import HTTPStatus
 
 from fastapi import Request
 
-from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -24,6 +23,7 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import ConversationMessage
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
