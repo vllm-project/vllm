@@ -190,6 +190,7 @@ from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesPropose
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.ngram_hint_proposer import NgramHintProposer
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
     NgramProposerGPU,
     copy_num_valid_draft_tokens,
@@ -607,6 +608,7 @@ class GPUModelRunner(
                 NgramProposer  # noqa: F823
                 | NgramProposerGPU
                 | SuffixDecodingProposer
+                | NgramHintProposer
                 | EagleProposer
                 | DFlashProposer
                 | DraftModelProposer
@@ -655,6 +657,8 @@ class GPUModelRunner(
                 self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method == "ngram_hint":
+                self.drafter = NgramHintProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
@@ -4999,6 +5003,16 @@ class GPUModelRunner(
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens,
                 self.input_batch.num_reqs,
+            )
+        elif spec_config.method == "ngram_hint":
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, NgramHintProposer)
+            draft_token_ids = self.drafter.propose(
+                num_spec_tokens_to_schedule,
+                self.input_batch,
+                sampled_token_ids,
+                self.requests,
+                slot_mappings=slot_mappings,
             )
         elif spec_config.method == "suffix":
             assert isinstance(sampled_token_ids, list)

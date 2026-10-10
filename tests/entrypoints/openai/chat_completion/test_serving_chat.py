@@ -3051,3 +3051,129 @@ def test_chat_kv_transfer_prompt_token_ids_allows_text_only_parts():
         kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
     )
     assert request.kv_transfer_params == {"prompt_token_ids": [10, 20, 30]}
+
+
+# A template that renders tool calls, so render_tool_call_hints has something
+# to diff. The module's CHAT_TEMPLATE renders a constant and would yield no hint.
+TOOL_CHAT_TEMPLATE = (
+    "{% for m in messages %}<{{ m.role }}>{{ m.content or '' }}"
+    "{% for tc in (m.tool_calls or []) %}<call>{{ tc.function.name }}"
+    "({{ tc.function.arguments | tojson }})</call>{% endfor %}"
+    "</{{ m.role }}>{% endfor %}"
+    "{% if add_generation_prompt %}<assistant>{% endif %}"
+)
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather in a city",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}
+
+
+def _build_spec_hint_serving_chat(
+    spec_method: str | None,
+) -> tuple[MagicMock, OpenAIServingChat]:
+    mock_engine = _build_mock_engine()
+    if spec_method is not None:
+        mock_engine.vllm_config = MagicMock()
+        mock_engine.vllm_config.kv_transfer_config = None
+        mock_engine.vllm_config.speculative_config.method = spec_method
+
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = OnlineRenderer(
+        model_config=mock_engine.model_config,
+        renderer=mock_engine.renderer,
+        request_logger=None,
+        chat_template=TOOL_CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+    )
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        models,
+        response_role="assistant",
+        online_renderer=online_renderer,
+        chat_template=TOOL_CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+        enable_auto_tools=True,
+    )
+    return mock_engine, serving_chat
+
+
+async def _sampling_params_for(mock_engine, serving_chat, **request_kwargs):
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+        **request_kwargs,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    return mock_engine.generate.call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_spec_hints_rendered_when_engine_drafts_with_ngram_hint():
+    mock_engine, serving_chat = _build_spec_hint_serving_chat("ngram_hint")
+
+    params = await _sampling_params_for(mock_engine, serving_chat, tools=[WEATHER_TOOL])
+
+    hints = params.extra_args["spec_hints"]
+    assert len(hints) == 1
+    assert all(isinstance(t, int) for t in hints[0])
+    tokenizer = mock_engine.renderer.tokenizer
+    assert "get_weather" in tokenizer.decode(hints[0])
+
+
+@pytest.mark.asyncio
+async def test_spec_hints_not_rendered_without_tools():
+    mock_engine, serving_chat = _build_spec_hint_serving_chat("ngram_hint")
+
+    params = await _sampling_params_for(mock_engine, serving_chat)
+
+    assert not (params.extra_args or {}).get("spec_hints")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_method", [None, "ngram"])
+async def test_spec_hints_not_rendered_for_other_drafters(spec_method):
+    mock_engine, serving_chat = _build_spec_hint_serving_chat(spec_method)
+
+    params = await _sampling_params_for(mock_engine, serving_chat, tools=[WEATHER_TOOL])
+
+    assert not (params.extra_args or {}).get("spec_hints")
+
+
+@pytest.mark.asyncio
+async def test_spec_hints_not_rendered_when_tool_choice_is_none():
+    mock_engine, serving_chat = _build_spec_hint_serving_chat("ngram_hint")
+
+    params = await _sampling_params_for(
+        mock_engine, serving_chat, tools=[WEATHER_TOOL], tool_choice="none"
+    )
+
+    assert not (params.extra_args or {}).get("spec_hints")
+
+
+@pytest.mark.asyncio
+async def test_spec_hints_from_the_client_take_precedence():
+    mock_engine, serving_chat = _build_spec_hint_serving_chat("ngram_hint")
+
+    params = await _sampling_params_for(
+        mock_engine,
+        serving_chat,
+        tools=[WEATHER_TOOL],
+        vllm_xargs={"spec_hints": [7, 8, 9]},
+    )
+
+    assert params.extra_args["spec_hints"] == [7, 8, 9]

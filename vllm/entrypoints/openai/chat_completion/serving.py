@@ -62,6 +62,7 @@ from vllm.renderers.chat_utils import (
     make_tool_call_id,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.tool_call_hints import render_tool_call_hints
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
@@ -158,6 +159,15 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self.enable_auto_tools: bool = enable_auto_tools
         self._include_reasoning_tokens_details = bool(reasoning_parser)
+
+        # Rendering hints costs a template pass per tool on every request, so
+        # only do it when the engine's drafter reads them.
+        speculative_config = getattr(
+            getattr(engine_client, "vllm_config", None), "speculative_config", None
+        )
+        self.render_spec_hints = (
+            getattr(speculative_config, "method", None) == "ngram_hint"
+        )
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -293,6 +303,37 @@ class OpenAIServingChat(GenerateBaseServing):
             self._create_chat_completion(request, raw_request), request, raw_request
         )
 
+    def _render_spec_hints(
+        self,
+        request: ChatCompletionRequest,
+        conversation: list[ConversationMessage],
+        tokenizer: Any,
+    ) -> list[list[int]] | None:
+        """Render the tool call hints for the ngram_hint speculative method.
+
+        Returns None unless the engine uses ngram_hint and the request has
+        tools the model may call.
+        """
+        if not self.render_spec_hints or not request.tools:
+            return None
+        if request.tool_choice == "none":
+            return None
+
+        chat_template = self.chat_template
+        if self.trust_request_chat_template and request.chat_template:
+            chat_template = request.chat_template
+
+        return (
+            render_tool_call_hints(
+                tokenizer,
+                conversation,
+                [tool.model_dump() for tool in request.tools],
+                chat_template=chat_template,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+            )
+            or None
+        )
+
     async def _create_chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -310,6 +351,8 @@ class OpenAIServingChat(GenerateBaseServing):
             return result
 
         conversation, engine_inputs = result
+
+        spec_hints = self._render_spec_hints(request, conversation, tokenizer)
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
@@ -361,6 +404,10 @@ class OpenAIServingChat(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if spec_hints:
+                    extra_args = dict(sampling_params.extra_args or {})
+                    extra_args.setdefault("spec_hints", spec_hints)
+                    sampling_params.extra_args = extra_args
 
             self._log_inputs(
                 sub_request_id,

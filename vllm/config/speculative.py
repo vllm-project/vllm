@@ -76,6 +76,7 @@ SpeculativeMethod = Literal[
     "mlp_speculator",
     "draft_model",
     "suffix",
+    "ngram_hint",
     "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
@@ -1167,6 +1168,8 @@ class SpeculativeConfig:
                 self.model = "ngram_gpu"
             elif self.method == "suffix":
                 self.model = "suffix"
+            elif self.method == "ngram_hint":
+                self.model = "ngram_hint"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
             elif self.method == "custom_class":
@@ -1220,6 +1223,15 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "ngram_hint":
+            # The hints come with each request, so there is no draft model.
+            # prompt_lookup_max is the length of the context suffix that is
+            # matched against the hints.
+            if self.prompt_lookup_max is None:
+                self.prompt_lookup_max = 3
+            self.prompt_lookup_min = self.prompt_lookup_max
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
         elif self.method == "custom_class":
             # Custom class proposer does not need a draft model.
             # It will dynamically load the user-provided class at runtime.
@@ -1988,6 +2000,7 @@ class SpeculativeConfig:
             in (
                 "ngram",
                 "suffix",
+                "ngram_hint",
                 "extract_hidden_states",
                 "custom_class",
             )
