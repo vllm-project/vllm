@@ -58,6 +58,7 @@ from vllm.v1.worker.block_table import (
     SlotMappingMode,
     get_block_table_width,
 )
+from vllm.v1.worker.cp_utils import prepare_dcp_dummy_context_metadata
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
@@ -78,6 +79,121 @@ def _restore_default_dtype():
     old = torch.get_default_dtype()
     yield
     torch.set_default_dtype(old)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("profile_seq_len", [1, 4, 4096])
+def test_stage_dummy_request_metadata_uses_absolute_positions(profile_seq_len: int):
+    seq_lens_cpu = torch.tensor([profile_seq_len, 260, 0], dtype=torch.int32)
+    seq_lens = torch.full((3,), -1, dtype=torch.int32)
+    num_scheduled_tokens = torch.tensor([4, 3, 0], dtype=torch.int32)
+    req_indices = torch.tensor([0, 0, 0, 0, 1, 1, 1], dtype=torch.int64)
+    query_pos = torch.tensor([0, 1, 2, 3, 0, 1, 2], dtype=torch.int64)
+    num_computed_tokens = torch.full((3,), -1, dtype=torch.int32)
+    positions = torch.full((10,), -1, dtype=torch.int64)
+
+    gpu_model_runner_module._stage_dummy_request_metadata(
+        seq_lens_cpu=seq_lens_cpu,
+        seq_lens=seq_lens,
+        num_scheduled_tokens_cpu=num_scheduled_tokens,
+        num_scheduled_tokens=num_scheduled_tokens,
+        req_indices=req_indices,
+        query_pos=query_pos,
+        num_computed_tokens=num_computed_tokens,
+        positions=positions,
+        num_reqs_padded=3,
+        num_tokens_unpadded=7,
+        num_tokens_padded=10,
+    )
+
+    assert torch.equal(seq_lens, seq_lens_cpu)
+    assert torch.equal(seq_lens, num_computed_tokens + num_scheduled_tokens)
+    context_len = max(profile_seq_len - 4, 0)
+    assert num_computed_tokens.tolist() == [context_len, 257, 0]
+    assert positions.tolist() == [
+        *range(context_len, context_len + 4),
+        257,
+        258,
+        259,
+        0,
+        0,
+        0,
+    ]
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("ragged_decode", [False, True], ids=["mixed", "ragged-decode"])
+def test_dcp_dummy_context_preserves_staged_request_invariants(ragged_decode: bool):
+    block_size = 16
+    max_row_blocks = 4
+    query_lens = [4, 3] if ragged_decode else [1, 6]
+    seq_lens_cpu = torch.tensor(
+        [20, 20, 0] if ragged_decode else [17, 22, 0], dtype=torch.int32
+    )
+    seq_lens = torch.full((3,), -1, dtype=torch.int32)
+    num_scheduled_tokens = torch.tensor([*query_lens, 0], dtype=torch.int32)
+    req_indices = torch.repeat_interleave(torch.arange(2), num_scheduled_tokens[:2])
+    query_pos = torch.cat([torch.arange(n) for n in query_lens])
+    num_computed_tokens = torch.full((3,), -1, dtype=torch.int32)
+    positions = torch.full((10,), -1, dtype=torch.int64)
+
+    gpu_model_runner_module._stage_dummy_request_metadata(
+        seq_lens_cpu=seq_lens_cpu,
+        seq_lens=seq_lens,
+        num_scheduled_tokens_cpu=num_scheduled_tokens,
+        num_scheduled_tokens=num_scheduled_tokens,
+        req_indices=req_indices,
+        query_pos=query_pos,
+        num_computed_tokens=num_computed_tokens,
+        positions=positions,
+        num_reqs_padded=3,
+        num_tokens_unpadded=7,
+        num_tokens_padded=10,
+    )
+    staged_positions = positions.clone()
+
+    # Include an extra query-start entry so the assertion below verifies that
+    # prepare_dcp_dummy_context_metadata passes only the active request slice.
+    query_start_loc = SimpleNamespace(
+        gpu=torch.tensor([0, query_lens[0], 7, 99], dtype=torch.int32)
+    )
+    block_table = SimpleNamespace(
+        max_num_blocks_per_req=max_row_blocks,
+        blocks_per_kv_block=1,
+        add_row=Mock(),
+        commit_block_table=Mock(),
+    )
+    multi_group_block_table = SimpleNamespace(
+        block_tables=[block_table],
+        compute_slot_mapping=Mock(),
+    )
+
+    prepare_dcp_dummy_context_metadata(
+        input_batch=SimpleNamespace(block_table=multi_group_block_table),
+        kv_cache_config=SimpleNamespace(num_blocks=4),
+        positions=positions,
+        query_start_loc=query_start_loc,
+        num_reqs=2,
+        num_tokens_unpadded=7,
+        dcp_dummy_context_len=16,
+    )
+
+    assert torch.equal(seq_lens, seq_lens_cpu)
+    assert num_computed_tokens.tolist() == [16, 17 if ragged_decode else 16, 0]
+    assert torch.equal(seq_lens, num_computed_tokens + num_scheduled_tokens)
+    assert torch.equal(
+        positions[:7], num_computed_tokens[req_indices].to(torch.int64) + query_pos
+    )
+    assert torch.equal(positions, staged_positions)
+    assert torch.all(positions[:7] >= 0)
+    assert torch.all(positions[:7] < max_row_blocks * block_size)
+    assert positions[7:].tolist() == [0, 0, 0]
+
+    slot_mapping_args = multi_group_block_table.compute_slot_mapping.call_args.args
+    assert slot_mapping_args[0] == 2
+    assert torch.equal(slot_mapping_args[1], query_start_loc.gpu[:3])
+    assert slot_mapping_args[1].numel() == 3
+    assert torch.equal(slot_mapping_args[2], staged_positions[:7])
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
