@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Triton DiffKV unified-attention kernel."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -16,6 +18,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.attention.ops import triton_unified_attention_diffkv as diffkv_module
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
@@ -263,3 +266,95 @@ def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D, monkey
         monkeypatch=monkeypatch,
         quant_query=True,
     )
+
+
+def _capture_diffkv_launch(
+    query_lens: list[int], max_seqlen_q: int, segm_first_dim: int
+):
+    """Run the launcher with both Triton kernels mocked; return grid/kwargs."""
+    num_query_heads, num_kv_heads = 8, 2
+    head_size_qk, head_size_v = 128, 128
+    num_seqs = len(query_lens)
+    num_tokens = sum(query_lens)
+
+    query = torch.zeros(
+        num_tokens, num_query_heads, head_size_qk, dtype=torch.bfloat16, device="cpu"
+    )
+    kv_cache = torch.zeros(
+        NUM_BLOCKS,
+        BLOCK_SIZES[0],
+        num_kv_heads,
+        head_size_qk + head_size_v,
+        dtype=torch.bfloat16,
+        device="cpu",
+    )
+    key_cache = kv_cache[..., :head_size_qk]
+    value_cache = kv_cache[..., head_size_qk:]
+    out = torch.zeros(
+        num_tokens, num_query_heads, head_size_v, dtype=torch.bfloat16, device="cpu"
+    )
+    cu_seqlens_q = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device="cpu"
+    ).cumsum(dim=0, dtype=torch.int32)
+    seqused_k = torch.full((num_seqs,), 512, dtype=torch.int32, device="cpu")
+    block_tables = torch.zeros(num_seqs, 32, dtype=torch.int32, device="cpu")
+    segm_output, segm_max, segm_expsum = _alloc_segm_buffers(
+        segm_first_dim, num_query_heads, head_size_v
+    )
+
+    with (
+        patch.object(diffkv_module, "kernel_unified_attention_diffkv") as mock_kernel,
+        patch.object(diffkv_module, "kernel_reduce_segments_diffkv") as mock_reduce,
+    ):
+        unified_attention_diffkv(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_k=seqused_k,
+            softmax_scale=head_size_qk**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_tables,
+            softcap=0,
+            max_seqlen_q=max_seqlen_q,
+            seq_threshold_3D=8,
+            num_par_softmax_segments=NUM_PAR_SOFTMAX_SEGMENTS,
+            softmax_segm_output=segm_output,
+            softmax_segm_max=segm_max,
+            softmax_segm_expsum=segm_expsum,
+        )
+
+    grid = mock_kernel.__getitem__.call_args.args[0]
+    kwargs = mock_kernel.__getitem__.return_value.call_args.kwargs
+    return grid, kwargs, mock_reduce.__getitem__.called
+
+
+def test_spec_verify_block_m_grouping_and_launch_kwargs() -> None:
+    """Pin program granularity for verify/decode without launching Triton."""
+    verify_grid, verify_kwargs, verify_reduce = _capture_diffkv_launch(
+        query_lens=[8, 8], max_seqlen_q=8, segm_first_dim=16
+    )
+    num_queries_per_kv = 4
+    expected_block_m = min(128, next_power_of_2(8 * num_queries_per_kv))
+    assert verify_grid == (4, 2, NUM_PAR_SOFTMAX_SEGMENTS)
+    assert verify_kwargs["IS_3D"] is True
+    assert verify_kwargs["BLOCK_M"] == expected_block_m
+    assert verify_kwargs["BLOCK_Q"] == expected_block_m // num_queries_per_kv
+    assert verify_kwargs["TILE_SIZE"] == 16
+    assert verify_kwargs["num_warps"] == 4
+    assert "num_stages" not in verify_kwargs
+    assert verify_reduce
+
+    decode_grid, decode_kwargs, decode_reduce = _capture_diffkv_launch(
+        query_lens=[1], max_seqlen_q=1, segm_first_dim=8
+    )
+    assert decode_grid == (1, 2, NUM_PAR_SOFTMAX_SEGMENTS)
+    assert decode_kwargs["IS_3D"] is True
+    assert decode_kwargs["BLOCK_M"] == 16
+    assert decode_kwargs["BLOCK_Q"] == 4
+    assert decode_kwargs["TILE_SIZE"] == 16
+    assert "num_warps" not in decode_kwargs
+    assert "num_stages" not in decode_kwargs
+    assert decode_reduce

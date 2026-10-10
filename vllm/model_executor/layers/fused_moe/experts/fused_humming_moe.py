@@ -258,25 +258,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             **kwargs,
         )
 
-    def _get_permute_scratch(
-        self, topk: int, indices_only: bool = False
-    ) -> MoEPermuteScratch | None:
+    def _get_permute_scratch(self) -> MoEPermuteScratch | None:
         if not moe_permute_unpermute_supported():
             return None
 
-        max_expanded_rows = (
-            self.moe_config.max_num_tokens
-            * self.moe_config.dp_size
-            * self.moe_config.experts_per_token
-        )
         return get_moe_permute_scratch(
-            max_num_tokens=math.ceil(max_expanded_rows / topk),
-            topk=topk,
             num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts,
             device=torch.device(self.moe_config.device),
-            hidden_size=None if indices_only else self.moe_config.hidden_dim,
-            hidden_dtype=None if indices_only else self.moe_config.in_dtype,
         )
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
@@ -911,14 +900,18 @@ class HummingGroupedExperts(HummingExpertsBase):
         )
         buffers["output"] = output
 
+        scratch = self._get_permute_scratch()
         if a1q_scale is None:
-            scratch = self._get_permute_scratch(topk_ids.size(1), indices_only=True)
             assert scratch is not None
             scatter_metadata = moe_prepare_scatter(topk_ids, expert_map, scratch)
             expert_offsets, scatter_idx = scatter_metadata
             inv_perm = scatter_idx.flatten()
             num_valid_tokens = expert_offsets[-1:] if expert_map is not None else None
         else:
+            # Prequantized inputs skip w13 quantization, so its buffer is free
+            # to hold the permuted hidden states.
+            permuted_hidden_states = buffers["quanted_gate_up_input"]
+            assert permuted_hidden_states.dtype == hidden_states.dtype
             hidden_states, a1q_scale, expert_offsets, inv_perm, _ = moe_permute(
                 hidden_states=hidden_states,
                 a1q_scale=a1q_scale,
@@ -926,7 +919,8 @@ class HummingGroupedExperts(HummingExpertsBase):
                 n_expert=global_num_experts,
                 n_local_expert=self.num_experts,
                 expert_map=expert_map,
-                scratch=self._get_permute_scratch(topk_ids.size(1)),
+                permuted_hidden_states=permuted_hidden_states,
+                scratch=scratch,
             )
             scatter_idx = None
             num_valid_tokens = None

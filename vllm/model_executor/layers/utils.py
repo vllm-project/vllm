@@ -128,15 +128,12 @@ def _can_use_flashinfer_cutedsl_bf16(
     if (
         k <= 0
         or n <= 0
+        or x.numel() == 0
         or weight.shape[1] != k
         or k % 128 != 0
         or x.data_ptr() % 32 != 0
         or weight.data_ptr() % 32 != 0
     ):
-        return False
-
-    m = x.numel() // k
-    if not 1 <= m <= 32:
         return False
     return bias is None or (
         bias.is_cuda
