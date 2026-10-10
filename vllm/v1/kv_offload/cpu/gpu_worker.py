@@ -22,11 +22,11 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
 from vllm.v1.kv_offload.cpu.copy_backend import (
     CopyBackendAdapter,
     CopyRunDescriptor,
 )
+from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 logger = init_logger(__name__)
