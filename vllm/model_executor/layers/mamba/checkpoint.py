@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -25,6 +25,7 @@ def compute_mamba_prefill_checkpoints(
     mamba_block_size: int,
     checkpoint_alignment: int | None,
     drop_eagle_block: bool,
+    cache_hit_alignment_tokens: int,
 ) -> tuple[list[int], list[int]]:
     """Per-row internal prefill checkpoint offsets and cache block columns.
 
@@ -43,7 +44,7 @@ def compute_mamba_prefill_checkpoints(
     for seq_len, query_len in zip(seq_lens, query_lens):
         query_start = seq_len - query_len
         position = get_mamba_prefill_checkpoint_position(
-            seq_len, hash_block_size, drop_eagle_block=drop_eagle_block
+            seq_len, cache_hit_alignment_tokens, drop_eagle_block=drop_eagle_block
         )
         valid = is_mamba_prefill_checkpoint_valid(
             query_start=query_start,
@@ -58,10 +59,36 @@ def compute_mamba_prefill_checkpoints(
     return offsets, cols
 
 
+def _gather_checkpoint_state_indices(
+    block_table: torch.Tensor, request_rows: torch.Tensor, block_cols: torch.Tensor
+) -> torch.Tensor:
+    return torch.where(
+        block_cols >= 0, block_table[request_rows, block_cols], NULL_BLOCK_ID
+    )
+
+
 @dataclass
 class MambaPrefillCheckpointMetadata:
     checkpoint_offsets: torch.Tensor
     state_indices: torch.Tensor
+    # Host copy of ``checkpoint_offsets``, for backends that lay out the
+    # checkpoint before any tensor exists (Mamba2's SSD chunk split).
+    offsets: list[int] | None = None
+    # Gather indices into the block table, kept so that another KV cache group
+    # with the same spec can re-derive its own ``state_indices``.
+    request_rows: torch.Tensor | None = None
+    block_cols: torch.Tensor | None = None
+
+    def regather_state_indices(
+        self, block_table: torch.Tensor
+    ) -> "MambaPrefillCheckpointMetadata":
+        assert self.request_rows is not None and self.block_cols is not None
+        return replace(
+            self,
+            state_indices=_gather_checkpoint_state_indices(
+                block_table, self.request_rows, self.block_cols
+            ),
+        )
 
 
 class MambaPrefillCheckpointBuilder:
@@ -76,14 +103,21 @@ class MambaPrefillCheckpointBuilder:
         m: CommonAttentionMetadata,
         request_rows: list[int],
     ) -> MambaPrefillCheckpointMetadata | None:
+        if self.vllm_config.cache_config.mamba_cache_mode != "align":
+            return None
         if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
+            return None
+        cache_config = self.vllm_config.cache_config
+        hash_block_size = cache_config.hash_block_size
+        cache_hit_alignment_tokens = cache_config.cache_hit_alignment_tokens
+        if hash_block_size is None or cache_hit_alignment_tokens is None:
+            # Unresolved only for the minimal KV cache built for profiling.
             return None
         assert m.seq_lens_cpu_upper_bound is not None
         all_query_lens = m.query_start_loc_cpu.diff().tolist()
         query_lens = [all_query_lens[row] for row in request_rows]
         seq_lens = m.seq_lens_cpu_upper_bound.tolist()
         block_size = self.kv_cache_spec.block_size
-        hash_block_size = self.vllm_config.cache_config.prefix_match_unit or block_size
         speculative_config = self.vllm_config.speculative_config
         drop_eagle_block = (
             speculative_config is not None and speculative_config.use_eagle_block_drop()
@@ -95,6 +129,7 @@ class MambaPrefillCheckpointBuilder:
             mamba_block_size=block_size,
             checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
             drop_eagle_block=drop_eagle_block,
+            cache_hit_alignment_tokens=cache_hit_alignment_tokens,
         )
         if not any(checkpoint_offsets):
             return None
@@ -109,17 +144,14 @@ class MambaPrefillCheckpointBuilder:
         checkpoint_cols_tensor = async_tensor_h2d(
             checkpoint_cols, dtype=torch.int64, device=m.query_start_loc.device
         )
-        checkpoint_state_indices = m.block_table_tensor[
-            request_rows_tensor, checkpoint_cols_tensor
-        ]
-        checkpoint_state_indices = torch.where(
-            checkpoint_cols_tensor >= 0,
-            checkpoint_state_indices,
-            NULL_BLOCK_ID,
-        )
         return MambaPrefillCheckpointMetadata(
             checkpoint_offsets_tensor,
-            checkpoint_state_indices,
+            _gather_checkpoint_state_indices(
+                m.block_table_tensor, request_rows_tensor, checkpoint_cols_tensor
+            ),
+            offsets=checkpoint_offsets,
+            request_rows=request_rows_tensor,
+            block_cols=checkpoint_cols_tensor,
         )
 
 

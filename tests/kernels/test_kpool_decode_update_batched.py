@@ -220,17 +220,44 @@ def _torch_reference(
     return kv_out, tail_cpu.to(torch.bfloat16).to(device="cuda")
 
 
-def _assert_eq(r_ref, r_kern):
+def _assert_eq(r_ref, r_kern, k_byte_tol=0):
     kv_ref, tail_ref = r_ref
     kv_kern, tail_kern = r_kern
-    assert torch.equal(kv_ref, kv_kern), (
-        "kv_cache differs: max diff "
-        f"{(kv_ref.int() - kv_kern.int()).abs().max().item()}"
+    # Each page holds the fp8 K bytes followed by the fp32 scales.
+    k_region = PAGE_SIZE * HEAD_DIM
+    pages_ref = kv_ref.view(kv_ref.shape[0], -1)
+    pages_kern = kv_kern.view(kv_kern.shape[0], -1)
+    k_diff = (pages_ref[:, :k_region].int() - pages_kern[:, :k_region].int()).abs()
+    assert k_diff.max().item() <= k_byte_tol, (
+        f"kv_cache K differs: max diff {k_diff.max().item()}"
+    )
+    assert torch.equal(pages_ref[:, k_region:], pages_kern[:, k_region:]), (
+        "kv_cache scales differ"
     )
     assert torch.equal(tail_ref, tail_kern), (
         "tail_kv_cache differs: max diff "
         f"{(tail_ref.float() - tail_kern.float()).abs().max().item()}"
     )
+
+
+def _cache_pool_bytes(kv_cache: torch.Tensor, pool_slot: int) -> torch.Tensor:
+    """Read a logical pool's K and scale bytes from the platform cache layout."""
+    page_size = kv_cache.shape[1]
+    head_dim = kv_cache.shape[2] - 4
+    page_idx, token_offset = divmod(pool_slot, page_size)
+    flat = kv_cache[page_idx].reshape(-1)
+    dims = torch.arange(head_dim, device=kv_cache.device)
+    if current_platform.is_rocm() and page_size > 1:
+        k_offsets = (
+            (token_offset // 16) * 16 * head_dim
+            + (dims // 16) * 16 * 16
+            + (token_offset % 16) * 16
+            + dims % 16
+        )
+    else:
+        k_offsets = token_offset * head_dim + dims
+    scale_offset = page_size * head_dim + 4 * token_offset
+    return torch.cat((flat[k_offsets], flat[scale_offset : scale_offset + 4]))
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
@@ -343,7 +370,7 @@ def test_decode_writer_matches_prefill_writer(pool_size, ring_pools):
         p
         for p in range(n_pools)
         if not torch.equal(
-            kv_prefill[p // page, p % page], kv_decode[p // page, p % page]
+            _cache_pool_bytes(kv_prefill, p), _cache_pool_bytes(kv_decode, p)
         )
     ]
     assert not differing, (
@@ -379,13 +406,6 @@ def test_rejected_draft_redo_needs_ring_slots(ring_pools):
     kv = torch.zeros_like(kv_ref)
     tail = torch.zeros(nblk, 2, ring, HEAD_DIM, dtype=torch.bfloat16, device=dev)
 
-    def pool_bytes(cache, p):
-        # Page layout: [page * HEAD_DIM bytes of K rows | page * 4 bytes of scales].
-        flat = cache[0].reshape(-1)
-        k_bytes = flat[p * HEAD_DIM : (p + 1) * HEAD_DIM]
-        s_bytes = flat[page * HEAD_DIM + 4 * p : page * HEAD_DIM + 4 * (p + 1)]
-        return torch.cat([k_bytes, s_bytes])
-
     def step(positions, keys, scores):
         pos = torch.tensor([positions], dtype=torch.int32, device=dev)
         slots = [(p // pool) if p % pool == pool - 1 else -1 for p in positions]
@@ -415,7 +435,7 @@ def test_rejected_draft_redo_needs_ring_slots(ring_pools):
     )
     step([8, 9, 10, 11], k[8:12], score[8:12])  # all drafts rejected
     for p in (1, 2):
-        assert torch.equal(pool_bytes(kv, p), pool_bytes(kv_ref, p)), p
+        assert torch.equal(_cache_pool_bytes(kv, p), _cache_pool_bytes(kv_ref, p)), p
 
     # Draft 7 completes pool 1 and is rejected. With a one-pool ring, drafts
     # 8 and 9 overwrite the slots of positions 4 and 5, which are read by the
@@ -430,7 +450,7 @@ def test_rejected_draft_redo_needs_ring_slots(ring_pools):
         torch.cat([score[6:7], draft_scores]),
     )
     step([7, 8, 9, 10], k[7:11], score[7:11])
-    pool1_ok = torch.equal(pool_bytes(kv, 1), pool_bytes(kv_ref, 1))
+    pool1_ok = torch.equal(_cache_pool_bytes(kv, 1), _cache_pool_bytes(kv_ref, 1))
     if ring_pools == 1:
         assert not pool1_ok, "expected a one-pool ring to corrupt pool 1"
     else:
@@ -639,4 +659,6 @@ def test_batched_matches_reference_fuzz(seed):
 
     r_ref = _torch_reference(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     r_kern = _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos)
-    _assert_eq(r_ref, r_kern)
+    # Random inputs can land the pooled value on a bf16 rounding midpoint,
+    # where the kernel and the CPU reference may round apart by one fp8 step.
+    _assert_eq(r_ref, r_kern, k_byte_tol=1)

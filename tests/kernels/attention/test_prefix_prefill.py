@@ -5,6 +5,7 @@ import math
 import random
 import time
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -321,6 +322,63 @@ def test_contexted_kv_attention(
     output_ref = output_ref.permute(1, 0, 2).contiguous()
     atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-4
     torch.testing.assert_close(output, output_ref, atol=atol, rtol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
+@pytest.mark.parametrize("sliding_window", [None, 1, 4])
+@pytest.mark.parametrize("query_len", [1, 3])
+@torch.inference_mode()
+def test_rocm_backend_sliding_window_includes_boundary_token(
+    sliding_window: int | None, query_len: int
+) -> None:
+    """A window of W must include the current token and W - 1 preceding tokens."""
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+    device, dtype = "cuda:0", torch.float16
+    num_heads, head_size, seq_len = 4, 128, 8
+    query = torch.zeros(query_len, num_heads, head_size, dtype=dtype, device=device)
+    key = torch.zeros(seq_len, 1, head_size, dtype=dtype, device=device)
+    values = torch.arange(1, seq_len + 1, dtype=dtype, device=device)
+    value = values[:, None, None].expand_as(key)
+    kv_cache = torch.zeros(2, 1, 16, head_size, dtype=dtype, device=device)
+    _, value_cache = PagedAttention.split_kv_cache(kv_cache, 1, head_size)
+    value_cache[..., :seq_len] = value.permute(1, 2, 0)
+    scale = torch.tensor(1.0, device=device)
+    metadata = SimpleNamespace(
+        use_cascade=False,
+        num_actual_tokens=query_len,
+        query_start_loc=torch.tensor([0, query_len], dtype=torch.int32, device=device),
+        seq_lens=torch.tensor([seq_len], dtype=torch.int32, device=device),
+        max_query_len=query_len,
+        max_seq_len=seq_len,
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=device),
+        causal=True,
+    )
+    impl = RocmAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=sliding_window,
+        kv_cache_dtype="auto",
+    )
+    output = torch.empty_like(query)
+    impl.forward(
+        SimpleNamespace(_k_scale=scale, _v_scale=scale),
+        query,
+        key[-query_len:],
+        value[-query_len:],
+        kv_cache.transpose(0, 1),
+        metadata,
+        output,
+    )
+    mask = create_causal_attention_mask_for_sdpa(
+        [query_len], [seq_len], sliding_window or 0, device=device, dtype=dtype
+    )
+    expected = (mask.float().softmax(dim=-1) @ values.float())[:, None, None]
+    torch.testing.assert_close(output, expected.to(dtype).expand_as(output))
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

@@ -304,9 +304,6 @@ class SchedulerOutput:
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
-    # Complete block-table rows that replace incrementally appended block IDs.
-    block_table_updates: dict[str, tuple[list[int], ...]] | None = None
-
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
 
@@ -335,3 +332,8 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
+    # Per request, ordered as structured_output_request_ids: how many leading
+    # drafts the bitmask constrained. `grammar_bitmask` fills every row after
+    # the first -1 placeholder with the all-permissive `_full_mask`, so drafts
+    # from this index on must not be accepted. None invalidates every draft.
+    num_acceptable_drafts: list[int] | None = None

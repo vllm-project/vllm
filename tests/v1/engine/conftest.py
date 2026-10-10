@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
 from tests.v1.engine.utils import (
@@ -18,9 +17,6 @@ from tests.v1.engine.utils import (
 from vllm.engine.arg_utils import EngineArgs
 
 from ...distributed.conftest import publisher_config, random_port  # noqa: F401
-
-EngineCoreSampleLogprobsType = list[tuple[torch.Tensor, torch.Tensor]]
-EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]
 
 
 def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:

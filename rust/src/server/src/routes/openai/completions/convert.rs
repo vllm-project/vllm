@@ -124,6 +124,8 @@ pub(super) fn prepare_completion_request(
             thinking_token_budget: request.thinking_token_budget,
             logprobs,
             prompt_logprobs,
+            prompt_logprob_token_ids: None,
+            prompt_logprob_start: None,
             min_p: request.min_p,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
@@ -134,6 +136,7 @@ pub(super) fn prepare_completion_request(
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
             bad_words: None,
+            bad_words_token_ids: None,
             logprob_token_ids: None,
             structured_outputs,
             skip_reading_prefix_cache: None,
@@ -141,6 +144,7 @@ pub(super) fn prepare_completion_request(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
             ),
+            stream_interval: request.stream_interval,
         },
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
@@ -208,6 +212,8 @@ fn completion_echo_text(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use axum::http::HeaderMap;
     use serde_json::json;
     use validator::Validate;
@@ -397,7 +403,8 @@ mod tests {
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
             "ignore_eos": true,
-            "skip_special_tokens": false
+            "skip_special_tokens": false,
+            "stream_interval": 4
         }))
         .expect("parse request");
 
@@ -433,6 +440,10 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+        assert_eq!(
+            prepared.text_request.sampling_params.stream_interval,
+            NonZeroU32::new(4)
+        );
     }
 
     #[test]
