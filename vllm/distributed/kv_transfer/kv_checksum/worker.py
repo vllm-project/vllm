@@ -58,9 +58,11 @@ class _LayerView:
     """One layer's KV cache as 8-byte pieces, with each piece's weight.
 
     ``blocks`` is ``[num_blocks, kernel_blocks, heads, tokens, pieces]``. A
-    piece in slice ``(layer, head)`` at position ``j`` of the slice weighs
-    ``m * (2 * j + 1)``, with ``m = 2 * (layer * H + head) + 1`` for the
-    global head (see ``checksum.py``).
+    piece ``j`` of slice ``(layer, head)`` weighs ``m * (2 * j + 1)``, with
+    ``m = 2 * (layer * H + head) + 1`` for the global head (see
+    ``checksum.py``). ``weights`` are those of a block holding the request's
+    first tokens; a block starting at token ``f`` adds ``f`` times
+    ``offset_weights`` to them.
     """
 
     def __init__(
@@ -90,6 +92,7 @@ class _LayerView:
         slice_weight = 2 * (first_slice + head) + 1
         position = self.token_index * num_pieces + piece
         self.weights = slice_weight * (2 * position + 1)
+        self.offset_weights = 2 * num_pieces * slice_weight
         self.pieces = pieces
         self.replica_key = replica_key
         self.rows_per_gather = max(
@@ -97,22 +100,31 @@ class _LayerView:
         )
 
     def accumulate(
-        self, block_ids: torch.Tensor, valid_tokens: torch.Tensor, out: torch.Tensor
+        self,
+        block_ids: torch.Tensor,
+        first_tokens: torch.Tensor,
+        valid_tokens: torch.Tensor,
+        out: torch.Tensor,
     ) -> None:
         """Add this layer's weighted sum of each block row into ``out``.
 
         Args:
             block_ids: ``[n]`` logical block ids on the device.
+            first_tokens: ``[n]`` position in the request of each block's first
+                token.
             valid_tokens: ``[n]`` tokens to include from the start of each block.
             out: ``[n]`` int64 accumulator, wrapping around (mod 2**64).
 
         """
+        dims = (1, 2, 3, 4)
         for start in range(0, block_ids.shape[0], self.rows_per_gather):
             end = start + self.rows_per_gather
             rows = self.pieces.index_select(0, block_ids[start:end])
             valid = valid_tokens[start:end].view(-1, 1, 1, 1, 1)
             rows.masked_fill_(self.token_index >= valid, 0)
-            out[start:end] += (rows * self.weights).sum(dim=(1, 2, 3, 4))
+            out[start:end] += (rows * self.weights).sum(dim=dims) + first_tokens[
+                start:end
+            ] * (rows * self.offset_weights).sum(dim=dims)
 
 
 def _layer_spec(group_spec: KVCacheSpec, layer_name: str) -> KVCacheSpec:
@@ -126,12 +138,7 @@ def _group_fingerprint(group: KVCacheGroupSpec) -> int:
     total = 0
     for layer_name in group.layer_names:
         spec = _layer_spec(group.kv_cache_spec, layer_name)
-        identity = (
-            layer_name,
-            type(spec).__name__,
-            spec.block_size,
-            str(getattr(spec, "dtype", None)),
-        )
+        identity = (layer_name, type(spec).__name__, str(getattr(spec, "dtype", None)))
         digest = hashlib.sha256(repr(identity).encode()).digest()
         total += int.from_bytes(digest[:8], "little")
     return total % 2**64
@@ -280,6 +287,7 @@ class _GroupBatch:
     segments: list[tuple[str, int, int]] = field(default_factory=list)
     """``(req_id, start_position, num_rows)`` per request, in row order."""
     block_ids: list[int] = field(default_factory=list)
+    first_tokens: list[int] = field(default_factory=list)
     valid_tokens: list[int] = field(default_factory=list)
 
 
@@ -545,6 +553,9 @@ class KVChecksumWorker:
                 batch = batches[group_id]
                 batch.segments.append((req_id, start, len(block_ids)))
                 batch.block_ids.extend(block_ids)
+                batch.first_tokens.extend(
+                    pos * block_size for pos in range(start, start + len(block_ids))
+                )
                 batch.valid_tokens.extend(
                     num_valid_tokens(pos, block_size, blocks.num_tokens)
                     for pos in range(start, start + len(block_ids))
@@ -561,6 +572,7 @@ class KVChecksumWorker:
             device = layers[0].pieces.device
             replica_keys = list(dict.fromkeys(layer.replica_key for layer in layers))
             block_ids = _to_device(batch.block_ids, device)
+            first_tokens = _to_device(batch.first_tokens, device)
             valid_tokens = _to_device(batch.valid_tokens, device)
             values = torch.zeros(
                 (len(batch.block_ids), len(replica_keys)),
@@ -570,6 +582,7 @@ class KVChecksumWorker:
             for layer in layers:
                 layer.accumulate(
                     block_ids,
+                    first_tokens,
                     valid_tokens,
                     values[:, replica_keys.index(layer.replica_key)],
                 )
