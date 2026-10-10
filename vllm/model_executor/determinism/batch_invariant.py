@@ -280,7 +280,10 @@ def matmul_descriptor_persistent(
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -293,7 +296,7 @@ def matmul_persistent(
     K, N = b.shape
     dtype = a.dtype
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    c = torch.empty((M, N), device=a.device, dtype=out_dtype or dtype)
 
     # 1D launch kernel where each block gets its own program.
     def grid(META):
@@ -739,6 +742,24 @@ def mm_batch_invariant(a, b, bias=None):
     return matmul_persistent(a, b, bias=bias)
 
 
+def mm_dtype_batch_invariant(a, b, out_dtype, *, out=None):
+    # Same dtype checks as ATen's CUDA mm.dtype / mm.dtype_out.
+    if a.dtype != b.dtype:
+        raise RuntimeError("input dtypes must be the same")
+    if out_dtype != a.dtype and not (
+        out_dtype == torch.float32 and a.dtype in (torch.float16, torch.bfloat16)
+    ):
+        raise RuntimeError(
+            "out_dtype must be the same as input dtype or fp32 for fp16/bf16 inputs"
+        )
+    if out is not None and out.dtype != out_dtype:
+        raise RuntimeError(
+            "out_dtype must be the same as the dtype of the provided out tensor"
+        )
+    result = matmul_persistent(a, b, out_dtype=out_dtype)
+    return result if out is None else out.copy_(result)
+
+
 def matmul_batch_invariant(a, b, *, out=None):
     # torch.matmul can handle various dimensions
     # For 2D x 2D, it's the same as mm
@@ -1067,6 +1088,10 @@ def enable_batch_invariant_mode():
             # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
             # triton persistent matmul overrides for mm/addmm/matmul/linear.
             _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::mm.dtype", mm_dtype_batch_invariant, key)
+            _batch_invariant_LIB.impl(
+                "aten::mm.dtype_out", mm_dtype_batch_invariant, key
+            )
             _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
             _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
