@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
@@ -50,8 +51,11 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
+    aux_stream,
+    current_stream,
     direct_register_custom_op,
 )
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -142,10 +146,12 @@ def _moe_forward_fake(
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
-    # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
-    # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
-    # as an op arg (not peeked from the layer registry) to keep the fake
-    # a pure shape function of its inputs and preserve subgraph dedup.
+    # `hidden_dim_unpadded > 0` when the routed output width differs from
+    # `hidden_states.shape[-1]`: on the TRT-LLM MXFP4 path, where the real
+    # kernel writes narrower, and when the runner applies the routed input
+    # transform inside the op. Plumbed as an op arg (not peeked from the layer
+    # registry) to keep the fake a pure shape function of its inputs and
+    # preserve subgraph dedup.
     if hidden_dim_unpadded > 0:
         return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
     return torch.empty_like(hidden_states)
@@ -290,6 +296,30 @@ class MoERunner(MoERunnerInterface):
                 mk_can_overlap_shared_experts=can_overlap,
             )
 
+        # When the runner holds the gate and there is a routed input transform
+        # (e.g. the latent projection of latent MoE), the transform is applied
+        # inside the MoE op instead of in `forward`, so that the gate, which
+        # reads the pre-transform input, can run on the aux stream concurrently
+        # with it. Same gating as the shared experts aux stream.
+        self._defer_input_transform = (
+            gate is not None and routed_input_transform is not None
+        )
+        self._gate_stream: torch.cuda.Stream | None = None
+        if self._defer_input_transform and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
+            self._gate_stream = aux_stream()
+            if self._gate_stream is not None:
+                logger.info_once(
+                    "MoE router gate runs on the aux CUDA stream, overlapped "
+                    "with the routed input transform (up to %d tokens).",
+                    envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD,
+                )
+                # One pair per DBO ubatch id to sync aux and main stream.
+                self._gate_input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                self._gate_output_ready_event = [
+                    torch.cuda.Event(),
+                    torch.cuda.Event(),
+                ]
+
         # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
 
@@ -354,6 +384,42 @@ class MoERunner(MoERunnerInterface):
                 [self.gate.weight, self.shared_expert_gate.weight],
                 dim=0,
             )
+
+    def _apply_gate(self, gate_input: torch.Tensor) -> torch.Tensor:
+        assert self.gate is not None
+        if self._fse_fuse_gate:
+            self._maybe_fuse_gate_weights()
+            return dispatch_unquantized_gemm()(
+                self, gate_input, self._combined_gate_weight, None
+            )
+        router_logits, _ = self.gate(gate_input)
+        return router_logits
+
+    def _gate_runs_in_aux_stream(self, gate_input: torch.Tensor) -> bool:
+        return (
+            self._gate_stream is not None
+            and gate_input.shape[0] <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        )
+
+    @property
+    def _gate_event_idx(self) -> int:
+        return dbo_current_ubatch_id() if self.enable_dbo else 0
+
+    def _apply_gate_async(self, gate_input: torch.Tensor) -> torch.Tensor:
+        """Enqueue the gate on the aux stream without waiting for it. The
+        caller makes the current stream wait on `_gate_output_ready_event`
+        before anything reads the returned router logits."""
+        assert self._gate_stream is not None
+        if self._fse_fuse_gate:
+            # One-time weight concat stays on the current stream.
+            self._maybe_fuse_gate_weights()
+        idx = self._gate_event_idx
+        self._gate_input_ready_event[idx].record(current_stream())
+        with torch.cuda.stream(self._gate_stream):
+            self._gate_input_ready_event[idx].wait(self._gate_stream)
+            router_logits = self._apply_gate(gate_input)
+            self._gate_output_ready_event[idx].record(self._gate_stream)
+        return router_logits
 
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
@@ -540,21 +606,43 @@ class MoERunner(MoERunnerInterface):
         fused MoE kernel. The returned trunc_size is used by
         _maybe_reduce_final_output to strip the padding from the result.
         """
-        shared_experts_hidden_dim = (
-            shared_experts_input.shape[-1] if shared_experts_input is not None else 0
-        )
-        transformed_hidden_dim: int | None = hidden_states.shape[-1]
-        if (
-            not self._quant_method.skip_forward_padding
-            and self.moe_config.hidden_dim != transformed_hidden_dim
-        ):
-            assert transformed_hidden_dim is not None
+        transformed_hidden_dim = hidden_states.shape[-1]
+        padded_hidden_dim = self._padded_routed_hidden_dim(transformed_hidden_dim)
+        if padded_hidden_dim != transformed_hidden_dim:
             hidden_states = F.pad(
                 hidden_states,
-                (0, self.moe_config.hidden_dim - transformed_hidden_dim),
+                (0, padded_hidden_dim - transformed_hidden_dim),
                 mode="constant",
                 value=0.0,
             )
+
+        return (
+            hidden_states,
+            *self._routed_truncation_sizes(
+                shared_experts_input.shape[-1]
+                if shared_experts_input is not None
+                else 0,
+                transformed_hidden_dim,
+            ),
+        )
+
+    def _padded_routed_hidden_dim(self, transformed_hidden_dim: int) -> int:
+        """Width of the routed input after `_maybe_pad_hidden_states`."""
+        if self._quant_method.skip_forward_padding:
+            return transformed_hidden_dim
+        return self.moe_config.hidden_dim
+
+    def _routed_truncation_sizes(
+        self,
+        shared_experts_hidden_dim: int,
+        transformed_hidden_dim: int,
+    ) -> tuple[int | None, int | None]:
+        """Truncation sizes (pre_xform, post_xform) for stripping the padding
+        applied by `_maybe_pad_hidden_states` from the output. Depends only on
+        shapes, so it can be computed without the transformed tensor."""
+        trunc_dim: int | None = transformed_hidden_dim
+        if self._padded_routed_hidden_dim(transformed_hidden_dim) == trunc_dim:
+            trunc_dim = None
 
         # Truncation sizes for stripping kernel padding from the output.
         # None means no truncation needed (no padding was applied).
@@ -574,17 +662,14 @@ class MoERunner(MoERunnerInterface):
         # Standard MoE / MoE without transforms (GPT-OSS, Mixtral):
         #   - pre_xform is None (no early truncation)
         #   - post_xform strips padding after all-reduce (or None if unpadded)
-        if transformed_hidden_dim == hidden_states.shape[-1]:
-            transformed_hidden_dim = None
-
         pre_xform_trunc_size = None
         if self.routed_output_transform is not None or shared_experts_hidden_dim > 0:
-            pre_xform_trunc_size = transformed_hidden_dim
-        post_xform_trunc_size = transformed_hidden_dim
+            pre_xform_trunc_size = trunc_dim
+        post_xform_trunc_size = trunc_dim
         if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
             post_xform_trunc_size = shared_experts_hidden_dim
 
-        return hidden_states, pre_xform_trunc_size, post_xform_trunc_size
+        return pre_xform_trunc_size, post_xform_trunc_size
 
     def _maybe_apply_shared_experts(
         self,
@@ -717,22 +802,41 @@ class MoERunner(MoERunnerInterface):
         # passes the already-transformed routed input as ``hidden_states`` and
         # the original hidden states as ``shared_experts_input``; skip the
         # transform in that case so shared experts still see the original input.
-        if shared_experts_input is None:
-            hidden_states, shared_experts_input = self.apply_routed_input_transform(
-                hidden_states
-            )
-
-        # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_fp4_moe_hidden_dim_for_fi`
-        # so routed output can be trimmed before
-        # shared+routed add / latent up proj if needed.
-
-        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
-            self._maybe_pad_hidden_states(
-                shared_experts_input,
-                hidden_states,
-            )
+        routed_output_dim = (
+            self.moe_config.hidden_dim_unpadded
+            if self._quant_method.has_unpadded_output
+            else 0
         )
+        if shared_experts_input is None and self._defer_input_transform:
+            # The transform and padding run inside the op (see
+            # `_forward_impl`); compute the truncation sizes from the shapes.
+            # The transform output width is the routed experts' hidden size.
+            transformed_hidden_dim = cast(int, self.moe_config.hidden_dim_unpadded)
+            og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
+                self._routed_truncation_sizes(
+                    hidden_states.shape[-1], transformed_hidden_dim
+                )
+            )
+            if routed_output_dim == 0:
+                routed_output_dim = self._padded_routed_hidden_dim(
+                    transformed_hidden_dim
+                )
+        else:
+            if shared_experts_input is None:
+                hidden_states, shared_experts_input = self.apply_routed_input_transform(
+                    hidden_states
+                )
+
+            # Record before `_maybe_pad_hidden_states` pads activations to
+            # match `moe_config.hidden_dim`, e.g. after
+            # `align_fp4_moe_hidden_dim_for_fi` so routed output can be trimmed
+            # before shared+routed add / latent up proj if needed.
+            hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
+                self._maybe_pad_hidden_states(
+                    shared_experts_input,
+                    hidden_states,
+                )
+            )
 
         result = self._forward_entry(
             hidden_states,
@@ -740,9 +844,7 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input,
             input_ids,
             self._encode_layer_name(),
-            self.moe_config.hidden_dim_unpadded
-            if self._quant_method.has_unpadded_output
-            else 0,
+            routed_output_dim,
         )
 
         #
@@ -892,6 +994,28 @@ class MoERunner(MoERunnerInterface):
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
+        # `forward` defers the routed input transform to here when the runner
+        # holds the gate; `hidden_states` is then still the pre-transform input.
+        defer_input_transform = (
+            self._defer_input_transform and shared_experts_input is None
+        )
+        if defer_input_transform:
+            shared_experts_input = hidden_states
+
+        # The gate reads the pre-transform input, which `shared_experts_input`
+        # holds whenever it is set.
+        # NOTE: in future PR, MoE runner will always hold the gate.
+        gate_input = (
+            shared_experts_input if shared_experts_input is not None else hidden_states
+        )
+
+        # Launch the gate on the aux stream first, so it overlaps the routed
+        # input transform below and is joined before routing reads the logits.
+        gate_overlapping = False
+        if self.gate is not None and self._gate_runs_in_aux_stream(gate_input):
+            router_logits = self._apply_gate_async(gate_input)
+            gate_overlapping = True
+
         # If using multi-stream overlap for shared experts, we must launch it
         # before routed expert dispatch.
         shared_experts_overlapping = False
@@ -900,17 +1024,23 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input
             )
 
+        if defer_input_transform:
+            hidden_states, _ = self.apply_routed_input_transform(hidden_states)
+            # `forward` derived the truncation sizes from this width.
+            assert hidden_states.shape[-1] == self.moe_config.hidden_dim_unpadded
+            hidden_states, _, _ = self._maybe_pad_hidden_states(
+                shared_experts_input, hidden_states
+            )
+
         # If the Runner holds the gate, apply it after the stream sync,
-        # so it can run overlapped with the
-        # NOTE: in future PR, MoE runner will always hold the gate.
+        # so it can run overlapped with the shared experts.
         if self.gate is not None:
-            if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
-                router_logits = dispatch_unquantized_gemm()(
-                    self, hidden_states, self._combined_gate_weight, None
+            if gate_overlapping:
+                self._gate_output_ready_event[self._gate_event_idx].wait(
+                    current_stream()
                 )
             else:
-                router_logits, _ = self.gate(hidden_states)
+                router_logits = self._apply_gate(gate_input)
 
         with self._sequence_parallel_context():
             # TODO(bnell): parts of the dispatch/combine steps will go away once
