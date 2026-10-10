@@ -376,18 +376,55 @@ def _support_torch_compile(
         # we may not have vllm_config so we may need to patch it
         sig = inspect.signature(old_init)
         # Check that any positional arguments match the old_init method signature
-        annotations = [p.annotation for p in sig.parameters.values()]
-        for arg, annotation in zip(args, annotations):
+        # Skip 'self', handle *args, and stop before keyword-only parameters
+        params = list(sig.parameters.values())[1:]  # Skip 'self'
+        arg_idx = 0
+        for param in params:
+            if arg_idx >= len(args):
+                break
+            # Keyword-only params cannot receive positional arguments
+            if param.kind == inspect.Parameter.KEYWORD_ONLY:
+                break
+            annotation = param.annotation
             if annotation is inspect._empty:
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    break  # *args with no annotation consumes rest
+                arg_idx += 1
                 continue
-            if not isinstance(arg, annotation):
+            if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                # *args: check all remaining args against this annotation
+                for arg in args[arg_idx:]:
+                    try:
+                        is_match = isinstance(arg, annotation)
+                    except TypeError:
+                        continue
+                    if not is_match:
+                        init = f"'{type(self).__name__}.__init__'"
+                        arg_type = f"'{type(arg).__name__}'"
+                        raise TypeError(
+                            f"{init} received a positional argument of type "
+                            f"{arg_type}, but no parameter of that type was "
+                            f"found in the method signature. Please either "
+                            f"annotate {init} or pass it as a keyword argument."
+                        )
+                break
+            # Regular positional parameter
+            arg = args[arg_idx]
+            try:
+                is_match = isinstance(arg, annotation)
+            except TypeError:
+                arg_idx += 1
+                continue
+            if not is_match:
                 init = f"'{type(self).__name__}.__init__'"
                 arg_type = f"'{type(arg).__name__}'"
                 raise TypeError(
                     f"{init} received a positional argument of type {arg_type}, "
-                    "but no parameter of that type was found in the method signature. "
-                    f"Please either annotate {init} or pass it as a keyword argument."
+                    "but no parameter of that type was found in the method "
+                    "signature. Please either annotate {init} or pass it as a "
+                    "keyword argument."
                 )
+            arg_idx += 1
         if "vllm_config" in sig.parameters:
             kwargs["vllm_config"] = vllm_config
         if "prefix" in sig.parameters:
