@@ -1448,6 +1448,8 @@ def test_preempt_during_execution():
     assert len(scheduler.running) == 1
     assert scheduler.running[0] == requests[0]
     assert requests[1].status == RequestStatus.PREEMPTED
+    # Counted exactly once: the reclaim site owns the counter.
+    assert requests[1].num_preemptions == 1
 
     model_runner_output1 = ModelRunnerOutput(
         req_ids=[requests[1].request_id],
@@ -2730,9 +2732,16 @@ def test_reset_prefix_cache_still_fails_on_remote_kvs_holder():
     output = scheduler.schedule()
     assert loading.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler.update_from_output(output, _runner_output([]))
+    assert scheduler.kv_cache_manager.get_block_ids("loading")[0]
 
     with pytest.raises(RuntimeError, match="Failed to reset KV cache"):
         scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    # The failure bails before touching anything: the holder keeps its blocks,
+    # status, and queue membership.
+    assert loading.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert loading in scheduler.kv_holding_waiting
+    assert scheduler.kv_cache_manager.get_block_ids("loading")[0]
 
 
 def test_reset_prefix_cache_reclaims_resumed_streaming_session():
