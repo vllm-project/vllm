@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import vllm.utils.flashinfer as fi
+import vllm.utils.platform_utils as pu
 
 
 def _make_exe(path: Path) -> None:
@@ -22,7 +23,7 @@ def default_cuda_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     _make_exe(tmp_path / "venv" / "bin" / "ninja")
     monkeypatch.setenv("PATH", str(tmp_path / "venv" / "bin"))
     home = tmp_path / "usr_local_cuda"
-    monkeypatch.setattr(fi, "_DEFAULT_CUDA_HOME", str(home))
+    monkeypatch.setattr(pu, "_DEFAULT_CUDA_HOME", str(home))
     return home
 
 

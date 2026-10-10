@@ -9,10 +9,13 @@ import contextlib
 import functools
 import importlib
 import os
+import shutil
+import subprocess
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, NoReturn
 
+import regex as re
 import torch
 
 import vllm.envs as envs
@@ -23,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import find_nvcc
 
 _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
     "qwen3_5_text",
@@ -34,6 +38,24 @@ def get_paged_mqa_page_sizes() -> tuple[int, ...]:
     """KV page sizes (in cache entries) the paged-MQA logits kernels take (only
     64 on SM120); larger storage blocks are split into one of these."""
     return (64,) if current_platform.is_device_capability_family(120) else (32, 64)
+
+
+def _deep_gemm_nvcc_version() -> tuple[int, int] | None:
+    """Version of the nvcc DeepGEMM's JIT would run, or None if it is missing."""
+    nvcc = os.environ.get("DG_JIT_NVCC_COMPILER") or os.environ.get(
+        "DJ_JIT_NVCC_COMPILER"
+    )
+    nvcc = shutil.which(nvcc) if nvcc else find_nvcc()
+    if nvcc is None:
+        return None
+    try:
+        out = subprocess.run(
+            [nvcc, "--version"], capture_output=True, text=True, timeout=60
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"release (\d+)\.(\d+)", out)
+    return (int(match[1]), int(match[2])) if match else None
 
 
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
@@ -113,7 +135,19 @@ def is_deep_gemm_supported() -> bool:
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.support_deep_gemm()
-    return is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
+    if not (is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()):
+        return False
+    # DeepGEMM's JIT aborts the engine when nvcc is missing or older than 12.9.
+    version = _deep_gemm_nvcc_version()
+    if version is None or version < (12, 9):
+        logger.warning_once(
+            "DeepGEMM kernels are disabled: its JIT needs nvcc 12.9 or newer "
+            "(DG_JIT_NVCC_COMPILER, CUDA_HOME, CUDA_PATH, PATH or "
+            "/usr/local/cuda), found %s. Set CUDA_HOME to a newer CUDA toolkit.",
+            "none" if version is None else f"{version[0]}.{version[1]}",
+        )
+        return False
+    return True
 
 
 @functools.cache
