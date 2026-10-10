@@ -8,7 +8,8 @@ launch this proxy demo through:
        --model $model_name  \
        --prefill localhost:8100 localhost:8101   \
        --decode localhost:8200 localhost:8201   \
-       --port 8000
+       --port 8000 \
+       --host 0.0.0.0
 
 Note: This demo will be removed once the PDController implemented in PR 15343
 (https://github.com/vllm-project/vllm/pull/15343) supports XpYd.
@@ -349,6 +350,7 @@ class ProxyServer:
         create_chat_completion: Callable[[Request], StreamingResponse] | None = None,
     ):
         self.validate_parsed_serve_args(args)
+        self.host = args.host
         self.port = args.port
         self.proxy_instance = Proxy(
             prefill_instances=[] if args.prefill is None else args.prefill,
@@ -410,7 +412,7 @@ class ProxyServer:
     def run_server(self):
         app = FastAPI()
         app.include_router(self.proxy_instance.router)
-        config = uvicorn.Config(app, port=self.port, loop="uvloop")
+        config = uvicorn.Config(app, host=self.host, port=self.port, loop="uvloop")
         server = uvicorn.Server(config)
         server.run()
 
@@ -436,6 +438,12 @@ def parse_args():
         help="List of decode node URLs (host:port)",
     )
 
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="localhost",
+        help="Server host (default: localhost)",
+    )
     parser.add_argument(
         "--port",
         type=int,
