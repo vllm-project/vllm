@@ -2411,6 +2411,11 @@ class Scheduler(SchedulerInterface):
                 cudagraph_stats,
                 perf_stats,
                 ec_connector_stats=ec_connector_stats,
+                spec_decode_scheduled_k=(
+                    scheduler_output.num_spec_tokens_to_schedule
+                    if self.dynamic_sd_lookup is not None
+                    else None
+                ),
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -2918,6 +2923,7 @@ class Scheduler(SchedulerInterface):
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
         ec_connector_stats: ECConnectorStats | None = None,
+        spec_decode_scheduled_k: int | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -2951,6 +2957,7 @@ class Scheduler(SchedulerInterface):
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
             spec_decoding_stats=spec_stats,
+            spec_decode_scheduled_k=spec_decode_scheduled_k,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
