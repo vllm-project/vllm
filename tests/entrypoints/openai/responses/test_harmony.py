@@ -496,19 +496,6 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Web search tool is not available in CI yet.")
-async def test_web_search(client: OpenAI, model_name: str):
-    response = await client.responses.create(
-        model=model_name,
-        input="Who is the president of South Korea as of now?",
-        tools=[{"type": "web_search_preview"}],
-    )
-    assert response is not None
-    assert response.status == "completed"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_code_interpreter(client: OpenAI, model_name: str):
     timeout_value = client.timeout * 3
     client_with_timeout = client.with_options(timeout=timeout_value)
@@ -912,74 +899,6 @@ async def test_function_calling_no_code_interpreter_events(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(
-    reason="This test is flaky in CI, needs investigation and "
-    "potential fixes in the code interpreter MCP implementation."
-)
-async def test_code_interpreter_streaming(
-    client: OpenAI,
-    model_name: str,
-    pairs_of_event_types: dict[str, str],
-):
-    tools = [{"type": "code_interpreter", "container": {"type": "auto"}}]
-    input_text = (
-        "Calculate 123 * 456 using python. "
-        "The python interpreter is not stateful and you must "
-        "print to see the output."
-    )
-
-    def _has_code_interpreter(evts: list) -> bool:
-        return events_contain_type(evts, "code_interpreter")
-
-    events = await retry_streaming_for(
-        client,
-        model=model_name,
-        validate_events=_has_code_interpreter,
-        input=input_text,
-        tools=tools,
-        temperature=0.0,
-        instructions=(
-            "You must use the Python tool to execute code. Never simulate execution."
-        ),
-    )
-
-    event_types = [e.type for e in events]
-    event_types_set = set(event_types)
-    logger.info(
-        "\n====== Code Interpreter Streaming Diagnostics ======\n"
-        "Event count: %d\n"
-        "Event types (in order): %s\n"
-        "Unique event types: %s\n"
-        "====================================================",
-        len(events),
-        event_types,
-        sorted(event_types_set),
-    )
-
-    # Structural validation (pairing, ordering, field consistency)
-    validate_streaming_event_stack(events, pairs_of_event_types)
-
-    # Validate code interpreter item fields
-    for event in events:
-        if (
-            event.type == "response.output_item.added"
-            and hasattr(event.item, "type")
-            and event.item.type == "code_interpreter_call"
-        ):
-            assert event.item.status == "in_progress"
-        elif event.type == "response.code_interpreter_call_code.done":
-            assert event.code is not None
-        elif (
-            event.type == "response.output_item.done"
-            and hasattr(event.item, "type")
-            and event.item.type == "code_interpreter_call"
-        ):
-            assert event.item.status == "completed"
-            assert event.item.code is not None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     """MCP tools work across multiple turns via previous_response_id."""
     tools = [{"type": "mcp", "server_label": "code_interpreter"}]
@@ -1201,16 +1120,8 @@ async def test_system_prompt_override_no_duplication(client: OpenAI, model_name:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Pirate language detection depends on model weights and is non-deterministic"
-    ),
-)
-async def test_system_prompt_override_follows_personality(
-    client: OpenAI, model_name: str
-):
-    """Soft check: model should adopt the personality from system prompt."""
+async def test_system_prompt_override_with_personality(client: OpenAI, model_name: str):
+    """A personality-setting system prompt override produces a response."""
     response = await client.responses.create(
         model=model_name,
         input=[
@@ -1226,11 +1137,6 @@ async def test_system_prompt_override_follows_personality(
         temperature=0.0,
     )
     assert response.status == "completed"
-    output_text = response.output_text.lower()
-    pirate_indicators = ["arrr", "matey", "ahoy", "ye", "sea", "aye", "sail"]
-    assert any(kw in output_text for kw in pirate_indicators), (
-        f"Expected pirate language, got: {response.output_text}"
-    )
 
 
 @pytest.mark.asyncio

@@ -58,18 +58,8 @@ pytestmark = pytest.mark.skipif(
             ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
             marks=large_gpu_mark(min_gb=80),
         ),
-        pytest.param(
-            (
-                "eagle",
-                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
-                4,
-                0.92,
-            ),
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
-        ),
     ],
-    ids=["qwen3_next_mtp", "llama4_eagle"],
+    ids=["qwen3_next_mtp"],
 )
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,

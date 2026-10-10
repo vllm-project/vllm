@@ -197,11 +197,6 @@ def qwen2vl_lora_files():
 
 
 @pytest.fixture(scope="session")
-def qwen25vl_lora_files():
-    return hf_api().snapshot_download(repo_id="jeeejeee/qwen25-vl-lora-pokemon")
-
-
-@pytest.fixture(scope="session")
 def qwen2vl_language_lora_files():
     return hf_api().snapshot_download(
         repo_id="prashanth058/qwen2vl-flickr-lora-language"
@@ -218,13 +213,6 @@ def qwen2vl_vision_tower_connector_lora_files():
 @pytest.fixture(scope="session")
 def qwen2vl_vision_tower_lora_files():
     return hf_api().snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower")
-
-
-@pytest.fixture(scope="session")
-def qwen25vl_vision_lora_files():
-    return hf_api().snapshot_download(
-        repo_id="EpochEcho/qwen2.5-3b-vl-lora-vision-connector"
-    )
 
 
 @pytest.fixture(scope="session")

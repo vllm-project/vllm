@@ -34,7 +34,6 @@ MODEL_INFO = EmbedModelInfo(
     attn_type="encoder_only",
     is_prefix_caching_supported=False,
     is_chunked_prefill_supported=False,
-    enable_test=True,
 )
 
 

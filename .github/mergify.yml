@@ -636,7 +636,6 @@ pull_request_rules:
     - or:
         - files~=^vllm/model_executor/layers/quantization/modelopt\.py$
         - files~=^vllm/model_executor/layers/quantization/__init__\.py$
-        - files~=^tests/models/quantization/test_modelopt\.py$
         - files~=^tests/quantization/test_modelopt\.py$
         - files~=^tests/models/quantization/test_nvfp4\.py$
         - files~=^docs/features/quantization/modelopt\.md$
