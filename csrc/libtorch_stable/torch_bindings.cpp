@@ -30,6 +30,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
 #ifndef USE_ROCM
+  ops.def(
+      "deterministic_top_k_per_row_prefill(Tensor logits, Tensor row_starts, "
+      "Tensor row_ends, Tensor! indices, int num_rows, int stride0, "
+      "int stride1, int top_k) -> ()");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -753,6 +757,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_int8));
 
 #ifndef USE_ROCM
+  ops.impl(
+      "deterministic_top_k_per_row_prefill",
+      TORCH_BOX(&vllm::batch_invariant::deterministic_top_k_per_row_prefill));
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
