@@ -269,11 +269,11 @@ def resolve_kv_cache_layout(
     shapes narrow the candidates to block-compact layouts. An explicit
     ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
     with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
-    connector's preference is used when compatible and dropped with a warning
-    otherwise. A layout already present on ``cache_config`` wins outright, and
-    the result is recorded there (see ``CacheConfig.kv_cache_layout``); it
-    reaches workers through the ``set_kv_cache_layout`` RPC and
-    ``KVCacheConfig.kv_cache_layout``.
+    connector's preference is used when compatible and otherwise replaced, with a
+    warning, by the first candidate with the same head/token order. A layout
+    already present on ``cache_config`` wins outright, and the result is recorded
+    there (see ``CacheConfig.kv_cache_layout``); it reaches workers through the
+    ``set_kv_cache_layout`` RPC and ``KVCacheConfig.kv_cache_layout``.
     """
     cache_config = vllm_config.cache_config
     if cache_config.kv_cache_layout is not None:
@@ -335,12 +335,18 @@ def resolve_kv_cache_layout(
     elif (connector := get_kv_connector_cache_layout(vllm_config)) is not None:
         layout = _layout_from_name(connector)
         if layout not in candidates:
+            # Connectors that slice pages by head (heterogeneous TP) need heads
+            # outside tokens; the layer and block order can follow the backends.
+            fallback = next(
+                (c for c in candidates if c.is_head_major == layout.is_head_major),
+                candidates[0],
+            )
             logger.warning_once(
                 f"KV connector cache layout {connector} does not satisfy every "
                 f"supported set; valid layouts: {_layout_names(candidates)}. "
-                f"Using {candidates[0].name} instead."
+                f"Using {fallback.name} instead."
             )
-            layout = candidates[0]
+            layout = fallback
     else:
         layout = candidates[0]
 

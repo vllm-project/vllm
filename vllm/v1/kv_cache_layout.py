@@ -47,6 +47,11 @@ class KVCacheLayout(Enum):
         return self.value[-3:] == (_DIM_H, _DIM_N, _DIM_C)
 
     @property
+    def is_head_major(self) -> bool:
+        """True when H is outside N, so each head's tokens are contiguous."""
+        return self.value.index(_DIM_H) < self.value.index(_DIM_N)
+
+    @property
     def is_block_compact(self) -> bool:
         """True when each page's [H, N, C] bytes form one contiguous run; i.e.
         the L and B dimensions are outermost."""
