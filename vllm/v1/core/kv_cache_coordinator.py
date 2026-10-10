@@ -466,6 +466,30 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
+    def mark_checkpoint_ready(self, request_id: str) -> None:
+        for manager in self.single_type_managers:
+            manager.mark_checkpoint_ready(request_id)
+
+    def has_unready_checkpoint(self, request: Request) -> bool:
+        return any(
+            manager.has_unready_checkpoint(request)
+            for manager in self.single_type_managers
+        )
+
+    def prepare_same_step_mamba_consumer(
+        self,
+        request_id: str,
+        source_blocks: tuple[Sequence[KVCacheBlock], ...],
+    ) -> None:
+        for manager, blocks in zip(
+            self.single_type_managers, source_blocks, strict=True
+        ):
+            manager.prepare_same_step_mamba_consumer(request_id, blocks)
+
+    def cleanup_same_step_mamba_consumer(self, request_id: str) -> None:
+        for manager in self.single_type_managers:
+            manager.cleanup_same_step_mamba_consumer(request_id)
+
     @abstractmethod
     def find_longest_cache_hit(
         self,
@@ -570,9 +594,11 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        self.dcp_world_size = self.single_type_managers[0].dcp_world_size
+        self.block_size = self.kv_cache_spec.block_size
+        self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        self.block_size = self.single_type_managers[0].block_size
+        if dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (
@@ -752,8 +778,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     SpecGroup(spec, [i], manager_cls, use_eagle)
                 )
 
-        assert self.attention_groups, (
-            "HybridKVCacheCoordinator requires at least one cacheable group."
+        assert len(self.attention_groups) > 1, (
+            "HybridKVCacheCoordinator requires at least two attention groups."
         )
 
         # Put full attention first: its efficient left-to-right scan provides
@@ -894,12 +920,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.single_type_managers[
-                        first_group_id
-                    ].dcp_world_size,
-                    pcp_world_size=self.single_type_managers[
-                        first_group_id
-                    ].pcp_world_size,
+                    dcp_world_size=(
+                        self.dcp_world_size
+                        if isinstance(spec, FullAttentionSpec)
+                        else 1
+                    ),
                 )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
@@ -980,8 +1005,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,
-                dcp_world_size=manager.dcp_world_size,
-                pcp_world_size=manager.pcp_world_size,
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks

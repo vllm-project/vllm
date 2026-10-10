@@ -2599,6 +2599,67 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     manager.free(req_2)
 
 
+def test_mamba_checkpoint_only_caches_explicit_boundary():
+    config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=32,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+    )
+    request = make_request("checkpoint", list(range(48)), 16, sha256)
+    request.mamba_checkpoint_position = 16
+
+    assert manager.allocate_slots(request, 16) is not None
+    mamba_group_id = 1
+    assert manager.has_unready_checkpoint(request)
+    assert (
+        manager.block_pool.get_cached_block(request.block_hashes[0], [mamba_group_id])
+        is None
+    )
+    manager.mark_checkpoint_ready(request.request_id)
+    assert not manager.has_unready_checkpoint(request)
+    assert (
+        manager.block_pool.get_cached_block(request.block_hashes[0], [mamba_group_id])
+        is not None
+    )
+
+    request.num_computed_tokens = 16
+    assert manager.allocate_slots(request, 32) is not None
+    assert (
+        manager.block_pool.get_cached_block(request.block_hashes[1], [mamba_group_id])
+        is None
+    )
+    assert (
+        manager.block_pool.get_cached_block(request.block_hashes[2], [mamba_group_id])
+        is None
+    )
+    manager.free(request)
+
+
 def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     """Regression test for https://github.com/vllm-project/vllm/issues/39271.
 

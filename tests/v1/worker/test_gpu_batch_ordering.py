@@ -216,6 +216,28 @@ def test_sort_batch_req_ids_spec_decode():
     assert sort_batch_req_ids(num_tokens_per_req, {}, 2) == ["d1", "d2", "tail", "p1"]
 
 
+def test_sort_batch_req_ids_mamba_prefix_producer_consumer():
+    """Verify that Producer leads, followed by Consumer, then other requests."""
+    num_tokens_per_req = {
+        "c2": 20,
+        "other": 5,
+        "producer": 16,
+        "c1": 20,
+    }
+    mamba_prefix_producer_ids = {
+        "c1": "producer",
+        "c2": "producer",
+    }
+    ordered = sort_batch_req_ids(
+        num_tokens_per_req,
+        draft_tokens={},
+        decode_query_len=1,
+        mamba_prefix_producer_ids=mamba_prefix_producer_ids,
+    )
+    # producer (0) leads, then consumers c2 & c1 (1), then other (2)
+    assert ordered == ["producer", "c2", "c1", "other"]
+
+
 def test_spec_decodes_lead_short_prefill_tail():
     # With the fixed ordering, split_decodes_and_prefills classifies the
     # uniform 2-token decodes as decodes even when a 1-token prefill tail is

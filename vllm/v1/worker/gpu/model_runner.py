@@ -1281,7 +1281,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         # batch_idx -> req_id
         req_ids = sort_batch_req_ids(
-            num_tokens_per_req, draft_tokens, self.decode_query_len
+            num_tokens_per_req,
+            draft_tokens,
+            self.decode_query_len,
+            scheduler_output.mamba_prefix_producer_ids,
         )
 
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
@@ -2426,12 +2429,28 @@ def sort_batch_req_ids(
     num_tokens_per_req: dict[str, int],
     draft_tokens: dict[str, list[int]],
     decode_query_len: int,
+    mamba_prefix_producer_ids: dict[str, str] | None = None,
 ) -> list[str]:
     # Order verification/decode -> short_extend -> prefill;
     # split_decodes_and_prefills relies on decode-like requests leading.
+    producer_ids = (
+        set(mamba_prefix_producer_ids.values()) if mamba_prefix_producer_ids else set()
+    )
+    consumer_ids = (
+        set(mamba_prefix_producer_ids.keys()) if mamba_prefix_producer_ids else set()
+    )
+
+    def get_role_priority(r: str) -> int:
+        if r in producer_ids:
+            return 0
+        if r in consumer_ids:
+            return 1
+        return 2
+
     key = lambda r: (
         not draft_tokens.get(r),
         (num := num_tokens_per_req[r]) != decode_query_len,
+        get_role_priority(r),
         num,
     )
     return sorted(num_tokens_per_req, key=key)

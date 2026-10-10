@@ -9,6 +9,10 @@ import torch
 import torch.nn.functional as F
 
 import vllm._custom_ops as ops
+from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    QwenGatedDeltaNetAttention,
+)
 from vllm.model_executor.layers.mamba.ops.cpu import gdn_attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -78,6 +82,261 @@ PREFILL_DTYPE_CASES = [
     pytest.param((2, 4), (64, 64), torch.bfloat16, id="bf16-representative"),
     pytest.param((2, 4), (64, 64), torch.float16, id="fp16-representative"),
 ]
+
+
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_grouped_gdn_preserves_source_and_isolates_consumers(monkeypatch):
+    state = torch.zeros(4, 1)
+    state[0] = 2
+    conv_state = torch.zeros(4, 1)
+    conv_state[0] = 3
+    conv_calls = 0
+    recurrent_calls = 0
+
+    def fake_conv(
+        x, weight, bias, *, conv_states, cache_indices, query_start_loc, **kwargs
+    ):
+        nonlocal conv_calls
+        conv_calls += 1
+        for index, destination in enumerate(cache_indices.tolist()):
+            start, end = query_start_loc[index : index + 2].tolist()
+            conv_states[destination] += x[:, start:end].sum()
+        return x
+
+    def fake_prep(conv_output, **kwargs):
+        values = conv_output.unsqueeze(-1)
+        return values, values, values, None, None
+
+    def fake_recurrent(*, initial_state, ssm_state_indices, q, cu_seqlens, **kwargs):
+        nonlocal recurrent_calls
+        recurrent_calls += 1
+        output = q.clone()
+        for index, destination in enumerate(ssm_state_indices.tolist()):
+            dest = destination[0] if isinstance(destination, list) else destination
+            start, end = cu_seqlens[index : index + 2].tolist()
+            output[:, start:end] += initial_state[dest].view(1, 1, 1)
+            initial_state[dest] += q[:, start:end].sum()
+        return output, None
+
+    monkeypatch.setattr(qwen_gdn_linear_attn, "causal_conv1d_fn", fake_conv)
+    monkeypatch.setattr(qwen_gdn_linear_attn, "fused_post_conv_prep", fake_prep)
+    monkeypatch.setattr(
+        qwen_gdn_linear_attn,
+        "fused_sigmoid_gating_delta_rule_update",
+        fake_recurrent,
+    )
+
+    layer = types.SimpleNamespace(
+        conv1d=types.SimpleNamespace(bias=None),
+        activation=None,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        num_k_heads=1,
+        tp_size=1,
+        head_k_dim=1,
+        head_v_dim=1,
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=3,
+        num_prefill_tokens=4,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=4,
+        prefix_producer_ranges=torch.tensor([[0, 2]], dtype=torch.int32),
+        producer_token_indices=torch.tensor([0, 1]),
+        producer_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        producer_conv_metadata=types.SimpleNamespace(),
+        consumer_ranges=torch.tensor([[2, 3], [3, 4]], dtype=torch.int32),
+        consumer_token_indices=torch.tensor([2, 3]),
+        consumer_query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        consumer_conv_metadata=types.SimpleNamespace(),
+        shared_initial_state_source=torch.tensor([0], dtype=torch.int32),
+        shared_state_destinations=torch.tensor([1], dtype=torch.int32),
+        consumer_shared_state_sources=torch.tensor([1, 1], dtype=torch.int32),
+        private_final_state_destination=torch.tensor([2, 3], dtype=torch.int32),
+    )
+    mixed_qkv = torch.tensor([[1.0], [1.0], [1.0], [2.0]])
+    a = torch.zeros(4, 1)
+    b = torch.zeros(4, 1)
+    source_state = state.clone()
+    source_conv = conv_state.clone()
+    output = torch.zeros(4, 1, 1)
+
+    QwenGatedDeltaNetAttention._forward_core_grouped_prefill(
+        layer,
+        mixed_qkv,
+        b,
+        a,
+        output,
+        metadata,
+        conv_state,
+        state,
+        torch.ones(1, 1, 1),
+    )
+
+    assert conv_calls == 2
+    assert recurrent_calls == 2
+    assert torch.equal(state[0], source_state[0])
+    assert torch.equal(conv_state[0], source_conv[0])
+    assert not torch.equal(state[2], state[3])
+    assert not torch.equal(conv_state[2], conv_state[3])
+
+    conv_calls = 0
+    recurrent_calls = 0
+    consumer_only = GDNAttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=1,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=1,
+        prefix_producer_ranges=torch.empty((0, 2), dtype=torch.int32),
+        producer_token_indices=torch.empty(0, dtype=torch.long),
+        producer_query_start_loc=torch.tensor([0], dtype=torch.int32),
+        consumer_ranges=torch.tensor([[0, 1]], dtype=torch.int32),
+        consumer_token_indices=torch.tensor([0]),
+        consumer_query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        consumer_conv_metadata=types.SimpleNamespace(),
+        shared_initial_state_source=torch.empty(0, dtype=torch.int32),
+        shared_state_destinations=torch.empty(0, dtype=torch.int32),
+        consumer_shared_state_sources=torch.tensor([1], dtype=torch.int32),
+        private_final_state_destination=torch.tensor([2], dtype=torch.int32),
+    )
+    QwenGatedDeltaNetAttention._forward_core_grouped_prefill(
+        layer,
+        mixed_qkv,
+        b,
+        a,
+        output,
+        consumer_only,
+        conv_state,
+        state,
+        torch.ones(1, 1, 1),
+    )
+    assert conv_calls == 1
+    assert recurrent_calls == 1
+
+
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_grouped_gdn_mixed_batch_with_ordinary_request(monkeypatch):
+    """Mixed batch (Producer + Consumer + Ordinary request) preserves isolation."""
+    state = torch.zeros(4, 1)
+    state[0] = 2.0
+    state[3] = 10.0
+    conv_state = torch.zeros(4, 1)
+    conv_state[0] = 3.0
+    conv_state[3] = 11.0
+
+    conv_calls = 0
+    recurrent_calls = 0
+
+    def fake_conv(
+        x, weight, bias, *, conv_states, cache_indices, query_start_loc, **kwargs
+    ):
+        nonlocal conv_calls
+        conv_calls += 1
+        for index, destination in enumerate(cache_indices.tolist()):
+            start, end = query_start_loc[index : index + 2].tolist()
+            conv_states[destination] += x[:, start:end].sum()
+        return x
+
+    def fake_prep(conv_output, **kwargs):
+        values = conv_output.unsqueeze(-1)
+        return values, values, values, None, None
+
+    def fake_recurrent(*, initial_state, ssm_state_indices, q, cu_seqlens, **kwargs):
+        nonlocal recurrent_calls
+        recurrent_calls += 1
+        output = q.clone()
+        for index, destination in enumerate(ssm_state_indices.tolist()):
+            dest = destination[0] if isinstance(destination, list) else destination
+            start, end = cu_seqlens[index : index + 2].tolist()
+            output[:, start:end] += initial_state[dest].view(1, 1, 1)
+            initial_state[dest] += q[:, start:end].sum()
+        return output, None
+
+    monkeypatch.setattr(qwen_gdn_linear_attn, "causal_conv1d_fn", fake_conv)
+    monkeypatch.setattr(qwen_gdn_linear_attn, "fused_post_conv_prep", fake_prep)
+    monkeypatch.setattr(
+        qwen_gdn_linear_attn,
+        "fused_sigmoid_gating_delta_rule_update",
+        fake_recurrent,
+    )
+
+    layer = types.SimpleNamespace(
+        conv1d=types.SimpleNamespace(bias=None),
+        activation=None,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        num_k_heads=1,
+        tp_size=1,
+        head_k_dim=1,
+        head_v_dim=1,
+    )
+
+    # 1 Producer (0..2), 1 Consumer (2..3), 1 Ordinary Request (3..4)
+    metadata = GDNAttentionMetadata(
+        num_prefills=3,
+        num_prefill_tokens=4,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=4,
+        prefix_producer_ranges=torch.tensor([[0, 2]], dtype=torch.int32),
+        producer_token_indices=torch.tensor([0, 1]),
+        producer_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        producer_conv_metadata=types.SimpleNamespace(),
+        consumer_ranges=torch.tensor([[2, 3], [3, 4]], dtype=torch.int32),
+        consumer_token_indices=torch.tensor([2, 3]),
+        consumer_query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        consumer_conv_metadata=types.SimpleNamespace(),
+        shared_initial_state_source=torch.tensor([0], dtype=torch.int32),
+        shared_state_destinations=torch.tensor([1], dtype=torch.int32),
+        consumer_shared_state_sources=torch.tensor([1, 3], dtype=torch.int32),
+        private_final_state_destination=torch.tensor([2, 3], dtype=torch.int32),
+    )
+
+    mixed_qkv = torch.tensor([[1.0], [1.0], [5.0], [7.0]])
+    a = torch.zeros(4, 1)
+    b = torch.zeros(4, 1)
+    output = torch.zeros(4, 1, 1)
+
+    QwenGatedDeltaNetAttention._forward_core_grouped_prefill(
+        layer,
+        mixed_qkv,
+        b,
+        a,
+        output,
+        metadata,
+        conv_state,
+        state,
+        torch.ones(1, 1, 1),
+    )
+
+    assert conv_calls == 2
+    assert recurrent_calls == 2
+
+    # Slot 0 (initial source) is preserved
+    assert state[0].item() == 2.0
+    assert conv_state[0].item() == 3.0
+
+    # Slot 1 (producer prefix state) has slot 0 initial state + 2 tokens (1.0 + 1.0)
+    assert state[1].item() == 4.0
+    assert conv_state[1].item() == 5.0
+
+    # Slot 2 (consumer) inherits slot 1 (4.0) + consumer token (5.0) = 9.0
+    assert state[2].item() == 9.0
+    assert conv_state[2].item() == 10.0
+
+    # Slot 3 (ordinary request) starts from its own 10.0 + ordinary token (7.0) = 17.0
+    assert state[3].item() == 17.0
+    assert conv_state[3].item() == 18.0
 
 
 @functools.lru_cache(maxsize=128, typed=False)
