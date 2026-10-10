@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stats container for the Mooncake connector."""
+"""Stats and Prometheus metrics for the Mooncake connector."""
 
 import threading
 from dataclasses import dataclass
@@ -8,12 +8,50 @@ from typing import Any
 
 import numpy as np
 
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
     KVConnectorStats,
+    PromMetric,
+    PromMetricT,
 )
+from vllm.v1.metrics.utils import create_metric_per_engine
 
-# TODO(mooncake-stats): add MooncakePromMetrics (mirror NixlPromMetrics)
-# and wire it via MooncakeConnector.build_prom_metrics in a follow-up PR.
+# Bucket edges for the per-transfer series, named after the series each feeds.
+# Timing covers 5ms to 5s; post time is not measured, so there is no
+# sub-millisecond edge. Payload sizes run 2KiB to 8GiB, doubling every other
+# power of two, and descriptor counts run 10 to 50k.
+_XFER_TIME_BUCKETS = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.075,
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0,
+    5.0,
+)
+_BYTES_BUCKETS = tuple(2 ** (10 + i) for i in range(1, 25, 2))
+_DESCRIPTOR_BUCKETS = (
+    10,
+    20,
+    30,
+    50,
+    75,
+    100,
+    200,
+    400,
+    1000,
+    2000,
+    4000,
+    10000,
+    20000,
+    50000,
+)
 
 
 @dataclass
@@ -58,8 +96,8 @@ class MooncakeKVConnectorStats(KVConnectorStats):
             self.data["bytes_transferred"].append(total_bytes)
             self.data["num_descriptors"].append(num_descs)
 
-    # Failure counters store a list of 1s so a future Prom counter can iterate
-    # with .inc(list_item), mirroring NIXL's NixlPromMetrics.observe.
+    # Each failure appends a single unit, which MooncakePromMetrics sums into
+    # one counter increment.
     def record_failed_transfer(self):
         with self._lock:
             self.data["num_failed_transfers"].append(1)
@@ -144,3 +182,99 @@ class MooncakeKVConnectorStats(KVConnectorStats):
     @property
     def num_successful_transfers(self) -> int:
         return len(self.data["transfer_duration"])
+
+
+class MooncakePromMetrics(KVConnectorPromMetrics):
+    """Prometheus metrics for Mooncake KV Cache transfers.
+
+    Mooncake is push-based, so the histograms are only populated on the
+    prefiller (P) instance; the counters are bumped wherever the failure was
+    detected.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+
+        mooncake_histogram_xfer_time = self._histogram_cls(
+            name="vllm:mooncake_xfer_time_seconds",
+            documentation="Histogram of transfer duration for Mooncake"
+            " KV Cache transfers.",
+            buckets=_XFER_TIME_BUCKETS,
+            labelnames=labelnames,
+        )
+        self.mooncake_histogram_xfer_time = create_metric_per_engine(
+            mooncake_histogram_xfer_time, self.per_engine_labelvalues
+        )
+        mooncake_histogram_bytes_transferred = self._histogram_cls(
+            name="vllm:mooncake_bytes_transferred",
+            documentation="Histogram of bytes transferred per Mooncake"
+            " KV Cache transfer.",
+            buckets=_BYTES_BUCKETS,
+            labelnames=labelnames,
+        )
+        self.mooncake_histogram_bytes_transferred = create_metric_per_engine(
+            mooncake_histogram_bytes_transferred, self.per_engine_labelvalues
+        )
+        mooncake_histogram_num_descriptors = self._histogram_cls(
+            name="vllm:mooncake_num_descriptors",
+            documentation="Histogram of number of descriptors per Mooncake"
+            " KV Cache transfer.",
+            buckets=_DESCRIPTOR_BUCKETS,
+            labelnames=labelnames,
+        )
+        self.mooncake_histogram_num_descriptors = create_metric_per_engine(
+            mooncake_histogram_num_descriptors, self.per_engine_labelvalues
+        )
+        counter_mooncake_num_failed_transfers = self._counter_cls(
+            name="vllm:mooncake_num_failed_transfers",
+            documentation="Number of failed Mooncake KV Cache transfers.",
+            labelnames=labelnames,
+        )
+        self.counter_mooncake_num_failed_transfers = create_metric_per_engine(
+            counter_mooncake_num_failed_transfers, self.per_engine_labelvalues
+        )
+        counter_mooncake_num_failed_recvs = self._counter_cls(
+            name="vllm:mooncake_num_failed_recvs",
+            documentation="Number of failed Mooncake KV Cache receives.",
+            labelnames=labelnames,
+        )
+        self.counter_mooncake_num_failed_recvs = create_metric_per_engine(
+            counter_mooncake_num_failed_recvs, self.per_engine_labelvalues
+        )
+        counter_mooncake_num_kv_expired_reqs = self._counter_cls(
+            name="vllm:mooncake_num_kv_expired_reqs",
+            documentation="Number of requests that had their KV expire. "
+            "NOTE: This metric is tracked on the P instance.",
+            labelnames=labelnames,
+        )
+        self.counter_mooncake_num_kv_expired_reqs = create_metric_per_engine(
+            counter_mooncake_num_kv_expired_reqs, self.per_engine_labelvalues
+        )
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0) -> None:
+        # A snapshot always carries every declared key, so a miss here is a
+        # connector bug and should surface rather than silently drop samples.
+        for per_engine_metrics, stats_key in (
+            (self.mooncake_histogram_xfer_time, "transfer_duration"),
+            (self.mooncake_histogram_bytes_transferred, "bytes_transferred"),
+            (self.mooncake_histogram_num_descriptors, "num_descriptors"),
+        ):
+            for value in transfer_stats_data[stats_key]:
+                per_engine_metrics[engine_idx].observe(value)
+
+        # Each failure appends a single unit, so incrementing by the sum costs
+        # one Prometheus client call per series instead of one per event.
+        for per_engine_metrics, stats_key in (
+            (self.counter_mooncake_num_failed_transfers, "num_failed_transfers"),
+            (self.counter_mooncake_num_failed_recvs, "num_failed_recvs"),
+            (self.counter_mooncake_num_kv_expired_reqs, "num_kv_expired_reqs"),
+        ):
+            num_events = sum(transfer_stats_data[stats_key])
+            if num_events:
+                per_engine_metrics[engine_idx].inc(num_events)
