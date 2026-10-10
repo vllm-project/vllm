@@ -7,10 +7,18 @@ import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     backend_to_kernel_cls,
+    make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
 from vllm.platforms import CpuArchEnum, current_platform
@@ -580,3 +588,33 @@ def test_select_explicit_triton_backend(is_lora_enabled):
 
     assert selected_backend == UnquantizedMoeBackend.TRITON
     assert experts_cls is not None
+
+
+def test_batched_triton_rejects_non_batched_prepare_finalize():
+    """Fail fast when BatchedTritonExperts is paired with a non-batched
+    prepare/finalize stage (vllm-project/vllm#60432).
+
+    moe_backend="batched_triton" selects BatchedTritonExperts, which requires
+    the BatchedExperts activation format. On platforms without the batched
+    prepare/finalize path (non-XPU, no all2all kernels),
+    maybe_make_prepare_finalize falls back to a naive Standard-format stage.
+    Kernel construction must raise a clear ValueError here instead of
+    crashing later with a raw TypeError from BatchedTritonExperts.__init__()
+    (missing max_num_tokens/num_dispatchers).
+    """
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_backend = "batched_triton"
+    quant_config = FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(),
+        _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc(),
+        _w2=FusedMoEQuantDesc(),
+    )
+
+    with pytest.raises(ValueError, match='moe_backend="batched_triton"'):
+        make_unquantized_moe_kernel(
+            quant_config=quant_config,
+            moe_config=moe_config,
+            backend=UnquantizedMoeBackend.BATCHED_TRITON,
+            experts_cls=BatchedTritonExperts,
+        )
