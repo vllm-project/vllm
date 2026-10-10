@@ -291,6 +291,15 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
+    enable_mhc_overlap: bool | None = None
+    """Overlap DeepSeek-V4.1 mHC coefficients with attention and MoE.
+
+    None keeps automatic selection on SM100-family GPUs. True also opts
+    Hopper (SM90) into the experimental path; kernel and CUDA graph
+    restrictions still apply. False disables overlap on both architectures.
+    Hopper correctness and performance validation is pending.
+    """
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
