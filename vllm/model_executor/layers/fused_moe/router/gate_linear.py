@@ -229,16 +229,12 @@ class GateLinear(ReplicatedLinear):
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
-        if (
-            self.allow_ll_bf16_gemm
-            and x.shape[0] <= self.LL_BF16_MAX_TOKENS
-            and x.dtype == torch.bfloat16
-        ):
-            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                ll_bf16_gemm,
+        # Dispatch is wrapped in a custom op so that torch.compile/CUDA-graph
+        # capture does not freeze the runtime num_tokens (m <= 16) branch.
+        if self.allow_ll_bf16_gemm and x.dtype == torch.bfloat16:
+            output = torch.ops.vllm.ll_bf16_router_gemm_dispatch(
+                x, self.weight, self.LL_BF16_MAX_TOKENS
             )
-
-            output = ll_bf16_gemm(x, self.weight)
             return self._return(output)
 
         # Tier 4: ROCm bf16x3 router GEMM. Checked before tier 2 because both
@@ -432,4 +428,46 @@ direct_register_custom_op(
     op_name="fp32_router_gemm_dispatch",
     op_func=fp32_router_gemm_dispatch_impl,
     fake_impl=fp32_router_gemm_dispatch_fake,
+)
+
+
+def ll_bf16_router_gemm_dispatch_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    max_tokens: int,
+) -> torch.Tensor:
+    """Dynamically run cuteDSL ll_bf16_gemm if 0 < num_tokens <= max_tokens,
+    otherwise fall back to Tier 5 cuBLAS bf16->fp32 GEMM.
+
+    This must be a custom op because our torch.compile integration does not
+    support runtime dispatching on num_tokens: models calling the gate from
+    ``@support_torch_compile`` model code have all Dynamo guards dropped by
+    vLLM, so a plain Python branch on ``x.shape[0]`` would be frozen at first
+    trace (whichever size traces first).
+    """
+    m = x.shape[0]
+    # Guard m > 0: ll_bf16_gemm would otherwise JIT a dotprod kernel with M=0
+    # as a Constexpr.
+    if 0 < m <= max_tokens:
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+            ll_bf16_gemm,
+        )
+
+        x = x.contiguous()
+        return ll_bf16_gemm(x, weight)
+    return torch.mm(x, weight.T, out_dtype=torch.float32)
+
+
+def ll_bf16_router_gemm_dispatch_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    max_tokens: int,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=torch.float32)
+
+
+direct_register_custom_op(
+    op_name="ll_bf16_router_gemm_dispatch",
+    op_func=ll_bf16_router_gemm_dispatch_impl,
+    fake_impl=ll_bf16_router_gemm_dispatch_fake,
 )

@@ -503,6 +503,73 @@ def test_gate_linear_m_gt_16_falls_back(monkeypatch):
     assert out.dtype == torch.float32
 
 
+def test_gate_linear_m_zero_falls_back(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
+    x = torch.empty(0, 2048, dtype=torch.bfloat16, device="cuda")
+
+    def fail_ll_bf16_gemm(hidden_states, router_weight):
+        raise AssertionError("ll_bf16_gemm should not run for M == 0")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        fail_ll_bf16_gemm,
+    )
+    out, _ = gate(x)
+    assert out.shape == (0, 64)
+    assert out.dtype == torch.float32
+
+
+def test_gate_linear_torch_compile_dynamic_m_dispatch(monkeypatch):
+    """Ensure torch.compile tracing at M > 16 does not freeze the M <= 16
+    branch. Dropping guards via ``guard_filter_fn`` and running subsequent
+    M <= 16 calls under ``fail_on_recompile`` emulates vLLM's
+    ``TorchCompileWithNoGuardsWrapper`` (which drops all Dynamo guards and
+    never recompiles), so a frozen branch or recompile fails the test.
+    """
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
+    torch.nn.init.normal_(gate.weight, std=0.02)
+    calls = []
+
+    def fake_ll_bf16_gemm(hidden_states, router_weight):
+        calls.append(hidden_states.shape[0])
+        return torch.mm(hidden_states, router_weight.T, out_dtype=torch.float32)
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        fake_ll_bf16_gemm,
+    )
+
+    compiled_gate = torch.compile(
+        gate,
+        fullgraph=True,
+        dynamic=True,
+        options={"guard_filter_fn": lambda x: [False for _ in x]},
+    )
+
+    # Trace once at M=32 (> 16)
+    x_prefill = torch.randn(32, 2048, dtype=torch.bfloat16, device="cuda")
+    out_prefill, bias_prefill = compiled_gate(x_prefill)
+    assert bias_prefill is None
+    assert out_prefill.shape == (32, 64)
+    assert torch.equal(
+        out_prefill,
+        torch.mm(x_prefill, gate.weight.T, out_dtype=torch.float32),
+    )
+    assert calls == []
+
+    # Subsequent decode calls must reuse the compiled graph without recompiling
+    # and still dispatch to ll_bf16_gemm.
+    with torch.compiler.set_stance("fail_on_recompile"):
+        for m in (1, 4, 16):
+            x_decode = torch.randn(m, 2048, dtype=torch.bfloat16, device="cuda")
+            out_decode, bias_decode = compiled_gate(x_decode)
+            assert bias_decode is None
+            assert out_decode.shape == (m, 64)
+            _assert_close(out_decode, _ref(x_decode, gate.weight))
+
+    assert calls == [1, 4, 16]
+
+
 # =================================================================
 # Negative tests — invalid inputs
 # =================================================================
