@@ -182,6 +182,214 @@ def test_all_reduce_mhc_matches_unfused_path(monkeypatch):
     multi_process_parallel(monkeypatch, 4, 1, _all_reduce_mhc)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def _all_reduce_efc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.kernels.allreduce_efc import (
+        DeviceScalar,
+        Group128Scale,
+        LamportAllReduce,
+        NVFP4Scale,
+        Row,
+        Scalar,
+        Weight,
+    )
+    from vllm.model_executor.kernels.allreduce_efc import epilogues as E
+    from vllm.model_executor.kernels.allreduce_efc.efc import (
+        nvfp4_swizzled_offsets,
+    )
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        per_token_group_quant_fp8,
+    )
+    from vllm.models.deepseek_v41.nvidia.ops.cute_dsl import AllReduceMHC
+
+    def quant_probe(
+        cfg,
+        residual: Row,
+        weight: Weight,
+        eps: Scalar,
+        global_scale: DeviceScalar,
+        fp8_scale: DeviceScalar,
+        residual_out: Row,
+        out: Row,
+        nvfp4: Row,
+        nvfp4_sf: NVFP4Scale,
+        fp8: Row,
+        fp8_group: Row,
+        fp8_group_scale: Group128Scale,
+    ):
+        h = cfg.round(cfg.accum() + residual.load(), torch.bfloat16)
+        residual_out.store(h)
+        y = cfg.round(E.rms_norm(cfg, h, weight, eps), torch.bfloat16)
+        out.store(y)
+        E.nvfp4_quant(cfg, y, global_scale, nvfp4, nvfp4_sf)
+        E.fp8_static_quant(cfg, y, fp8_scale, fp8)
+        E.fp8_group_quant(cfg, y, fp8_group, fp8_group_scale, ue8m0=True)
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        hidden, top_k, eps = 5120, 6, 1e-6
+        ar = LamportAllReduce(
+            hidden_size=hidden, max_num_tokens=16, device=device, top_k=top_k
+        )
+        hand_written = AllReduceMHC(
+            hidden_size=hidden, hc_mult=4, max_num_tokens=16, top_k=top_k, device=device
+        )
+
+        torch.manual_seed(123)
+        residual = torch.randn(16, hidden, device=device, dtype=torch.bfloat16)
+        weight = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        mhc_args = dict(
+            residual=torch.randn(16, 4, hidden, device=device, dtype=torch.bfloat16),
+            post=torch.rand(16, 4, device=device),
+            comb=torch.randn(16, 4, 4, device=device) * 0.1,
+            pre=torch.rand(16, 4, device=device),
+            weight=weight,
+            eps=eps,
+        )
+        scales = dict(
+            global_scale=torch.tensor([896.0], device=device),
+            fp8_scale=torch.tensor([0.02], device=device),
+        )
+
+        def outputs(n):
+            def row(dtype=torch.bfloat16):
+                return torch.empty(n, hidden, device=device, dtype=dtype)
+
+            sf = ops.create_fp4_scale_tensor(n, hidden, device, True)
+            return dict(
+                residual_out=row(),
+                out=row(),
+                nvfp4=torch.empty(n, hidden // 2, device=device, dtype=torch.uint8),
+                nvfp4_sf=sf.view(torch.float8_e4m3fn),
+                fp8=row(torch.float8_e4m3fn),
+                fp8_group=row(torch.float8_e4m3fn),
+                fp8_group_scale=torch.empty(n, hidden // 128, device=device),
+            )
+
+        fused_mhc = ar.bind(
+            E.mhc_rmsnorm,
+            **mhc_args,
+            residual_out=torch.empty_like(mhc_args["residual"]),
+            out=residual.clone(),
+        )
+        quant = ar.bind(
+            quant_probe,
+            residual=residual,
+            weight=weight,
+            eps=eps,
+            **scales,
+            **outputs(16),
+        )
+
+        def check_quant(n, o, x):
+            peers = get_tp_group().all_gather(x, dim=0).view(tp_size, n, hidden)
+            accum = torch.zeros(n, hidden, device=device)
+            for peer in peers:
+                accum += peer.float()
+            ref = outputs(n)
+            quant.reference(
+                accum, residual=residual[:n], weight=weight, eps=eps, **scales, **ref
+            )
+            assert torch.equal(o["residual_out"], ref["residual_out"])
+            assert _bf16_ulps(o["out"], ref["out"]) <= 1
+            # Each fused quant matches vLLM's kernel on the row it quantized.
+            q, sf = ops.scaled_fp4_quant(o["out"], scales["global_scale"])
+            assert torch.equal(o["nvfp4"], q)
+            real = nvfp4_swizzled_offsets(n, hidden // 16, device).flatten()
+            assert torch.equal(
+                o["nvfp4_sf"].view(torch.uint8).flatten()[real],
+                sf.view(torch.uint8).flatten()[real],
+            )
+            q8, _ = ops.scaled_fp8_quant(o["out"], scales["fp8_scale"])
+            assert torch.equal(o["fp8"].view(torch.uint8), q8.view(torch.uint8))
+            q8, s8 = per_token_group_quant_fp8(
+                o["out"], 128, column_major_scales=False, use_ue8m0=True
+            )
+            assert torch.equal(o["fp8_group"].view(torch.uint8), q8.view(torch.uint8))
+            assert torch.equal(o["fp8_group_scale"], s8)
+
+        for n in (1, 5, 16, 3):
+            torch.manual_seed(42 + rank)
+            x = torch.randn(n, hidden, device=device, dtype=torch.bfloat16)
+            x[:, :16] = 0
+            x[:, 9:16:2] = -0.0
+            sliced = {
+                k: v[:n] if k not in ("weight", "eps") else v
+                for k, v in mhc_args.items()
+            }
+
+            # The generated mHC consumer matches the hand-written one.
+            expected = hand_written(x, *sliced.values())
+            streams = torch.empty_like(expected[0])
+            normalized = torch.empty_like(expected[1])
+            fused_mhc(x, **sliced, residual_out=streams, out=normalized)
+            assert torch.equal(streams, expected[0])
+            assert torch.equal(normalized, expected[1])
+
+            o = outputs(n)
+            quant(x, residual=residual[:n], weight=weight, eps=eps, **scales, **o)
+            check_quant(n, o, x)
+
+            # The MoE finalize publish feeds the same epilogue.
+            rows = n * top_k + 5
+            gemm2 = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16)
+            permuted = torch.randperm(rows, device=device)[: n * top_k]
+            permuted = permuted.view(n, top_k).int()
+            permuted[0, -1] = -1
+            weights = torch.rand(n, top_k, device=device)
+            shared = torch.randn(n, hidden, device=device, dtype=torch.bfloat16)
+            acc = torch.zeros(n, hidden, device=device)
+            for k in range(top_k):
+                valid = (permuted[:, k] >= 0).unsqueeze(-1)
+                rows_k = gemm2[permuted[:, k].clamp_min(0).long()].float()
+                torch.addcmul(
+                    acc,
+                    torch.where(valid, rows_k, 0.0),
+                    torch.where(valid, weights[:, k : k + 1], 0.0),
+                    out=acc,
+                )
+            o = outputs(n)
+            quant.finalize(
+                gemm2,
+                weights,
+                permuted,
+                shared,
+                residual=residual[:n],
+                weight=weight,
+                eps=eps,
+                **scales,
+                **o,
+            )
+            check_quant(n, o, (acc + shared.float()).bfloat16())
+
+        # Replays pick up in-place input changes.
+        n = 8
+        x = torch.randn(n, hidden, device=device, dtype=torch.bfloat16)
+        o = outputs(n)
+        args = dict(residual=residual[:n], weight=weight, eps=eps, **scales, **o)
+        quant(x, **args)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            quant(x, **args)
+        x.mul_(0.5)
+        graph.replay()
+        check_quant(n, o, x)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+)
+def test_all_reduce_efc_epilogues(monkeypatch):
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("Requires four GPUs with NVLink multicast")
+    multi_process_parallel(monkeypatch, 4, 1, _all_reduce_efc)
+
+
 @pytest.mark.parametrize(
     ("dtype", "expected"),
     [
