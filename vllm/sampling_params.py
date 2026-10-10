@@ -1197,11 +1197,13 @@ class SamplingParams(
         if not model_config.is_diffusion:
             return
 
-        # Diffusion models denoise a whole canvas per step with a fixed
-        # temperature schedule, so per-request sampling parameters are not
-        # supported. Penalties are ignored by the sampler with a warning.
+        # Nemotron supports ordinary per-request temperatures; other
+        # diffusion models retain their engine-level schedule.
+        per_request_temperature = (
+            "NemotronLabsDiffusionModel" in model_config.architectures
+        )
         if (
-            self.temperature != 1.0
+            (self.temperature != 1.0 and not per_request_temperature)
             or self.min_p > _SAMPLING_EPS
             or self.seed is not None
             or self.min_tokens > 0

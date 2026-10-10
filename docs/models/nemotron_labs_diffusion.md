@@ -1,0 +1,90 @@
+# Nemotron Labs Diffusion
+
+`NemotronLabsDiffusionModel` checkpoints support text generation with masked
+block diffusion. Prompt prefill and completed-block KV refresh use causal
+attention; denoising uses bidirectional attention within the current block.
+
+The same implementation supports the **3B and 8B text checkpoints** with
+architecture `NemotronLabsDiffusionModel`. Layer counts, hidden dimensions,
+attention heads, and RoPE settings are read from the checkpoint configuration;
+no size-specific architecture override is needed. Both sizes support masked
+diffusion and ordinary autoregressive inference. Linear speculation is deferred
+to a separate follow-up.
+
+```bash
+vllm serve nvidia/Nemotron-Labs-Diffusion-3B \
+    --attention-backend TRITON_ATTN \
+    --max-num-seqs 8 \
+    --diffusion-config '{"temperature": 0.0, "confidence_threshold": 0.9}'
+```
+
+The canvas length defaults to the checkpoint's `block_size`. The default
+`confidence_threshold` policy reveals all masked positions whose selected-token
+probability is at least 0.9, and at least the most confident position each step.
+Revealed positions remain fixed. The final permitted denoising step resolves any
+remaining masks before the block is committed.
+
+`DiffusionConfig.max_denoising_steps` limits iterations **per block** and defaults
+to the canvas length. `SamplingParams.max_tokens` controls the response length.
+Use ordinary request temperatures: `0` is greedy, `0.7` samples at temperature
+0.7, and `1` samples at temperature 1. Different temperatures can share a batch.
+For example, pass `SamplingParams(temperature=0.7, top_p=0.9)` to `LLM.generate`.
+Temperature scaling precedes top-k/top-p filtering and applies to returned
+sampling logprobs. Confidence is measured using unscaled logits over the retained
+candidates.
+
+`DiffusionConfig.temperature`, when provided, sets the default for requests that
+omit temperature; it no longer overrides explicit request temperatures.
+`--override-generation-config '{"temperature": 0.7}'` sets the same standard
+default and takes precedence over `DiffusionConfig.temperature`. Without either
+setting, the checkpoint's ordinary generation defaults apply (temperature 1 if
+unspecified). The previous `1` selector for an engine temperature is removed.
+The `low_confidence` policy instead reveals a scheduled number of the most
+confident positions; `leftmost` reveals that number from left to right.
+
+The model uses vLLM's diffusion support in Model Runner V2. Triton attention is the default;
+FlashAttention requires FA4. FlashInfer does not support the mixed
+causal/bidirectional attention. This implementation covers
+text-only masked diffusion; linear speculation and vision inputs are not included.
+
+## Autoregressive inference
+
+The same checkpoint also supports ordinary causal, token-by-token generation:
+
+```bash
+vllm serve nvidia/Nemotron-Labs-Diffusion-3B \
+    --hf-overrides '{"ar_mode": true}'
+```
+
+For Python, pass `hf_overrides={"ar_mode": True}` to `LLM`. The architecture
+alias `hf_overrides={"architectures": ["NemotronLabsDiffusionForCausalLM"]}`
+also selects AR mode, for compatibility with existing callers.
+
+AR mode uses the same backbone and `diffusion_head` weights, with causal
+attention and vLLM's standard scheduler, KV cache, and sampler. Sampling
+parameters such as temperature, top-p, and top-k are set per request. Do not
+pass `diffusion_config` in AR mode; denoising policies and thresholds do not
+apply. The default, without either override, remains block diffusion.
+
+## 8B checkpoints
+
+Point the server at the 8B checkpoint directly, using the same decoding options:
+
+```bash
+vllm serve /path/to/Nemotron-Labs-Diffusion-8B \
+    --max-num-seqs 8 \
+    --diffusion-config '{"canvas_length": 32}'
+```
+
+Use `--hf-overrides '{"ar_mode": true}'` instead of `--diffusion-config` for AR,
+or omit both options for confidence-threshold diffusion. The 8B checkpoint's
+own RoPE configuration determines its context limit; the 3B context settings
+are not substituted.
+
+The model test suite accepts either size through `NEMOTRON_DLM_MODEL_PATH`:
+
+```bash
+NEMOTRON_DLM_MODEL_PATH=/path/to/Nemotron-Labs-Diffusion-8B \
+    .venv/bin/python -m pytest --confcutdir=tests/models/language/generation \
+    tests/models/language/generation/test_nemotron_dllm.py -v
+```
