@@ -55,6 +55,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.flashinfer import (
     flashinfer_fused_kda_decode,
+    flashinfer_fused_kda_decode_selects_backend,
     flashinfer_packed_fused_kda_decode,
     flashinfer_recurrent_kda,
     has_flashinfer_fused_kda_decode,
@@ -214,6 +215,53 @@ def is_flashinfer_fused_kda_decode_supported(
         and recurrent_state_dtype in (torch.float32, torch.bfloat16)
         and not is_conv_state_dim_first()
     )
+
+
+# State-indices mode handed to FlashInfer's ``fused_kda_decode`` when it
+# selects the kernel itself (``backend="auto"``). The KDA metadata fills
+# CUDA-graph padding rows with NULL_BLOCK_ID (0), the reserved null block no
+# request owns, and every live T=1 row owns its own block, so the state indices
+# are non-positive or unique; FlashInfer treats non-positive rows as the null
+# path (zero output, no state update). ``positive_unique`` would be a false
+# assertion under padding. FlashInfer never verifies this mode on the device,
+# so it must hold for every caller path that reaches the FlashInfer decode.
+_FLASHINFER_KDA_STATE_INDICES_MODE = "unique_or_null"
+
+
+def _format_kda_decode_kwargs(kwargs: dict[str, str]) -> str:
+    """Render the FlashInfer call kwargs as ``k=v, ...`` (sorted, stable)."""
+    return ", ".join(f"{k}={v}" for k, v in sorted(kwargs.items()))
+
+
+def _announce_flashinfer_kda_decode(kwargs: dict[str, str]) -> None:
+    """Log once which kwargs the fused FlashInfer decode is called with.
+
+    ``logger.info_once`` deduplicates by hashing the message arguments, so the
+    kwargs are rendered to a string first (a dict argument raised ``TypeError:
+    unhashable type`` at model construction).
+    """
+    logger.info_once(
+        "FlashInfer selects the fused KDA decode kernel (%s).",
+        _format_kda_decode_kwargs(kwargs),
+    )
+
+
+def _flashinfer_kda_decode_kwargs(backend: str) -> dict[str, str]:
+    """Extra ``flashinfer_fused_kda_decode`` kwargs for the resolved KDA decode
+    backend.
+
+    When ``backend`` is ``"flashinfer"`` and the installed FlashInfer
+    ``fused_kda_decode`` accepts ``backend`` / ``state_indices_mode``
+    (FlashInfer >= 0.7.1rc1), pass ``backend="auto"`` and the host-known
+    state-indices mode so FlashInfer selects the kernel itself. Otherwise (the
+    pinned 0.7.0.post1, or another decode backend) the call is unchanged.
+    """
+    if backend != "flashinfer" or not flashinfer_fused_kda_decode_selects_backend():
+        return {}
+    return {
+        "backend": "auto",
+        "state_indices_mode": _FLASHINFER_KDA_STATE_INDICES_MODE,
+    }
 
 
 def is_flashinfer_fused_kda_spec_decode_supported(
@@ -694,6 +742,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_state_dtype,
             recurrent_state_dtype,
         )
+        self.flashinfer_kda_decode_kwargs: dict[str, str] = (
+            _flashinfer_kda_decode_kwargs(self.kda_decode_backend)
+        )
+        if self.flashinfer_kda_decode_kwargs:
+            _announce_flashinfer_kda_decode(self.flashinfer_kda_decode_kwargs)
         spec_decode_backend = (
             additional_config.get("kda_spec_decode_backend", "auto")
             if isinstance(additional_config, dict)
@@ -900,6 +953,41 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             return self.gemm_rs_ar.apply(core_attn_out, self.o_proj)
         return self.o_proj(core_attn_out)[0]
 
+    def _flashinfer_fused_kda_decode(
+        self,
+        mixed_qkv: torch.Tensor,
+        conv_state: torch.Tensor,
+        g1: torch.Tensor,
+        beta: torch.Tensor,
+        state_indices: torch.Tensor,
+        recurrent_state: torch.Tensor,
+        output_gate: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """FlashInfer fused T=1 decode.
+
+        ``self.flashinfer_kda_decode_kwargs`` adds ``backend="auto"`` and the
+        state-indices mode when the installed FlashInfer accepts them, so
+        FlashInfer selects the kernel itself; otherwise the call is unchanged.
+        """
+        flashinfer_fused_kda_decode(
+            x=mixed_qkv,
+            weight=self.decode_conv1d_weight,
+            conv_state=conv_state,
+            raw_gate=g1,
+            raw_beta=beta,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            state_indices=state_indices,
+            state=recurrent_state,
+            output_gate=output_gate,
+            norm_weight=self.decode_norm_weight,
+            lower_bound=self.gate_lower_bound,
+            norm_eps=self.o_norm.eps,
+            output=output,
+            **self.flashinfer_kda_decode_kwargs,
+        )
+
     @eager_break_during_capture
     def _forward(
         self,
@@ -992,21 +1080,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert non_spec_state_indices_tensor is not None
             state_indices = non_spec_state_indices_tensor[:num_actual_tokens]
             if self.kda_decode_backend == "flashinfer":
-                flashinfer_fused_kda_decode(
-                    x=mixed_qkv,
-                    weight=self.decode_conv1d_weight,
-                    conv_state=conv_state,
-                    raw_gate=g1,
-                    raw_beta=beta,
-                    A_log=self.A_log,
-                    dt_bias=self.dt_bias,
-                    state_indices=state_indices,
-                    state=recurrent_state,
-                    output_gate=g2[:num_actual_tokens],
-                    norm_weight=self.decode_norm_weight,
-                    lower_bound=self.gate_lower_bound,
-                    norm_eps=self.o_norm.eps,
-                    output=core_attn_out[:, :num_actual_tokens],
+                self._flashinfer_fused_kda_decode(
+                    mixed_qkv,
+                    conv_state,
+                    g1,
+                    beta,
+                    state_indices,
+                    recurrent_state,
+                    g2[:num_actual_tokens],
+                    core_attn_out[:, :num_actual_tokens],
                 )
             else:
                 ops.fused_kda_decode(

@@ -31,6 +31,7 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
+    _flashinfer_kda_decode_kwargs,
     _flashinfer_kda_prefill,
     _flashkda_prefill,
     is_flashinfer_fused_kda_decode_supported,
@@ -1181,6 +1182,7 @@ def test_fused_kda_decode_correctness(
             lower_bound=lower_bound,
             norm_eps=norm_eps,
             output=output,
+            **_flashinfer_kda_decode_kwargs(decode_backend),
         )
     else:
         actual = ops.fused_kda_decode(
