@@ -22,6 +22,7 @@ from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.utils import StageMissingLayer
+from vllm.transformers_utils.config import get_submodel_config_name
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import multi_gpu_test, prep_prompts
@@ -784,3 +785,69 @@ def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
 
     assert positions.shape == (4, 3)
     assert delta == 0
+
+
+class _AltNameMRoPEModel:
+    """`get_rope_index` naming the audio and seconds inputs its own way (Qwen Omni)."""
+
+    def __init__(self):
+        self.seen: dict[str, Any] = {}
+
+    def get_rope_index(
+        self,
+        input_ids,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        use_audio_in_video=False,
+        audio_seqlens=None,
+        second_per_grids=None,
+    ):
+        self.seen = dict(
+            use_audio_in_video=use_audio_in_video,
+            audio_seqlens=audio_seqlens,
+            second_per_grids=second_per_grids,
+        )
+        seq_len = input_ids.shape[-1]
+        positions = torch.arange(seq_len).view(1, 1, -1).expand(4, 1, -1)
+        return positions, torch.tensor([0])
+
+
+def _mm_feature(modality: str, **fields):
+    data = {k: SimpleNamespace(data=v) for k, v in fields.items()}
+    return SimpleNamespace(modality=modality, data=data)
+
+
+def test_get_mrope_input_positions_passes_the_names_the_model_accepts():
+    """The audio lengths and the seconds go by another name on some models."""
+    model = _AltNameMRoPEModel()
+    mixin = SimpleNamespace(model=model)
+    features = [
+        _mm_feature("audio", audio_feature_lengths=torch.tensor(300)),
+        _mm_feature(
+            "video",
+            video_grid_thw=torch.tensor([1, 2, 2]),
+            second_per_grid_ts=torch.tensor(1.0),
+            use_audio_in_video=torch.tensor(True),
+        ),
+    ]
+
+    MultiModalMixin.get_mrope_input_positions(mixin, [1, 2, 3], features)
+
+    assert model.seen["use_audio_in_video"] is True
+    assert model.seen["audio_seqlens"].tolist() == [300]
+    assert model.seen["second_per_grids"].tolist() == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("Qwen/Qwen2.5-Omni-3B", "thinker_config"),
+        ("Qwen/Qwen3-VL-2B-Instruct", None),
+        ("vidore/colpali-v1.3-hf", None),
+    ],
+)
+def test_get_submodel_config_name(model_id, expected):
+    """A composite checkpoint keeps the servable model in one of its sub-configs."""
+    config = AutoConfig.from_pretrained(model_id)
+
+    assert get_submodel_config_name(config) == expected

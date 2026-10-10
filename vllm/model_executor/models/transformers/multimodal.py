@@ -48,8 +48,13 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     cached_encode,
 )
-from vllm.multimodal.processing.processor import HFMultiModalInputs
+from vllm.multimodal.processing.processor import (
+    HFMultiModalInputs,
+    MultiModalProcessingResult,
+    PlaceholderFeaturesInfo,
+)
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import get_submodel_config_name
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import async_tensor_h2d
 
@@ -79,17 +84,33 @@ _MAX_DUMMY_SIDE = 10_000
 _MIN_DUMMY_SIDE = 224
 
 
-def _get_embed_token_id(replacement_ids: torch.Tensor) -> int:
-    """The token an expansion repeats is the one holding the embeddings."""
-    return int(replacement_ids.mode().values)
+def _get_embed_token_id(
+    replacement_ids: list[int], preferred: int | None = None
+) -> int:
+    """The token holding the embeddings, which an expansion repeats."""
+    if preferred is not None and replacement_ids.count(preferred) > 1:
+        return preferred
+    return int(torch.tensor(replacement_ids).mode().values)
 
 
-def _count_embed_tokens(seqs: list[list[int]]) -> torch.Tensor:
+def _validate_one_audio_per_video(num_audios: int, num_videos: int) -> None:
+    if num_videos > num_audios:
+        raise ValueError(
+            "use_audio_in_video needs one audio per video, got "
+            f"num_audios={num_audios} and num_videos={num_videos}"
+        )
+
+
+def _count_embed_tokens(
+    seqs: list[list[int]], preferred: int | None = None
+) -> torch.Tensor:
     """Number of embedding tokens in each item's replacement."""
     counts = []
     for seq in seqs:
-        ids = torch.tensor(seq)
-        counts.append(int(ids.eq(_get_embed_token_id(ids)).sum()))
+        if preferred is not None and (count := seq.count(preferred)):
+            counts.append(count)
+            continue
+        counts.append(seq.count(_get_embed_token_id(seq)))
     return torch.tensor(counts)
 
 
@@ -126,7 +147,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         except AttributeError:
             logger.info_once(
                 "%s cannot count video tokens yet, so the Transformers modeling "
-                "backend serves this model without video inputs. See "
+                "backend serves this model without video inputs. Please report "
+                "this to transformers so it can be fixed, see "
                 "https://github.com/huggingface/transformers/issues/43329",
                 type(self.get_hf_processor()).__name__,
             )
@@ -158,6 +180,10 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
                 "serve this model as multi-modal."
             )
         return modalities
+
+    @cached_property
+    def _fuses_audio_into_video(self) -> bool:
+        return bool(self.ctx.get_merged_mm_kwargs({}).get("use_audio_in_video"))
 
     def _get_audio_sampling_rate(self) -> float:
         sub = self._get_audio_processor()
@@ -192,13 +218,19 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         config = self.get_hf_config()
         audio_config_names = ("audio_config", "encoder_config")
         names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
+        submodel = get_submodel_config_name(config)
+        if submodel is not None:
+            config = getattr(config, submodel)
         audio_config = getattr_iter(config, audio_config_names, default=config)
         val = getattr_iter(audio_config, names)
+        if val is None:
+            val = getattr(self.get_hf_processor(), "audio_seq_length", None)
         if val is not None:
             return int(val)
         raise ValueError(
             f"Unable to get max input length from {type(audio_config).__name__}. "
-            f"The following attribute names were checked: {names}."
+            f"The following attribute names were checked: {names}, and "
+            "`audio_seq_length` on the processor."
         )
 
     def _get_num_mm_tokens(self, **sizes: Sequence[Sequence[int]]) -> Any:
@@ -323,16 +355,12 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             text += " ".join([audio_token] * num_audios)
         if self.info._is_image_model and (num_images := mm_counts.get("image", 0)):
             processor = self.info.get_hf_processor()
-            if "gemma3" in processor.__class__.__name__.lower():
-                image_token = processor.boi_token
-            else:
-                image_token = getattr(processor, "image_token", "")
-                # Some processors (e.g. HunYuanVL) reject a bare image token and
-                # require each one to be wrapped in its start/end markers.
-                start_token = getattr(processor, "image_start_token", "")
-                end_token = getattr(processor, "image_end_token", "")
-                image_token = f"{start_token}{image_token}{end_token}"
-            text += image_token * num_images
+            image_token = getattr(processor, "image_token", "")
+            # Some processors (e.g. HunYuanVL) reject a bare image token and
+            # require each one to be wrapped in its start/end markers.
+            start_token = getattr(processor, "image_start_token", "")
+            end_token = getattr(processor, "image_end_token", "")
+            text += f"{start_token}{image_token}{end_token}" * num_images
         if self.info._is_video_model and (num_videos := mm_counts.get("video", 0)):
             processor = self.info.get_hf_processor()
             video_token = getattr(processor, "video_token", "")
@@ -455,6 +483,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         for name in getattr(sub_processor, "model_input_names", None) or ():
             # Companion masks are emitted but not always declared
             names.update((name, f"{name}_mask"))
+            if name == "input_features":
+                names.add("feature_attention_mask")
         return names
 
     def _partition_keys_by_modality(
@@ -523,7 +553,13 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             for suffix in ("ids", "sizes")
         }
         # Registered by name below, so no sub-processor has to claim them
-        own_keys |= {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"}
+        own_keys |= {
+            "image_grid_thw",
+            "video_grid_thw",
+            "second_per_grid_ts",
+            "audio_feature_lengths",
+            "use_audio_in_video",
+        }
         keys = [key for key in hf_inputs if key not in own_keys]
         owned = self._partition_keys_by_modality(keys, modalities)
 
@@ -532,6 +568,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             for modality in modalities
             for key in owned[modality]
         }
+
+        if "audio" in modalities and "audio_feature_lengths" in hf_inputs:
+            mm_fields["audio_feature_lengths"] = MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            )
 
         for modality in modalities:
             # One row per item, and only ever read on the CPU
@@ -555,6 +596,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched(
                 "video", keep_on_cpu=True
             )
+            if "use_audio_in_video" in hf_inputs:
+                mm_fields["use_audio_in_video"] = MultiModalFieldConfig.shared(
+                    "video", len(sizes["video"]), keep_on_cpu=True
+                )
             mm_fields["second_per_grid_ts"] = MultiModalFieldConfig.batched(
                 "video", keep_on_cpu=True
             )
@@ -583,6 +628,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             return MultiModalFieldConfig.batched("video")
         if rows == total:
             return MultiModalFieldConfig.flat_from_sizes("video", sizes, dim=dim)
+        # Gemma 4 concatenates every video's frames along one axis, so a per-frame
+        # field has one row per frame rather than per patch
+        num_frames = hf_inputs.get("num_frames_per_video")
+        if num_frames is not None and rows == int(num_frames.sum()):
+            return MultiModalFieldConfig.flat_from_sizes("video", num_frames, dim=dim)
         # VideoLLaMA3's compression mask has one row per token the processor counts
         num_video_tokens = hf_inputs["num_video_tokens"]
         if rows == int(num_video_tokens.sum()):
@@ -597,6 +647,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         )
 
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        if self.info._fuses_audio_into_video:
+            mm_counts = {
+                **mm_counts,
+                "audio": max(0, mm_counts.get("audio", 0) - mm_counts.get("video", 0)),
+            }
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _unpad_audios(
@@ -683,26 +738,83 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         updates = []
         for modality, items in out_mm_kwargs.items():
+            token = getattr(hf_processor, f"{modality}_token")
+            target = get_target_token_ids(token)
+            preferred = target[0] if len(target) == 1 else None
             # Popped so they are neither cached nor sent to the model; the updates
             # they produce are cached alongside the item instead
             replacements = []
             for item in items:
                 ids = item.pop(f"{modality}_replacement_ids").data
                 assert isinstance(ids, torch.Tensor)
+                replacement_ids = ids.tolist()
                 replacements.append(
                     PromptUpdateDetails.select_token_id(
-                        ids.tolist(), _get_embed_token_id(ids)
+                        replacement_ids,
+                        _get_embed_token_id(replacement_ids, preferred),
                     )
                 )
-            token = getattr(hf_processor, f"{modality}_token")
             updates.append(
                 PromptReplacement(
                     modality=modality,
-                    target=get_target_token_ids(token),
+                    target=target,
                     replacement=replacements.__getitem__,
                 )
             )
         return updates
+
+    def _derive_audio_from_video_placeholders(
+        self,
+        placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
+    ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
+        """The placeholders for audios folded into videos, which share their span."""
+        if "video" not in placeholders:
+            return placeholders
+
+        hf_processor = self.info.get_hf_processor()
+        tokenizer = self.info.get_tokenizer()
+        audio_token_id = cached_encode(
+            tokenizer, hf_processor.audio_token, add_special_tokens=False
+        )[0]
+
+        audio_placeholders = list(placeholders.get("audio", []))
+        for video in placeholders["video"]:
+            audio_placeholders.append(
+                PlaceholderFeaturesInfo(
+                    modality="audio",
+                    item_idx=len(audio_placeholders),
+                    start_idx=video.start_idx,
+                    tokens=video.tokens,
+                    is_embed=torch.tensor(video.tokens).eq(audio_token_id),
+                )
+            )
+        return {**placeholders, "audio": audio_placeholders}
+
+    def _maybe_apply_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        mm_res: MultiModalProcessingResult,
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        if not self.info._fuses_audio_into_video:
+            return super()._maybe_apply_prompt_updates(mm_items, mm_res)
+
+        mm_item_counts = mm_items.get_all_counts()
+        self._validate_mm_kwargs(mm_res.kwargs, mm_item_counts)
+        self._validate_mm_updates(mm_res.prompt_updates, mm_item_counts)
+
+        num_audios = mm_item_counts.get("audio", 0)
+        num_videos = mm_item_counts.get("video", 0)
+        _validate_one_audio_per_video(num_audios, num_videos)
+        num_standalone = num_audios - num_videos
+        updates = dict(mm_res.prompt_updates)
+        if "audio" in updates:
+            updates["audio"] = updates["audio"][:num_standalone]
+        prompt_ids, placeholders = self._apply_prompt_updates(
+            mm_res.prompt_ids, updates
+        )
+        placeholders = self._derive_audio_from_video_placeholders(placeholders)
+        self._validate_mm_placeholders(placeholders, mm_item_counts)
+        return prompt_ids, placeholders
 
     def _get_num_image_patches(
         self,
@@ -768,6 +880,18 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         prompt_text = hf_data.pop("text")
         assert isinstance(prompt_text, str)
 
+        use_audio_in_video = self.info._fuses_audio_into_video
+        override = hf_kwargs.get("use_audio_in_video")
+        if override is not None and bool(override) != use_audio_in_video:
+            raise ValueError(
+                "use_audio_in_video is a server-level setting and cannot be "
+                "overridden per request; pass it in --mm-processor-kwargs instead."
+            )
+        item_counts = mm_items.get_all_counts()
+        num_audios = item_counts.get("audio", 0)
+        if use_audio_in_video:
+            _validate_one_audio_per_video(num_audios, item_counts.get("video", 0))
+
         # Ask for the replacement each placeholder expands to, and record it as
         # per-item fields: its token ids, and the tokens or patches behind them
         if has_mm_data := any(hf_data.values()):
@@ -788,8 +912,23 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             hf_inputs = transformers.BatchFeature(
                 dict(input_ids=[tokenizer.encode(prompt_text)]), tensor_type="pt"
             )
+
+        if self.info.ctx.model_config.uses_mrope:
+            feature_attention_mask = getattr_iter(
+                hf_inputs, ("feature_attention_mask", "input_features_mask"), None
+            )
+            if feature_attention_mask is not None:
+                hf_inputs["audio_feature_lengths"] = feature_attention_mask.sum(-1)
+
         self._unpad_images(hf_inputs)
         self._unpad_audios(hf_inputs, hf_data, hf_kwargs)
+
+        video_second_per_grid = hf_inputs.pop("video_second_per_grid", None)
+        if video_second_per_grid is not None:
+            hf_inputs["second_per_grid_ts"] = video_second_per_grid
+
+        if use_audio_in_video:
+            hf_inputs["use_audio_in_video"] = torch.tensor(True)
 
         # Drop the inputs the model would reject
         hf_inputs.pop("mm_token_type_ids", None)
@@ -820,6 +959,26 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 cached_encode(tokenizer, entry["replacement"], add_special_tokens=False)
             )
 
+        audio_token_id = None
+        if "use_audio_in_video" in hf_inputs and replacements.get("video"):
+            audio_token_id = cached_encode(
+                tokenizer,
+                self.info.get_hf_processor().audio_token,
+                add_special_tokens=False,
+            )[0]
+            fused = [seq for seq in replacements["video"] if audio_token_id in seq]
+            if len(replacements["audio"]) + len(fused) != num_audios:
+                raise ValueError(
+                    f"use_audio_in_video fused {len(fused)} of "
+                    f"{len(replacements['video'])} videos with an audio, which "
+                    f"accounts for {len(replacements['audio']) + len(fused)} of "
+                    f"{num_audios} audios"
+                )
+            # Standalone audios first, so item indices match the derived placeholders
+            replacements["audio"].extend(fused)
+            if not replacements["audio"]:
+                del replacements["audio"]
+
         for modality, seqs in replacements.items():
             hf_inputs[f"{modality}_replacement_ids"] = torch.tensor(
                 [token_id for seq in seqs for token_id in seq]
@@ -832,7 +991,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                     hf_inputs, hf_data, len(seqs)
                 )
             elif modality == "audio":
-                hf_inputs["num_audio_tokens"] = _count_embed_tokens(seqs)
+                hf_inputs["num_audio_tokens"] = _count_embed_tokens(
+                    seqs, audio_token_id
+                )
             elif modality == "video":
                 grid = hf_inputs.get("video_grid_thw")
                 hf_inputs["num_video_patches"] = (
@@ -1202,21 +1363,21 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
                 "use_audio_in_video",
             },
         )
-        if kwargs.get("audio_feature_lengths") or kwargs.get("use_audio_in_video"):
-            raise NotImplementedError(
-                "Transformers modeling backend does not support audio inputs in "
-                "M-RoPE models."
-            )
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
         second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
+        audio_feature_lengths = kwargs.get("audio_feature_lengths", [])
 
         image_grid_thw = torch.stack(image_grid_thw) if image_grid_thw else None
         video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
         second_per_grid_ts = (
             torch.stack(second_per_grid_ts) if second_per_grid_ts else None
         )
+        audio_feature_lengths = (
+            torch.stack(audio_feature_lengths) if audio_feature_lengths else None
+        )
+        use_audio_in_video = any(kwargs.get("use_audio_in_video", []))
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
         if not hasattr(self, "_get_rope_index_kwarg_names"):
@@ -1234,16 +1395,30 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         def accepts_kwarg(name: str) -> bool:
             return kwarg_names is None or name in kwarg_names
 
+        seconds_name = (
+            "second_per_grid_ts"
+            if accepts_kwarg("second_per_grid_ts")
+            else "second_per_grids"
+        )
+        audio_name = (
+            "audio_feature_lengths"
+            if accepts_kwarg("audio_feature_lengths")
+            else "audio_seqlens"
+        )
+
         # Drop a grid the model can't accept only when there is nothing to pass.
         kwargs = {
             name: value
             for name, value in (
                 ("image_grid_thw", image_grid_thw),
                 ("video_grid_thw", video_grid_thw),
-                ("second_per_grid_ts", second_per_grid_ts),
+                (seconds_name, second_per_grid_ts),
+                (audio_name, audio_feature_lengths),
             )
             if value is not None or accepts_kwarg(name)
         }
+        if accepts_kwarg("use_audio_in_video"):
+            kwargs["use_audio_in_video"] = use_audio_in_video
         if accepts_kwarg("mm_token_type_ids"):
             mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
             for feature in mm_features:

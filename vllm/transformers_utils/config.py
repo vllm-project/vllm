@@ -15,7 +15,7 @@ import torch
 import transformers.configuration_utils as hf_configuration_utils
 from huggingface_hub import constants
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import GenerationConfig, PreTrainedConfig
+from transformers import AutoModel, GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -722,6 +722,23 @@ def mrope_num_dims(config: PreTrainedConfig) -> int:
 
     # Custom configs may declare M-RoPE without exposing the sections.
     return 3
+
+
+def get_submodel_config_name(config: PreTrainedConfig) -> str | None:
+    """The sub-config of this model's own text-generating part, when it has one."""
+    if type(config) in AutoModel._model_mapping:
+        return None
+    text_config = config.get_text_config()
+    for name in getattr(config, "sub_configs", ()) or ():
+        sub = getattr(config, name, None)
+        if sub is None or type(sub) not in AutoModel._model_mapping:
+            continue
+        # A part of this very model, rather than a model it merely wraps
+        if sub.model_type.startswith(f"{config.model_type}_") and (
+            getattr(sub, "text_config", None) is text_config
+        ):
+            return name
+    return None
 
 
 def is_encoder_decoder(config: PreTrainedConfig) -> bool:

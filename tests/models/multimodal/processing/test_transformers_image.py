@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -260,7 +261,7 @@ def test_repeated_image_hits_the_processor_cache():
 def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
     """The prompt is tokenized without any multi-modal data and the expansion spliced
     in, so its token ids have to come out the same as the ones the HF processor
-    produces itself."""
+    produces itself, with an embedding slot for every token the expansion repeats."""
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(model=model_id, model_impl="transformers")
     )
@@ -283,6 +284,10 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
         hf_processor_mm_kwargs={},
     )
     assert result["prompt_token_ids"] == hf_ids
+
+    placeholder = result["mm_placeholders"]["image"][0]
+    expansion = hf_ids[placeholder.offset : placeholder.offset + placeholder.length]
+    assert placeholder.get_num_embeds() == max(Counter(expansion).values())
 
 
 def test_nested_image_fields_split_per_image():

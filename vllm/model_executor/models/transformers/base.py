@@ -16,8 +16,9 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
+import copy
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from functools import cached_property
 from itertools import chain
@@ -84,6 +85,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import get_submodel_config_name
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -115,6 +117,8 @@ class Base(
 ):
     hf_to_vllm_mapper: WeightsMapper
 
+    requires_raw_input_tokens: bool = False
+
     # TODO transformers will have a util to get these
     embedding_modules = {"embed_tokens": "input_embeddings"}
 
@@ -124,6 +128,12 @@ class Base(
 
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
+        submodel = get_submodel_config_name(self.config)
+        if submodel is not None:
+            composite = self.config
+            self.config = copy.copy(getattr(self.config, submodel))
+            if not self.config.architectures:
+                self.config.architectures = composite.architectures
         self.text_config = self.config.get_text_config()
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -177,6 +187,10 @@ class Base(
         ):
             from_config_kwargs = self._from_config_kwargs
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+
+        if getattr(self.model.get_decoder(), "hidden_size_per_layer_input", 0):
+            self.check_version("5.19.0", "per-layer input models")
+            self.requires_raw_input_tokens = True
 
         # Create weight name to module qualname mapper
         self._create_hf_to_vllm_mapper()
@@ -324,11 +338,6 @@ class Base(
             if isinstance(mapping, WeightRenaming):
                 orig_to_new_renaming.append(mapping)
             # TODO: Handle WeightConverter to enable layer merging
-
-        # Handle unexpected weights which should be ignored
-        if self.model._keys_to_ignore_on_load_unexpected is not None:
-            for key in self.model._keys_to_ignore_on_load_unexpected:
-                orig_to_new_regex[re.compile(key)] = None
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
@@ -782,8 +791,18 @@ class Base(
             positions = positions[None, ...]
 
         # Transformers models expect either input_ids or inputs_embeds, but not both
+        raw_input_ids = input_ids
         if input_ids is not None and inputs_embeds is not None:
             input_ids = None
+
+        if (
+            self.requires_raw_input_tokens
+            and inputs_embeds is not None
+            and raw_input_ids is not None
+        ):
+            kwargs["per_layer_inputs"] = self.model.get_decoder().get_per_layer_inputs(
+                raw_input_ids
+            )
 
         outputs = self.model(
             input_ids=input_ids,
@@ -807,19 +826,46 @@ class Base(
             return hidden_states, aux_hidden_states
         return hidden_states
 
+    def _drop_ignored_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterator[tuple[str, torch.Tensor]]:
+        """Drop a weight only if the model has nowhere to put it.
+
+        Transformers aggregates `_keys_to_ignore_on_load_unexpected` onto ancestors
+        without the submodule prefix, and uses it only to decide whether an
+        *unexpected* key deserves a warning, so a pattern says nothing about a
+        weight the model does have.
+        """
+        keys = self.model._keys_to_ignore_on_load_unexpected or ()
+        patterns = [re.compile(key) for key in keys]
+        if not patterns:
+            yield from weights
+            return
+        expected = {name for name, _ in self.named_parameters()}
+        expected |= {name for name, _ in self.named_buffers()}
+        for name, weight in weights:
+            if any(pattern.search(name) for pattern in patterns):
+                mapped = self.hf_to_vllm_mapper.map_name(name)
+                if mapped is None or mapped not in expected:
+                    continue
+            yield name, weight
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(
+            self._drop_ignored_weights(weights), mapper=self.hf_to_vllm_mapper
+        )
 
     @staticmethod
     def check_version(min_version: str, feature: str):
         installed = Version(transformers.__version__)
         required = Version(min_version)
-        if installed < required:
+        # Base version, so a preview build passes (as tests/models/registry.py does)
+        if Version(installed.base_version) < required:
             raise ImportError(
                 f"Transformers modeling backend requires transformers>={required} "
                 f"for {feature}, but got {installed}"
