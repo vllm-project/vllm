@@ -49,6 +49,7 @@ class KdaDecodeInputs:
         num_heads: int,
         num_slots: int,
         seed: int = 0,
+        num_spec: int = 0,
     ) -> None:
         torch.manual_seed(seed)
         device = "cuda"
@@ -70,10 +71,12 @@ class KdaDecodeInputs:
                 for i in range(3)
             ]
         )
-        # SD cache layout: [slots, width - 1, 3 * dim]; the layer transposes it.
+        # SD cache layout: [slots, state_len, 3 * dim]; the layer transposes it.
+        # Speculative decode keeps the draft tokens in the cache, so
+        # state_len is width - 1 + num_spec rather than width - 1.
+        state_len = CONV_WIDTH - 1 + num_spec
         self.conv_state = (
-            torch.randn(num_slots, CONV_WIDTH - 1, 3 * dim, device=device, dtype=DTYPE)
-            * 0.5
+            torch.randn(num_slots, state_len, 3 * dim, device=device, dtype=DTYPE) * 0.5
         )
         self.recurrent_state = (
             torch.randn(
@@ -124,17 +127,69 @@ def _gated_rmsnorm(
 
 def _run_triton_chain(
     inp: KdaDecodeInputs,
+    *,
+    num_accepted_tokens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    ssm_state_indices: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """conv1d update -> recurrent decode -> gated norm, as the layer runs it."""
+    """conv1d update -> recurrent decode -> gated norm, as the layer runs it.
+
+    Passing the speculative metadata takes the three-op path a pure spec
+    batch uses: varlen conv update, ``fused_recurrent_kda``, then gated norm.
+    """
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
         causal_conv1d_update,
     )
     from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+        fused_recurrent_kda,
         fused_recurrent_kda_packed_decode,
     )
 
     conv_state = inp.conv_state.clone()
     recurrent_state = inp.recurrent_state.clone()
+    if num_accepted_tokens is not None:
+        assert query_start_loc is not None and ssm_state_indices is not None
+        spec_len = ssm_state_indices.shape[1]
+        conv_out = torch.empty_like(inp.mixed_qkv)
+        mixed_qkv = causal_conv1d_update(
+            inp.mixed_qkv,
+            inp.conv_state_view(conv_state),
+            inp.conv_weights,
+            None,
+            activation="silu",
+            conv_state_indices=ssm_state_indices[:, 0],
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc,
+            max_query_len=spec_len,
+            validate_data=False,
+            out=conv_out,
+        )
+        q, k, v = (
+            mixed_qkv[:, i * inp.dim : (i + 1) * inp.dim].reshape(
+                1, -1, inp.num_heads, HEAD_DIM
+            )
+            for i in range(3)
+        )
+        core_attn_out, _ = fused_recurrent_kda(
+            q=q,
+            k=k,
+            v=v,
+            raw_g=inp.g1,
+            raw_beta=inp.beta,
+            A_log=inp.A_log,
+            dt_bias=inp.dt_bias,
+            lower_bound=GATE_LOWER_BOUND,
+            initial_state=recurrent_state,
+            cu_seqlens=query_start_loc,
+            ssm_state_indices=ssm_state_indices,
+            num_accepted_tokens=num_accepted_tokens,
+            uniform_sequence_length=spec_len,
+        )
+        if core_attn_out.dim() == 4:
+            core_attn_out = core_attn_out[0]
+        out = _gated_rmsnorm(core_attn_out, inp.g2, inp.norm_weight_bf16, NORM_EPS)
+        return out, conv_state, recurrent_state
+
     conv_out = torch.empty_like(inp.mixed_qkv)
     causal_conv1d_update(
         inp.mixed_qkv,
@@ -289,3 +344,100 @@ def test_fused_kda_decode_skips_null_block_padding() -> None:
     torch.testing.assert_close(actual_state[0], inp.recurrent_state[0], atol=0, rtol=0)
     torch.testing.assert_close(actual_conv, expected_conv, atol=0, rtol=0)
     torch.testing.assert_close(actual_state, expected_state, atol=2e-3, rtol=2e-3)
+
+
+def test_speculative_kda_decode_requires_aiter_interface(monkeypatch) -> None:
+    """Spec batches use AITER only when that build has the spec interface.
+
+    ``VLLM_ROCM_AITER_KDA_SPEC_DECODE=0`` and older AITER builds stay on the
+    three-op path.
+    """
+    from vllm import envs
+    from vllm.models.kimi_k3.amd.ops.kda_decode import (
+        is_aiter_spec_kda_decode_supported,
+        is_fused_kda_decode_supported,
+    )
+
+    kwargs = dict(
+        num_heads=12,
+        head_dim=HEAD_DIM,
+        conv_width=CONV_WIDTH,
+        num_spec=7,
+        input_dtype=DTYPE,
+        conv_state_dtype=DTYPE,
+    )
+    monkeypatch.setattr(envs, "VLLM_ROCM_AITER_KDA_SPEC_DECODE", False)
+    is_aiter_spec_kda_decode_supported.cache_clear()
+    assert not is_fused_kda_decode_supported(**kwargs)
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_AITER_KDA_SPEC_DECODE", True)
+    is_aiter_spec_kda_decode_supported.cache_clear()
+    supported = is_aiter_spec_kda_decode_supported()
+    assert is_fused_kda_decode_supported(**kwargs) == supported
+
+
+@torch.inference_mode()
+def test_aiter_spec_kda_decode_matches_triton_chain() -> None:
+    """AITER's fused spec kernel matches the three-op chain it replaces."""
+    from vllm.models.kimi_k3.amd.ops.kda_decode import (
+        is_aiter_spec_kda_decode_supported,
+    )
+
+    if not is_aiter_spec_kda_decode_supported():
+        pytest.skip("AITER fused_kda_decode has no speculative interface")
+    from aiter.ops.triton.gated_delta_net.fused_kda_decode import fused_kda_decode
+
+    num_spec = 7
+    spec_len = num_spec + 1
+    batch, num_heads = 2, 12
+    num_tokens = batch * spec_len
+    inp = KdaDecodeInputs(
+        num_tokens,
+        num_heads,
+        num_slots=num_tokens + 3,
+        seed=5,
+        num_spec=num_spec,
+    )
+    device = inp.mixed_qkv.device
+    ssm_state_indices = torch.arange(
+        1, num_tokens + 1, device=device, dtype=torch.int32
+    ).reshape(batch, spec_len)
+    num_accepted_tokens = torch.ones(batch, device=device, dtype=torch.int32)
+    query_start_loc = torch.arange(
+        0, num_tokens + 1, spec_len, device=device, dtype=torch.int32
+    )
+
+    expected_out, expected_conv, expected_state = _run_triton_chain(
+        inp,
+        num_accepted_tokens=num_accepted_tokens,
+        query_start_loc=query_start_loc,
+        ssm_state_indices=ssm_state_indices,
+    )
+    conv_state = inp.conv_state.clone()
+    recurrent_state = inp.recurrent_state.clone()
+    actual = fused_kda_decode(
+        mixed_qkv=inp.mixed_qkv,
+        conv_state=inp.conv_state_view(conv_state),
+        conv_weight=inp.decode_conv1d_weight,
+        gate=inp.g1,
+        beta=inp.beta,
+        out_gate=inp.g2.reshape(num_tokens, -1),
+        A_log=inp.A_log,
+        dt_bias=inp.dt_bias,
+        ssm_state=recurrent_state,
+        ssm_state_indices=ssm_state_indices,
+        cu_seqlens=query_start_loc,
+        norm_weight=inp.decode_norm_weight,
+        norm_eps=NORM_EPS,
+        head_dim=HEAD_DIM,
+        num_local_heads=num_heads,
+        lower_bound=GATE_LOWER_BOUND,
+        num_accepted_tokens=num_accepted_tokens,
+        conv_state_indices=ssm_state_indices[:, 0],
+    )
+
+    torch.testing.assert_close(
+        actual, expected_out.reshape(num_tokens, -1), atol=3e-2, rtol=3e-2
+    )
+    torch.testing.assert_close(conv_state, expected_conv, atol=0, rtol=0)
+    torch.testing.assert_close(recurrent_state, expected_state, atol=2e-3, rtol=2e-3)

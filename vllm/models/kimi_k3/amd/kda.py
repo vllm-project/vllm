@@ -53,6 +53,7 @@ from vllm.models.kimi_k3.amd.ops.kda_chunk import (
     is_fused_kda_chunk_supported,
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
+    is_aiter_spec_kda_decode_supported,
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
@@ -392,7 +393,57 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_state = conv_state.transpose(-1, -2)
 
         if (
-            self.decode_conv1d_weight is not None
+            self.num_spec > 0
+            and is_aiter_spec_kda_decode_supported()
+            and self.decode_conv1d_weight is not None
+            and self.decode_norm_weight is not None
+            and spec_sequence_masks is not None
+            and m.num_prefills == 0
+            and m.num_decodes == 0
+        ):
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            assert num_accepted_tokens is not None
+            assert self.gate_lower_bound is not None
+            from aiter.ops.triton.gated_delta_net.fused_kda_decode import (
+                fused_kda_decode as aiter_fused_kda_decode,
+            )
+
+            logger.info_once("Using the AITER fused KDA kernel for speculative decode.")
+            num_spec_decodes = m.num_spec_decodes
+            num_spec_tokens = m.num_spec_decode_tokens
+            spec_state_indices = spec_state_indices_tensor[:num_spec_decodes]
+            spec_cu_seqlens = spec_query_start_loc[: num_spec_decodes + 1]
+            conv_state_indices = spec_state_indices[:, 0]
+            aiter_fused_kda_decode(
+                # FULL_DECODE_ONLY graph replay pads num_actual_tokens to the
+                # capture size. Narrow to the real speculative tokens:
+                # ssm_state_indices is only that wide.
+                mixed_qkv=mixed_qkv[:num_spec_tokens],
+                conv_state=conv_state,
+                conv_weight=self.decode_conv1d_weight,
+                gate=g1[:, :num_spec_tokens],
+                beta=beta[:, :num_spec_tokens],
+                out_gate=g2[:num_spec_tokens].reshape(num_spec_tokens, -1),
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                ssm_state=recurrent_state,
+                ssm_state_indices=spec_state_indices,
+                cu_seqlens=spec_cu_seqlens,
+                norm_weight=self.decode_norm_weight,
+                norm_eps=self.o_norm.eps,
+                head_dim=self.head_dim,
+                num_local_heads=self.local_num_heads,
+                lower_bound=self.gate_lower_bound,
+                num_accepted_tokens=num_accepted_tokens[:num_spec_decodes],
+                conv_state_indices=conv_state_indices,
+                out=core_attn_out[0, :num_spec_tokens].reshape(num_spec_tokens, -1),
+            )
+            return
+
+        if (
+            self.num_spec == 0
+            and self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
             and spec_sequence_masks is None
             and m.num_prefills == 0
