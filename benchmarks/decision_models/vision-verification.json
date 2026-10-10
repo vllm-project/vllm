@@ -1,0 +1,187 @@
+{
+  "scope": "GPU image API functional compatibility; synthetic color fixtures; no broad quality/calibration or resident performance claim",
+  "hardware": "RTX4070 12GB",
+  "runtime_base": "a4b14e57b6d5ad25a2215eff93d6f93ba05005df",
+  "vision_implementation": "90b0fa4",
+  "models": [
+    {
+      "family": "Gemma4",
+      "precision": "BF16 native safetensors",
+      "cpu_offload_gb_requested": 10,
+      "strategy": "Winnow canonical",
+      "source_manifest_sha256": "46ad81b27cc25d4f9e0c09de70ea2a4d457d0c37c6eb43e016b7e61c2cbea730",
+      "requests": 5,
+      "decisions": 15,
+      "repeated_probability_max_abs_delta": 2.2224553308802797e-09,
+      "functional_cases": [
+        "red",
+        "blue",
+        "red-blue",
+        "blue-red",
+        "repeat-red"
+      ],
+      "assertions_passed": [
+        "image content changes probabilities",
+        "swapping images changes first-image answer",
+        "repeating image preserves probabilities within 1e-6",
+        "predicate, choice and score responses validated"
+      ]
+    },
+    {
+      "family": "Qwen3.5",
+      "precision": "BF16 native safetensors",
+      "cpu_offload_gb_requested": 2,
+      "strategy": "generic next-token chat",
+      "source_manifest_sha256": "9b1460d98f84e1fcb24b9deccd48e77712ba867080400ec48d851c0fe6a82bff",
+      "requests": 5,
+      "decisions": 15,
+      "repeated_probability_max_abs_delta": 0.0,
+      "functional_cases": [
+        "red",
+        "blue",
+        "red-blue",
+        "blue-red",
+        "repeat-red"
+      ],
+      "assertions_passed": [
+        "image content changes probabilities",
+        "swapping images changes first-image answer",
+        "repeating image preserves probabilities within 1e-6",
+        "predicate, choice and score responses validated"
+      ]
+    }
+  ],
+  "cpu_processor_prefix_verification": [
+    {
+      "family": "gemma",
+      "actual_processor": "MULTIMODAL_REGISTRY native processor on CPU",
+      "scope": "Direct processor placeholder expansion, not full chat rendering or inference",
+      "two_images": true,
+      "same_images_private_questions_same_hashes": true,
+      "swapped_images_reverse_hashes": true,
+      "shared_token_prefix": 524,
+      "image_spans": [
+        {
+          "offset": 0,
+          "length": 258
+        },
+        {
+          "offset": 259,
+          "length": 258
+        }
+      ],
+      "image_prefix_end": 517
+    },
+    {
+      "family": "qwen",
+      "actual_processor": "MULTIMODAL_REGISTRY native processor on CPU",
+      "scope": "Direct processor placeholder expansion, not full chat rendering or inference",
+      "two_images": true,
+      "same_images_private_questions_same_hashes": true,
+      "swapped_images_reverse_hashes": true,
+      "shared_token_prefix": 140,
+      "image_spans": [
+        {
+          "offset": 1,
+          "length": 64
+        },
+        {
+          "offset": 68,
+          "length": 64
+        }
+      ],
+      "image_prefix_end": 132
+    }
+  ],
+  "native_online_renderer_prefix_verification": [
+    {
+      "family": "gemma",
+      "cases": 3,
+      "engine_keys": [
+        "type",
+        "prompt_token_ids",
+        "mm_kwargs",
+        "mm_hashes",
+        "mm_placeholders",
+        "prompt",
+        "arrival_time"
+      ],
+      "image_hash_order_and_repeat_verified": true,
+      "private_suffixes_verified": true,
+      "shared_token_prefix": 582,
+      "image_prefix_end": 570,
+      "image_spans": [
+        {
+          "offset": 53,
+          "length": 258
+        },
+        {
+          "offset": 312,
+          "length": 258
+        }
+      ]
+    },
+    {
+      "family": "qwen",
+      "cases": 3,
+      "engine_keys": [
+        "type",
+        "prompt_token_ids",
+        "mm_kwargs",
+        "mm_hashes",
+        "mm_placeholders",
+        "prompt",
+        "arrival_time"
+      ],
+      "image_hash_order_and_repeat_verified": true,
+      "private_suffixes_verified": true,
+      "shared_token_prefix": 141,
+      "image_prefix_end": 137,
+      "image_spans": [
+        {
+          "offset": 7,
+          "length": 64
+        },
+        {
+          "offset": 73,
+          "length": 64
+        }
+      ]
+    }
+  ],
+  "refreshed_stack_checks": [
+    {
+      "family": "Gemma4",
+      "implementation": "905e54a",
+      "requests": 5,
+      "decisions": 15,
+      "prefix_caching": true,
+      "repeat_max_abs_delta": 2.2224553308802797e-09,
+      "strict_repeat_tolerance": 1e-06,
+      "passed": true,
+      "artifact_sha256": "7a1c630ac460b3087c21f7a02ca75fbe9bf1cbf60aecf4eb29d30496c160335c"
+    },
+    {
+      "family": "Qwen3.5",
+      "implementation": "905e54a",
+      "requests": 5,
+      "decisions": 15,
+      "prefix_caching": false,
+      "repeat_max_abs_delta": 0.0,
+      "strict_repeat_tolerance": 1e-06,
+      "passed": true,
+      "artifact_sha256": "f56479005f4015e4b6b66a7bd8d902319605a0a0e308d8dfba13171c868e3bd4"
+    }
+  ],
+  "qwen_cached_repeat_limitation": {
+    "implementation": "905e54a",
+    "prefix_caching": true,
+    "requests_served": 5,
+    "color_order_checks_passed": true,
+    "repeat_max_abs_delta": 0.001278468154801926,
+    "strict_repeat_passed": false,
+    "batch_invariant_mode": "Startup rejected: VLLM batch_invariant mode is not supported for GDN_ATTN",
+    "native_renderer_token_hash_order_repeat_checks": "passed",
+    "mitigation_verified": "Disable prefix caching for strict repeatability on this tested configuration; no general determinism guarantee"
+  }
+}

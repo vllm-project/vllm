@@ -62,6 +62,12 @@ def register_generate_api_routers(app: FastAPI):
 
     register_structured_decisions_api_router(app)
 
+    from vllm.entrypoints.openai.decisions.api_router import (
+        register_decisions_api_router,
+    )
+
+    register_decisions_api_router(app)
+
 
 async def init_generate_state(
     engine_client: "EngineClient",
@@ -230,26 +236,23 @@ async def init_generate_state(
         request_logger=request_logger,
     )
 
-    from .structured_decisions.serving import ServingStructuredDecisions
-    from .structured_decisions.strategies import ReadContext, select_read_strategy
+    from vllm.entrypoints.openai.decisions.state import init_decisions_state
 
-    strategy = None
-    if "generate" in supported_tasks:
-        try:
-            strategy_cls = select_read_strategy(engine_client.model_config)
-            strategy = strategy_cls(
-                ReadContext(
-                    engine_client=engine_client,
-                    online_renderer=state.online_renderer,
-                    chat_template=resolved_chat_template,
-                    chat_template_content_format=args.chat_template_content_format,
-                    default_chat_template_kwargs=default_chat_template_kwargs,
-                )
-            )
-        except ValueError as e:
-            # Info, since every model without a read strategy lands here.
-            logger.info("/v1/systemone is disabled: %s", e)
-            strategy = None
+    from .structured_decisions.serving import ServingStructuredDecisions
+
+    state.openai_serving_decisions = None
+    strategy = (
+        init_decisions_state(
+            engine_client,
+            state,
+            args,
+            request_logger,
+            resolved_chat_template,
+            default_chat_template_kwargs,
+        )
+        if "generate" in supported_tasks
+        else None
+    )
     state.serving_structured_decisions = (
         ServingStructuredDecisions(
             state.openai_serving_models,

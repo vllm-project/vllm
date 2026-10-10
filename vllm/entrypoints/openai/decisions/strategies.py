@@ -11,21 +11,23 @@ import math
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.inputs import EngineInput, tokens_input
 from vllm.lora.request import LoRARequest
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 
-from .protocol import ReadPromptRequest
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -57,6 +59,38 @@ class QuestionRead:
     argmax_is_label: bool
     input_tokens: int
     output_tokens: int
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
+    confidence: float | None = None
+
+
+class ReadPromptRequest(OpenAIBaseModel):
+    """Chat options for one read, ending at the generation prompt so the label
+    is the reply's first token. Thinking is off unless the request enables it."""
+
+    chat_template_kwargs: dict[str, Any] | None = None
+    cache_salt: str | None = None
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        return ChatParams(
+            chat_template=default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                merge_kwargs({"enable_thinking": False}, self.chat_template_kwargs),
+                dict(add_generation_prompt=True, continue_final_message=False),
+            ),
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=1,
+            add_special_tokens=False,
+        )
 
 
 class ReadStrategy(ABC):
@@ -71,7 +105,7 @@ class ReadStrategy(ABC):
         self,
         questions: list[Question],
         instructions: str | None,
-        state: str,
+        state: str | list[dict[str, Any]],
         *,
         request_id: str,
         chat_template_kwargs: dict[str, Any] | None,
@@ -206,7 +240,7 @@ class NextTokenStrategy(ReadStrategy):
         self,
         questions: list[Question],
         instructions: str | None,
-        state: str,
+        state: str | list[dict[str, Any]],
         *,
         request_id: str,
         chat_template_kwargs: dict[str, Any] | None,
@@ -220,7 +254,20 @@ class NextTokenStrategy(ReadStrategy):
 
         slots, engine_inputs, params = [], [], []
         for q in questions:
-            messages = [{"role": "user", "content": f"{state}\n\n{q.type.prompt(q)}"}]
+            messages: list[dict[str, Any]]
+            if isinstance(state, str):
+                messages = [
+                    {"role": "user", "content": f"{state}\n\n{q.type.prompt(q)}"}
+                ]
+            else:
+                if not ctx.engine_client.model_config.is_multimodal_model:
+                    raise StructuredDecisionError(
+                        "This model does not support image input"
+                    )
+                messages = deepcopy(state)
+                messages[-1]["content"].append(
+                    {"type": "text", "text": "\n\n" + q.type.prompt(q)}
+                )
             if instructions:
                 messages.insert(0, {"role": "system", "content": instructions})
             engine_input, prompt_ids = await self._render(read_request, messages)
@@ -254,6 +301,10 @@ class NextTokenStrategy(ReadStrategy):
                     and output.token_ids[0] in ids,
                     input_tokens=len(label_read.result.prompt_token_ids or ()),
                     output_tokens=len(output.token_ids),
+                    cached_tokens=label_read.result.num_cached_tokens or 0,
+                    cache_write_tokens=(
+                        label_read.result.num_cache_creation_tokens or 0
+                    ),
                 )
             )
         return reads
@@ -349,6 +400,19 @@ LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
 
 def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
     """Raise ValueError when the model cannot serve structured decisions."""
+    config = getattr(model_config, "hf_config", None)
+    protocol = getattr(config, "decision_read_strategy", None)
+    if protocol == "winnow":
+        from .winnow import WinnowStrategy
+
+        if model_config.architecture not in {
+            "Gemma4ForCausalLM",
+            "Gemma4ForConditionalGeneration",
+        }:
+            raise ValueError("Winnow requires a Gemma4 causal or multimodal model")
+        if model_config.logprobs_mode != "raw_logprobs":
+            raise ValueError("Winnow requires raw_logprobs")
+        return WinnowStrategy
     strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
         raise ValueError(
