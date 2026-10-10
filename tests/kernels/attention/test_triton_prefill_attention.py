@@ -80,7 +80,7 @@ def ref_masked_attention(
 @pytest.mark.parametrize("max_seq_len", [1024])
 @pytest.mark.parametrize("H_Q", [32])
 @pytest.mark.parametrize("H_KV", [32, 8])
-@pytest.mark.parametrize("D", [128])
+@pytest.mark.parametrize("D", [128, 256])
 @pytest.mark.parametrize("is_causal", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_context_attention(
@@ -248,7 +248,13 @@ class _LaunchCapture:
 
 
 def _capture_tile_config(
-    monkeypatch, *, is_rocm: bool, on_gfx1x: bool, dtype=torch.bfloat16
+    monkeypatch,
+    *,
+    is_rocm: bool,
+    on_gfx1x: bool,
+    dtype=torch.bfloat16,
+    head_size: int = 128,
+    max_shared_memory: int = 227 * 1024,
 ) -> _LaunchCapture:
     """Capture the tile configuration with the platform predicates mocked.
 
@@ -258,6 +264,10 @@ def _capture_tile_config(
     """
     platform = prefill_ops.current_platform
     monkeypatch.setattr(platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(platform, "is_cuda", lambda: not is_rocm)
+    monkeypatch.setattr(
+        prefill_ops, "get_max_shared_memory_bytes", lambda: max_shared_memory
+    )
     # Every device this kernel targets is cuda-alike at capability 80 or better,
     # so the stock tile is 128 for 16-bit dtypes.
     monkeypatch.setattr(platform, "is_cuda_alike", lambda: True)
@@ -275,10 +285,10 @@ def _capture_tile_config(
 
     seq_lens = torch.empty(2, dtype=torch.int32, device="meta")
     context_attention_fwd(
-        meta(256, 8, 128),
-        meta(256, 2, 128),
-        meta(256, 2, 128),
-        meta(256, 8, 128),
+        meta(256, 8, head_size),
+        meta(256, 2, head_size),
+        meta(256, 2, head_size),
+        meta(256, 8, head_size),
         seq_lens,
         seq_lens,
         128,
@@ -315,3 +325,25 @@ def test_rdna_narrows_the_kv_tile_and_nothing_else(monkeypatch) -> None:
     assert tuned.kwargs.pop("BLOCK_N") != stock.kwargs.pop("BLOCK_N")
     assert tuned.kwargs == stock.kwargs
     assert tuned.grid == stock.grid
+
+
+@pytest.mark.parametrize(
+    ("head_size", "max_shared_memory", "expected_block_m"),
+    [
+        # RTX 30/40/50, RTX PRO 6000 and GB10 have ~99KB per block.
+        pytest.param(256, 99 * 1024, 64, id="256-small-smem"),
+        pytest.param(256, 227 * 1024, 128, id="256-large-smem"),
+        pytest.param(128, 99 * 1024, 128, id="128-small-smem"),
+    ],
+)
+def test_wide_head_tile_fits_shared_memory(
+    monkeypatch, head_size: int, max_shared_memory: int, expected_block_m: int
+) -> None:
+    capture = _capture_tile_config(
+        monkeypatch,
+        is_rocm=False,
+        on_gfx1x=False,
+        head_size=head_size,
+        max_shared_memory=max_shared_memory,
+    )
+    assert capture.kwargs["BLOCK_M"] == expected_block_m
