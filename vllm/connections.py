@@ -3,10 +3,18 @@
 
 import asyncio
 import functools
+import inspect
 import time
-from collections.abc import Callable, Coroutine, Mapping, MutableMapping
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Mapping,
+    MutableMapping,
+)
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
+from urllib.parse import urljoin
 
 import aiohttp
 import requests
@@ -28,6 +36,29 @@ _T = TypeVar("_T")
 # per-attempt timeout and sleeps _RETRY_BACKOFF_FACTOR ** N seconds.
 _RETRY_BACKOFF_FACTOR = 4
 _RESPONSE_READ_CHUNK_SIZE = 64 * KiB_bytes
+
+# Cap on hops followed by the guarded (validate_url) fetch path below.
+_MEDIA_MAX_REDIRECTS = 5
+_MEDIA_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
+def _next_redirect_url(current_url: str, location: str | None) -> str:
+    """Resolve a redirect Location against the URL that produced it."""
+    if not location:
+        raise ValueError(f"Redirect from {current_url} has no Location header")
+    return urljoin(current_url, location)
+
+
+def _dial_url(url: str) -> str:
+    """Re-serialize a URL from its urllib3 parse before dialing it.
+
+    Callers validate the urllib3 parse of a URL, but the HTTP clients may
+    parse the same text differently (aiohttp uses yarl; e.g. backslash-@
+    attacks dial a different host than urllib3 reports). Dialing the
+    re-serialized URL guarantees the dialed host is the validated one.
+    Same defense as run_batch's URL normalization.
+    """
+    return parse_url(url).url or url
 
 
 class HTTPResponseSizeExceededError(VLLMValidationError):
@@ -407,16 +438,46 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        validate_url: Callable[[str], None] | None = None,
     ) -> bytes:
-        with self.get_response(
-            url,
-            stream=True,
-            timeout=timeout,
-            allow_redirects=allow_redirects,
-        ) as r:
-            r.raise_for_status()
+        if validate_url is None:
+            with self.get_response(
+                url,
+                stream=True,
+                timeout=timeout,
+                allow_redirects=allow_redirects,
+            ) as r:
+                r.raise_for_status()
 
-            return _read_response_bytes(r, max_bytes)
+                return _read_response_bytes(r, max_bytes)
+
+        # Guarded fetch: redirects are followed manually so `validate_url`
+        # can check (e.g. DNS-resolve and filter) every hop *before* it is
+        # requested. A 3xx reached with redirects disabled is returned as
+        # the body, matching the unguarded path.
+        current_url = url
+        for _ in range(_MEDIA_MAX_REDIRECTS + 1):
+            validate_url(current_url)
+            # Dial the validated, re-serialized URL (see _dial_url), and
+            # resolve the next Location against what we actually dialed.
+            request_url = _dial_url(current_url)
+            with self.get_response(
+                request_url,
+                stream=True,
+                timeout=timeout,
+                allow_redirects=False,
+            ) as r:
+                if allow_redirects and r.status_code in _MEDIA_REDIRECT_STATUSES:
+                    current_url = _next_redirect_url(
+                        request_url, r.headers.get("Location")
+                    )
+                    continue
+                r.raise_for_status()
+                return _read_response_bytes(r, max_bytes)
+        raise ValueError(
+            f"Too many redirects (more than {_MEDIA_MAX_REDIRECTS}) "
+            f"while fetching {url}"
+        )
 
     @_async_retry
     async def async_get_bytes(
@@ -426,15 +487,45 @@ class HTTPConnection:
         timeout: float | None = None,
         allow_redirects: bool = True,
         max_bytes: int | None = None,
+        validate_url: Callable[[str], Awaitable[None] | None] | None = None,
     ) -> bytes:
-        async with await self.get_async_response(
-            url,
-            timeout=timeout,
-            allow_redirects=allow_redirects,
-        ) as r:
-            r.raise_for_status()
+        if validate_url is None:
+            async with await self.get_async_response(
+                url,
+                timeout=timeout,
+                allow_redirects=allow_redirects,
+            ) as r:
+                r.raise_for_status()
 
-            return await _async_read_response_bytes(r, max_bytes)
+                return await _async_read_response_bytes(r, max_bytes)
+
+        # Guarded fetch: see get_bytes. The validator may be a sync callable
+        # or a coroutine function; DNS work must run off the event loop.
+        current_url = url
+        for _ in range(_MEDIA_MAX_REDIRECTS + 1):
+            validated = validate_url(current_url)
+            if inspect.isawaitable(validated):
+                await validated
+            # Dial the validated, re-serialized URL (see _dial_url), and
+            # resolve the next Location against what we actually dialed.
+            # This closes the urllib3/yarl backslash-@ parser differential.
+            request_url = _dial_url(current_url)
+            async with await self.get_async_response(
+                request_url,
+                timeout=timeout,
+                allow_redirects=False,
+            ) as r:
+                if allow_redirects and r.status in _MEDIA_REDIRECT_STATUSES:
+                    current_url = _next_redirect_url(
+                        request_url, r.headers.get("Location")
+                    )
+                    continue
+                r.raise_for_status()
+                return await _async_read_response_bytes(r, max_bytes)
+        raise ValueError(
+            f"Too many redirects (more than {_MEDIA_MAX_REDIRECTS}) "
+            f"while fetching {url}"
+        )
 
     def get_text(self, url: str, *, timeout: float | None = None) -> str:
         with self.get_response(url, timeout=timeout) as r:

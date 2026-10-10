@@ -79,6 +79,11 @@ if TYPE_CHECKING:
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
     VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
+    # Block media URL fetches to private/loopback/link-local destinations
+    # (includes the cloud metadata range 169.254.0.0/16). Addresses are
+    # DNS-resolved and filtered before every request hop.
+    # Default to True
+    VLLM_MEDIA_EGRESS_BLOCK_PRIVATE: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
@@ -1005,6 +1010,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default to True
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS": lambda: bool(
         int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))
+    ),
+    # Whether to block media URL fetches to private/loopback/link-local
+    # addresses (including the cloud metadata range 169.254.0.0/16).
+    # Hosts are DNS-resolved and checked before every request hop.
+    # Default is True
+    "VLLM_MEDIA_EGRESS_BLOCK_PRIVATE": lambda: bool(
+        int(os.getenv("VLLM_MEDIA_EGRESS_BLOCK_PRIVATE", "1"))
     ),
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.
@@ -2387,6 +2399,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_CACHE_TTL_HOURS",
         "VLLM_MEDIA_FETCH_MAX_RETRIES",
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
+        "VLLM_MEDIA_EGRESS_BLOCK_PRIVATE",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
