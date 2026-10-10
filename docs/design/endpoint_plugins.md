@@ -126,7 +126,9 @@ Do not expect a single endpoint plugin to also mutate engine/worker state. If yo
 
 ## Path-prefix convention
 
-There is currently no route conflict enforcement (tracked as a follow-up to RFC [#46565](https://github.com/vllm-project/vllm/issues/46565)). A plugin's `attach_router` can register a path that collides with a core route and routes attached later win. To avoid surprising operators:
+Plugin hooks run after the core routers have been registered. HTTP routes added by plugins replace earlier routes with the same path template and HTTP method, including their OpenAPI description. Methods not overridden by the plugin remain available. When multiple plugins register the same operation, the last registered route takes precedence. Different path templates are not treated as equivalent.
+
+There is currently no rejection of route conflicts (tracked as a follow-up to RFC [#46565](https://github.com/vllm-project/vllm/issues/46565)). To avoid surprising operators:
 
 - Namespace your routes under a distinct prefix, e.g. `/plugins/<plugin-name>/...`, rather than reusing `/v1/...` or other core prefixes
 - Only register routes under a core prefix (like the worked example's `/v1/admin/scheduler_config`) if you specifically intend to override or extend existing behavior and document that clearly for operators allowlisting your plugin
