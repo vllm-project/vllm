@@ -11,7 +11,6 @@ logits (task="generate").
 import asyncio
 import math
 import time
-from collections.abc import Mapping
 from typing import Any, Literal
 
 from fastapi import Request
@@ -32,11 +31,6 @@ from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -462,17 +456,3 @@ class ServingGenerativeScoring(BaseServing):
                 token_id: math.exp(logprob)
                 for token_id, logprob in label_logprobs.items()
             }
-
-    async def _get_trace_headers(
-        self,
-        headers: Mapping[str, str],
-    ) -> Mapping[str, str] | None:
-        """Extract trace headers from request headers."""
-        if not contains_trace_headers(headers):
-            return None
-
-        if not await self.engine_client.is_tracing_enabled():
-            log_tracing_disabled_warning()
-            return None
-
-        return extract_trace_headers(headers)
