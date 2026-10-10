@@ -283,6 +283,17 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         return self.kernel(q=q, k=k, v=v, **kwargs)
 
 
+def split_dynamic_causal(
+    cu_seqlens_q: torch.Tensor, dynamic_causal: torch.Tensor
+) -> list[tuple[bool, torch.Tensor]]:
+    """Emulate a per-sequence causal flag with a causal and a non-causal FA4
+    launch, each restricted to its own sequences via ``seqused_q``. Only SM90
+    FA4 kernels support ``dynamic_causal`` natively."""
+    q_lens = cu_seqlens_q.diff()
+    is_causal = dynamic_causal != 0
+    return [(True, q_lens * is_causal), (False, q_lens * ~is_causal)]
+
+
 class FlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -1451,32 +1462,50 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table = block_table[:, :num_pages]
                     num_splits = 1
 
-                _FA4_DENSE_ATTENTION_KERNEL(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=causal,
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=sliding_window_size,
-                    block_table=block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=q_descale,
-                    k_descale=k_descale,
-                    v_descale=v_descale,
-                    dynamic_causal=dynamic_causal,
-                    num_splits=num_splits,
-                    s_aux=self.sinks,
-                    mask_mod=rswa_mask_mod_fn or mm_mask_mod,
-                    aux_tensors=rswa_aux or mm_aux,
-                )
+                passes: list[tuple[bool, torch.Tensor | None, torch.Tensor | None]]
+                if dynamic_causal is not None and not (
+                    current_platform.is_device_capability_family(90)
+                ):
+                    if not causal:
+                        raise NotImplementedError(
+                            "Per-sequence causal with a sliding window requires SM90"
+                        )
+                    passes = [
+                        (pass_causal, None, seqused_q)
+                        for pass_causal, seqused_q in split_dynamic_causal(
+                            cu_seqlens_q, dynamic_causal
+                        )
+                    ]
+                else:
+                    passes = [(causal, dynamic_causal, None)]
+                for pass_causal, pass_dynamic_causal, seqused_q in passes:
+                    _FA4_DENSE_ATTENTION_KERNEL(
+                        q=query[:num_actual_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:num_actual_tokens],
+                        cu_seqlens_q=cu_seqlens_q,
+                        max_seqlen_q=max_seqlen_q,
+                        seqused_k=seqused_k,
+                        max_seqlen_k=max_seqlen_k,
+                        softmax_scale=self.scale,
+                        causal=pass_causal,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=sliding_window_size,
+                        block_table=block_table,
+                        softcap=self.logits_soft_cap,
+                        scheduler_metadata=scheduler_metadata,
+                        fa_version=self.vllm_flash_attn_version,
+                        q_descale=q_descale,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                        dynamic_causal=pass_dynamic_causal,
+                        seqused_q=seqused_q,
+                        num_splits=num_splits,
+                        s_aux=self.sinks,
+                        mask_mod=rswa_mask_mod_fn or mm_mask_mod,
+                        aux_tensors=rswa_aux or mm_aux,
+                    )
                 return output
 
         # Cascade attention (rare case).
