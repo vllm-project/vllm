@@ -326,6 +326,15 @@ If you are running vLLM outside of Docker, the solution is to install the `cuda-
 
 On Conda, you can install the `conda-forge::cuda-compat` package (e.g., `conda install -c conda-forge cuda-compat=12.9`), then after activating the environment, set `export VLLM_ENABLE_CUDA_COMPATIBILITY=1` and `export VLLM_CUDA_COMPATIBILITY_PATH="${CONDA_PREFIX}/cuda-compat"`.
 
+This error can also appear when a compiled extension has no native cubin for your
+GPU architecture and the driver must JIT-compile embedded PTX. In that case,
+make sure the NVIDIA driver can JIT the CUDA toolkit version used to build vLLM,
+rebuild vLLM with a CUDA toolkit supported by the installed driver, or update
+the driver. If the failure is isolated to an attention kernel, you can also try
+selecting a different attention backend, for example
+`--attention-backend FLASHINFER` or `--attention-backend TRITON_ATTN`, while you
+fix the driver/toolkit mismatch.
+
 You can verify the configuration works by running a minimal Python script that initializes CUDA via vLLM:
 
 ```bash
