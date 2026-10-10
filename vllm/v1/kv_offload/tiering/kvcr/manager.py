@@ -9,7 +9,7 @@ import time
 import uuid
 from collections.abc import Collection, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import msgspec
 from kvcr import (
@@ -264,6 +264,12 @@ _JobState = tuple[int, int, bool, set[OffloadKey] | None]
 
 class KVCRSecondaryTierManager(SecondaryTierManager):
     """Secondary tier wrapper around the KVCR KV P2P API."""
+
+    # Serves framework pin requests from serve_external_requests(), but only
+    # once per step for now: opting in would also poll the KVCR library from
+    # the tiering manager's polling thread, which it is not yet verified to
+    # tolerate.
+    serves_external_requests: ClassVar[bool] = False
 
     @classmethod
     @override

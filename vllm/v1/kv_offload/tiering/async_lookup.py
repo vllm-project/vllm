@@ -11,8 +11,12 @@ Locking design
 --------------
 There is no explicit lock.  Thread safety is achieved by ownership:
 
-* _lookup_state and _lookup_batch are owned exclusively by the scheduler
-  thread.  lookup(), flush(), and cleanup() read and write them directly.
+* _lookup_state and _lookup_batch are owned by whichever thread holds the
+  OffloadingManager lock.  lookup(), flush(), and cleanup() read and write
+  them directly.  That is usually the scheduler thread, but a tier reached
+  through ParentManager -- a peer lookup fanning out from another tier, say --
+  can arrive on the tiering manager's control-plane thread instead.  Both hold
+  the manager lock, so the accesses stay serialized.
 
 * _lookup_queue is written by the scheduler (flush → put_nowait, one item
   per step) and read by the background thread (get).  queue.Queue is

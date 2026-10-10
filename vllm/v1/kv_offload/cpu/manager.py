@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
@@ -64,6 +65,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
+        self._lock = threading.Lock()
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
         self._num_allocated_chunks: int = 0
@@ -88,6 +90,11 @@ class CPUOffloadingManager(OffloadingManager):
         self.counts: OrderedDict[OffloadKey, int] | None = (
             OrderedDict() if store_threshold >= 2 else None
         )
+
+    @property
+    @override
+    def lock(self) -> threading.Lock:
+        return self._lock
 
     # --- chunk pool ---
 

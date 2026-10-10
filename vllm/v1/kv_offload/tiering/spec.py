@@ -72,6 +72,7 @@ from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
+    DEFAULT_TIER_POLL_INTERVAL_S,
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
@@ -286,6 +287,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
+        # Pause between control-plane rounds for tiers that need servicing
+        # between engine steps. Zero or negative disables the thread, which
+        # restores per-step servicing.
+        self.tier_poll_interval_s = float(
+            self.extra_config.get("tier_poll_interval_s", DEFAULT_TIER_POLL_INTERVAL_S)
+        )
+
         # Backpressure config is merged field-by-field in priority order
         # (highest first):
         #   1. Per-tier ``backpressure`` dict in the tier config
@@ -386,6 +394,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
+                    tier_poll_interval_s=self.tier_poll_interval_s,
                 )
                 self._manager = tiering_manager
             except Exception:

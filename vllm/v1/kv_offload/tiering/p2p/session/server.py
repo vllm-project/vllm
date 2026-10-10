@@ -584,10 +584,13 @@ class ServerRole:
         """Pin primary slots for HIT keys and park them as the lookup's
         round supply via ``add_stored_blocks``.
 
-        Caller has already confirmed every key is HIT (single-threaded
-        scheduler ⇒ no eviction race), so the JobMetadata returned by
-        ``parent.create_store_job`` carries parallel ``keys``/``block_ids``
-        of length ``len(keys)``.
+        Caller has already confirmed every key is HIT, so the JobMetadata
+        returned by ``parent.create_store_job`` carries parallel
+        ``keys``/``block_ids`` of length ``len(keys)``. Nothing can evict
+        between that confirmation and the pin because the whole
+        ``serve_external_requests`` call runs inside one hold of the tiering
+        manager's lock -- which is why that call must never release it
+        partway through.
         """
         meta = parent.create_store_job(keys, lookup.ctx)
         self.add_stored_blocks(

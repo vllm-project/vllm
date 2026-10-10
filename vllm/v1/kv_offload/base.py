@@ -4,6 +4,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
@@ -198,6 +199,16 @@ The class provides the following primitives:
         as well as a list of blocks that were evicted as a result.
     complete_store() - marks a previous store as completed.
         Following this call, the given blocks will become loadable.
+
+Exclusion:
+    lock is a context manager guarding a manager's whole state subtree: the
+    manager itself, every tier it composes, and any front-end state those
+    tiers own. Manager methods never take the lock themselves, so a caller
+    holds it across as many operations as its invariants need -- notably a
+    lookup() HIT and the prepare_load() that pins the result, which must not
+    be separated by another thread's eviction. The default is a no-op;
+    managers that can be entered from more than one thread supply a real
+    lock.
 """
 
 
@@ -233,6 +244,26 @@ class OffloadingKVEventsConfig:
 
 
 class OffloadingManager(ABC):
+    @property
+    def lock(self) -> AbstractContextManager[Any]:
+        """Context manager granting exclusive access to this manager's state.
+
+        Scope is the manager, every tier it composes, and any front-end state
+        those tiers own (e.g. a tier's async lookup front end). Every caller of
+        an OffloadingManager method must hold it. Manager methods never enter
+        it themselves, so a caller may hold it across an arbitrary sequence of
+        operations -- which is required wherever one call establishes a fact a
+        later call relies on, such as a lookup() HIT followed by the
+        prepare_load() that pins it.
+
+        The default is a no-op, for managers that are only ever entered from
+        one thread. A manager that may be entered from another thread -- its
+        own background thread, say -- returns a real lock instead. Callers must
+        not assume either: always enter it, and never re-enter it while held,
+        since a real lock need not be reentrant.
+        """
+        return nullcontext()
+
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """Checks whether a single block is offloaded and ready to be read.
@@ -394,6 +425,10 @@ class OffloadingManager(ABC):
 
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
+
+        This is the last manager call of a step: every lookup(), prepare_load(),
+        prepare_store() and on_request_finished() for the step has already been
+        issued.
 
         Managers may override this to flush deferred work accumulated
         during the step (e.g., batched promotions).
