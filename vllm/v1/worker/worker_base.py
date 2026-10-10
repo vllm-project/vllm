@@ -244,10 +244,18 @@ class WorkerWrapperBase:
         # Initialized after init_worker is called
         self.worker: WorkerBase
         self.vllm_config: VllmConfig
+        self._worker_extension_cls: type | None = None
 
     def shutdown(self) -> None:
-        if self.worker is not None:
-            self.worker.shutdown()
+        worker = self.__dict__.get("worker")
+        if worker is None:
+            return
+        try:
+            hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
+            if callable(hook):
+                hook(worker)
+        finally:
+            worker.shutdown()
 
     def update_environment_variables(
         self,
@@ -293,6 +301,7 @@ class WorkerWrapperBase:
                 "and pass the qualified name of the class as a string."
             )
 
+        worker_extension_cls: type | None = None
         if parallel_config.worker_extension_cls:
             worker_extension_cls = resolve_obj_by_qualname(
                 parallel_config.worker_extension_cls
@@ -336,6 +345,7 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
+            self._worker_extension_cls = worker_extension_cls
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
@@ -348,6 +358,9 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
+            hook = getattr(self._worker_extension_cls, "init_worker_extension", None)
+            if callable(hook):
+                hook(self.worker)
 
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)
