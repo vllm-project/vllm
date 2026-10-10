@@ -144,6 +144,7 @@ class OffloadingConnectorWorker:
         if (
             packed_layer_name is not None
             and kv_cache_config.hisparse_host_num_blocks is None
+            and not self.spec.compact_group_layout
         ):
             (tensor,) = tensors_per_block[packed_layer_name]
             num_blocks = tensor.shape[0]

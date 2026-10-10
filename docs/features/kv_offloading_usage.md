@@ -55,6 +55,10 @@ does not query any secondary tier.
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
 
+For models with multiple KV cache groups, each offload key stores data from one group. CPU slots are shared by all groups and sized for the largest selected group, including worker copies and alignment padding. Smaller groups can leave unused space within a slot. This applies to both `CPUOffloadingSpec` and the CPU primary tier of `TieringOffloadingSpec`.
+
+The compact multi-group layout uses a separate persistent-cache namespace. Files written with the previous layout remain on disk but are not reused.
+
 ## Single-Tier Setup (CPU Only)
 
 ```bash
