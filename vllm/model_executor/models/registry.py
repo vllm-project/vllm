@@ -246,6 +246,7 @@ _EMBEDDING_MODELS = {
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
+    "EmbeddingGemma2Model": ("embedding_gemma2", "EmbeddingGemma2Model"),
     "LlamaNemotronVLModel": ("nemotron_vl", "LlamaNemotronVLForEmbedding"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
@@ -849,6 +850,7 @@ _OOT_SUPPORTED_MODELS = {
     "BartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
     "Florence2ForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
     "MBartForConditionalGeneration": "https://github.com/vllm-project/bart-plugin",
+    "Nemotron3_5AsrForRNNT": "https://github.com/Sohaib-Ahmed21/vllm-nemotron-asr-plugin",
 }
 
 

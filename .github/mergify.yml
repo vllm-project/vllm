@@ -112,6 +112,32 @@ pull_request_rules:
       add:
         - frontend
 
+- name: label-pooling
+  description: Automatically apply pooling label
+  conditions:
+    - -closed
+    - or:
+      - files~=^vllm/entrypoints/pooling/
+      - files~=^vllm/model_executor/layers/pooler/
+      - files=vllm/model_executor/models/transformers/pooling.py
+      - files=vllm/model_executor/models/adapters.py
+      - files=vllm/config/pooler.py
+      - files=vllm/pooling_params.py
+      - files~=^vllm/v1/pool/
+      - files~=^vllm/v1/worker/gpu/pool/
+      - files~=^tests/entrypoints/pooling/
+      - files~=^tests/models/(language|multimodal)/pooling(_mteb_test)?/
+      - files~=^tests/model_executor/layers/test_pooler_.*\.py$
+      - files=tests/test_pooling_params.py
+      - files~=^tests/v1/e2e/general/test_pooling_.*\.py$
+      - files~=^docs/models/pooling_models/
+      - files~=^examples/pooling/
+      - title~=(?i)\bpooling\b
+  actions:
+    label:
+      add:
+        - pooling
+
 - name: label-rust
   description: Automatically apply rust label
   conditions:
@@ -523,8 +549,6 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=tpu.py
-      - files~=_tpu
-      - files~=tpu_
       - files~=/tpu/
   actions:
     label:
@@ -538,8 +562,6 @@ pull_request_rules:
     - label != stale
     - and:
       - -files~=tpu.py
-      - -files~=_tpu
-      - -files~=tpu_
       - -files~=/tpu/
   actions:
     label:

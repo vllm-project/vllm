@@ -918,7 +918,7 @@ def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = 
         for d in sorted_dims:
             result = result.squeeze(d)
 
-    return result
+    return result if dtype is not None else result.to(input.dtype)
 
 
 @triton.jit

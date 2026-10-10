@@ -3,11 +3,12 @@
 
 import contextlib
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -23,6 +24,10 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -42,6 +47,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.mla import MLAModules
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTokenSym,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -120,6 +129,9 @@ class KimiMLP(nn.Module):
                 "Only silu and situ are supported."
             )
 
+    def get_input_quant_key(self) -> QuantKey | None:
+        return get_input_quant_key(self.gate_up_proj)
+
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
@@ -131,11 +143,13 @@ class KimiRoutedOutputTransform(nn.Module):
     def __init__(
         self,
         norm: RMSNorm | None,
-        up_proj: ReplicatedLinear,
+        up_proj: ReplicatedLinear | ColumnParallelLinear,
+        row_sharded: bool = False,
     ) -> None:
         super().__init__()
         self.norm = norm
         self.up_proj = up_proj
+        self.row_sharded = row_sharded
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.norm is not None:
@@ -154,8 +168,10 @@ def _apply_attn_res(
     delta: torch.Tensor | None = None,
     output_norm: RMSNorm | None = None,
     block_write_idx: int = -1,
-) -> torch.Tensor:
-    return attn_res(
+    quant_key: QuantKey | None = None,
+) -> torch.Tensor | QuantizedActivation:
+    fuse_quant = quant_key == kFp8DynamicTokenSym and not envs.VLLM_BATCH_INVARIANT
+    result = attn_res(
         prefix_sum,
         delta,
         block_residual,
@@ -166,7 +182,18 @@ def _apply_attn_res(
         block_write_idx,
         norm.variance_epsilon,
         0.0 if output_norm is None else output_norm.variance_epsilon,
+        quant_dtype=cast(torch.dtype, kFp8DynamicTokenSym.dtype)
+        if fuse_quant
+        else None,
     )
+    if fuse_quant:
+        assert isinstance(result, tuple)
+        data, scale = result
+        return QuantizedActivation(
+            data, scale, prefix_sum.dtype, prefix_sum.shape, kFp8DynamicTokenSym
+        )
+    assert isinstance(result, torch.Tensor)
+    return result
 
 
 class KimiMoE(nn.Module):
@@ -246,7 +273,7 @@ class KimiMoE(nn.Module):
 
         self.routed_expert_down_proj: ReplicatedLinear | None
         self.routed_expert_norm: RMSNorm | None
-        self.routed_expert_up_proj: ReplicatedLinear | None
+        self.routed_expert_up_proj: ReplicatedLinear | ColumnParallelLinear | None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
             self.routed_expert_down_proj = ReplicatedLinear(
@@ -261,15 +288,36 @@ class KimiMoE(nn.Module):
                 if self.latent_moe_use_norm
                 else None
             )
-            self.routed_expert_up_proj = ReplicatedLinear(
-                self.moe_hidden_size,
-                hidden_size,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.routed_expert_up_proj",
+            shard_up_proj = (
+                self.tp_size > 1
+                and hidden_size % self.tp_size == 0
+                and self.num_shared_experts is not None
+                and self.routed_scaling_factor == 1.0
             )
+            if shard_up_proj:
+                # gather_output is a fallback restoring the full hidden dim for
+                # the unfused tail. The fused tail reads from .weight directly
+                # so it is not triggered
+                self.routed_expert_up_proj = ColumnParallelLinear(
+                    self.moe_hidden_size,
+                    hidden_size,
+                    bias=False,
+                    gather_output=True,
+                    quant_config=None,
+                    prefix=f"{prefix}.routed_expert_up_proj",
+                )
+            else:
+                self.routed_expert_up_proj = ReplicatedLinear(
+                    self.moe_hidden_size,
+                    hidden_size,
+                    bias=False,
+                    quant_config=None,
+                    prefix=f"{prefix}.routed_expert_up_proj",
+                )
             self.routed_output_transform = KimiRoutedOutputTransform(
-                self.routed_expert_norm, self.routed_expert_up_proj
+                self.routed_expert_norm,
+                self.routed_expert_up_proj,
+                row_sharded=shard_up_proj,
             )
         else:
             self.routed_expert_down_proj = None
@@ -458,10 +506,13 @@ class KimiMLAAttention(nn.Module):
             prefix,
         )
 
+    def get_input_quant_key(self) -> QuantKey | None:
+        return self.mla_attn.get_input_quant_key()
+
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         return self.mla_attn(positions, hidden_states)
 
@@ -585,7 +636,7 @@ class KimiDecoderLayer(nn.Module):
     def _run_self_attn(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         return self.self_attn(
             hidden_states=hidden_states,
@@ -692,6 +743,11 @@ class KimiDecoderLayer(nn.Module):
         prefix_delta: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
+        attention_quant_key = (
+            self.self_attn.get_input_quant_key()
+            if isinstance(self.self_attn, (KimiK3DeltaAttention, KimiMLAAttention))
+            else None
+        )
         hidden_states = _apply_attn_res(
             prefix_sum,
             block_residual,
@@ -701,6 +757,7 @@ class KimiDecoderLayer(nn.Module):
             delta=prefix_delta,
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
+            quant_key=attention_quant_key,
         )
 
         if self.is_block_write_layer:
@@ -728,6 +785,11 @@ class KimiDecoderLayer(nn.Module):
             mlp_valid_blocks,
             delta=prefix_delta,
             output_norm=self.post_attention_layernorm,
+            quant_key=(
+                self.mlp.get_input_quant_key()
+                if isinstance(self.mlp, KimiMLP)
+                else None
+            ),
         )
 
         if sp.ACTIVE:

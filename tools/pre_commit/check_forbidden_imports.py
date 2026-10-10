@@ -56,6 +56,7 @@ CHECK_IMPORTS = {
             "vllm/distributed/device_communicators/all_reduce_utils.py",
             "vllm/distributed/device_communicators/shm_broadcast.py",
             "vllm/distributed/device_communicators/shm_object_storage.py",
+            "vllm/distributed/device_communicators/shm_tensor_arena.py",
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "vllm/distributed/weight_transfer/clients.py",
             "vllm/model_executor/model_loader/weight_cache/protocol.py",
@@ -88,7 +89,11 @@ CHECK_IMPORTS = {
         allowed_pattern=re.compile(r"^\s*import\s+pybase64(\s*|\s+as\s+base64\s*)$"),
     ),
     "re": ForbiddenImport(
-        pattern=r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)",
+        # regex has no equivalent of the private sre modules
+        pattern=(
+            r"^\s*(?:import\s+re(?:$|\s|,)"
+            r"|from\s+re\s+import(?!(?:\s*,?\s*_(?:constants|parser))+\s*(?:#.*)?$))"
+        ),
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
         allowed_files={"setup.py"},

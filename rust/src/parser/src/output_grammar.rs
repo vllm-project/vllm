@@ -255,6 +255,7 @@ mod tests {
                 "required": ["query"]
             }),
             strict,
+            defer_loading: None,
         }
     }
 

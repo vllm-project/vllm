@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
     get_current_attn_backends,
+    get_current_attn_backends_and_specs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -59,16 +60,16 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.request import RequestStatus
-from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 logger = init_logger(__name__)
@@ -700,6 +701,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    _cache_hit_source = CacheHitSource.P2P
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -747,6 +750,9 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        return self._kv_cache_config.transfer_group_ids
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -891,6 +897,10 @@ class MooncakeConnectorScheduler:
         # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
         # path is currently tested with GDN; Mamba2 is not validated yet.
         self._has_mamba = kv_cache_config.has_mamba_layers
+        self._bounded_replay = any(
+            g.kv_cache_spec.prefix_replay_tokens > 0
+            for g in kv_cache_config.kv_cache_groups
+        )
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -935,8 +945,10 @@ class MooncakeConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
+        always recomputes the last token and must start from h(N-1), and for
+        DSV41 SWA bounded replay, whose window is not replayed after a P/D load
+        and must be laid out for that token."""
+        if (self._has_mamba or self._bounded_replay) and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
@@ -952,6 +964,9 @@ class MooncakeConnectorScheduler:
             params is not None
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
+            # A request that skips reading the prefix cache (prompt logprobs)
+            # loads nothing on the decoder, which recomputes its whole prompt.
+            and not request.get_skip_reading_prefix_cache()
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
@@ -967,7 +982,11 @@ class MooncakeConnectorScheduler:
 
     def on_new_request(self, request: "Request") -> None:
         params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
+        if (
+            params is not None
+            and params.get("do_remote_decode")
+            and (self._has_mamba or self._bounded_replay)
+        ):
             self._truncate_mamba_request_for_prefill(request)
 
     def get_num_new_matched_tokens(
@@ -1331,7 +1350,10 @@ class MooncakeConnectorWorker:
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
         backends = get_current_attn_backends(self.vllm_config)
-        kernel_block_size = select_common_block_size(self.block_size, backends)
+        backends, specs = get_current_attn_backends_and_specs(
+            self.vllm_config, self.kv_cache_config, backends
+        )
+        kernel_block_size = select_common_block_size(self.block_size, backends, specs)
         if self.block_size != kernel_block_size:
             logger.info_once(
                 "User-specified logical block size (%s) does not match"
@@ -1708,11 +1730,12 @@ class MooncakeConnectorWorker:
         )
         group_specs = self.kv_cache_config.transfer_groups
         return [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                self._physical_blocks_per_logical_kv_block,
-                block_arange,
-            ).tolist()
+            (
+                np.array(group)[:, None] * self._physical_blocks_per_logical_kv_block
+                + block_arange
+            )
+            .reshape(-1)
+            .tolist()
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
             else group
             for i, group in enumerate(block_ids)
@@ -2035,7 +2058,7 @@ class MooncakeConnectorWorker:
             # hetero PP can align by name (#56033). A non-contiguous row cannot
             # name a sub-span, so it is one region anchored at the allocation.
             use_packed_row = (
-                not isinstance(layer_spec, (MambaSpec, KpoolTailSpec))
+                not isinstance(layer_spec, (MambaSpec, CircularBufferSpec))
                 and storage_is_block_major
                 and block_stride > 0
                 and (is_mla_region or not hnc_contiguous)
@@ -2102,9 +2125,7 @@ class MooncakeConnectorWorker:
                 block_len = region_cache.stride(0) * region_cache.element_size()
                 region_base_addresses.append(base_addr)
 
-                if isinstance(layer_spec, KpoolTailSpec):
-                    kv_block_len = layer_spec.unpadded_page_size_bytes // 2
-                elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
                     assert (
                         layer_spec.page_size_bytes
                         % self._physical_blocks_per_logical_kv_block
@@ -2114,6 +2135,8 @@ class MooncakeConnectorWorker:
                         layer_spec.page_size_bytes
                         // self._physical_blocks_per_logical_kv_block
                     )
+                elif isinstance(layer_spec, MambaSpec) and block_is_contiguous:
+                    kv_block_len = layer_spec.page_size_bytes
                 else:
                     kv_block_len = block_len
                 if kv_block_len > block_len:
@@ -2404,7 +2427,9 @@ class MooncakeConnectorWorker:
                 continue
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
-            if pull_meta.pull_tasks_count == 0:
+            # Empty pulls only release the producer's blocks; the consumer
+            # did not enter WAITING_FOR_REMOTE_KVS.
+            if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
                 self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if ok_reqs:
@@ -2417,9 +2442,30 @@ class MooncakeConnectorWorker:
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
+        max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url)
+            async with httpx.AsyncClient(
+                timeout=envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+            ) as client:
+                retry_delay = 0.1
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        response = await client.get(url)
+                        break
+                    except httpx.RequestError as e:
+                        if attempt == max_attempts:
+                            raise
+                        logger.warning(
+                            "Bootstrap query to %s failed on attempt %d/%d "
+                            "(%s: %s); retrying in %.1f seconds",
+                            remote_bootstrap_addr,
+                            attempt,
+                            max_attempts,
+                            type(e).__name__,
+                            e,
+                            retry_delay,
+                        )
+                        await asyncio.sleep(retry_delay)
                 response.raise_for_status()
                 data: dict = response.json()
                 for _, dp_entry in data.items():
@@ -2434,8 +2480,9 @@ class MooncakeConnectorWorker:
                     self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
         except Exception as e:
             logger.error(
-                "Failed to connect to bootstrap server %s: %s",
+                "Failed to connect to bootstrap server %s (%s): %s",
                 remote_bootstrap_addr,
+                type(e).__name__,
                 e,
             )
 

@@ -60,6 +60,8 @@ def region_pull_worker():
     worker._transfer_layer_group_ids = ()
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
+    worker._failed_remote_engines = set()
+    worker._invalid_remote_engines = set()
     worker.use_mla, worker._has_mamba = True, False
     worker.dcp_size = 1
     worker.dcp_rank = 0
@@ -265,6 +267,7 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
     worker.region_num_blocks = [4, 4]
     worker.block_len_per_layer = [8, 8]
     worker.block_stride_per_layer = [24, 24]
+    worker._skip_dram_xfer = False
     worker._recving_metadata = {
         "request": ReqMeta(
             local_block_ids=[[1, 2], [0, 1]],
@@ -690,6 +693,8 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._invalid_remote_engines = set()
+    worker._remote_agents = {"remote-engine": {}}
     worker._engine_last_active = {}
     worker._recving_transfers = {}
     worker._bidirectional_kv_xfer_enabled = False
@@ -1399,46 +1404,66 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 
 
 @pytest.mark.cpu_test
-def test_post_process_zeroes_untransferred_tail():
-    """The untransferred sub-blocks of the last local block are zeroed on
-    receive; mamba state caches are untouched by the attention permute."""
+@pytest.mark.parametrize(
+    ("kv_cache_layout", "enable_permute_local_kv"),
+    [("LBHNC", False), ("LBNHC", False), ("LBNHC", True)],
+)
+def test_post_process_zeroes_untransferred_tail(
+    kv_cache_layout, enable_permute_local_kv
+):
+    """Received remote sub-blocks are regrouped per head and the untransferred
+    sub-blocks of the last local block are zeroed on receive, once per block
+    although two attention groups alias the tensor."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     ratio = 4
     block_tokens = 8  # 2 tokens per remote sub-block
+    num_kv_heads = 2  # fewer than ratio
 
     worker = MagicMock(spec=NixlConnectorWorker)
-    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
     worker.transfer_topo = MagicMock()
     worker.device_type = "cpu"
-    worker.enable_permute_local_kv = False
-    attn_cache = torch.ones(6, block_tokens, 2, 4)
-    mamba_cache = torch.ones(6, 16)
-    worker.device_kv_caches = {"attn.0": attn_cache, "mamba.0": mamba_cache}
+    worker.enable_permute_local_kv = enable_permute_local_kv
+    worker.kv_cache_layout = kv_cache_layout
+    # Attention caches are [B, H, N, C]; distinct values per head and token.
+    expected = torch.arange(6 * num_kv_heads * block_tokens * 4).view(
+        6, num_kv_heads, block_tokens, 4
+    )
+    # Blocks [2, 3] as received: `ratio` head-major remote sub-blocks each.
+    received = (
+        expected[2:4]
+        .unflatten(2, (ratio, -1))
+        .transpose(1, 2)
+        .reshape(2, num_kv_heads, block_tokens, 4)
+    )
+    if kv_cache_layout == "LBNHC":
+        attn_cache = expected.transpose(1, 2).contiguous().transpose(1, 2)
+        if enable_permute_local_kv:
+            # The remote is LBHNC: its bytes land in token-major memory.
+            attn_cache.transpose(1, 2)[2:4] = received.view(2, block_tokens, -1, 4)
+        # Otherwise token-major blocks receive the sub-blocks in token order.
+    else:
+        attn_cache = expected.clone()
+        attn_cache[2:4] = received
+    worker.device_kv_caches = {"attn.0": attn_cache, "swa.0": attn_cache}
     fa_group = MagicMock(layer_names=["attn.0"])
-    ssm_group = MagicMock(layer_names=["mamba.0"])
-    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, ssm_group])
-    # The cached property filters mamba layers out of the permuted caches.
-    attn_caches = NixlConnectorWorker._attention_kv_caches.func(worker)
-    assert len(attn_caches) == 1 and attn_caches[0] is attn_cache
-    worker._attention_kv_caches = attn_caches
+    swa_group = MagicMock(layer_names=["swa.0"])
+    worker.kv_cache_config = MagicMock(transfer_groups=[fa_group, swa_group])
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
-    # Request occupies blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [([2, 3], 6)])
+    # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
-    assert torch.all(attn_cache[2] == 1)
-    assert torch.all(attn_cache[3, :4] == 1)
-    assert torch.all(attn_cache[3, 4:] == 0)
-    # Untouched blocks and the mamba cache keep their content.
-    assert torch.all(attn_cache[4] == 1)
-    assert torch.all(mamba_cache == 1)
+    assert torch.equal(attn_cache[2], expected[2])
+    assert torch.equal(attn_cache[3, :, :4], expected[3, :, :4])
+    assert torch.all(attn_cache[3, :, 4:] == 0)
+    # Untouched blocks keep their content.
+    assert torch.equal(attn_cache[4], expected[4])
 
 
 @pytest.mark.cpu_test
@@ -1523,34 +1548,6 @@ def _make_fake_kv_cache_manager():
 
 
 @pytest.mark.cpu_test
-def test_zeroing_block_ids_cover_only_loaded_attention_blocks():
-    """Only zero-recorded (attention) groups contribute, sliced to the
-    externally-loaded token range; Mamba state blocks are never zeroed."""
-    manager = _make_fake_kv_cache_manager()
-
-    # Tokens [0, 16) are locally cached; the load covers tokens [16, 56).
-    assert manager.get_zeroing_block_ids_in_range("req-1", 16, 56) == [11, 12, 13]
-
-
-@pytest.mark.cpu_test
-def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
-    """Blocks that will be loaded by the connector must not be zeroed."""
-    from vllm.v1.core.sched.scheduler import Scheduler
-
-    class FakeKVCacheManager:
-        def take_new_block_ids(self):
-            return [9, 10, 11, 12]
-
-    scheduler = object.__new__(Scheduler)
-    scheduler.needs_kv_cache_zeroing = True
-    scheduler.kv_cache_manager = FakeKVCacheManager()
-    scheduler._skip_zero_block_ids = {10, 12}
-
-    assert scheduler._get_new_block_ids_to_zero() == [9, 11]
-    assert not scheduler._skip_zero_block_ids
-
-
-@pytest.mark.cpu_test
 def test_failed_load_rezeroes_unwritten_skipped_blocks():
     """A failed async load leaves zeroing-skipped blocks unwritten beyond
     the valid prefix; they must be zeroed before local recompute."""
@@ -1575,7 +1572,6 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     # Attention blocks covering tokens >= 48 are re-recorded for zeroing
     # and flow into the next step's zero list; Mamba blocks are not.
-    scheduler._skip_zero_block_ids = set()
     assert scheduler._get_new_block_ids_to_zero() == [13, 14, 15]
 
 
@@ -1584,17 +1580,22 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "has_mamba,is_hma_required,expected_count",
+    "has_mamba,is_hma_required,bounded_replay,expected_count",
     [
-        (True, True, 9),
-        (False, False, 10),
-        (False, True, 10),
+        (True, True, False, 9),
+        (False, False, False, 10),
+        (False, True, False, 10),
+        (False, True, True, 9),
     ],
-    ids=["mamba", "fa_only", "swa_only"],
+    ids=["mamba", "fa_only", "swa_only", "swa_bounded_replay"],
 )
-def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
-    """D-side: Mamba gets N-1 matched tokens, non-Mamba gets N."""
-    sched = make_nixl_scheduler(has_mamba=has_mamba, is_hma_required=is_hma_required)
+def test_mamba_n1_d_side(has_mamba, is_hma_required, bounded_replay, expected_count):
+    """D-side: Mamba and SWA bounded replay get N-1 matched tokens, others N."""
+    sched = make_nixl_scheduler(
+        has_mamba=has_mamba,
+        is_hma_required=is_hma_required,
+        bounded_replay=bounded_replay,
+    )
     req = create_request(num_tokens=10, do_remote_prefill=True)
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
@@ -1662,6 +1663,20 @@ def test_mamba_n1_p_side_truncation():
 
     fa_sched.on_new_request(fa_req)
     assert len(fa_req.prompt_token_ids) == fa_original
+
+    # SWA bounded replay: the window is not replayed after the load, so the
+    # prefiller stops short of the last token too.
+    swa_sched = make_nixl_scheduler(is_hma_required=True, bounded_replay=True)
+    swa_req = create_request(num_tokens=10, do_remote_decode=True)
+    swa_sched.on_new_request(swa_req)
+    assert len(swa_req.prompt_token_ids) == 9
+
+    # A request that skips reading the prefix cache (prompt logprobs) is not
+    # cut: the decoder loads nothing and recomputes its whole prompt.
+    logprobs_req = create_request(num_tokens=10, do_remote_decode=True)
+    logprobs_req.sampling_params.skip_reading_prefix_cache = True
+    swa_sched.on_new_request(logprobs_req)
+    assert len(logprobs_req.prompt_token_ids) == 10
 
 
 @pytest.mark.cpu_test

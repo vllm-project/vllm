@@ -129,8 +129,11 @@ class CuMemBackend(SleepModeBackend):
 
         self._state = "SUSPENDED"
         allocator = get_mem_allocator_instance()
-        # Runtime state is kept at every level; weights only at level 1.
-        offload_tags = ("weights", "runtime") if level == 1 else ("runtime",)
+        # Runtime state and graph pools are kept at every level; weights only
+        # at level 1.
+        offload_tags: tuple[str, ...] = ("runtime", "cudagraph")
+        if level == 1:
+            offload_tags = ("weights", *offload_tags)
         allocator.sleep(offload_tags=offload_tags)
 
     def resume(self, tags: list[str] | None = None) -> None:

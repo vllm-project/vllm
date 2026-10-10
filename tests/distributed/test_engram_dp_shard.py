@@ -39,9 +39,16 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    convert_swizzled_to_linear,
+)
 from vllm.models.deepseek_v41.common import engram as engram_ops
 from vllm.models.deepseek_v41.common.engram import (
     Engram,
+    EngramBatch,
     EngramLayout,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
@@ -177,7 +184,9 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
     # Supply the resolved Engram settings without constructing a full model.
     vllm_config.engram_config = EngramConfig()
     vllm_config.model_config = SimpleNamespace(
-        architecture="DeepseekV41ForCausalLM", is_moe=True
+        architecture="DeepseekV41ForCausalLM",
+        is_moe=True,
+        sleep_mode_offload_cudagraph=False,
     )
     try:
         init_distributed_environment()
@@ -205,8 +214,73 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
                 n_heads,
                 sequence_parallel,
             )
+        if tp_size == 1:
+            _check_fp8_batch(vllm_config)
     finally:
         cleanup_dist_env_and_memory()
+
+
+def _check_fp8_batch(vllm_config):
+    """MXFP8 staging matches the tables across peer/all-to-all slots, idle
+    replicas and graph replays."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    layers = []
+    for index in range(2):
+        weight, scale = _full_table(sum(HEAD_SIZES))
+        weight = (weight.float() * (1 - 2 * index)).to(torch.float8_e4m3fn)
+        table = ParallelEngramEmbedding(
+            sum(HEAD_SIZES), DIM, HEAD_SIZES, cpu_offload=True
+        )
+        table.weight.weight_loader(table.weight, weight)
+        table.weight_scale_inv.weight_loader(table.weight_scale_inv, scale)
+        staged = torch.empty(0, device="cuda")
+        reference = (weight.cuda(), scale.cuda())
+        layers.append(SimpleNamespace(embed_tokens=table, staged_rows=staged))
+        layers[-1].layer_hash_index, layers[-1].reference = index, reference
+    batch = EngramBatch(layers, 257)
+
+    def check(ids):
+        tokens = ids.shape[0]
+        for layer in layers:
+            x = batch.wkv_input(layer, tokens)
+            sf = convert_swizzled_to_linear(x.scale, tokens, x.data.shape[1], BLOCK)
+            actual = dequant_mxfp8_to_bf16(x.data, sf).unflatten(-1, (-1, DIM))
+            weight, scale = layer.reference
+            expected = _reference(weight, scale, ids[:, layer.layer_hash_index])
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    for counts in ((7, 0, 5, 1), (127,) * 4, (128,) * 4, (257, 0, 129, 1)):
+        tokens = counts[dp_rank]
+        seed = 700 + 10 * dp_rank
+        ids = torch.stack([_make_ids(HEAD_SIZES, tokens, seed + i) for i in (0, 1)], 1)
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=tokens,
+            num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
+        ):
+            batch.prepare_embeddings(ids)
+            check(ids)
+            for capture in ("full", "breakable") if len(set(counts)) == 1 else ():
+                warmup = torch.cuda.Stream()
+                warmup.wait_stream(torch.cuda.current_stream())
+                if capture == "full":
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=warmup):
+                        batch.prepare_embeddings(ids)
+                else:
+                    graph = BreakableCUDAGraphCapture()
+                    with torch.cuda.stream(warmup), graph:
+                        batch.prepare_embeddings(ids)
+                torch.cuda.current_stream().wait_stream(warmup)
+                for step in (2, 3):
+                    replay_ids = _make_ids(HEAD_SIZES, tokens, seed + step)
+                    ids.copy_(torch.stack([replay_ids] * 2, 1))
+                    graph.replay()
+                    check(ids)
+                del graph
 
 
 def _check_shared_storage_lifetime_and_failures(failure):
@@ -514,6 +588,7 @@ def _check_dummy_hash_model_forward(
     model.use_native_mega_moe = False
     model.use_sequence_parallel = False
     model.fuse_mhc_all_reduce = False
+    model.engram_batch = None
     model.engram_hash = state
     model.engram_swa_prefix = "swa"
     model.engram_dp_shared_memory = dp_shared_memory

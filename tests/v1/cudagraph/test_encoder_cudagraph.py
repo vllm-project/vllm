@@ -246,6 +246,138 @@ class TestFindBudgetGraph:
 
 
 # ---------------------------------------------------------------------------
+# _execute_local greedy packing with budget-cliff deferral (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+def _run_packing(
+    mgr: EncoderCudaGraphManager, specs: list[EncoderItemSpec]
+) -> list[tuple[list[int], str, int]]:
+    """Run _execute_local with graph replay and postprocess mocked out.
+
+    Returns:
+        (batch_indices, path, token_budget) for every graph replay.
+
+    """
+    mgr.model = MagicMock()
+
+    runs: list[tuple[list[int], str, int]] = []
+
+    def fake_run(mm_kwargs, token_budget, path="default", axis_keys=()):
+        runs.append((list(mm_kwargs["indices"]), path, token_budget))
+        n_tokens = sum(
+            specs[i].get_path_output_tokens(path) for i in mm_kwargs["indices"]
+        )
+        return torch.zeros(n_tokens, 32)
+
+    def fake_postprocess(
+        graph_outputs,
+        batch_indices,
+        per_item_out_tokens,
+        outputs_by_orig_idx,
+        clone,
+        batch_mm_kwargs,
+    ):
+        for i in batch_indices:
+            outputs_by_orig_idx[i] = torch.zeros(per_item_out_tokens[i], 32)
+
+    mgr.model.postprocess_encoder_output = fake_postprocess
+    with (
+        patch.object(mgr, "_get_item_specs", lambda mm_kwargs: specs),
+        patch.object(
+            mgr,
+            "_select_items",
+            lambda mm_kwargs, indices: ({"indices": indices}, ()),
+        ),
+        patch.object(mgr, "_run_budget_graph", fake_run),
+    ):
+        result = mgr._execute_local({})
+    assert len(result) == len(specs)
+    return runs
+
+
+class TestExecuteLocalPacking:
+    """Greedy packing defers items that cross a budget cliff."""
+
+    @staticmethod
+    def _spec(tokens: int) -> EncoderItemSpec:
+        return EncoderItemSpec(input_size=tokens, output_tokens=tokens)
+
+    def test_cliff_deferral_splits_batch(self):
+        # Merging would force 4200 tokens into the 8192 budget; deferring
+        # the 4000-token item costs 256 + 4096 instead.
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(4000), self._spec(200)])
+        assert runs == [([1], "default", 256), ([0], "default", 4096)]
+
+    def test_tie_does_not_defer(self):
+        # 4096 + 4096 ties the merged 8192 budget; merging wins because it
+        # saves one replay.
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(4000), self._spec(4000)])
+        assert runs == [([0, 1], "default", 8192)]
+
+    def test_deferral_requires_item_outweighing_batch(self):
+        # The third 1366-token item would save budget if deferred (4096+2048
+        # < 8192) but is smaller than the current batch (4096), so it merges:
+        # deferring mid-size items fragments flood packing into extra replays.
+        mgr = _make_manager_with_budgets([256, 2048, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(1366)] * 3)
+        assert runs == [([0, 1, 2], "default", 8192)]
+
+    def test_packing_without_cliff_unchanged(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100), self._spec(100)])
+        assert runs == [([0, 1], "default", 256)]
+
+    def test_small_items_split_to_avoid_cliff(self):
+        # Merging 3+ items of 100 tokens crosses 256 -> 4096; splitting
+        # into pairs costs 256 + 256 < 4096.
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100)] * 4)
+        assert runs == [([0, 1], "default", 256), ([2, 3], "default", 256)]
+
+    def test_max_batch_size_split_unchanged(self):
+        mgr = _make_manager_with_budgets([1024, 4096])
+        mgr.max_batch_size = 3
+        runs = _run_packing(mgr, [self._spec(100)] * 4)
+        assert runs == [([0, 1, 2], "default", 1024), ([3], "default", 1024)]
+
+    def test_oversized_item_still_falls_back_to_eager(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100), self._spec(9000)])
+        assert runs == [([0], "default", 256)]
+        assert mgr.graph_misses == 1
+
+    def test_multi_path_deferral_skips_zero_token_paths(self):
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        mgr.path_token_budgets = {
+            "a": [0, 256, 4096, 8192],
+            "b": [256, 4096, 8192],
+        }
+        specs = [
+            EncoderItemSpec(
+                input_size=300,
+                output_tokens=300,
+                path_output_tokens={"a": 200, "b": 100},
+            ),
+            EncoderItemSpec(
+                input_size=4000,
+                output_tokens=4000,
+                path_output_tokens={"a": 0, "b": 4000},
+            ),
+        ]
+        runs = _run_packing(mgr, specs)
+        # Path b alone triggers deferral (256 + 4096 < 8192); the deferred
+        # item has zero tokens on path a, so that path is skipped.
+        assert runs == [
+            ([0], "a", 256),
+            ([0], "b", 256),
+            ([1], "b", 4096),
+        ]
+
+
+# ---------------------------------------------------------------------------
 # get_cumulative_stats
 # ---------------------------------------------------------------------------
 
