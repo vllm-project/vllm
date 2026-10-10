@@ -144,3 +144,56 @@ class AiterCustomAllreduce:
     @property
     def supports_per_group_quant(self) -> bool:
         return self.build_supports_per_group_quant()
+
+    @staticmethod
+    def build_supports_gemma_mxfp4_quant() -> bool:
+        """True if the running AITER build has the fused AR+RMSNorm+MXFP4
+        kernel with a Gemma (1 + w) weight mode."""
+        import inspect
+
+        from aiter.dist.device_communicators.custom_all_reduce import (
+            CustomAllreduce as _AiterCustomAllreduce,
+        )
+
+        fn = getattr(_AiterCustomAllreduce, "fused_ar_rms_mxfp4_quant", None)
+        return fn is not None and "gemma_norm" in inspect.signature(fn).parameters
+
+    def mxfp4_fused_ar_rms_stage(self, inp: torch.Tensor) -> bool | None:
+        """Kernel choice for AITER's fused AR+RMSNorm+MXFP4 quant with a bf16
+        side output: True for the one-stage kernel, False for the two-stage
+        kernel, None when neither launcher accepts the shape or the AITER
+        build lacks the Gemma-capable kernel.
+
+        Mirrors ``CudaCommunicator.fused_allreduce_rmsnorm_mxfp4_quant`` in
+        aiter/dist/device_communicators/communicator_cuda.py.
+        """
+        if not self.build_supports_gemma_mxfp4_quant():
+            return None
+        if inp.dim() != 2 or inp.dtype not in (torch.bfloat16, torch.float16):
+            return None
+        m, k = inp.shape
+        world_size = self._impl.world_size
+        if k % 32 != 0 or world_size == 6:
+            return None
+        pack_size = 16 // inp.element_size()
+        block_size = k // pack_size
+        if block_size > 1024:
+            return None
+        can_1stage = (
+            m <= 4
+            or (k <= 4096 and m <= 32)
+            or (k <= 6144 and m <= 16)
+            or (k == 8192 and m <= 8)
+        )
+        can_2stage = (
+            block_size % world_size == 0
+            and block_size % 32 == 0
+            and m * k * inp.element_size() <= 512 * 1024
+        )
+        if can_2stage and world_size == 8 and m >= 16 and k <= 6144:
+            can_1stage = False
+        if can_1stage:
+            return True
+        if can_2stage:
+            return False
+        return None
