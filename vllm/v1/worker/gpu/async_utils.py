@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.v1.conf_compute_utils import confidential_compute_enabled
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     LogprobsTensors,
@@ -130,47 +131,77 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.check_ep_fault = check_ep_fault
+        self.main_stream = main_stream
+        self.copy_stream = copy_stream
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
 
+        # Under Confidential Computing the D2H copies are host-synchronous:
+        # issued here they would stall this thread on the in-flight
+        # forward+sample and delay the next step's launch. Defer them to
+        # get_output(), which runs on the executor's async-output thread and
+        # blocks until the copy completes anyway (see
+        # vllm.v1.conf_compute_utils).
+        self._defer_copy = confidential_compute_enabled()
+        if self._defer_copy:
+            self._src_ready_event = torch.cuda.Event(blocking=True)
+            self._src_ready_event.record(main_stream)
+            return
+
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
+            self._issue_copies()
 
-            self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
-            self.logprobs_tensors: LogprobsTensors | None = None
-            if sampler_output.logprobs_tensors is not None:
-                self.logprobs_tensors = (
-                    sampler_output.logprobs_tensors.to_cpu_nonblocking()
-                )
-            self.num_nans: np.ndarray | None = None
-            if sampler_output.num_nans is not None:
-                self.num_nans = async_copy_to_np(sampler_output.num_nans)
-            self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            self.sampling_mask_tensors: SamplingMaskTensors | None = None
-            if sampler_output.sampling_mask_tensors is not None:
-                self.sampling_mask_tensors = (
-                    sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
-                )
-            self.prompt_logprobs_dict = {
-                k: v.to_cpu_nonblocking() if v is not None else None
-                for k, v in self.model_runner_output.prompt_logprobs_dict.items()
-            }
-            token_id_logprobs = self.model_runner_output.prompt_token_id_logprobs_dict
-            self.prompt_token_id_logprobs_dict = {
-                k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
-            }
-            if self.pending_aux_output is not None:
-                self.pending_aux_output.enqueue_cpu_copy(
-                    num_sampled=self.num_sampled_tokens_np,
-                    num_rejected=async_copy_to_np(sampler_output.num_rejected),
-                )
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
-            self.copy_event.record(copy_stream)
+    def _issue_copies(self) -> None:
+        """Issue the D2H copies on the current stream and record copy_event.
+
+        The producing forward+sample must already be ordered before the
+        copies: stream-wait in __init__, or event-sync in get_output for the
+        deferred Confidential Computing path.
+        """
+        sampler_output = self.sampler_output
+        self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
+        self.logprobs_tensors: LogprobsTensors | None = None
+        if sampler_output.logprobs_tensors is not None:
+            self.logprobs_tensors = sampler_output.logprobs_tensors.to_cpu_nonblocking()
+        self.num_nans: np.ndarray | None = None
+        if sampler_output.num_nans is not None:
+            self.num_nans = async_copy_to_np(sampler_output.num_nans)
+        self.num_sampled_tokens_np = async_copy_to_np(self.num_sampled_tokens)
+        self.sampling_mask_tensors: SamplingMaskTensors | None = None
+        if sampler_output.sampling_mask_tensors is not None:
+            self.sampling_mask_tensors = (
+                sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
+            )
+        self.prompt_logprobs_dict = {
+            k: v.to_cpu_nonblocking() if v is not None else None
+            for k, v in self.model_runner_output.prompt_logprobs_dict.items()
+        }
+        token_id_logprobs = self.model_runner_output.prompt_token_id_logprobs_dict
+        self.prompt_token_id_logprobs_dict = {
+            k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
+        }
+        if self.pending_aux_output is not None:
+            self.pending_aux_output.enqueue_cpu_copy(
+                num_sampled=self.num_sampled_tokens_np,
+                num_rejected=async_copy_to_np(sampler_output.num_rejected),
+            )
+        if self.check_ep_fault:
+            has_fault = get_ep_all2all_manager().query_fault()
+            self._has_fault = has_fault.to("cpu", non_blocking=True)
+        self.copy_event.record(self.copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
+        if self._defer_copy:
+            # Sleep until the forward+sample has materialized the source
+            # tensors (event-sync rather than stream-wait, so the
+            # host-synchronous copies only pay their own transfer time), then
+            # issue the copies from this thread on the copy stream.
+            self._src_ready_event.synchronize()
+            with stream(self.copy_stream, self.main_stream):
+                self._issue_copies()
         self.copy_event.synchronize()
 
         # NOTE(woosuk): The following code is to ensure compatibility with
@@ -228,30 +259,47 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
+        self.finished_mask = finished_mask
+        self.main_stream = main_stream
+        self.copy_stream = copy_stream
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
 
+        # Same deferral as AsyncOutput under Confidential Computing.
+        self._defer_copy = confidential_compute_enabled()
+        if self._defer_copy:
+            self._src_ready_event = torch.cuda.Event(blocking=True)
+            self._src_ready_event.record(main_stream)
+            return
+
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
-            if isinstance(self.pooler_output, torch.Tensor) and all(finished_mask):
-                self.pooler_output_cpu: PoolerOutput = self.pooler_output.to(
-                    "cpu", non_blocking=True
-                )
-            else:
-                outputs = (
-                    self.pooler_output.unbind()
-                    if isinstance(self.pooler_output, torch.Tensor)
-                    else self.pooler_output
-                )
-                self.pooler_output_cpu = [
-                    None
-                    if output is None or not is_finished
-                    else output.to("cpu", non_blocking=True)
-                    for output, is_finished in zip(outputs, finished_mask, strict=True)
-                ]
-            self.copy_event.record(copy_stream)
+            self._issue_copies()
+
+    def _issue_copies(self) -> None:
+        if isinstance(self.pooler_output, torch.Tensor) and all(self.finished_mask):
+            self.pooler_output_cpu: PoolerOutput = self.pooler_output.to(
+                "cpu", non_blocking=True
+            )
+        else:
+            outputs = (
+                self.pooler_output.unbind()
+                if isinstance(self.pooler_output, torch.Tensor)
+                else self.pooler_output
+            )
+            self.pooler_output_cpu = [
+                None
+                if output is None or not is_finished
+                else output.to("cpu", non_blocking=True)
+                for output, is_finished in zip(outputs, self.finished_mask, strict=True)
+            ]
+        self.copy_event.record(self.copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
+        if self._defer_copy:
+            self._src_ready_event.synchronize()
+            with stream(self.copy_stream, self.main_stream):
+                self._issue_copies()
         if isinstance(self.pooler_output_cpu, torch.Tensor):
             pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
         else:

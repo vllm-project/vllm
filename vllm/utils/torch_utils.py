@@ -7,6 +7,7 @@ import random
 import sys
 import threading
 from collections.abc import Callable, Collection
+from functools import cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -74,6 +75,13 @@ T = TypeVar("T")
 
 
 PIN_MEMORY = is_pin_memory_available()
+
+
+@cache
+def _confidential_compute_enabled() -> bool:
+    from vllm.platforms import current_platform
+
+    return current_platform.is_confidential_compute()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
@@ -726,6 +734,18 @@ def async_tensor_h2d(
     else:
         t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
     assert t.is_cpu
+
+    # Under Confidential Computing a pinned H2D on the compute stream blocks
+    # the host on the in-flight forward; route it through the idle prep
+    # stream instead (see vllm.v1.conf_compute_utils).
+    if _confidential_compute_enabled():
+        from vllm.v1.conf_compute_utils import staged_h2d
+
+        if out is not None and out.is_cuda:
+            assert out.dtype == dtype
+            return staged_h2d(t.to(dtype), out=out)
+        if out is None and device is not None and torch.device(device).type == "cuda":
+            return staged_h2d(t if dtype is None else t.to(dtype), device=device)
 
     if out is not None:
         assert out.dtype == dtype

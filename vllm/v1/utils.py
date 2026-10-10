@@ -32,6 +32,7 @@ from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_mes
 from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.conf_compute_utils import confidential_compute_enabled, staged_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -140,6 +141,10 @@ class CpuGpuBuffer:
         cpu, gpu = self.cpu, self.gpu
         if n is not None:
             cpu, gpu = cpu[:n], gpu[:n]
+        if gpu.is_cuda and confidential_compute_enabled():
+            # A pinned H2D on the compute stream would block the host on the
+            # in-flight forward; stage it through the prep stream instead.
+            return staged_h2d(cpu, out=gpu)
         return gpu.copy_(cpu.pin_memory() if PIN_MEMORY else cpu, non_blocking=True)
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
