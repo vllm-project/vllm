@@ -5,39 +5,33 @@
 # Cache helper for ROCm base wheels
 #
 # This script manages caching of pre-built ROCm base wheels (torch, triton, etc.)
-# to avoid rebuilding them when Dockerfile.rocm_base hasn't changed.
+# to avoid rebuilding them when the stack's base Dockerfile hasn't changed.
 #
-# Usage:
-#   cache-rocm-base-wheels.sh check    - Check if cache exists, outputs "hit" or "miss"
-#   cache-rocm-base-wheels.sh upload   - Upload wheels to cache
-#   cache-rocm-base-wheels.sh download - Download wheels from cache
-#   cache-rocm-base-wheels.sh key      - Output the cache key
+# Usage: cache-rocm-base-wheels.sh <base-dockerfile> <command>
+#   base-dockerfile  e.g. docker/Dockerfile.rocm_base or docker/Dockerfile.rocm_72_base
+# Commands:
+#   check    - Check if cache exists, outputs "hit" or "miss"
+#   upload   - Upload wheels to cache
+#   download - Download wheels from cache
+#   key      - Output the cache key
+#   path     - Output the full S3 cache path
 #
 # Environment variables:
 #   S3_BUCKET          - S3 bucket name (default: vllm-wheels)
 #
-# Note: ROCm version is determined by BASE_IMAGE in Dockerfile.rocm_base,
-#       so changes to ROCm version are captured by the Dockerfile hash.
+# The cache key hashes the base Dockerfile and the repo files it COPYs in, which
+# capture the ROCm version and every component pin (see rocm/stack.sh).
 
 set -euo pipefail
 
 BUCKET="${S3_BUCKET:-vllm-wheels}"
-DOCKERFILE="docker/Dockerfile.rocm_base"
 CACHE_PREFIX="rocm/cache"
 
-# Generate hash from Dockerfile content + build args
-generate_cache_key() {
-    # Include Dockerfile content
-    if [[ ! -f "$DOCKERFILE" ]]; then
-        echo "ERROR: Dockerfile not found: $DOCKERFILE" >&2
-        exit 1
-    fi
-    local dockerfile_hash=$(sha256sum "$DOCKERFILE" | cut -c1-16)
-
-    echo "${dockerfile_hash}"
-}
-
-CACHE_KEY=$(generate_cache_key)
+# shellcheck source=.buildkite/scripts/rocm/stack.sh
+source "$(dirname "${BASH_SOURCE[0]}")/rocm/stack.sh" "${1:?Usage: $0 <base-dockerfile> <command>}"
+shift
+CACHE_KEY="$ROCM_STACK_WHEEL_KEY"
+WHEELS_DIR="$ROCM_STACK_BASE_WHEELS_DIR"
 CACHE_PATH="s3://${BUCKET}/${CACHE_PREFIX}/${CACHE_KEY}/"
 
 case "${1:-}" in
@@ -67,19 +61,19 @@ case "${1:-}" in
         echo "Cache path: ${CACHE_PATH}"
         echo ""
 
-        if [[ ! -d "artifacts/rocm-base-wheels" ]]; then
-            echo "ERROR: artifacts/rocm-base-wheels directory not found" >&2
+        if [[ ! -d "${WHEELS_DIR}" ]]; then
+            echo "ERROR: ${WHEELS_DIR} directory not found" >&2
             exit 1
         fi
 
-        WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
+        WHEEL_COUNT=$(find "${WHEELS_DIR}" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         if [[ "$WHEEL_COUNT" -eq 0 ]]; then
-            echo "ERROR: No wheels found in artifacts/rocm-base-wheels/" >&2
+            echo "ERROR: No wheels found in ${WHEELS_DIR}/" >&2
             exit 1
         fi
 
         echo "Uploading $WHEEL_COUNT wheels..."
-        aws s3 cp --recursive artifacts/rocm-base-wheels/ "${CACHE_PATH}"
+        aws s3 cp --recursive "${WHEELS_DIR}/" "${CACHE_PATH}"
 
         echo ""
         echo "Cache upload complete!"
@@ -93,17 +87,17 @@ case "${1:-}" in
         echo "Cache key: ${CACHE_KEY}"
         echo "Cache path: ${CACHE_PATH}"
         echo ""
-        mkdir -p artifacts/rocm-base-wheels
+        mkdir -p "${WHEELS_DIR}"
         
         # Use sync with include/exclude to only download .whl files
-        aws s3 sync "${CACHE_PATH}" artifacts/rocm-base-wheels/ \
+        aws s3 sync "${CACHE_PATH}" "${WHEELS_DIR}/" \
             --exclude "*" \
             --include "*.whl"
         
         echo ""
         echo "Downloaded wheels:"
-        find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' -exec ls -lh {} \;
-        WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
+        find "${WHEELS_DIR}" -maxdepth 1 -name '*.whl' -exec ls -lh {} \;
+        WHEEL_COUNT=$(find "${WHEELS_DIR}" -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         echo ""
         echo "Total: $WHEEL_COUNT wheels"
         echo "========================================"
@@ -118,12 +112,12 @@ case "${1:-}" in
         ;;
 
     *)
-        echo "Usage: $0 {check|upload|download|key|path}" >&2
+        echo "Usage: $0 <base-dockerfile> {check|upload|download|key|path}" >&2
         echo "" >&2
         echo "Commands:" >&2
         echo "  check    - Check if cache exists, outputs 'hit' or 'miss'" >&2
-        echo "  upload   - Upload wheels from artifacts/rocm-base-wheels/ to cache" >&2
-        echo "  download - Download wheels from cache to artifacts/rocm-base-wheels/" >&2
+        echo "  upload   - Upload wheels from ${WHEELS_DIR}/ to cache" >&2
+        echo "  download - Download wheels from cache to ${WHEELS_DIR}/" >&2
         echo "  key      - Output the cache key" >&2
         echo "  path     - Output the full S3 cache path" >&2
         exit 1
