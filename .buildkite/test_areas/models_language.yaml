@@ -136,6 +136,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Generation)"
   device: h200_35gb
   key: language-models-test-extended-generation
+  automatic_shard: true
   timeout_in_minutes: 80
   optional: true
   source_file_dependencies:
@@ -222,6 +223,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Language Models (MTEB)"
   key: language-models-test-mteb
+  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_35gb
   optional: true

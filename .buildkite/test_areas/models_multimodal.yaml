@@ -151,6 +151,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
+  automatic_shard: true
   optional: true
   source_file_dependencies:
   - vllm/
