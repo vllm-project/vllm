@@ -119,18 +119,44 @@ class ConsumerXfer:
     _quarantined: bool = field(default=False, init=False)
 
     def handle_ack(self, ack: XferAck, agent_name: str) -> bool:
-        """Issue the NIXL READ on an OK XferAck. Returns False on any NACK."""
+        """Issue the NIXL READ on an OK XferAck.
+
+        Returns False on any NACK, and when ``src_block_indices`` is not a
+        list of the same length as the local allocation. A mismatched ack
+        must fail this transfer, not raise out of the scheduler.
+        """
         if ack.status != XferStatus.OK:
+            return False
+        remote_indices = ack.src_block_indices
+        if not isinstance(remote_indices, list) or len(remote_indices) != len(
+            self.block_indices
+        ):
+            logger.warning(
+                "EC consumer: block count mismatch mm_hash=%s local=%d remote=%s",
+                self.mm_hash,
+                len(self.block_indices),
+                len(remote_indices) if isinstance(remote_indices, list) else None,
+            )
             return False
         # notif_msg encodes both session_id and mm_hash so the producer can
         # do a direct (session_id, mm_hash) → ProducerXfer lookup on completion.
         notif_msg = f"{self.consumer_session_id}:{self.mm_hash}".encode()
-        self.transfer_handle = self.data.post_read(
-            self.block_indices,
-            agent_name,
-            ack.src_block_indices,
-            notif_msg=notif_msg,
-        )
+        try:
+            self.transfer_handle = self.data.post_read(
+                self.block_indices,
+                agent_name,
+                remote_indices,
+                notif_msg=notif_msg,
+            )
+        except ValueError:
+            logger.warning(
+                "EC consumer: rejected NIXL READ mm_hash=%s local_blocks=%d "
+                "remote_blocks=%d",
+                self.mm_hash,
+                len(self.block_indices),
+                len(remote_indices),
+            )
+            return False
         self.deadline = time.monotonic() + _CONSUMER_READ_TIMEOUT_S
         logger.debug(
             "EC consumer: NIXL READ posted mm_hash=%s agent=%s local_blocks=%d "
