@@ -264,6 +264,10 @@ class EngineClient(ABC):
         """Scale the engine."""
         raise NotImplementedError
 
+    async def check_health_gpu(self) -> None:
+        """Raise if the engine is not ready to execute model work."""
+        raise NotImplementedError
+
     async def collective_rpc(
         self,
         method: str,

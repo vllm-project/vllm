@@ -66,6 +66,7 @@ from vllm.v1.engine import (
     EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
+    EngineCoreReadyState,
     EngineCoreRequest,
     EngineCoreRequestType,
     FinishReason,
@@ -105,6 +106,11 @@ logger = init_logger(__name__)
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
+READY_PROGRESS_BROADCAST_CLIENT_INDEX = -2
+READY_PROGRESS_PUBLISH_INTERVAL_S = 1.0
+READY_STATE_UTILITY_METHODS = frozenset(
+    {"pause_scheduler", "resume_scheduler", "sleep", "wake_up"}
+)
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -240,6 +246,9 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+
+        self._ready_progress_seq = 0
+        self._last_health_dummy_batch_at = 0.0
 
         self._idle_state_callbacks: list[Callable] = []
 
@@ -671,6 +680,8 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self._record_ready_progress()
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
@@ -772,6 +783,8 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self._record_ready_progress()
         self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
@@ -1030,8 +1043,39 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
+    def get_ready_state(self) -> EngineCoreReadyState:
+        if self.is_sleeping():
+            return EngineCoreReadyState.SLEEPING
+        if (
+            getattr(self, "engines_running", False)
+            or self.scheduler.has_requests()
+            or self.batch_queue
+        ):
+            return EngineCoreReadyState.BUSY
+        return EngineCoreReadyState.IDLE
+
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
+
+    def _record_ready_progress(self) -> None:
+        self._ready_progress_seq += 1
+        self._last_health_dummy_batch_at = 0.0
+
+    def check_health_gpu(self, cache_ttl_s: float) -> None:
+        """Run a GPU probe only when the engine is awake and idle."""
+        if self.get_ready_state() != EngineCoreReadyState.IDLE:
+            return
+
+        now = time.monotonic()
+        if (
+            cache_ttl_s > 0
+            and self._last_health_dummy_batch_at > 0
+            and now - self._last_health_dummy_batch_at < cache_ttl_s
+        ):
+            return
+
+        self.execute_dummy_batch()
+        self._last_health_dummy_batch_at = time.monotonic()
 
     def compute_weight_checksums(self) -> list[dict[str, str]]:
         return self.collective_rpc("compute_weight_checksums")
@@ -1186,6 +1230,10 @@ class EngineCoreProc(EngineCore):
                 executor_fail_callback,
                 internal_dp_balancing,
             )
+
+            self._last_ready_published_state = EngineCoreReadyState.IDLE
+            self._last_ready_published_seq = self._ready_progress_seq
+            self._last_ready_published_at = time.monotonic()
 
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
@@ -1590,8 +1638,11 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
+        self._maybe_publish_ready_progress()
+
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+        self._maybe_publish_ready_progress(outputs)
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1605,6 +1656,42 @@ class EngineCoreProc(EngineCore):
             time.sleep(0.001)
 
         return model_executed
+
+    def _maybe_publish_ready_progress(
+        self,
+        outputs: dict[int, EngineCoreOutputs] | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        ready_state = self.get_ready_state()
+        state_changed = ready_state != self._last_ready_published_state
+        if state_changed and ready_state == EngineCoreReadyState.BUSY:
+            self._last_health_dummy_batch_at = 0.0
+        progress_changed = self._ready_progress_seq != self._last_ready_published_seq
+        publish_progress = progress_changed and (
+            now - self._last_ready_published_at >= READY_PROGRESS_PUBLISH_INTERVAL_S
+        )
+        if not force and not state_changed and not publish_progress:
+            return
+
+        if outputs:
+            for output in outputs.values():
+                output.ready_progress_seq = self._ready_progress_seq
+                output.ready_state = ready_state
+
+        self.output_queue.put_nowait(
+            (
+                READY_PROGRESS_BROADCAST_CLIENT_INDEX,
+                EngineCoreOutputs(
+                    ready_progress_seq=self._ready_progress_seq,
+                    ready_state=ready_state,
+                ),
+            )
+        )
+        self._last_ready_published_state = ready_state
+        self._last_ready_published_seq = self._ready_progress_seq
+        self._last_ready_published_at = now
 
     def _notify_idle_state_callbacks(self) -> None:
         while self._idle_state_callbacks:
@@ -1677,11 +1764,15 @@ class EngineCoreProc(EngineCore):
             if self._reject_utility_in_shutdown(client_idx, call_id, method_name):
                 return
             output = UtilityOutput(call_id)
+
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (
-                (method := getattr(self, method_name))
-                and method(*self._convert_msgspec_args(method, args))
-            )
+            def get_result():
+                method = getattr(self, method_name)
+                result = method(*self._convert_msgspec_args(method, args))
+                if method_name in READY_STATE_UTILITY_METHODS:
+                    self._maybe_publish_ready_progress(force=True)
+                return result
+
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
             )
@@ -1967,6 +2058,12 @@ class EngineCoreProc(EngineCore):
                     # which will be very small.
                     assert coord_socket is not None
                     coord_socket.send_multipart(encoder.encode(outputs))
+                    continue
+
+                if client_index == READY_PROGRESS_BROADCAST_CLIENT_INDEX:
+                    buffers = encoder.encode(outputs)
+                    for socket in sockets:
+                        socket.send_multipart(buffers)
                     continue
 
                 # Reclaim buffers that zmq is finished with.
@@ -2349,6 +2446,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 elif not self.model_executor.is_sleeping:
                     with self.capture_iteration_details(None) as iteration_details:
                         self.execute_dummy_batch()
+                    self._record_ready_progress()
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(
@@ -2359,6 +2457,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs
             )
+            self._maybe_publish_ready_progress()
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:

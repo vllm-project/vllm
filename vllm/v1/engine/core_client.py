@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -41,6 +42,7 @@ from vllm.v1.engine import (
     EEPNotificationType,
     EngineCoreOutputs,
     EngineCoreReadyResponse,
+    EngineCoreReadyState,
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
@@ -75,6 +77,13 @@ AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 EngineIdentity = bytes
+
+
+@dataclass
+class EngineCoreReadyProgress:
+    seq: int = 0
+    state: EngineCoreReadyState = EngineCoreReadyState.IDLE
+    last_progress_at: float = 0.0
 
 
 class EngineCoreClient(ABC):
@@ -223,6 +232,18 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def execute_dummy_batch_async(self) -> None:
+        raise NotImplementedError
+
+    async def check_health_gpu_async(self, cache_ttl_s: float) -> None:
+        raise NotImplementedError
+
+    def get_stalled_engine_ranks(self, timeout_s: float) -> list[int]:
+        raise NotImplementedError
+
+    def get_sleeping_engine_ranks(self) -> list[int]:
+        raise NotImplementedError
+
+    def all_engines_idle(self) -> bool:
         raise NotImplementedError
 
     async def set_weight_version_async(self, weight_version: str) -> None:
@@ -1130,6 +1151,13 @@ class AsyncMPClient(MPClient):
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
 
+        self._ready_progress = {
+            rank: EngineCoreReadyProgress() for rank in self.engine_ranks_managed
+        }
+        self._ready_engine_ranks = dict(
+            zip(self.core_engines, self.engine_ranks_managed)
+        )
+
         # locally-cached engine status
         self._engine_status: dict[int, dict] = {}
         if self.vllm_config.parallel_config.enable_fault_tolerance:
@@ -1224,6 +1252,70 @@ class AsyncMPClient(MPClient):
             process_outputs_socket(), name="EngineCoreOutputQueueTask"
         )
 
+    @staticmethod
+    async def process_engine_outputs(
+        self: "AsyncMPClient", outputs: EngineCoreOutputs
+    ) -> None:
+        if outputs.ready_state is None or outputs.ready_progress_seq is None:
+            return
+
+        now = time.monotonic()
+        progress = self._ready_progress.setdefault(
+            outputs.engine_index, EngineCoreReadyProgress()
+        )
+        if outputs.ready_state != progress.state:
+            progress.state = outputs.ready_state
+            progress.last_progress_at = now
+        if outputs.ready_progress_seq != progress.seq:
+            progress.seq = outputs.ready_progress_seq
+            progress.last_progress_at = now
+
+    def get_stalled_engine_ranks(self, timeout_s: float) -> list[int]:
+        if timeout_s <= 0:
+            return []
+        now = time.monotonic()
+        return [
+            rank
+            for rank, progress in self._ready_progress.items()
+            if progress.state == EngineCoreReadyState.BUSY
+            and now - progress.last_progress_at > timeout_s
+        ]
+
+    def get_sleeping_engine_ranks(self) -> list[int]:
+        return [
+            rank
+            for rank, progress in self._ready_progress.items()
+            if progress.state == EngineCoreReadyState.SLEEPING
+        ]
+
+    def all_engines_idle(self) -> bool:
+        return all(
+            progress.state == EngineCoreReadyState.IDLE
+            for progress in self._ready_progress.values()
+        )
+
+    def _mark_engine_busy(self, engine: EngineIdentity) -> None:
+        rank = self._ready_engine_ranks.setdefault(
+            engine, int.from_bytes(engine, byteorder="little")
+        )
+        progress = self._ready_progress.setdefault(rank, EngineCoreReadyProgress())
+        if progress.state == EngineCoreReadyState.SLEEPING:
+            return
+        if progress.state != EngineCoreReadyState.BUSY:
+            progress.state = EngineCoreReadyState.BUSY
+            progress.last_progress_at = time.monotonic()
+
+    def _sync_ready_engines(self) -> None:
+        managed_ranks = set(self.engine_ranks_managed)
+        self._ready_progress = {
+            rank: self._ready_progress.get(rank, EngineCoreReadyProgress())
+            for rank in managed_ranks
+        }
+        self._ready_engine_ranks = {
+            engine: int.from_bytes(engine, byteorder="little")
+            for engine in self.core_engines
+        }
+
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
         # If an exception arises in process_outputs_socket task,
@@ -1295,6 +1387,7 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
+        self._mark_engine_busy(self.core_engine)
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
@@ -1357,6 +1450,14 @@ class AsyncMPClient(MPClient):
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
+
+    async def check_health_gpu_async(self, cache_ttl_s: float) -> None:
+        await asyncio.gather(
+            *(
+                self._call_utility_async("check_health_gpu", cache_ttl_s, engine=engine)
+                for engine in self.core_engines
+            )
+        )
 
     async def set_weight_version_async(self, weight_version: str) -> None:
         await self.call_utility_async("set_weight_version", weight_version)
@@ -1522,6 +1623,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             self.engine_ranks_managed = list(
                                 range(dp_rank, dp_rank + num_ranks)
                             )
+                            self._sync_ready_engines()
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines = self.lb_engines + [
                                     [0, 0, 0.0]
@@ -1586,6 +1688,7 @@ class DPAsyncMPClient(AsyncMPClient):
         request.client_index = self.client_index
 
         chosen_engine = self.get_core_engine_for_request(request)
+        self._mark_engine_busy(chosen_engine)
         to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
         if not self.engines_running:
             # Notify coordinator that we're sending a request
@@ -1701,9 +1804,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         return (await self.call_utility_all_async(method, *args))[0]
 
     @staticmethod
-    async def process_engine_outputs(
-        self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
-    ):
+    async def process_engine_outputs(self: "AsyncMPClient", outputs: EngineCoreOutputs):
+        await AsyncMPClient.process_engine_outputs(self, outputs)
+        assert isinstance(self, DPLBAsyncMPClient)
         if outputs.finished_requests and self.reqs_in_flight:
             for req_id in outputs.finished_requests:
                 if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
@@ -1981,6 +2084,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Update the parallel config
         parallel_config = self.vllm_config.parallel_config
         parallel_config.data_parallel_size = new_data_parallel_size
+        self.engine_ranks_managed = [
+            int.from_bytes(engine, byteorder="little") for engine in self.core_engines
+        ]
+        self._sync_ready_engines()
         if isinstance(self.resources.engine_manager, CoreEngineActorManager):
             parallel_config.data_parallel_size_local = len(
                 self.resources.engine_manager.local_engine_actors
@@ -2032,6 +2139,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
         for rank in range(new_data_parallel_size, cur_data_parallel_size):
             self._kv_event_sources.pop(rank, None)
+        self._sync_ready_engines()
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         eep_mode = self._eep_commit_pause_mode()
         pause_modes = [eep_mode] * new_data_parallel_size + ["abort"] * removed_dp_size

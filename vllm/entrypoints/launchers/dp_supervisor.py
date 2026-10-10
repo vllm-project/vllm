@@ -182,7 +182,7 @@ async def _probe_endpoint(
     conn_err_failure_threshold: int = 3,
     conn_err_retry_delay: float = 5.0,
 ) -> bool:
-    """Probe /health endpoint for 200 status.
+    """Probe a child endpoint for 200 status.
 
     If there is a connection error, retry every N seconds.
     """
@@ -197,8 +197,8 @@ async def _probe_endpoint(
             async with session.get(
                 _child_base_url(args, port) + path, ssl=probe_ssl
             ) as response:
-                # vLLM returns 503 on EngineDeadError, so we should return
-                # immediately if vLLM responds with a non-200 status code.
+                # A non-200 response is authoritative and should not be
+                # retried as a connection failure.
                 return response.status == HTTPStatus.OK
         except (TimeoutError, aiohttp.ClientError) as e:
             # Allow retry of connection errors.
@@ -232,7 +232,7 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
     @app.get("/ready", include_in_schema=False)
     @app.get("/readyz", include_in_schema=False)
     async def ready() -> Response:
-        return _status_response(app.state.supervisor.is_ready)
+        return _status_response(await app.state.supervisor.check_ready())
 
     return app
 
@@ -283,6 +283,33 @@ class DPSupervisor:
     @property
     def is_ready(self) -> bool:
         return self._is_ready and not self._shutdown_event.is_set()
+
+    async def check_ready(self) -> bool:
+        """Aggregate child readiness without changing supervisor lifecycle."""
+        if not self.is_ready:
+            return False
+
+        timeout = aiohttp.ClientTimeout(
+            total=max(
+                self.args.dp_supervisor_probe_timeout_s,
+                envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT + 1,
+            )
+        )
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            results = await asyncio.gather(
+                *(
+                    _probe_endpoint(
+                        session,
+                        self.args,
+                        port,
+                        "/ready",
+                        conn_err_failure_threshold=1,
+                    )
+                    for port in self.child_ports
+                ),
+                return_exceptions=True,
+            )
+        return all(result is True for result in results)
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()

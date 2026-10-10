@@ -52,7 +52,12 @@ from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineGenerateError,
+    EngineSleepingError,
+    EngineUnhealthyError,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -191,6 +196,8 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
             renderer=renderer,
         )
+        self._idle_health_probe_lock = asyncio.Lock()
+        self._idle_health_probe_task: asyncio.Task[None] | None = None
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
@@ -1088,6 +1095,64 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
+
+    async def check_health_gpu(self) -> None:
+        """Check readiness using busy progress or an idle GPU execution."""
+        await self.check_health()
+
+        sleeping_ranks = self.engine_core.get_sleeping_engine_ranks()
+        if sleeping_ranks:
+            raise EngineSleepingError(
+                f"Engine is sleeping or paused (engine ranks: {sleeping_ranks})"
+            )
+
+        # busy progress check
+        stall_timeout = envs.VLLM_READY_STALL_TIMEOUT_S
+        stalled_ranks = self.engine_core.get_stalled_engine_ranks(stall_timeout)
+        if stalled_ranks:
+            raise EngineUnhealthyError(
+                "EngineCore made no model-step progress for "
+                f"{stall_timeout:g}s (engine ranks: {stalled_ranks})"
+            )
+
+        # idle GPU health check, if dp size is > 1, skip
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            return
+
+        if not self.engine_core.all_engines_idle():
+            return
+
+        await self._check_idle_gpu_health()
+
+    async def _check_idle_gpu_health(self) -> None:
+        cache_ttl = envs.VLLM_READY_IDLE_PROBE_CACHE_TTL_S
+        async with self._idle_health_probe_lock:
+            task = self._idle_health_probe_task
+            if task is None or task.done():
+                task = asyncio.create_task(
+                    self.engine_core.check_health_gpu_async(cache_ttl)
+                )
+                task.add_done_callback(
+                    lambda done: None if done.cancelled() else done.exception()
+                )
+                self._idle_health_probe_task = task
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
+            )
+        except EngineDeadError:
+            raise
+        except TimeoutError as exc:
+            raise EngineUnhealthyError(
+                "Idle GPU health check timed out after "
+                f"{envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT:g}s"
+            ) from exc
+        except Exception as exc:
+            raise EngineUnhealthyError("Idle GPU health check failed") from exc
+        finally:
+            if task.done() and self._idle_health_probe_task is task:
+                self._idle_health_probe_task = None
 
     async def start_profile(
         self,

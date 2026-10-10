@@ -247,6 +247,24 @@ def test_handles_shutdown_event():
 
 
 @pytest.mark.asyncio
+async def test_ready_aggregates_children_without_shutdown(monkeypatch):
+    supervisor = DPSupervisor(_make_unit_args())
+    supervisor._is_ready = True
+    supervisor.child_ports = [8000, 8001]
+    probed_paths = []
+
+    async def fake_probe(_session, _args, port, path, **_kwargs):
+        probed_paths.append((port, path))
+        return port == 8000
+
+    monkeypatch.setattr(dp_sup, "_probe_endpoint", fake_probe)
+
+    assert not await supervisor.check_ready()
+    assert probed_paths == [(8000, "/ready"), (8001, "/ready")]
+    assert not supervisor._shutdown_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_children_uses_engine_process_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):

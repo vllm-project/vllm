@@ -13,7 +13,11 @@ from fastapi import Request
 
 from tests.utils import RemoteOpenAIServer
 from vllm import envs
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineSleepingError,
+    EngineUnhealthyError,
+)
 from vllm.version import __version__ as VLLM_VERSION
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -93,6 +97,13 @@ async def test_show_version(server: RemoteOpenAIServer):
 @pytest.mark.asyncio
 async def test_check_health(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("health"))
+
+    assert response.status_code == HTTPStatus.OK
+
+
+@pytest.mark.asyncio
+async def test_check_ready(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("ready"))
 
     assert response.status_code == HTTPStatus.OK
 
@@ -224,3 +235,37 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [EngineDeadError(), EngineUnhealthyError()])
+async def test_ready_check_engine_error(error: Exception):
+    from vllm.entrypoints.serve.instrumentator.health import ready
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_gpu.side_effect = error
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+
+    response = await ready(mock_request)
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_ready_check_engine_sleeping_reason():
+    from vllm.entrypoints.serve.instrumentator.health import ready
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.check_health_gpu.side_effect = EngineSleepingError()
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+
+    response = await ready(mock_request)
+
+    assert response.status_code == 503
+    assert response.body == b'{"status":"not_ready","reason":"sleeping"}'
