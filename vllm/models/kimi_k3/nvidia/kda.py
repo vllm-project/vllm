@@ -456,6 +456,8 @@ def _flashinfer_kda_prefill(
         beta_is_logit=True,
         seq_order=seq_order,
         prefill_workspace=prefill_workspace,
+        # The auto-selected small-BH backend requires tensor version counters.
+        backend="cute-dsl",
     )
     return output, initial_state
 
