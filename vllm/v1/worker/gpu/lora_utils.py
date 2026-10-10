@@ -96,9 +96,26 @@ class LoraState:
         req_ids: list[str],
         idx_mapping: np.ndarray,
         num_scheduled_tokens: np.ndarray,
+        num_logits_per_req: np.ndarray,
     ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+        """Build the LoRA ids for one batch.
+
+        Args:
+            req_ids: Request ids in batch order.
+            idx_mapping: Batch row to request-state slot.
+            num_scheduled_tokens: Query length of each request. Repeats the
+                per-token mapping used by hidden-state LoRA.
+            num_logits_per_req: Logits rows of each request, bonus tokens plus
+                draft tokens. Repeats the lm_head mapping so it lines up with
+                ``cu_num_logits``. Same role as V1 ``num_sampled_tokens``.
+
+        Returns:
+            The lm_head mapping, the per-token mapping, and the LoRA requests
+            active in this batch.
+
+        """
         lora_ids = self.lora_ids[idx_mapping]
-        prompt_lora_mapping = tuple(lora_ids)
+        prompt_lora_mapping = tuple(lora_ids.repeat(num_logits_per_req))
         token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = self.get_activate_loras(req_ids)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests

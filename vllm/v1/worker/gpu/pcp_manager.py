@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
+    make_num_logits_per_req,
 )
 
 if TYPE_CHECKING:
@@ -679,6 +680,14 @@ class PCPManager:
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            # Local prefill rows are not the sampled logits. One row per
+            # local request matches cu_num_logits rebuilt above; do not keep
+            # the global spec-decode counts copied by replace().
+            num_logits_per_req=make_num_logits_per_req(
+                num_local_reqs,
+                None,
+                1 if total_num_logits > 0 else 0,
+            ),
             prompt_lens=None,
         )
         return self._local_batch

@@ -115,6 +115,7 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBuffers,
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
+    make_num_logits_per_req,
     post_update,
     post_update_num_computed_tokens,
     prepare_pos_seq_lens,
@@ -1369,6 +1370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
+            num_logits_per_req = make_num_logits_per_req(num_reqs, None, 1)
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(
                 num_reqs + 1, device=self.device, dtype=torch.int32
@@ -1382,16 +1384,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if num_draft_tokens_per_req is None:
                 num_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+            num_logits_per_req = make_num_logits_per_req(
+                num_reqs, num_draft_tokens_per_req, num_bonus_tokens
+            )
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
-            total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
-            num_logits = num_draft_tokens_per_req + num_bonus_tokens
+            total_num_logits = int(num_logits_per_req.sum())
             # combine_sampled_and_draft_tokens places a request's logits rows
             # at [query_end - num_logits, query_end). Fewer query rows than
             # that would silently select the preceding request's hidden states.
-            assert (num_scheduled_tokens_np >= num_logits).all()
+            assert (num_scheduled_tokens_np >= num_logits_per_req).all()
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
-            np.cumsum(num_logits, out=cu_num_logits_np[1:])
+            np.cumsum(num_logits_per_req, out=cu_num_logits_np[1:])
             cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
 
         # The general branch also serves a no-draft batch with k != 1, and
@@ -1409,6 +1413,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     cu_num_logits_np,
                 )
             )
+            # A zero draft budget rewrites the CPU cumsum down to bonus rows.
+            if int(num_logits_per_req.sum()) != int(cu_num_logits_np[-1]):
+                num_logits_per_req = np.diff(cu_num_logits_np).astype(
+                    np.int32, copy=False
+                )
 
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
@@ -1426,6 +1435,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+            # Partial draft admission picks rows on device. The lm_head LoRA
+            # mapping has to follow those rows, not the pre-admission cumsum.
+            row_count = int(num_logits_per_req.sum())
+            if self.lora_config is not None and row_count != total_num_logits:
+                num_logits_per_req = np.diff(cu_num_logits.cpu().numpy()).astype(
+                    np.int32, copy=False
+                )
         if num_draft_tokens_per_req is not None:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
@@ -1528,6 +1544,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            num_logits_per_req=num_logits_per_req,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
             fast_prefill=fast_prefill,
@@ -1813,11 +1830,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
             if self.lora_config:
-                # Activate LoRA adapters.
+                # Activate LoRA adapters. lm_head ids follow logits rows
+                # (bonus + draft), not one id per request.
+                num_logits_per_req = input_batch.num_logits_per_req
+                assert num_logits_per_req is not None
                 lora_inputs = self.lora_state.make_lora_inputs(
                     input_batch.req_ids,
                     input_batch.idx_mapping_np,
                     input_batch.num_scheduled_tokens,
+                    num_logits_per_req,
                 )
                 self._set_active_loras(*lora_inputs)
         else:
