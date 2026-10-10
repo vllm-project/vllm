@@ -177,7 +177,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 * self.config.parallel.pp_size
                 * self.config.parallel.pcp_size
             )
-        return torch.accelerator.current_device_index() % worker_world_size
+        from vllm.distributed.parallel_state import get_world_group
+
+        return get_world_group().local_rank % worker_world_size
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
