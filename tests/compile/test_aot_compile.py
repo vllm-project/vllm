@@ -94,10 +94,13 @@ class SparseActivationAotModel(torch.nn.Module):
         return self.down_proj(self.activation(self.up_proj(x)))
 
 
-def make_vllm_config() -> VllmConfig:
+# allow passing mode to exercise DYNAMO_TRACE_ONCE without changing existing tests
+def make_vllm_config(
+    mode: CompilationMode = CompilationMode.VLLM_COMPILE,
+) -> VllmConfig:
     return VllmConfig(
         compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
+            mode=mode,
             backend="inductor",
         )
     )
@@ -148,7 +151,10 @@ def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
-def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    "mode", [CompilationMode.VLLM_COMPILE, CompilationMode.DYNAMO_TRACE_ONCE]
+)
+def test_save_and_load(monkeypatch: pytest.MonkeyPatch, mode: CompilationMode):
     with monkeypatch.context() as m:
         args = (torch.randn(10, 10),)
 
@@ -158,7 +164,7 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
             m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
             m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
             disable_envs_cache()
-            vllm_config = make_vllm_config()
+            vllm_config = make_vllm_config(mode=mode)
             with (
                 use_vllm_config(vllm_config),
                 compilation_counter.expect(
@@ -174,7 +180,7 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
             disable_envs_cache()
 
             m.setenv("VLLM_FORCE_AOT_LOAD", "1")
-            vllm_config = make_vllm_config()
+            vllm_config = make_vllm_config(mode=mode)
             with (
                 use_vllm_config(vllm_config),
                 compilation_counter.expect(
