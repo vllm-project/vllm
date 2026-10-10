@@ -476,15 +476,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub max_log_len: Option<Unsupported>,
 
-    /// If set to True, include per-request timing metrics in API responses.
-    #[arg(
-        long,
-        visible_alias = "no-enable-per-request-metrics",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_per_request_metrics: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,

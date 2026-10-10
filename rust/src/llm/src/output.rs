@@ -20,6 +20,7 @@ use vllm_engine_core_client::{
     AbortCause, EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput,
 };
 
+use crate::RequestTimestamps;
 use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
@@ -172,6 +173,8 @@ pub struct GenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
+    /// Engine lifecycle timestamps, present on terminal outputs.
+    pub timestamps: Option<RequestTimestamps>,
 }
 
 impl GenerateOutput {
@@ -225,6 +228,7 @@ impl GenerateOutput {
         self.kv_transfer_params = next.kv_transfer_params;
         self.ec_transfer_params = next.ec_transfer_params;
         self.spec_decode_metrics = next.spec_decode_metrics;
+        self.timestamps = next.timestamps;
     }
 }
 
@@ -236,6 +240,7 @@ impl GenerateOutput {
         token_ids: Vec<u32>,
         finish_reason: Option<FinishReason>,
     ) -> Self {
+        let timestamps = finish_reason.is_some().then(RequestTimestamps::default);
         Self {
             request_id: String::new(),
             prompt_info: prompt_token_ids.map(|ids| {
@@ -253,6 +258,7 @@ impl GenerateOutput {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            timestamps,
         }
     }
 }
@@ -358,6 +364,7 @@ impl GenerateOutputStream {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
 
+        let timestamps = finish_reason.is_some().then(|| self.request_metrics.timestamps());
         let output = GenerateOutput {
             request_id: raw.request_id,
             prompt_info: self.pending_prompt_info.take(),
@@ -369,6 +376,7 @@ impl GenerateOutputStream {
             ec_transfer_params: raw.ec_transfer_params,
             sampling_mask,
             spec_decode_metrics: raw.spec_decode_metrics,
+            timestamps,
         };
 
         Ok(output)

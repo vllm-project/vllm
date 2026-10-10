@@ -18,6 +18,15 @@ const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
 const PROMPT_TOKEN_SOURCE_EXTERNAL_KV_TRANSFER: &str = "external_kv_transfer";
 
+/// Engine lifecycle timestamps used by frontend per-request response metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RequestTimestamps {
+    pub queued_ts: f64,
+    pub scheduled_ts: f64,
+    pub first_token_ts: f64,
+    pub last_token_ts: f64,
+}
+
 /// Request-scoped metrics state tracked across streamed engine-core updates.
 ///
 /// This is the Rust-side counterpart of the Python frontend's request-lifecycle
@@ -220,6 +229,16 @@ impl RequestMetricsTracker {
         }
     }
 
+    /// Engine lifecycle timestamps recorded so far.
+    pub(crate) fn timestamps(&self) -> RequestTimestamps {
+        RequestTimestamps {
+            queued_ts: self.queued_ts,
+            scheduled_ts: self.scheduled_ts,
+            first_token_ts: self.first_token_ts,
+            last_token_ts: self.last_token_ts,
+        }
+    }
+
     /// Record prompt token counters through cached metric handles.
     fn record_prompt_tokens(&self, prefill_stats: &PrefillStats) {
         let computed = prefill_stats.num_computed_tokens as u64;
@@ -380,7 +399,7 @@ mod tests {
     use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
 
-    use super::{RequestMetricsTracker, diff_or_zero};
+    use super::{RequestMetricsTracker, RequestTimestamps, diff_or_zero};
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
@@ -437,6 +456,15 @@ mod tests {
         assert_eq!(tracker.scheduled_ts, 9.0);
         assert_eq!(tracker.first_token_ts, 10.0);
         assert_eq!(tracker.last_token_ts, 11.5);
+        assert_eq!(
+            tracker.timestamps(),
+            RequestTimestamps {
+                queued_ts: 8.0,
+                scheduled_ts: 9.0,
+                first_token_ts: 10.0,
+                last_token_ts: 11.5,
+            }
+        );
         assert!((tracker.first_token_latency - 0.2).abs() < 1e-9);
         assert_eq!(
             diff_or_zero(tracker.last_token_ts, tracker.first_token_ts),

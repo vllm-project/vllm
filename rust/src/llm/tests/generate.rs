@@ -412,6 +412,8 @@ async fn generate_merges_outputs_by_stream_interval() {
     for output in &outputs {
         assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
     }
+    assert!(outputs[..2].iter().all(|output| output.timestamps.is_none()));
+    assert!(outputs[2].timestamps.is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -530,6 +532,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
             rows: vec![vec![1, 33, 99]],
         }),
         spec_decode_metrics: None,
+        timestamps: Default::default(),
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();
