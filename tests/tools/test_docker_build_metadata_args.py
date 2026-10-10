@@ -1,15 +1,139 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 ROCM_CI_BAKE = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
 ROCM_IMAGE_SMOKE = REPO_ROOT / ".buildkite" / "scripts" / "rocm" / "smoke-test-image.sh"
+ROCM_PROMOTION = (
+    REPO_ROOT / ".buildkite" / "scripts" / "rocm" / "promote-stable-images.sh"
+)
+SMOKE_DIGEST = "sha256:" + "a" * 64
+SMOKE_IMAGE = f"rocm/vllm-ci@{SMOKE_DIGEST}"
+
+
+@pytest.fixture
+def promotion_env(tmp_path: Path) -> dict[str, str]:
+    """Record external calls; no registry or Git remote is contacted."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ("git", "docker", "buildkite-agent"):
+        stub = fake_bin / command
+        stub.write_text(
+            """#!/bin/bash
+printf '%s %s\\n' "${0##*/}" "$*" >> "$CALL_LOG"
+case "${0##*/}" in
+    git)
+        [[ "$1 $2" == 'ls-remote --exit-code' && "$#" == 4 ]] || exit 98
+        [[ "$3" == 'https://github.com/vllm-project/vllm.git' ]] || exit 98
+        [[ "$4" == refs/heads/main ]] || exit 98
+        [[ -n "${REMOTE_TIP:-}" ]] || exit 1
+        printf '%s\\trefs/heads/main\\n' "$REMOTE_TIP"
+        ;;
+    buildkite-agent)
+        case "$*" in
+            'meta-data get rocm-base-standard-config')
+                printf '%s\\n' "${BASE_STANDARD:-1}" ;;
+            'meta-data get rocm-ci-base-standard-config')
+                printf '%s\\n' "${CI_STANDARD:-1}" ;;
+            *) exit 97 ;;
+        esac
+        ;;
+    *) exit 96 ;;
+esac
+"""
+        )
+        stub.chmod(0o755)
+    return {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CALL_LOG": str(tmp_path / "calls"),
+        "BUILDKITE": "true",
+        "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+        "BUILDKITE_BRANCH": "main",
+        "BUILDKITE_PULL_REQUEST": "false",
+        "BUILDKITE_COMMIT": "a" * 40,
+        "BUILDKITE_BUILD_ID": "standard-nightly",
+        "NIGHTLY": "1",
+        "REMOTE_TIP": "a" * 40,
+    }
+
+
+def run_promotion(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(ROCM_PROMOTION)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"NIGHTLY": ""},
+        {"NIGHTLY": "0"},
+        {"NIGHTLY": "true"},
+        {"BUILDKITE": "false"},
+        {"BUILDKITE_PULL_REQUEST": "50800"},
+        {"BUILDKITE_PULL_REQUEST": ""},
+        {"BUILDKITE_BRANCH": "feature", "ROCM_BASE_STABLE_BRANCH": "feature"},
+        {
+            "BUILDKITE_REPO": "https://github.com/fork/vllm.git",
+            "CI_BASE_STABLE_REPO_SLUG": "fork/vllm",
+        },
+        {"CI_ROCM_DOCKERFILE": "docker/Dockerfile.rock"},
+        {"ROCM_BASE_DOCKERFILE": "docker/Dockerfile.rock_base"},
+        {"TORCH_NIGHTLY": "1"},
+        {"PYTORCH_BRANCH": "experiment"},
+        {"NIXL_BRANCH": ""},
+        {"ROCM_BASE_PUSH_STABLE_TAG": "0"},
+        {"ROCM_BASE_PUSH_STABLE_TAG": ""},
+        {"CI_BASE_PUSH_STABLE_TAG": "0"},
+        {"ROCM_BASE_IMAGE_REPO": "preview/vllm-dev"},
+        {"CI_BASE_IMAGE_TAG": "rocm/vllm-dev:preview"},
+    ],
+)
+def test_rocm_promotion_ineligible_build_never_contacts_registry_or_upstream(
+    promotion_env, overrides
+) -> None:
+    result = run_promotion(promotion_env | overrides)
+    assert result.returncode == 0, result.stderr
+    assert "Skipping stable ROCm promotion" in result.stdout
+    assert not Path(promotion_env["CALL_LOG"]).exists()
+
+
+@pytest.mark.parametrize("tip", ["b" * 40, "", "invalid"])
+def test_rocm_promotion_checks_fixed_upstream_before_loading_candidates(
+    promotion_env, tip
+) -> None:
+    result = run_promotion(promotion_env | {"REMOTE_TIP": tip})
+    assert result.returncode == (0 if len(tip) == 40 else 1), result.stderr
+    assert Path(promotion_env["CALL_LOG"]).read_text().splitlines() == [
+        "git ls-remote --exit-code "
+        "https://github.com/vllm-project/vllm.git refs/heads/main"
+    ]
+
+
+@pytest.mark.parametrize("field", ["BASE_STANDARD", "CI_STANDARD"])
+@pytest.mark.parametrize("value", ["0", "invalid"])
+def test_rocm_promotion_requires_standard_configuration_from_each_producer(
+    promotion_env, field, value
+) -> None:
+    result = run_promotion(promotion_env | {field: value})
+    assert result.returncode == (0 if value == "0" else 1), result.stderr
+    calls = Path(promotion_env["CALL_LOG"]).read_text().splitlines()
+    assert all(
+        call.startswith("git ") or call.endswith("-standard-config") for call in calls
+    ), calls
 
 
 def run_helper(
@@ -236,6 +360,9 @@ def prepare_rocm_smoke_test(
     docker = fake_bin / "docker"
     docker.write_text('#!/bin/sh\ntouch "$FAKE_DOCKER_CALLED"\nexit 99\n')
     docker.chmod(0o755)
+    agent = fake_bin / "buildkite-agent"
+    agent.write_text('#!/bin/sh\ntest "$1 $2" = "meta-data set"\n')
+    agent.chmod(0o755)
 
     marker = tmp_path / "build" / "rocm-smoke-export" / "vllm-smoke-ok"
     marker.parent.mkdir(parents=True)
@@ -244,12 +371,13 @@ def prepare_rocm_smoke_test(
     env.update(
         {
             "BUILDKITE_BUILD_ID": build_id,
+            "BUILDKITE": "false",
             "FAKE_DOCKER_CALLED": str(docker_called),
             "PATH": f"{fake_bin}:{env['PATH']}",
+            "VLLM_CI_SMOKE_IMAGE": SMOKE_IMAGE,
         }
     )
     env.pop("ROCM_CI_ARTIFACT_ONLY", None)
-    env.pop("VLLM_CI_SMOKE_IMAGE", None)
     return env, marker, docker, docker_called
 
 
@@ -259,6 +387,8 @@ def test_rocm_smoke_marker_avoids_host_image_pull(tmp_path: Path) -> None:
         marker_id="build-123",
         build_id="build-123",
     )
+    proof = marker.with_name("vllm-smoke-image")
+    proof.write_text(f"build-123\n{SMOKE_IMAGE}\n{SMOKE_DIGEST}\n")
 
     result = subprocess.run(
         ["bash", str(ROCM_IMAGE_SMOKE)],
@@ -271,7 +401,7 @@ def test_rocm_smoke_marker_avoids_host_image_pull(tmp_path: Path) -> None:
 
     assert "verified inside BuildKit" in result.stdout
     assert not docker_called.exists()
-    assert not marker.exists()
+    assert marker.exists()
 
 
 def test_rocm_smoke_rejects_marker_from_another_build(tmp_path: Path) -> None:
@@ -315,7 +445,7 @@ def test_rocm_smoke_override_streams_current_checks_to_docker(
             "FAKE_DOCKER_ARGS": str(docker_args),
             "FAKE_DOCKER_STDIN": str(docker_stdin),
             "IMAGE_TAG": "rocm/vllm-ci:built",
-            "VLLM_CI_SMOKE_IMAGE": "rocm/vllm-ci:override",
+            "VLLM_CI_SMOKE_IMAGE": f"rocm/vllm-ci@sha256:{'b' * 64}",
         }
     )
 
@@ -326,10 +456,311 @@ def test_rocm_smoke_override_streams_current_checks_to_docker(
         env=env,
     )
 
-    assert "rocm/vllm-ci:override" in docker_args.read_text().splitlines()
+    assert env["VLLM_CI_SMOKE_IMAGE"] in docker_args.read_text().splitlines()
     assert docker_args.read_text().splitlines()[-3:] == ["-s", "--", "--inside"]
     assert "run_smoke_checks()" in docker_stdin.read_text()
     assert marker.exists()
+
+
+@pytest.mark.parametrize(
+    "proof_lines",
+    [
+        ["another-build", SMOKE_IMAGE, SMOKE_DIGEST],
+        ["build-123", "rocm/vllm-ci:another-image", SMOKE_DIGEST],
+        ["build-123", SMOKE_IMAGE, "sha256:" + "b" * 64],
+        ["build-123", SMOKE_IMAGE],
+    ],
+    ids=["wrong-build", "wrong-image", "wrong-digest", "incomplete-proof"],
+)
+def test_rocm_smoke_rejects_image_proof_mismatch(
+    tmp_path: Path, proof_lines: list[str]
+) -> None:
+    env, marker, _, docker_called = prepare_rocm_smoke_test(
+        tmp_path, marker_id="build-123", build_id="build-123"
+    )
+    marker.with_name("vllm-smoke-image").write_text("\n".join(proof_lines) + "\n")
+
+    result = subprocess.run(
+        ["bash", str(ROCM_IMAGE_SMOKE)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "proof does not match" in result.stderr
+    assert not docker_called.exists()
+
+
+def test_rocm_smoke_rejects_proof_without_success_marker(tmp_path: Path) -> None:
+    env, marker, _, docker_called = prepare_rocm_smoke_test(
+        tmp_path, marker_id="build-123", build_id="build-123"
+    )
+    marker.with_name("vllm-smoke-image").write_text(
+        f"build-123\n{SMOKE_IMAGE}\n{SMOKE_DIGEST}\n"
+    )
+    marker.unlink()
+
+    result = subprocess.run(
+        ["bash", str(ROCM_IMAGE_SMOKE)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "no success marker" in result.stderr
+    assert not docker_called.exists()
+
+
+@pytest.mark.parametrize("has_marker", [False, True])
+def test_rocm_smoke_requires_pinned_image_run_without_digest_proof(
+    tmp_path: Path, has_marker: bool
+) -> None:
+    env, marker, docker, docker_called = prepare_rocm_smoke_test(
+        tmp_path, marker_id="build-123", build_id="build-123"
+    )
+    if not has_marker:
+        marker.unlink()
+    docker.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_DOCKER_CALLED"\ncat >/dev/null\n'
+    )
+
+    subprocess.run(["bash", str(ROCM_IMAGE_SMOKE)], check=True, cwd=tmp_path, env=env)
+
+    args = docker_called.read_text().splitlines()
+    assert args[0] == "run"
+    assert SMOKE_IMAGE in args
+    assert "--network=none" in args
+
+
+@pytest.mark.parametrize("marker_id", [None, "another-build", "build-123"])
+def test_rocm_bake_export_binds_only_valid_marker_to_emitted_digest(
+    tmp_path: Path, marker_id: str | None
+) -> None:
+    export_dir = tmp_path / "build" / "rocm-smoke-export"
+    export_dir.mkdir(parents=True)
+    if marker_id is not None:
+        (export_dir / "vllm-smoke-ok").write_text(marker_id + "\n")
+    metadata = tmp_path / "bake-metadata.json"
+    metadata.write_text(
+        json.dumps({"test-rocm-ci": {"containerimage.digest": SMOKE_DIGEST}})
+    )
+    proof = export_dir / "vllm-smoke-image"
+    proof.write_text("stale-proof\n")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"; TARGET=test-rocm-ci-with-wheel; '
+                'BAKE_METADATA_FILE="$2"; verify_rocm_smoke_export'
+            ),
+            "bash",
+            str(ROCM_CI_BAKE),
+            str(metadata),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "BUILDKITE_BUILD_ID": "build-123",
+            "IMAGE_TAG": "rocm/vllm-ci:build-123",
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    if marker_id == "build-123":
+        assert result.returncode == 0, result.stderr
+        assert proof.read_text().splitlines() == [
+            "build-123",
+            "rocm/vllm-ci:build-123",
+            SMOKE_DIGEST,
+        ]
+    else:
+        assert result.returncode == 1
+        assert not proof.exists()
+
+
+def test_rocm_bake_records_fresh_metadata_and_smoke_from_same_run(
+    tmp_path: Path,
+) -> None:
+    export_dir = tmp_path / "build" / "rocm-smoke-export"
+    export_dir.mkdir(parents=True)
+    (export_dir / "vllm-smoke-ok").write_text("stale-marker\n")
+    (export_dir / "vllm-smoke-image").write_text("stale-proof\n")
+    metadata_dir = tmp_path / "temporary"
+    metadata_dir.mkdir()
+    (metadata_dir / "bake-metadata.json").write_text("stale-metadata\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+SCRIPT_TMP_DIR="$2"
+TARGET=test-rocm-ci-with-wheel
+BAKE_TARGETS=("$TARGET")
+validate_ci_base_output_refs() { return 0; }
+docker() {
+    [[ "$1 $2" == 'buildx bake' ]] || return 97
+    [[ ! -e ./build/rocm-smoke-export/vllm-smoke-ok ]] || return 97
+    [[ ! -e ./build/rocm-smoke-export/vllm-smoke-image ]] || return 97
+    while (($#)); do
+        if [[ "$1" == --metadata-file ]]; then
+            [[ ! -e "$2" ]] || return 97
+            printf '{"test-rocm-ci":{"containerimage.digest":"%s"}}\n' \
+                "$EXPECTED_DIGEST" > "$2"
+            printf '%s\n' "$BUILDKITE_BUILD_ID" \
+                > ./build/rocm-smoke-export/vllm-smoke-ok
+            return 0
+        fi
+        shift
+    done
+    return 97
+}
+run_bake
+verify_rocm_smoke_export
+""",
+            "bash",
+            str(ROCM_CI_BAKE),
+            str(metadata_dir),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "BUILDKITE_BUILD_ID": "build-123",
+            "IMAGE_TAG": "rocm/vllm-ci:build-123",
+            "EXPECTED_DIGEST": SMOKE_DIGEST,
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (export_dir / "vllm-smoke-image").read_text().splitlines() == [
+        "build-123",
+        "rocm/vllm-ci:build-123",
+        SMOKE_DIGEST,
+    ]
+
+
+@pytest.mark.parametrize(
+    "metadata_content",
+    [None, "invalid-json", "{}", '{"test-rocm-ci":{"containerimage.digest":"bad"}}'],
+    ids=["missing", "malformed-json", "missing-target", "invalid-digest"],
+)
+def test_rocm_bake_without_complete_digest_requires_outer_smoke(
+    tmp_path: Path, metadata_content: str | None
+) -> None:
+    export_dir = tmp_path / "build" / "rocm-smoke-export"
+    export_dir.mkdir(parents=True)
+    (export_dir / "vllm-smoke-ok").write_text("build-123\n")
+    metadata = tmp_path / "bake-metadata.json"
+    if metadata_content is not None:
+        metadata.write_text(metadata_content)
+    proof = export_dir / "vllm-smoke-image"
+    proof.write_text("stale-proof\n")
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                'source "$1"; TARGET=test-rocm-ci-with-wheel; '
+                'BAKE_METADATA_FILE="$2"; verify_rocm_smoke_export'
+            ),
+            "bash",
+            str(ROCM_CI_BAKE),
+            str(metadata),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "BUILDKITE_BUILD_ID": "build-123",
+            "IMAGE_TAG": "rocm/vllm-ci:build-123",
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "host smoke will verify the pinned image" in result.stdout
+    assert not proof.exists()
+
+
+def test_rocm_smoke_streamed_script_reaches_argument_validation() -> None:
+    result = subprocess.run(
+        ["bash", "-s", "--", "--unknown-argument"],
+        input=ROCM_IMAGE_SMOKE.read_text(),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Usage:" in result.stderr
+    assert "unbound variable" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "expected_image"),
+    [
+        (
+            {
+                "VLLM_CI_SMOKE_IMAGE": "rocm/vllm-ci:explicit",
+                "IMAGE_TAG": "rocm/vllm-ci:local",
+                "BUILDKITE_COMMIT": "local-commit",
+            },
+            "rocm/vllm-ci:explicit",
+        ),
+        ({"IMAGE_TAG": "rocm/vllm-ci:local"}, "rocm/vllm-ci:local"),
+        ({"BUILDKITE_COMMIT": "local-commit"}, "rocm/vllm-ci:local-commit"),
+        (
+            {"BUILDKITE": "true", "IMAGE_TAG": "rocm/vllm-ci:ambient"},
+            "rocm/vllm-ci:metadata",
+        ),
+    ],
+    ids=["explicit-override", "local-image-tag", "local-commit", "ci-metadata"],
+)
+def test_rocm_smoke_image_selection_preserves_local_and_ci_contracts(
+    tmp_path: Path, extra_env: dict[str, str], expected_image: str
+) -> None:
+    env, marker, docker, docker_called = prepare_rocm_smoke_test(
+        tmp_path, marker_id="build-123", build_id="build-123"
+    )
+    marker.unlink()
+    for name in ("VLLM_CI_SMOKE_IMAGE", "IMAGE_TAG", "BUILDKITE_COMMIT"):
+        env.pop(name, None)
+    env.update(extra_env)
+    env.update({"EXPECTED_SMOKE_IMAGE": expected_image, "SMOKE_DIGEST": SMOKE_DIGEST})
+    agent = docker.with_name("buildkite-agent")
+    agent.write_text(
+        "#!/bin/sh\n"
+        'case "$1 $2 $3" in\n'
+        '  "meta-data get rocm-ci-image-smoke-required") printf "1\\n";;\n'
+        '  "meta-data get rocm-ci-image-smoke-ref") '
+        'printf "%s\\n" "$EXPECTED_SMOKE_IMAGE";;\n'
+        '  "meta-data set "*) :;;\n'
+        "  *) exit 97;;\n"
+        "esac\n"
+    )
+    docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "buildx imagetools inspect" ]; then\n'
+        '  test "$4" = "$EXPECTED_SMOKE_IMAGE" || exit 97\n'
+        '  printf "Digest: %s\\n" "$SMOKE_DIGEST"\n'
+        'elif [ "$1" = run ]; then\n'
+        '  printf "%s\\n" "$@" > "$FAKE_DOCKER_CALLED"\n'
+        "  cat >/dev/null\n"
+        "else exit 97; fi\n"
+    )
+
+    subprocess.run(["bash", str(ROCM_IMAGE_SMOKE)], check=True, cwd=tmp_path, env=env)
+
+    assert SMOKE_IMAGE in docker_called.read_text().splitlines()
 
 
 def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
@@ -362,3 +793,89 @@ def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
         "origin",
         "HEAD",
     ]
+
+
+@pytest.mark.parametrize("helper", ["refresh", "validate"])
+@pytest.mark.parametrize(
+    "scenario", ["equivalent", "wrong-hash", "wrong-parent", "build-race"]
+)
+def test_rocm_ci_base_shared_content_races_preserve_build_identity(
+    tmp_path: Path, helper: str, scenario: str
+) -> None:
+    """Concurrent equivalent cache writes cannot invalidate our pinned build."""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+source "$1"
+TARGET=ci-base-rocm-ci
+CI_BASE_IMAGE_TAG_BUILD_REF=ci:build
+CI_BASE_IMAGE_TAG_CONTENT_REF=ci:content
+IMAGE_TAG=ci:build
+CI_BASE_IMAGE_TAG=ci:content
+unexpected() { printf '%s\n' "$*" > unexpected-command; return 97; }
+docker() {
+    case "$1 ${2:-} ${3:-}" in
+        'manifest inspect ci:build'|'manifest inspect ci:content') return 0 ;;
+        'buildx imagetools create')
+            [[ "$4 $5" == '--prefer-index=false -t' \
+                && "$7" == "ci:content@$OWN_DIGEST" ]] || unexpected "$@"
+            ;;
+        'buildx imagetools inspect')
+            case "$4" in
+                ci:build|ci:content|"ci:build@$OWN_DIGEST"|"ci:content@$OWN_DIGEST"|\
+                "ci:build@$OTHER_DIGEST"|"ci:content@$OTHER_DIGEST") ;;
+                *) unexpected "$@"; return 97 ;;
+            esac
+            if [[ "${5:-}" == --format ]]; then
+                local hash="$CI_BASE_CONTENT_HASH" parent="${BASE_IMAGE##*@}"
+                if [[ "$4" == "ci:content@$OTHER_DIGEST" ]]; then
+                    [[ "$SCENARIO" != wrong-hash ]] || hash="$OTHER_HASH"
+                    [[ "$SCENARIO" != wrong-parent ]] || parent="$OTHER_DIGEST"
+                fi
+                printf '%s|3|%s|%s\n' "$hash" "$CI_BASE_CONTENT_HASH" "$parent"
+            elif [[ "$4" == ci:build ]]; then
+                local count=0 digest="$OWN_DIGEST"
+                [[ ! -f inspections ]] || read -r count < inspections
+                count=$((count + 1)); printf '%s\n' "$count" > inspections
+                if [[ "$SCENARIO" == build-race ]] \
+                    && { [[ "$HELPER" == refresh ]] || ((count > 1)); }; then
+                    digest="$OTHER_DIGEST"
+                fi
+                printf 'Digest: %s\n' "$digest"
+            else
+                printf 'Digest: %s\n' "$OTHER_DIGEST"
+            fi
+            ;;
+        *) unexpected "$@" ;;
+    esac
+}
+if [[ "$HELPER" == refresh ]]; then
+    refresh_ci_base_tags_from_ref "ci:content@$OWN_DIGEST"
+else
+    validate_ci_base_output_refs
+fi
+""",
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ["PATH"],
+            "HELPER": helper,
+            "SCENARIO": scenario,
+            "OWN_DIGEST": "sha256:" + "a" * 64,
+            "OTHER_DIGEST": "sha256:" + "b" * 64,
+            "CI_BASE_CONTENT_HASH": "c" * 64,
+            "OTHER_HASH": "d" * 64,
+            "BASE_IMAGE": "base@sha256:" + "e" * 64,
+            "CI_BASE_LABEL_ATTEMPTS": "1",
+            "CI_BASE_LABEL_RETRY_DELAY": "0",
+            "ROCM_REGISTRY_PROBE_ATTEMPTS": "1",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert not (tmp_path / "unexpected-command").exists(), result.stderr
+    assert result.returncode == (0 if scenario == "equivalent" else 2), result.stderr
