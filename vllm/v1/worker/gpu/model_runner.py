@@ -1831,6 +1831,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Profiling and warmup must route the dummy tokens to experts
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
+                decode_query_len=(
+                    self.decode_query_len if self.speculator is not None else None
+                ),
             )
             if randomize_inputs:
                 # All-zero input_ids route every token to the same experts.

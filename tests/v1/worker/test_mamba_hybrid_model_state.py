@@ -20,9 +20,25 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+
+
+@pytest.mark.parametrize("num_tokens,expected_drafts", [(4096, [-1]), (16, [0])])
+def test_dummy_warmup_excludes_oversized_rows_from_spec_state(
+    monkeypatch: pytest.MonkeyPatch, num_tokens: int, expected_drafts: list[int]
+) -> None:
+    """Long warmup rows take prefill; 16-token capture rows retain spec decode."""
+    state = _mamba_hybrid_state(num_speculative_tokens=15)
+    buffers = InputBuffers(1, num_tokens, torch.device("cpu"))
+    batch = InputBatch.make_dummy(1, num_tokens, buffers, decode_query_len=16)
+    build_metadata = Mock(return_value={})
+    monkeypatch.setattr(mamba_hybrid, "build_attn_metadata", build_metadata)
+    state.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.empty(0), [], Mock())
+    metadata = build_metadata.call_args.kwargs["model_specific_attn_metadata"]
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == expected_drafts
 
 
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
