@@ -800,3 +800,282 @@ def philox_gumbel_sample(
     )
     max_block_index = local_max.argmax(dim=-1, keepdim=True)
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
+
+
+# Process four SynthID layers per pass by binning probability mass by g-bit
+# pattern and deriving the corresponding tournament factors.
+_SYNTHID_CHUNK_BITS = 4
+_SYNTHID_BLOCK_SIZE = 2048
+
+
+@triton.jit
+def _synthid_words(
+    block_idx,
+    state_0,
+    state_1,
+    state_2,
+    state_3,
+    key_0,
+    key_1,
+    stream_0,
+    stream_1,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # The stream enters the candidate key as in `_philox_uint32`.
+    groups = block_idx * (BLOCK_SIZE // 4) + tl.arange(0, BLOCK_SIZE // 4)
+    output_0, output_1, output_2, output_3 = _philox_candidate_words(
+        groups, state_0, state_1, state_2, state_3, key_0 ^ stream_1, key_1 ^ stream_0
+    )
+    return tl.interleave(
+        tl.interleave(output_0, output_2),
+        tl.interleave(output_1, output_3),
+    )
+
+
+@triton.jit(
+    do_not_specialize=["key_0_value", "key_1_value", "stream_0_value", "stream_1_value"]
+)
+def _synthid_tournament_kernel(
+    output_ptr,
+    output_stride,
+    logits_ptr,
+    logits_stride,
+    contexts_ptr,
+    context_stride,
+    row_stats_ptr,  # [B, 2]: row max, softmax denominator
+    factors_ptr,  # [B, DEPTH, 2]: (1 - m_l, 2 - m_l)
+    local_hist_ptr,  # [B, num_blocks, 2**CHUNK_BITS]
+    local_max_ptr,  # [B, num_blocks]
+    key_0_value,
+    key_1_value,
+    stream_0_value,
+    stream_1_value,
+    vocab_size,
+    num_blocks,
+    CONTEXT_WIDTH: tl.constexpr,
+    DEPTH: tl.constexpr,
+    CHUNK_BITS: tl.constexpr,
+    CHUNK: tl.constexpr,
+    FINAL: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    block_idx = tl.program_id(1)
+    candidate = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = candidate < vocab_size
+    logits = tl.load(
+        logits_ptr + row * logits_stride + candidate,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
+    stream_1 = stream_1_value.to(tl.uint32)
+    state_0, state_1, state_2, state_3 = _philox_context_state(
+        contexts_ptr + row * context_stride, key_0, key_1, CONTEXT_WIDTH
+    )
+    words = _synthid_words(
+        block_idx,
+        state_0,
+        state_1,
+        state_2,
+        state_3,
+        key_0,
+        key_1,
+        stream_0_value.to(tl.uint32),
+        stream_1,
+        BLOCK_SIZE,
+    )
+
+    if FINAL or CHUNK > 0:
+        row_max = tl.load(row_stats_ptr + row * 2)
+        row_sum = tl.load(row_stats_ptr + row * 2 + 1)
+        probs = tl.exp(logits - row_max) / row_sum
+        NUM_APPLIED: tl.constexpr = DEPTH if FINAL else CHUNK * CHUNK_BITS
+        for layer in tl.static_range(NUM_APPLIED):
+            if layer % 32 == 0 and layer > 0:
+                words = _synthid_words(
+                    block_idx,
+                    state_0,
+                    state_1,
+                    state_2,
+                    state_3,
+                    key_0,
+                    key_1,
+                    (stream_0_value + layer // 32).to(tl.uint32),
+                    stream_1,
+                    BLOCK_SIZE,
+                )
+            factor_0 = tl.load(factors_ptr + (row * DEPTH + layer) * 2)
+            factor_1 = tl.load(factors_ptr + (row * DEPTH + layer) * 2 + 1)
+            g = (words >> (layer % 32)) & 1
+            probs = probs * tl.where(g != 0, factor_1, factor_0)
+    else:
+        block_max = tl.max(logits, axis=0)
+        tl.store(local_max_ptr + row * num_blocks + block_idx, block_max)
+        probs = tl.exp(logits - tl.where(block_max == float("-inf"), 0.0, block_max))
+
+    if FINAL:
+        log_probs = tl.log(probs)
+        # Same as the eager path: masked tokens stay -inf, underflow -> min.
+        keep = (log_probs > float("-inf")) | (logits == float("-inf"))
+        log_probs = tl.where(keep, log_probs, -3.4028234663852886e38)
+        tl.store(output_ptr + row * output_stride + candidate, log_probs, mask=mask)
+    else:
+        FIRST: tl.constexpr = CHUNK * CHUNK_BITS
+        NUM_BINS: tl.constexpr = 1 << CHUNK_BITS
+        if FIRST % 32 == 0 and FIRST > 0:
+            words = _synthid_words(
+                block_idx,
+                state_0,
+                state_1,
+                state_2,
+                state_3,
+                key_0,
+                key_1,
+                (stream_0_value + FIRST // 32).to(tl.uint32),
+                stream_1,
+                BLOCK_SIZE,
+            )
+        pattern = (words >> (FIRST % 32)) & (NUM_BINS - 1)
+        bins = tl.arange(0, NUM_BINS)
+        hist = tl.zeros((NUM_BINS,), tl.float32)
+        for b in tl.static_range(NUM_BINS):
+            mass = tl.sum(tl.where(pattern == b, probs, 0.0), axis=0)
+            hist = tl.where(bins == b, mass, hist)
+        tl.store(
+            local_hist_ptr + (row * num_blocks + block_idx) * NUM_BINS + bins,
+            hist,
+        )
+
+
+@triton.jit
+def _synthid_reduce_kernel(
+    local_hist_ptr,
+    local_max_ptr,
+    row_stats_ptr,
+    factors_ptr,
+    num_blocks,
+    DEPTH: tl.constexpr,
+    CHUNK_BITS: tl.constexpr,
+    CHUNK: tl.constexpr,
+    PADDED_NUM_BLOCKS: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    NUM_BINS: tl.constexpr = 1 << CHUNK_BITS
+    blocks = tl.arange(0, PADDED_NUM_BLOCKS)
+    bins = tl.arange(0, NUM_BINS)
+    block_mask = blocks < num_blocks
+    local_hist = tl.load(
+        local_hist_ptr
+        + (row * num_blocks + blocks[:, None]) * NUM_BINS
+        + bins[None, :],
+        mask=block_mask[:, None],
+        other=0.0,
+    )
+    if CHUNK == 0:
+        local_max = tl.load(
+            local_max_ptr + row * num_blocks + blocks,
+            mask=block_mask,
+            other=float("-inf"),
+        )
+        row_max = tl.max(local_max, axis=0)
+        rescale = tl.where(local_max == float("-inf"), 0.0, tl.exp(local_max - row_max))
+        hist = tl.sum(local_hist * rescale[:, None], axis=0)
+        tl.store(row_stats_ptr + row * 2, row_max)
+        tl.store(row_stats_ptr + row * 2 + 1, tl.sum(hist, axis=0))
+    else:
+        hist = tl.sum(local_hist, axis=0)
+    weight = tl.full((NUM_BINS,), 1.0, tl.float32)
+    for bit in tl.static_range(CHUNK_BITS):
+        if CHUNK * CHUNK_BITS + bit < DEPTH:
+            g = ((bins >> bit) & 1).to(tl.float32)
+            # 1 - m from the g = 0 mass: full precision when m is close to 1.
+            mass_1 = tl.sum(hist * weight * g, axis=0)
+            mass_0 = tl.sum(hist * weight * (1.0 - g), axis=0)
+            factor_0 = mass_0 / (mass_0 + mass_1)
+            factor_1 = 1.0 + factor_0
+            layer = CHUNK * CHUNK_BITS + bit
+            tl.store(factors_ptr + (row * DEPTH + layer) * 2, factor_0)
+            tl.store(factors_ptr + (row * DEPTH + layer) * 2 + 1, factor_1)
+            weight *= tl.where(g != 0, factor_1, factor_0)
+
+
+def synthid_watermark_logits(
+    logits: torch.Tensor,
+    contexts: torch.Tensor,
+    key: int,
+    depth: int,
+    stream: int = 0,
+) -> torch.Tensor:
+    """Return FP32 SynthID-Text log-probs of `logits` [B, V].
+
+    Layers [32 b, 32 b + 32) use the bits of Philox stream `stream + b`.
+    """
+    stream_0, stream_1 = stream & _UINT32_MASK_VALUE, stream >> 32
+    assert stream_0 + (depth - 1) // 32 <= _UINT32_MASK_VALUE
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
+    num_tokens, vocab_size = logits.shape
+    block_size = _SYNTHID_BLOCK_SIZE
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    num_bins = 1 << _SYNTHID_CHUNK_BITS
+    output = logits.new_empty(num_tokens, vocab_size, dtype=torch.float32)
+    if num_tokens == 0:
+        return output
+    row_stats = logits.new_empty(num_tokens, 2, dtype=torch.float32)
+    factors = logits.new_empty(num_tokens, depth, 2, dtype=torch.float32)
+    local_hist = logits.new_empty(num_tokens, num_blocks, num_bins, dtype=torch.float32)
+    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float32)
+    args = (
+        output,
+        output.stride(0),
+        logits,
+        logits.stride(0),
+        contexts,
+        contexts.stride(0),
+        row_stats,
+        factors,
+        local_hist,
+        local_max,
+        key & _UINT32_MASK_VALUE,
+        key >> 32,
+        stream_0,
+        stream_1,
+        vocab_size,
+        num_blocks,
+    )
+    for chunk in range(triton.cdiv(depth, _SYNTHID_CHUNK_BITS)):
+        _synthid_tournament_kernel[(num_tokens, num_blocks)](
+            *args,
+            CONTEXT_WIDTH=contexts.shape[-1],
+            DEPTH=depth,
+            CHUNK_BITS=_SYNTHID_CHUNK_BITS,
+            CHUNK=chunk,
+            FINAL=False,
+            BLOCK_SIZE=block_size,
+        )
+        _synthid_reduce_kernel[(num_tokens,)](
+            local_hist,
+            local_max,
+            row_stats,
+            factors,
+            num_blocks,
+            DEPTH=depth,
+            CHUNK_BITS=_SYNTHID_CHUNK_BITS,
+            CHUNK=chunk,
+            PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
+        )
+    _synthid_tournament_kernel[(num_tokens, num_blocks)](
+        *args,
+        CONTEXT_WIDTH=contexts.shape[-1],
+        DEPTH=depth,
+        CHUNK_BITS=_SYNTHID_CHUNK_BITS,
+        CHUNK=0,
+        FINAL=True,
+        BLOCK_SIZE=block_size,
+    )
+    return output

@@ -4,7 +4,6 @@
 """Gumbel-max watermark generation and detection primitives."""
 
 import math
-import warnings
 
 import torch
 
@@ -18,6 +17,7 @@ from vllm.v1.watermarking.watermarker import (
     SupportsSpeculativeDecoding,
     Watermarker,
     WatermarkSample,
+    _validate_context_width,
 )
 
 
@@ -261,14 +261,3 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
         shape = torch.tensor(num_scored_tokens / variance, dtype=torch.float64)
         scaled_score = torch.tensor(score / variance, dtype=torch.float64)
         return torch.special.gammaincc(shape, scaled_score).item()
-
-
-def _validate_context_width(context_width: int) -> None:
-    if context_width < 1:
-        raise ValueError("context_width must be positive")
-    if context_width > 16:
-        warnings.warn(
-            "context_width values greater than 16 reduce robustness to edits because "
-            "each changed token affects more subsequent watermark contexts",
-            stacklevel=3,
-        )

@@ -48,12 +48,11 @@ callers, or strip and validate the field at the ingress boundary.
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
-contexts. Values above 16 are allowed but emit a warning.
+contexts for all algorithms. Values above 16 are allowed and trigger a warning.
 
 `allow_target_only_watermarking` defaults to false and only has an effect when
-speculative decoding is enabled. It permits speculative decoding with a
-watermarking algorithm that does not support it natively, at the cost of
-weaker detectability. See
+speculative decoding is enabled. It permits target-only Gumbel-max watermarking
+at the cost of weaker detectability. See
 [Speculative decoding](#speculative-decoding).
 
 ## Architecture
@@ -71,7 +70,7 @@ generation.
 
 ## Interactions with generation features
 
-- Greedy decoding (`temperature=0`) cannot apply a Gumbel watermark. The first
+- Greedy decoding (`temperature=0`) cannot apply a watermark. The first
   such request emits a server-side warning; it and subsequent greedy requests
   use ordinary greedy sampling without a watermark. This includes
   transcription, translation, and realtime transcription, which default to
@@ -100,13 +99,13 @@ Watermarking requires speculative decoding to use probabilistic draft sampling,
 standard rejection sampling, and an autoregressive model-based method (`dspark`,
 `eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dspark`.
 
-A watermarking algorithm without native speculative-decoding support is
-rejected before model loading. Set
-`"allow_target_only_watermarking": true` to allow it: accepted draft tokens are
-not watermarked, while target-side rejection recovery and bonus sampling remain
-watermarked. The watermark signal is diluted in proportion to the share of
-output tokens supplied by accepted drafts; rejected drafts do not dilute it
-because their recovery tokens are watermarked.
+For `gumbel`, set `"allow_target_only_watermarking": true` to leave accepted
+draft tokens unwatermarked while watermarking target-side rejection recovery
+and bonus sampling. The signal is diluted in proportion to the share of output
+tokens supplied by accepted drafts.
+
+SynthID-Text does not support speculative decoding, including target-only
+watermarking, and is rejected before model loading.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -149,8 +148,9 @@ longer. A smaller value reduces scanning cost but only provides the guarantee
 within that window. Set it to `null` to search back to the start of the
 generation for `"single_turn"`, or of the request for `"all"`; an unbounded
 search costs more as the sequence grows. The setting has no effect when
-`deduplicate_contexts` is `"none"`. Values below 1,024 emit a warning because a
-short window can miss repetition loops whose contexts recur farther apart.
+`deduplicate_contexts` is `"none"`. Disabling deduplication or setting a
+value below 1,024 emits a warning about degenerate generations, including
+repetition loops. A short window can miss contexts that recur farther apart.
 
 For example, this checks prompt and completion history within the default
 8,192-position window:
@@ -198,8 +198,25 @@ vllm serve MODEL \
 
 ### SynthID-Text
 
-[SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but
-not currently implemented.
+[SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) reweights the
+categorical distribution using multiple binary tournament-sampling layers before
+vLLM's normal random sampler selects a token.
+
+Configure it with `algorithm="synthid_text"` and `depth`, which defaults to 32:
+
+```bash
+vllm serve MODEL \
+  --watermark-config \
+  '{"algorithm":"synthid_text","key":42,"context_width":4,"depth":32}'
+```
+
+`depth` controls the number of tournament-sampling layers. Higher values
+strengthen the watermark but add sampling overhead. Depths above 32 require
+additional Philox evaluations.
+
+`SynthIDWatermarkDetector` implements the corresponding unweighted-mean detector
+using the same generation parameters. Its reported p-value assumes independent
+Bernoulli(0.5) values under the null.
 
 ## Pseudorandom functions
 
@@ -242,7 +259,7 @@ candidate configurations they have served, test the text against each
 candidate, and correct for multiple testing, for example with a Bonferroni
 correction to the resulting p-values.
 
-Gumbel-max detection scores repeated contexts once by default so identical PRF
+Detection scores repeated contexts once by default so identical PRF
 random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
 for correlated scores.
@@ -276,6 +293,8 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
+- Beam search expands candidates from model log probabilities and does not
+  support configured watermarking.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
 - Global custom logits processors are unavailable because Model Runner V2 does

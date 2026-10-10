@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-WatermarkingAlgorithm = Literal["gumbel", "dual_key_gumbel"]
+WatermarkingAlgorithm = Literal["gumbel", "dual_key_gumbel", "synthid_text"]
 WatermarkPRFName = Literal["philox"]
 WatermarkContextScope = Literal["none", "single_turn", "all"]
 
@@ -48,6 +48,8 @@ class WatermarkConfig:
     `none`."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
+    depth: int = 32
+    """Number of layers of tournament sampling for SynthID-Text."""
     allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""
 
@@ -59,15 +61,22 @@ class WatermarkConfig:
     def validate_watermark_settings(self) -> Self:
         if self.key > 2**64 - 1:
             raise ValueError("philox keys must fit in 64 bits")
+        if self.algorithm == "synthid_text":
+            if self.depth < 1:
+                raise ValueError("SynthID-Text depth must be positive")
+            if self.depth > 32:
+                logger.warning_once(
+                    "SynthID-Text depths above 32 require additional Philox "
+                    "evaluations and may reduce sampling performance.",
+                    scope="global",
+                )
         history_is_too_short = (
             self.deduplicate_contexts_max_history is not None
             and self.deduplicate_contexts_max_history < _MIN_RECOMMENDED_DEDUP_HISTORY
         )
-        if self.algorithm in ("gumbel", "dual_key_gumbel") and (
-            self.deduplicate_contexts == "none" or history_is_too_short
-        ):
+        if self.deduplicate_contexts == "none" or history_is_too_short:
             logger.warning_once(
-                "Gumbel-max watermarking with context deduplication "
+                "Watermarking with context deduplication "
                 "disabled or limited to fewer than "
                 f"{_MIN_RECOMMENDED_DEDUP_HISTORY} positions may increase the "
                 "frequency of degenerate generations, including repetition loops. "
