@@ -4,6 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import (
@@ -28,7 +29,8 @@ class GateLinear(ReplicatedLinear):
     3. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
     4. ROCm bf16x3 router GEMM (gfx950, bf16 in, fp32 weight, fp32 out,
        M>=2048)
-    5. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
+    5. bf16×bf16→fp32 GEMM: cuBLAS (SM90+ + bf16 weight + fp32 out_dtype)
+       or AITER tuned GEMM (ROCm gfx950, bf16 weight)
     6. F.linear via ReplicatedLinear (ultimate fallback)
 
     The ``out_dtype`` attribute is mutable and can be set after init
@@ -79,6 +81,11 @@ class GateLinear(ReplicatedLinear):
             ) in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
         can_use_specialized_kernels = (
             current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
+        )
+        can_use_aiter_tuned_gemm = (
+            not bias
+            and not force_fp32_compute
+            and bool(rocm_aiter_ops.is_tgemm_enabled())
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -187,6 +194,14 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
+        # AITER tuned GEMM eligibility
+        self.allow_aiter_router_gemm = (
+            self.is_unquantized
+            and can_use_aiter_tuned_gemm
+            and self.weight.dtype == torch.bfloat16
+            and rocm_aiter_ops.is_bf16_gemm_tuned(output_size, input_size)
+        )
+
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
 
@@ -279,10 +294,21 @@ class GateLinear(ReplicatedLinear):
             output = bf16x3_router_gemm(x, self.weight)
             return self._return(output)
 
-        # Tier 5: cuBLAS bf16→fp32
-        if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
-            output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
-            return self._return(output)
+        # Tier 5: bf16→fp32 GEMM, the AITER tuned GEMM on ROCm or cuBLAS elsewhere.
+        # The torch.mm epilogue below is eligible on ROCm too, so AITER is tried
+        # first to keep it reachable there.
+        if x.dtype == torch.bfloat16:
+            if self.allow_aiter_router_gemm:
+                output = torch.ops.vllm.rocm_aiter_router_gemm(
+                    x,
+                    self.weight,
+                    self.out_dtype if self.out_dtype is not None else self.weight.dtype,
+                )
+                return self._return(output)
+
+            if self.allow_cublas_router_gemm:
+                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
+                return self._return(output)
 
         # Tier 6: F.linear (ReplicatedLinear)
         if (

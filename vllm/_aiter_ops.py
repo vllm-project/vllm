@@ -246,6 +246,24 @@ def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
 
 
+def _bf16_gemm_shape_is_tuned(N: int, K: int) -> bool:
+    # get_GEMM_A16W16_config builds a default on a miss; only tuned rows carry
+    # the tuner's "us" field.
+    try:
+        from aiter.tuned_gemm import get_GEMM_A16W16_config
+
+        bf16 = str(torch.bfloat16)
+        return any(
+            "us" in get_GEMM_A16W16_config(M, N, K, False, bf16, bf16)
+            for M in (1, 2, 4, 8, 16, 32, 64, 128, 256)
+        )
+    except (AttributeError, ImportError, OSError):
+        logger.warning_once(
+            "Could not read aiter bf16 GEMM configs; treating all shapes as untuned."
+        )
+        return False
+
+
 def _ck_gemm_shape_is_tuned(
     N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
 ) -> bool:
@@ -534,6 +552,26 @@ def _rocm_aiter_topk_sigmoid_impl(
     from aiter import topk_sigmoid
 
     topk_sigmoid(topk_weights, topk_indices, gating_output)
+
+
+def _rocm_aiter_router_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    # AITER only has bf16-output tuned configs for router shapes: run bf16, cast.
+    from aiter.tuned_gemm import tgemm
+
+    out = tgemm.mm(x, weight, None)
+    return out if out.dtype == out_dtype else out.to(out_dtype)
+
+
+def _rocm_aiter_router_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0], weight.shape[0]), dtype=out_dtype)
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
@@ -2818,6 +2856,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_router_gemm",
+                op_func=_rocm_aiter_router_gemm_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_router_gemm_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_biased_grouped_topk",
                 op_func=_rocm_aiter_biased_grouped_topk_impl,
                 mutates_args=["topk_weights", "topk_ids"],
@@ -3942,6 +3988,11 @@ class rocm_aiter_ops:
             )
         except (AssertionError, ImportError):
             return False
+
+    @staticmethod
+    @functools.cache
+    def is_bf16_gemm_tuned(N: int, K: int) -> bool:
+        return _bf16_gemm_shape_is_tuned(N, K)
 
     @staticmethod
     @functools.cache

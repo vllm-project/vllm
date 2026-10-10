@@ -32,6 +32,8 @@ def _make_gate(
     output_size: int = 64,
     on_gfx950: bool = False,
     parallel_world_size: int = 1,
+    force_fp32_compute: bool = False,
+    quant_config=None,
 ) -> GateLinear:
     """Build a GateLinear with platform predicates mocked, no GPU needed."""
     for target in (
@@ -63,6 +65,8 @@ def _make_gate(
         bias=bias,
         out_dtype=out_dtype,
         params_dtype=params_dtype,
+        force_fp32_compute=force_fp32_compute,
+        quant_config=quant_config,
     )
 
 
@@ -258,3 +262,103 @@ def test_rocm_bf16x3_is_reachable_for_low_m_shapes(monkeypatch):
     assert source.index("allow_rocm_bf16x3_router_gemm") < source.index(
         "allow_fp32_router_gemm"
     )
+
+
+# ---------------------------------------------------------------------------
+# ROCm AITER tuned GEMM tier (bf16 router weights)
+# ---------------------------------------------------------------------------
+def _make_aiter_gate(monkeypatch, *, tgemm=True, tuned=True, **kwargs):
+    """Build a gate with the AITER tgemm and tuned-shape checks mocked."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    tuned_calls = []
+
+    def is_bf16_gemm_tuned(n, k):
+        tuned_calls.append((n, k))
+        return tuned
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_tgemm_enabled", staticmethod(lambda: tgemm))
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_bf16_gemm_tuned", staticmethod(is_bf16_gemm_tuned)
+    )
+    return _make_gate(monkeypatch, is_rocm=True, **kwargs), tuned_calls
+
+
+class _OnlineQuantMethod:
+    """Quantizes after loading, so the weight is still bf16 at construction."""
+
+    def create_weights(
+        self,
+        layer,
+        input_size_per_partition,
+        output_partition_sizes,
+        input_size,
+        output_size,
+        params_dtype,
+        **extra_weight_attrs,
+    ):
+        weight = torch.empty(
+            sum(output_partition_sizes), input_size_per_partition, dtype=params_dtype
+        )
+        layer.register_parameter(
+            "weight", torch.nn.Parameter(weight, requires_grad=False)
+        )
+
+
+class _OnlineQuantConfig:
+    online_quantization_config = None
+
+    def get_quant_method(self, layer, prefix):
+        return _OnlineQuantMethod()
+
+
+def test_rocm_aiter_router_gemm_enabled_for_tuned_bf16_gate(monkeypatch):
+    gate, tuned_calls = _make_aiter_gate(monkeypatch, input_size=6144, output_size=256)
+    assert gate.allow_aiter_router_gemm
+    assert tuned_calls == [(256, 6144)]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"tgemm": False}, id="tgemm-disabled"),
+        pytest.param({"tuned": False}, id="untuned-shape"),
+        pytest.param({"bias": True}, id="bias"),
+        pytest.param({"params_dtype": torch.float32}, id="fp32-weight"),
+        pytest.param({"force_fp32_compute": True}, id="force-fp32-compute"),
+        pytest.param({"quant_config": _OnlineQuantConfig()}, id="quantized"),
+    ],
+)
+def test_rocm_aiter_router_gemm_rejects_ineligible_gates(monkeypatch, kwargs):
+    gate, _ = _make_aiter_gate(monkeypatch, **kwargs)
+    assert not gate.allow_aiter_router_gemm
+
+
+@pytest.mark.parametrize(("tuned", "expected"), [(True, "aiter"), (False, "torch.mm")])
+def test_rocm_aiter_router_gemm_forward_dispatch(monkeypatch, tuned, expected):
+    """The torch.mm epilogue is eligible on ROCm too, so a tuned gate must take
+    the AITER op instead of it."""
+    gate, _ = _make_aiter_gate(monkeypatch, tuned=tuned)
+    assert gate.allow_cublas_router_gemm
+
+    calls = []
+
+    def fake_aiter(x, weight, out_dtype):
+        calls.append("aiter")
+        return x.new_zeros(x.shape[0], weight.shape[0], dtype=out_dtype)
+
+    def fake_mm(x, weight_t, out_dtype=None):
+        calls.append("torch.mm")
+        return x.new_zeros(x.shape[0], weight_t.shape[1], dtype=out_dtype)
+
+    monkeypatch.setattr(
+        torch.ops.vllm, "rocm_aiter_router_gemm", fake_aiter, raising=False
+    )
+    monkeypatch.setattr(torch, "mm", fake_mm)
+
+    x = torch.zeros(4, gate.input_size, dtype=torch.bfloat16)
+    output, _ = gate(x)
+
+    assert calls == [expected]
+    assert output.shape == (4, gate.output_size)
+    assert output.dtype == torch.float32
