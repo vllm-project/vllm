@@ -21,10 +21,6 @@ from xgrammar.structural_tag import (
     TriggeredTagsFormat,
 )
 
-from vllm.entrypoints.chat_utils import (
-    get_tool_call_id_type,
-    make_tool_call_id,
-)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
@@ -42,6 +38,10 @@ from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.renderers.chat_utils import (
+    get_tool_call_id_type,
+    make_tool_call_id,
+)
 from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
@@ -741,8 +741,6 @@ class DelegatingParser(Parser):
                 extract_required_tool_call_streaming(
                     previous_text=previous_text,
                     current_text=current_text,
-                    delta_text=delta_text,
-                    function_name_returned=function_name_returned,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
                 )
@@ -904,8 +902,17 @@ class DelegatingParser(Parser):
                     (delta_message.content if delta_message else None) or ""
                 ) + ((flush_delta.content if flush_delta else None) or "")
                 if self._engine_based:
-                    if delta_message and self._tool_parser is not None:
-                        delta_message.content = None
+                    if self._tool_parser is not None:
+                        # The tool-call phase below consumes current_text.
+                        if delta_message:
+                            delta_message.content = None
+                    elif current_text:
+                        # No tool phase follows to consume the flushed text,
+                        # and the engine is not fed again after the
+                        # transition, so emit it as content here.
+                        if delta_message is None:
+                            delta_message = DeltaMessage()
+                        delta_message.content = current_text
                 else:
                     delta_text = current_text
 
@@ -943,12 +950,13 @@ class DelegatingParser(Parser):
                 elif not delta_message.reasoning:
                     delta_message.reasoning = reasoning_from_this_batch
 
-            if (
-                delta_message
-                and delta_message.tool_calls
-                and delta_message.tool_calls[0].id is not None
-            ):
-                state.history_tool_call_cnt += 1
+            if delta_message and delta_message.tool_calls:
+                # A delta may start several tool calls at once (e.g. the
+                # "required" path when one delta completes more than one
+                # call), so count every id rather than only the first.
+                state.history_tool_call_cnt += sum(
+                    tc.id is not None for tc in delta_message.tool_calls
+                )
 
         # No phase active: pass through as content.
         # Skip when reasoning just ended in this delta — the engine already

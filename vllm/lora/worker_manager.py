@@ -153,6 +153,7 @@ class WorkerLoRAManager:
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
+            self._adapter_manager._validate_moe_lora_format(lora)
 
             # Validate classification-head weights.
             self._adapter_manager._validate_modules_to_save(lora)

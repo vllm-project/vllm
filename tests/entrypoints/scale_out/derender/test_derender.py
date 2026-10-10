@@ -74,14 +74,13 @@ def _make_generate_response(
     }
 
 
-def _make_logprobs_with_placeholders(token_id: int = 1234) -> dict:
+def _make_generate_logprobs(token_id: int = 1234) -> dict:
+    """A `GenerateLogProbs` payload: integer token ids, no token/bytes."""
     entry = {
-        "token": f"token_id:{token_id}",
+        "token_id": token_id,
         "logprob": -1.0,
-        "bytes": None,
-        "top_logprobs": [
-            {"token": f"token_id:{token_id + 1}", "logprob": -2.0, "bytes": None}
-        ],
+        "rank": 1,
+        "top_logprobs": [{"token_id": token_id + 1, "logprob": -2.0, "rank": 2}],
     }
     return {"content": [entry]}
 
@@ -154,7 +153,7 @@ async def test_derender_chat_usage_default(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_logprobs(client):
-    """token_id:N placeholders in content.token are resolved to real strings."""
+    """Integer token ids are decoded to real strings by derender."""
     gen_req = await _render_chat(client)
     synthetic_ids = gen_req["token_ids"][:3]
     token_id = synthetic_ids[0]
@@ -165,7 +164,7 @@ async def test_derender_chat_logprobs(client):
             "model": MODEL_NAME,
             "generate_response": _make_generate_response(
                 synthetic_ids,
-                logprobs=_make_logprobs_with_placeholders(token_id),
+                logprobs=_make_generate_logprobs(token_id),
             ),
         },
     )
@@ -176,8 +175,8 @@ async def test_derender_chat_logprobs(client):
     content = logprobs["content"]
     assert content is not None and len(content) == 1
     token_str = content[0]["token"]
-    assert not token_str.startswith("token_id:"), (
-        f"Placeholder was not resolved: {token_str!r}"
+    assert token_str and not token_str.startswith("token_id:"), (
+        f"token id was not decoded: {token_str!r}"
     )
 
 
@@ -194,7 +193,7 @@ async def test_derender_chat_logprobs_bytes(client):
             "model": MODEL_NAME,
             "generate_response": _make_generate_response(
                 synthetic_ids,
-                logprobs=_make_logprobs_with_placeholders(token_id),
+                logprobs=_make_generate_logprobs(token_id),
             ),
         },
     )
@@ -208,7 +207,7 @@ async def test_derender_chat_logprobs_bytes(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_top_logprobs(client):
-    """top_logprobs entries also have their placeholders resolved."""
+    """top_logprobs entries are decoded too."""
     gen_req = await _render_chat(client)
     synthetic_ids = gen_req["token_ids"][:3]
     token_id = synthetic_ids[0]
@@ -219,7 +218,7 @@ async def test_derender_chat_top_logprobs(client):
             "model": MODEL_NAME,
             "generate_response": _make_generate_response(
                 synthetic_ids,
-                logprobs=_make_logprobs_with_placeholders(token_id),
+                logprobs=_make_generate_logprobs(token_id),
             ),
         },
     )
@@ -228,7 +227,7 @@ async def test_derender_chat_top_logprobs(client):
     top = content[0]["top_logprobs"]
     assert len(top) == 1
     assert not top[0]["token"].startswith("token_id:"), (
-        f"top_logprobs placeholder not resolved: {top[0]['token']!r}"
+        f"top_logprobs token id not decoded: {top[0]['token']!r}"
     )
 
 
@@ -633,8 +632,8 @@ async def test_derender_completion_empty_generate_responses(client):
 
 @pytest.mark.asyncio
 async def test_derender_completion_logprobs(client):
-    """token_id:N placeholders in logprobs are resolved; CompletionLogProbs
-    flat-list structure is returned with non-empty tokens and text_offsets."""
+    """Integer token ids are decoded; CompletionLogProbs flat-list structure is
+    returned with non-empty tokens and text_offsets."""
     gr1 = await _render_completion(client, "Hello world")
     ids1 = gr1["token_ids"][:3]
     token_id = ids1[0]
@@ -647,7 +646,7 @@ async def test_derender_completion_logprobs(client):
                 _make_completion_generate_response(
                     ids1,
                     gr1["request_id"],
-                    logprobs=_make_logprobs_with_placeholders(token_id),
+                    logprobs=_make_generate_logprobs(token_id),
                 ),
             ],
         },
@@ -658,7 +657,7 @@ async def test_derender_completion_logprobs(client):
     tokens = logprobs["tokens"]
     assert len(tokens) == 1
     assert not tokens[0].startswith("token_id:"), (
-        f"Placeholder was not resolved: {tokens[0]!r}"
+        f"token id was not decoded: {tokens[0]!r}"
     )
     assert len(logprobs["token_logprobs"]) == 1
     assert isinstance(logprobs["token_logprobs"][0], float)
@@ -794,7 +793,7 @@ async def test_derender_chat_oversized_logprobs_rejected(client):
     """logprobs.content longer than max_model_len returns 400."""
     oversized_logprobs: dict = {
         "content": [
-            {"token": "x", "logprob": -1.0, "bytes": None, "top_logprobs": []}
+            {"token_id": 42, "logprob": -1.0, "rank": 1, "top_logprobs": []}
             for _ in range(1_000_000)
         ]
     }
@@ -825,11 +824,11 @@ async def test_derender_chat_oversized_top_logprobs_rejected(client):
     oversized_top_logprobs = {
         "content": [
             {
-                "token": "x",
+                "token_id": 42,
                 "logprob": -1.0,
-                "bytes": None,
+                "rank": 1,
                 "top_logprobs": [
-                    {"token": f"t{i}", "logprob": -float(i), "bytes": None}
+                    {"token_id": i, "logprob": -float(i), "rank": i + 1}
                     for i in range(25)
                 ],
             }

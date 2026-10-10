@@ -67,6 +67,7 @@ Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
 
 ```bash
 uv pip install vllm
+vllm download-kernels  # precompiled kernels for faster startup
 ```
 
 Or [build from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for development.
