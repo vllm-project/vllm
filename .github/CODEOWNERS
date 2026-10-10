@@ -38,9 +38,9 @@
 /vllm/entrypoints/cohere @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
-/vllm/entrypoints/openai/chat_completion @DarkLight1337
-/vllm/entrypoints/openai/completion @DarkLight1337
-/vllm/entrypoints/openai/models @DarkLight1337
+/vllm/entrypoints/openai/chat_completion @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai/completion @chaunceyjiang @DarkLight1337
+/vllm/entrypoints/openai/models @chaunceyjiang @DarkLight1337
 /vllm/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
 /vllm/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
 /vllm/entrypoints/rl @aoshen02
