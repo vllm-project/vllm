@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Adapted from ROCm/aiter#6173 at b02df0db8 (Apache-2.0 License),
+# Adapted from ROCm/aiter#6173 at 56d6390de (Apache-2.0 License),
 # Copyright (c) 2025 FlyDSL Project Contributors:
 # aiter/ops/flydsl/kernels/glm5_mono/glm/kernel.py
 # Closures built in the device-code loops run while that iteration is traced.
@@ -4387,9 +4387,7 @@ def build_glm5_monokernel(
         for t in range(start("down"), N_DN_TILES, G):
             t = fx.Int32(t)
             stamp("down", t, 0)
-            if const_expr(
-                ug_split(S, expert_inter) is None
-            ):  # else routed before up/gate
+            if const_expr(S == 1):  # S > 1 routed before up/gate
                 dn_route(load_bias())
             gpu.barrier()
             gu = wave // DN_WPR
