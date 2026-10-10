@@ -210,17 +210,21 @@ class DeepSeekV31ToolParser(ToolParser):
                 if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
                     logger.debug("attempting to close tool call, but no tool call")
                     return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
-                if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
+                if self.prev_tool_call_arr[self.current_tool_id].get("arguments"):
+                    matches = (
+                        self.stream_tool_call_portion_regex.match(tool_call_portion)
+                        if tool_call_portion
+                        else None
                     )
-                    if '"}' not in delta_text:
+                    if not matches:
                         return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
+                    full_arguments = matches.group("function_arguments")
+                    streamed = self.streamed_args_for_tool[self.current_tool_id]
+                    if not full_arguments.startswith(streamed):
+                        return None
+                    diff = full_arguments[len(streamed) :]
+                    if not diff:
+                        return None
                     logger.debug(
                         "Finishing tool and found diff that had not "
                         "been streamed yet: %s",
