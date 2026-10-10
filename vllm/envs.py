@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_AITER_MLA_DCP_VERIFY: Literal["auto", "asm", "segmented"] = "auto"
+    VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY: Literal["asm", "triton"] = "asm"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
@@ -1328,6 +1329,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_ROCM_AITER_MLA_DCP_VERIFY",
         "auto",
         ["auto", "asm", "segmented"],
+        case_sensitive=False,
+    ),
+    # Kernel for causal multi-token verify steps under decode context
+    # parallelism on gfx942: "asm" runs AITER's single-token ASM decode over
+    # one row per verify token, "triton" runs Triton segmented MLA where it fits
+    # in LDS and the generic Triton split-KV decode otherwise.
+    "VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY": env_with_choices(
+        "VLLM_ROCM_AITER_MLA_GFX942_DCP_VERIFY",
+        "asm",
+        ["asm", "triton"],
         case_sensitive=False,
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts

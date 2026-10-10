@@ -20,6 +20,10 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
     AiterMLAImpl,
     AiterMLAMetadataBuilder,
 )
+from vllm.v1.attention.ops.dcp import (  # noqa: E402
+    CPTritonContext,
+    correct_attn_out,
+)
 from vllm.v1.attention.ops.rocm_aiter_mla_merge import (  # noqa: E402
     merge_mla_segments_triton,
 )
@@ -121,8 +125,12 @@ def _builder(
         # segmented route is available, query length decides per batch. CPRR
         # preferred still keeps this True so qlen < _MIN_CPRR_QLEN can fall back.
         _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
+        _use_triton_dcp_verify=False,
+        _use_asm_rows_dcp_verify=False,
         # Derived once in the real constructor, so derive it once here too.
-        _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
+        _dcp_verify_page_size=rocm_aiter_mla._segmented_mla_page_size(
+            kernel_block_size
+        ),
         _dcp_verify_buffers=None,
         _graph_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
@@ -628,6 +636,99 @@ def test_segmented_verify_reduce_returns_natural_lse_and_masks_empty_rows():
     assert output[1].item() == 0
     torch.testing.assert_close(lse[0], torch.tensor([math.log(3.0)], device="cuda"))
     assert lse[1].item() == float("-inf")
+
+
+def test_triton_verify_empty_local_shard_merges_through_dcp_combine():
+    """Empty rows need no masking: -inf LSE gives them zero combine weight.
+
+    Row 0 has KV on both ranks, row 1 only on rank 0, row 2 on neither (graph
+    padding). The raw rows come back NaN; the production AG+RS combine must
+    still produce full-context attention and zeros for the padded row.
+    """
+    torch.manual_seed(0)
+    num_ranks, num_rows, num_heads = 2, 3, 16
+    kv_lora_rank, head_dim, block_size = 512, 576, 16
+    scale = head_dim**-0.5
+    local_lens = [[5, 4, 0], [5, 0, 0]]
+
+    q = torch.randn(num_rows, num_heads, head_dim, dtype=torch.bfloat16, device="cuda")
+    kv_caches = [
+        torch.randn(1, block_size, head_dim, dtype=torch.bfloat16, device="cuda")
+        for _ in range(num_ranks)
+    ]
+    impl = object.__new__(AiterMLAImpl)
+    impl.scale = scale
+    impl.kv_lora_rank = kv_lora_rank
+    impl._sm_count = current_platform.num_compute_units()
+    layer = SimpleNamespace(_k_scale=torch.tensor(1.0, device="cuda"))
+    outputs, lses = [], []
+    for rank in range(num_ranks):
+        verify = SimpleNamespace(
+            block_table=torch.zeros(num_rows, 1, dtype=torch.int32, device="cuda"),
+            row_lens=torch.tensor(local_lens[rank], dtype=torch.int32, device="cuda"),
+            max_kv_seq_len=max(local_lens[rank]),
+        )
+        output, lse = impl._forward_triton_dcp_verify(
+            q, verify, kv_caches[rank], layer, torch.bfloat16
+        )
+        outputs.append(output)
+        lses.append(lse)
+
+    assert torch.isneginf(lses[1][1]).all()
+    assert torch.isneginf(lses[0][2]).all() and torch.isneginf(lses[1][2]).all()
+
+    all_lses = torch.stack(lses)
+    merged = sum(
+        correct_attn_out(outputs[rank], all_lses, rank, CPTritonContext())[0].float()
+        for rank in range(num_ranks)
+    )
+
+    reference = torch.zeros(num_rows, num_heads, kv_lora_rank, device="cuda")
+    for row in range(num_rows):
+        keys = torch.cat(
+            [kv_caches[rank][0, : local_lens[rank][row]] for rank in range(num_ranks)]
+        ).float()
+        if keys.shape[0]:
+            probs = torch.softmax(q[row].float() @ keys.T * scale, dim=-1)
+            reference[row] = probs @ keys[:, :kv_lora_rank]
+
+    assert torch.isfinite(merged).all()
+    torch.testing.assert_close(merged, reference, rtol=2e-2, atol=2e-2)
+
+
+def test_batch_aware_kv_splits_fit_an_int32_safe_reservation(monkeypatch):
+    # MI325X DCP8 verify at 128K context: 128 gathered heads, 16K local tokens.
+    sm_count, heads, local_seq_len, kv_lora_rank = 304, 128, 16384, 512
+    max_rows = 4096
+    reserved = []
+    monkeypatch.setattr(
+        rocm_aiter_mla, "is_workspace_manager_initialized", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "current_workspace_manager",
+        lambda: SimpleNamespace(get_simultaneous=lambda *specs: reserved.extend(specs)),
+    )
+    rocm_aiter_mla._reserve_triton_dcp_verify_workspace(
+        max_rows, heads, local_seq_len, kv_lora_rank, sm_count
+    )
+    ((shape, _),) = reserved
+    # The kernel's attn_logits offsets are int32; seq-only splits overflow them.
+    seq_only = rocm_aiter_mla._compute_num_kv_splits(local_seq_len, sm_count)
+    assert max_rows * heads * seq_only * (kv_lora_rank + 1) >= 2**31
+    assert math.prod(shape) < 2**31
+
+    counts = [
+        rocm_aiter_mla._triton_dcp_verify_num_kv_splits(
+            local_seq_len, rows, heads, sm_count
+        )
+        for rows in range(1, max_rows + 1)
+    ]
+    # Small batches keep the seq-only split count.
+    assert counts[:4] == [seq_only] * 4
+    assert counts == sorted(counts, reverse=True)
+    for rows, splits in enumerate(counts, start=1):
+        assert rows * heads * splits * (kv_lora_rank + 1) <= math.prod(shape)
 
 
 def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):

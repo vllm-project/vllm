@@ -536,5 +536,12 @@ def test_cprr_kernel_is_selected_for_the_k3_shape():
         is True
     )
     assert QLEN >= m._MIN_CPRR_QLEN
-    assert m._select_dcp_decode_route(True, True, QLEN, True) is m._DCPDecodeRoute.CPRR
+    route = m._select_dcp_decode_route(
+        supports_segmented=True,
+        supports_triton=False,
+        causal=True,
+        max_qo_len=QLEN,
+        asm_selected=True,
+    )
+    assert route is m._DCPDecodeRoute.CPRR
     assert m._asm_dcp_verify_heads(96) in m._NATIVE_CPRR_HEADS
