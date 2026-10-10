@@ -5,6 +5,7 @@ import asyncio
 import functools
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
+from http.cookiejar import DefaultCookiePolicy
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
@@ -321,8 +322,18 @@ def _async_retry(
     return wrapper  # type: ignore[return-value]
 
 
+def _session_without_cookies() -> requests.Session:
+    session = requests.Session()
+    session.cookies.set_policy(DefaultCookiePolicy(allowed_domains=()))
+    return session
+
+
 class HTTPConnection:
-    """Helper class to send HTTP requests."""
+    """Helper class to send HTTP requests.
+
+    Reused clients do not persist cookies, so caller-supplied media fetches
+    cannot replay another request's ``Set-Cookie`` state.
+    """
 
     def __init__(self, *, reuse_client: bool = True) -> None:
         super().__init__()
@@ -334,7 +345,7 @@ class HTTPConnection:
 
     def get_sync_client(self) -> requests.Session:
         if self._sync_client is None or not self.reuse_client:
-            self._sync_client = requests.Session()
+            self._sync_client = _session_without_cookies()
 
         return self._sync_client
 
@@ -342,7 +353,10 @@ class HTTPConnection:
     # required, so that the client is only accessible inside async event loop
     async def get_async_client(self) -> aiohttp.ClientSession:
         if self._async_client is None or not self.reuse_client:
-            self._async_client = aiohttp.ClientSession(trust_env=True)
+            self._async_client = aiohttp.ClientSession(
+                trust_env=True,
+                cookie_jar=aiohttp.DummyCookieJar(),
+            )
 
         return self._async_client
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import threading
 from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +44,36 @@ def local_media_server() -> Generator[str, None, None]:
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@pytest.fixture
+def local_cookie_server() -> Generator[tuple[str, list[str | None]], None, None]:
+    received_cookies: list[str | None] = []
+
+    class _CookieHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received_cookies.append(self.headers.get("Cookie"))
+            body = b"ok"
+            self.send_response(200)
+            if self.path.startswith("/set-cookie"):
+                self.send_header("Set-Cookie", "sid=shared-session")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CookieHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", received_cookies
     finally:
         server.shutdown()
         thread.join()
@@ -187,6 +218,55 @@ async def test_get_bytes_allows_body_within_limit(
     try:
         actual = await connection.async_get_bytes(f"{local_media_server}/small")
         assert actual == _SMALL_BODY
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
+
+
+def test_sync_http_connection_does_not_replay_response_cookies(
+    local_cookie_server: tuple[str, list[str | None]],
+) -> None:
+    base_url, received_cookies = local_cookie_server
+    connection = HTTPConnection()
+
+    assert connection.get_bytes(f"{base_url}/set-cookie") == b"ok"
+    assert connection.get_bytes(f"{base_url}/next") == b"ok"
+    assert received_cookies == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_async_http_connection_does_not_replay_response_cookies(
+    local_cookie_server: tuple[str, list[str | None]],
+) -> None:
+    base_url, received_cookies = local_cookie_server
+    connection = HTTPConnection()
+
+    try:
+        assert await connection.async_get_bytes(f"{base_url}/set-cookie") == b"ok"
+        assert await connection.async_get_bytes(f"{base_url}/next") == b"ok"
+        assert received_cookies == [None, None]
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_http_connection_does_not_replay_cookies_concurrently(
+    local_cookie_server: tuple[str, list[str | None]],
+) -> None:
+    base_url, received_cookies = local_cookie_server
+    connection = HTTPConnection()
+
+    try:
+        await asyncio.gather(
+            connection.async_get_bytes(f"{base_url}/set-cookie-a"),
+            connection.async_get_bytes(f"{base_url}/set-cookie-b"),
+        )
+        await asyncio.gather(
+            connection.async_get_bytes(f"{base_url}/next-a"),
+            connection.async_get_bytes(f"{base_url}/next-b"),
+        )
+        assert received_cookies == [None, None, None, None]
     finally:
         if connection._async_client is not None:
             await connection._async_client.close()
