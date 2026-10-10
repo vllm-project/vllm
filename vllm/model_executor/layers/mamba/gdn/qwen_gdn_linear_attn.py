@@ -3,6 +3,7 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import os
+from dataclasses import replace
 from typing import Literal
 
 import torch
@@ -31,6 +32,13 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.prefill_checkpoint import (
+    GDN_SPLIT_CHECKPOINT_ALIGNMENT,
+    chunk_gated_delta_rule_with_checkpoints,
+)
+from vllm.model_executor.layers.mamba.kda_checkpoint import (
+    FlashKDAPrefillCheckpointExporter,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
@@ -66,6 +74,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -464,6 +473,25 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv_kernel_size,
             self.num_spec,
         )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        cache_config = vllm_config.cache_config
+        # _forward_core exports checkpoints for these backends by splitting rows.
+        if (
+            isinstance(spec, MambaSpec)
+            and spec.mamba_cache_mode == "align"
+            and current_platform.is_cuda_alike()
+            and self.gdn_prefill_backend in ("triton", "aiter_flydsl")
+            and self.speculative_config is None
+            and cache_config.prefix_match_unit in (None, cache_config.block_size)
+        ):
+            spec = replace(
+                spec,
+                num_prefill_checkpoint_blocks=1,
+                prefill_checkpoint_alignment=GDN_SPLIT_CHECKPOINT_ALIGNMENT,
+            )
+        return spec
 
     def __init__(
         self,
@@ -1443,6 +1471,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
         # 1.2: Process the remaining part
+        conv_input_non_spec = mixed_qkv_non_spec
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
@@ -1598,23 +1627,54 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=attn_metadata.prefill_query_start_loc,
-                chunk_indices=attn_metadata.chunk_indices,
-                chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
-                aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
-            )
+            checkpoint_split = attn_metadata.checkpoint_split
+            if checkpoint_split is None:
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                    aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
+                )
+            else:
+                assert attn_metadata.checkpoint is not None
+                assert conv_input_non_spec is not None
+                assert non_spec_query_start_loc is not None
+                assert g_non_spec is not None and beta_non_spec is not None
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                    checkpoint_state,
+                ) = chunk_gated_delta_rule_with_checkpoints(
+                    self.chunk_gated_delta_rule,
+                    checkpoint_split,
+                    query_non_spec,
+                    key_non_spec,
+                    value_non_spec,
+                    g_non_spec,
+                    beta_non_spec,
+                    initial_state,
+                    use_qk_l2norm_in_kernel=False,
+                )
+                # Despite the name, this exporter is not KDA-specific.
+                FlashKDAPrefillCheckpointExporter().export(
+                    attn_metadata.checkpoint,
+                    raw_qkv=conv_input_non_spec,
+                    conv_state=conv_state,
+                    recurrent_checkpoint=checkpoint_state[checkpoint_split.rows],
+                    recurrent_state=ssm_state,
+                    cu_seqlens=non_spec_query_start_loc,
+                )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
