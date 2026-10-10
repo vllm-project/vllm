@@ -1174,7 +1174,8 @@ def _ensure_block_size_k_divisible(
     """Ensure block_size_k is a divisor of size_k and divisible by group_size.
 
     This ensures BLOCK_SIZE_K compatibility with MoeWNA16 CUDA kernel which
-    requires size_k % BLOCK_SIZE_K == 0 and BLOCK_SIZE_K % group_size == 0.
+    requires size_k % BLOCK_SIZE_K == 0 and BLOCK_SIZE_K // group_size in
+    [1, 2, 4, 8].
 
     Args:
         size_k: The size_k dimension that must be divisible by result.
@@ -1185,21 +1186,12 @@ def _ensure_block_size_k_divisible(
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
 
     """
-    # Fast path: already valid
-    if size_k % block_size_k == 0 and block_size_k % group_size == 0:
-        return block_size_k
-
-    # Find the largest value that:
-    # 1. Divides size_k (size_k % candidate == 0)
-    # 2. Is divisible by group_size (candidate % group_size == 0)
-    # 3. Is <= block_size_k (prefer smaller values close to block_size_k)
-    #
-    # Strategy: Search from min(block_size_k, size_k) down to group_size,
-    # stepping by group_size to ensure divisibility by group_size
-    max_search = min(block_size_k, size_k)
-    start = (max_search // group_size) * group_size
-    for candidate in range(start, group_size - 1, -group_size):
-        if size_k % candidate == 0:
+    # Other ratios fall back to the GROUPS=1 kernel instantiation, which
+    # misreads the scales. Pick the largest legal candidate that divides
+    # size_k and does not exceed block_size_k.
+    for ratio in (8, 4, 2, 1):
+        candidate = group_size * ratio
+        if candidate <= block_size_k and size_k % candidate == 0:
             return candidate
 
     # Fallback: if group_size divides size_k, use it

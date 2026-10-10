@@ -11,6 +11,9 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _ensure_block_size_k_divisible,
+)
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
     _backend_incompatibility_reason,
@@ -441,6 +444,19 @@ def test_xpu_platform_supports_moe_wna16():
         pytest.skip("vllm_xpu_kernels not importable outside an XPU stack")
 
     assert "moe_wna16" in XPUPlatform.supported_quantization
+
+
+@pytest.mark.parametrize("size_k", [2560, 4096])
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+@pytest.mark.parametrize("block_size_k", [128, 256, 512, 1024])
+def test_wna16_cuda_block_size_k_has_supported_group_ratio(
+    size_k, group_size, block_size_k
+):
+    """moe_wna16_gemm only instantiates BLOCK_SIZE_K // group_size in 1/2/4/8."""
+    out = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
+    assert size_k % out == 0
+    assert out // group_size in (1, 2, 4, 8)
+    assert out % group_size == 0
 
 
 def _channelwise_int4_args() -> QuantizationArgs:
