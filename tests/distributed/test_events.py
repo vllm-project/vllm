@@ -5,6 +5,7 @@ import time
 
 import msgspec
 import pytest
+import zmq
 
 from vllm.distributed.kv_events import (
     EventBatch,
@@ -214,6 +215,68 @@ def test_null_publisher():
     batch = create_test_events(5)
     publisher.publish(batch)
     publisher.shutdown()
+
+
+def test_null_publisher_reports_no_stats():
+    """The no-op publisher tracks nothing, so it reports no counters."""
+    publisher = NullEventPublisher(DP_RANK)
+    assert publisher.get_stats() is None
+    publisher.shutdown()
+
+
+def test_publisher_stats_count_published_batches(publisher, subscriber):
+    """Published batches are counted and the queue drains to empty."""
+    assert publisher.get_stats().published == 0
+
+    for _ in range(3):
+        publisher.publish(create_test_events(2))
+
+    for _ in range(3):
+        subscriber.receive_one(timeout=1000)
+
+    deadline = time.time() + 5
+    while time.time() < deadline and publisher.get_stats().published < 3:
+        time.sleep(0.01)
+
+    stats = publisher.get_stats()
+    assert stats.published == 3
+    assert stats.errored == 0
+    assert stats.queued == 0
+
+
+def test_publisher_stats_count_send_errors(publisher, subscriber):
+    """A transport failure is counted and does not wedge the queue.
+
+    Guards the error path in the publisher thread: the batch is dropped
+    rather than retried, so it must still be marked done or a join() on the
+    queue would hang forever.
+    """
+    publisher.publish(create_test_events(1))
+    subscriber.receive_one(timeout=1000)
+
+    # Force the next send to fail, leaving later sends working.
+    original_send = publisher._pub.send_multipart
+    calls = {"n": 0}
+
+    def flaky_send(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise zmq.ZMQError("induced failure")
+        return original_send(*args, **kwargs)
+
+    publisher._pub.send_multipart = flaky_send
+
+    publisher.publish(create_test_events(1))
+
+    deadline = time.time() + 5
+    while time.time() < deadline and publisher.get_stats().errored < 1:
+        time.sleep(0.01)
+
+    stats = publisher.get_stats()
+    assert stats.errored == 1
+    # The failed batch was still accounted for, so nothing is left pending.
+    assert stats.queued == 0
+    publisher._event_queue.join()
 
 
 def test_data_parallel_rank_tagging(publisher_config):

@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -2939,6 +2939,10 @@ class Scheduler(SchedulerInterface):
         ec_connector_stats_payload = (
             ec_connector_stats.data if ec_connector_stats else None
         )
+        kv_event_publisher_stats = self.kv_event_publisher.get_stats()
+        kv_event_publisher_stats_payload = (
+            asdict(kv_event_publisher_stats) if kv_event_publisher_stats else None
+        )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
         return SchedulerStats(
@@ -2955,6 +2959,7 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            kv_event_publisher_stats=kv_event_publisher_stats_payload,
         )
 
     def make_spec_decoding_stats(
