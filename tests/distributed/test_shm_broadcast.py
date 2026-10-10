@@ -613,6 +613,83 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
             socket.close(linger=0)
 
 
+def _read_pair(reader, read_first, sent_second, latencies):
+    assert reader.dequeue(timeout=5) == 1
+    read_first.set()
+    assert reader.dequeue(timeout=5) == 2
+    latencies.append(time.monotonic() - sent_second[0])
+
+
+def test_back_to_back_writes_wake_a_parked_reader():
+    """A write right after another must wake a reader that parked in between.
+
+    The reader never busy-waits, so after each read it parks on the notify
+    socket; the writer sends the second message as soon as the reader has
+    entered its poll, well within zmq's ~1-3 ms flow-control window after the
+    first. A dropped notification would leave the reader asleep until the
+    recheck.
+    """
+    writer = MessageQueue(
+        n_reader=1, n_local_reader=1, max_chunk_bytes=1024, max_chunks=4
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    latencies: list[float] = []
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        reader._spin_condition.busy_loop_s = 0
+        poller = reader._spin_condition.poller
+        real_poll = poller.poll
+        parked = threading.Event()
+        first_read = [threading.Event()]
+
+        def poll(*args, **kwargs):
+            # Only a poll that starts after the first message was read counts:
+            # that is the reader parked, waiting for the second.
+            if first_read[0].is_set():
+                parked.set()
+            return real_poll(*args, **kwargs)
+
+        poller.poll = poll
+        with mock.patch(
+            "vllm.distributed.device_communicators.shm_broadcast."
+            "SHM_READER_RECHECK_INTERVAL_MS",
+            new=2000,
+        ):
+            for _ in range(50):
+                read_first = threading.Event()
+                first_read[0] = read_first
+                parked.clear()
+                sent_second = [0.0]
+                thread = threading.Thread(
+                    target=_read_pair,
+                    args=(reader, read_first, sent_second, latencies),
+                    daemon=True,
+                )
+                thread.start()
+                time.sleep(0.01)  # let the reader park
+                writer.enqueue(1)
+                assert read_first.wait(timeout=5)
+                assert parked.wait(timeout=5)  # the reader is in its poll now
+                sent_second[0] = time.monotonic()
+                writer.enqueue(2)
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+        assert max(latencies) < 0.5, f"slowest wake-up {max(latencies):.3f} s"
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+        for socket in (
+            writer.local_socket,
+            writer._spin_condition.local_notify_socket,
+            reader.local_socket,
+            reader._spin_condition.local_notify_socket,
+            reader._spin_condition.read_cancel_socket,
+            reader._spin_condition.write_cancel_socket,
+        ):
+            socket.close(linger=0)
+
+
 def test_acquire_read_releases_slot_when_reader_raises():
     writer = MessageQueue(
         n_reader=1,
