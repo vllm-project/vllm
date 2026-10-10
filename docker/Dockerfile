@@ -492,6 +492,7 @@ WORKDIR /workspace
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
 ARG DEEPEP_COMMIT_HASH=d4f41e4e93
+ARG MOONEP_COMMIT_HASH=33327eb9c4
 ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -507,6 +508,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         --workspace /tmp/ep_kernels_workspace \
         --mode wheel \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} \
+        ${MOONEP_COMMIT_HASH:+--moonep-ref "$MOONEP_COMMIT_HASH"} \
         ${NVSHMEM_VER:+--nvshmem-ver "$NVSHMEM_VER"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 

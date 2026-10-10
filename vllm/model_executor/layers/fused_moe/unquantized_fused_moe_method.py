@@ -54,8 +54,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
             moe_config=self.moe,
         )
-        # MoonEP replaces the named parameters with its [E+B] gate/down
-        # split and keeps the up projection outside the parameter registry,
+        # MoonEP replaces the named parameters with its [2 * epn] gate/down
+        # views and keeps the up projection outside the parameter registry,
         # so a pre-processed (e.g. ipc_cache) load cannot reconstruct it.
         self.supports_pre_processed_weights = (
             self.unquantized_backend != UnquantizedMoeBackend.MOONEP
@@ -199,7 +199,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # No-op by default. Experts that need the layer itself for setup
             # convert_to_unquantized_kernel_format cannot express override
             # it: CPU prepacks into its grouped-gemm layout and captures the
-            # router config; MoonEP picks up the [E+B] weight layout for
+            # router config; MoonEP picks up the expert weight views for
             # prefetch and the up projection.
             assert self.moe_kernel is not None
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)

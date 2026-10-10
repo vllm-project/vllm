@@ -3,24 +3,27 @@
 """MoonEP experts: grouped GEMM over MoonEP's expert-grouped activations.
 
 MoonEP dispatch delivers tokens already contiguous per weight row
-(``[NvS, H]`` in ``cu_seqlens[E+B]`` segment order), so the expert compute
-is three grouped GEMMs over those segments with no permute/unpermute:
+(``[NvS, H]`` in ``cu_seqlens[2 * epn]`` segment order), so the expert
+compute is three grouped GEMMs over those segments with no
+permute/unpermute:
 
-    gate = grouped_mm(x, w_gate[E+B])      # [NvS, I]
-    up   = grouped_mm(x, w_up[E+B])        # [NvS, I]
-    act  = silu(gate) * up * route_weight  # route weights applied here
-    out  = grouped_mm(act, w_down[E+B])    # [NvS, H]
+    gate = grouped_mm(x, w_gate[2 * epn])    # [NvS, I]
+    up   = grouped_mm(x, w_up[2 * epn])      # [NvS, I]
+    act  = silu(gate) * up * route_weight    # route weights applied here
+    out  = grouped_mm(act, w_down[2 * epn])  # [NvS, H]
 
-Rows ``[E, E+B)`` are the redundant-expert prefetch slots that
-``MoonEPPrepareAndFinalize`` fills before ``apply`` runs. Empty segments
-(including unused prefetch slots) are skipped by the grouped GEMM.
+Rows ``[0, epn)`` are this rank's own experts and rows ``[epn, 2 * epn)``
+the redundant-expert prefetch slots that ``MoonEPPrepareAndFinalize`` fills
+before ``apply`` runs. Empty segments (including unused prefetch slots) are
+skipped by the grouped GEMM.
 
-Weight layout: MoonEP's ``prefetch_weight`` requires each projection to be
-its own contiguous ``[E+B, ., .]`` tensor, so gate and up are separate
-tensors rather than vLLM's interleaved ``[E, 2I, H]`` ``w13``. The modular
-kernel passes ``w1``/``w2`` from the layer (``w1`` is the gate tensor); the
-full layout is picked up from the layer in ``process_weights_after_loading``
-and shared with ``MoonEPPrepareAndFinalize`` via ``post_init_setup``.
+Weight layout: MoonEP's ``prefetch_weight`` takes each projection as its own
+contiguous tensor, so gate and up are separate tensors rather than vLLM's
+interleaved ``[E, 2I, H]`` ``w13``. The modular kernel passes ``w1``/``w2``
+from the layer (``w1`` is the gate compute view); the full
+``MoonEPExpertWeights`` is picked up from the layer in
+``process_weights_after_loading`` and shared with
+``MoonEPPrepareAndFinalize`` via ``post_init_setup``.
 """
 
 import torch
@@ -81,22 +84,22 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
                 "MoonEPExperts implements plain silu(gate) * up only; SwiGLU "
                 "variants with alpha/beta/clamp parameters are not supported"
             )
-        self._weight_layout = None
+        self._expert_weights = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # The [E+B] gate/up/down layout built by
+        # The gate/up/down compute views built by
         # convert_to_unquantized_kernel_format; MoonEPPrepareAndFinalize
-        # reads it from here (post_init_setup) for weight prefetch.
-        layout = getattr(layer, "_moonep_weight_layout", None)
-        assert layout is not None, (
-            "MoonEPExperts requires the layer to carry _moonep_weight_layout "
+        # reads them from here (post_init_setup) for weight prefetch.
+        weights = getattr(layer, "_moonep_expert_weights", None)
+        assert weights is not None, (
+            "MoonEPExperts requires the layer to carry _moonep_expert_weights "
             "(set by convert_to_unquantized_kernel_format)"
         )
-        self._weight_layout = layout
+        self._expert_weights = weights
 
     @property
-    def weight_layout(self):
-        return self._weight_layout
+    def expert_weights(self):
+        return self._expert_weights
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -117,7 +120,7 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # EPLB rearranges the named expert parameters as local_num_experts
-        # rows, which does not understand the replicated [E+B] layout.
+        # rows, which does not understand the [2 * epn] compute views.
         return (
             moe_parallel_config.use_moonep_kernels
             and not moe_parallel_config.enable_eplb
@@ -135,7 +138,7 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         return False
 
     def supports_expert_map(self) -> bool:
-        # MoonEP addresses global expert rows directly.
+        # MoonEP's planner maps global expert ids to local rows itself.
         return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -151,7 +154,7 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         # a1 is [NvS, H] in segment order, not token-major, so the base
         # implementation's topk_ids/a1 row-count check does not apply.
         assert a1.dim() == 2 and w1.dim() == 3 and w2.dim() == 3
-        num_rows, intermediate, hidden = w1.shape  # [E+B, I, H]
+        num_rows, intermediate, hidden = w1.shape  # [2 * epn, I, H]
         assert a1.size(1) == hidden
         return num_rows, a1.size(0), intermediate, hidden, topk_ids.size(1)
 
@@ -189,9 +192,9 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         apply_router_weight_on_input: bool,
     ) -> None:
         # expert_map is ignored: MoonEP dispatches on global expert ids and
-        # the weights are addressed by global [E+B] row, on every rank.
+        # its planner addresses the [2 * epn] compute rows directly.
         assert activation == MoEActivation.SILU
-        assert self._weight_layout is not None, (
+        assert self._expert_weights is not None, (
             "process_weights_after_loading() not called"
         )
         assert expert_tokens_meta is not None
@@ -207,9 +210,7 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         assert cu_seqlens.numel() == w1.size(0)
 
         gate = moonep_grouped_gemm(hidden_states, w1, cu_seqlens)
-        up = moonep_grouped_gemm(
-            hidden_states, self._weight_layout.full_up_weight, cu_seqlens
-        )
+        up = moonep_grouped_gemm(hidden_states, self._expert_weights.up, cu_seqlens)
         act = torch.nn.functional.silu(gate)
         act.mul_(up)
         if not apply_router_weight_on_input:

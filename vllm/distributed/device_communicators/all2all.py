@@ -1205,10 +1205,21 @@ class MoonEPAll2AllManager(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+            MoonEPExpertWeightPools,
+        )
+
         check_moonep_system_support()
         super().__init__(cpu_group, tcp_store_group)
         self._device_group = device_group
         self.handle_cache = Cache()
+        # Process-global prefetch slots shared by every MoE layer; the
+        # layers place their expert weights through it at load time.
+        self.expert_weight_pools = MoonEPExpertWeightPools(self._group)
+
+    @property
+    def _group(self):
+        return self._device_group if self._device_group is not None else self.cpu_group
 
     def _make_buffer_kwargs(
         self,
@@ -1216,7 +1227,6 @@ class MoonEPAll2AllManager(All2AllManagerBase):
         token_hidden_size: int,
         num_topk: int,
         num_global_experts: int,
-        num_prefetch_slots: int,
         token_padding: int,
         num_sms: int,
     ) -> dict:
@@ -1228,10 +1238,7 @@ class MoonEPAll2AllManager(All2AllManagerBase):
             num_ep_ranks=self.world_size,
             num_sms=num_sms,
             token_padding=token_padding,
-            B=num_prefetch_slots,
-            group=self._device_group
-            if self._device_group is not None
-            else self.cpu_group,
+            group=self._group,
             explicitly_destroy=True,
         )
 
@@ -1256,3 +1263,4 @@ class MoonEPAll2AllManager(All2AllManagerBase):
             for _, handle in self.handle_cache._cache.items():
                 handle.destroy()
             self.handle_cache._cache.clear()
+        self.expert_weight_pools.close()

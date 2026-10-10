@@ -2049,18 +2049,26 @@ class VllmConfig:
                     f"only; got dtype={self.model_config.dtype}. Use a "
                     "different --all2all-backend or --dtype bfloat16."
                 )
+            if self.model_config is not None and self.model_config.enable_sleep_mode:
+                raise ValueError(
+                    "The moonep all2all backend does not support sleep mode: "
+                    "its expert weights live in CUDA VMM allocations outside "
+                    "the sleep-mode allocator and would be neither offloaded "
+                    "nor discarded. Disable --enable-sleep-mode or use a "
+                    "different --all2all-backend."
+                )
             if self.parallel_config.enable_eplb:
                 raise ValueError(
                     "The moonep all2all backend does not support EPLB yet: "
                     "EPLB rearranges expert parameters in a layout MoonEP's "
-                    "replicated [E+B] weights do not follow. Disable "
+                    "symmetric-memory weight views do not follow. Disable "
                     "--enable-eplb or use a different --all2all-backend."
                 )
             if self.parallel_config.expert_placement_strategy != "linear":
                 raise ValueError(
                     "The moonep all2all backend requires linear expert "
-                    "placement: its load-time all-gather assumes each rank "
-                    "holds a contiguous chunk of the global expert range. Got "
+                    "placement: MoonEP's planner assumes each rank holds a "
+                    "contiguous chunk of the global expert range. Got "
                     "--expert-placement-strategy "
                     f"{self.parallel_config.expert_placement_strategy!r}."
                 )
