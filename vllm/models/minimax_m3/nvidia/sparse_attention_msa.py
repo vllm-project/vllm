@@ -266,7 +266,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
         # Given query_fp8, it is the only q the fused insert wrote: CUTLASS
-        # decode reads it directly, and the bf16-query kernels read it
+        # decode and prefill read it directly, and Triton decode reads it
         # dequantized into ``query``.
         q_fp8 = (
             None
@@ -339,11 +339,11 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             # [H, prefill, MK] transposed view; build_k2q_csr consumes the
             # strided view directly (topK stays innermost-contiguous).
             prefill_topk = topk[nd:num_tokens].transpose(0, 1)
-            qp = (
-                q[nd:]
-                if q_fp8 is None
-                else _dequantize_query(q_fp8[nd:], q_scale_float, q[nd:])
-            )
+            # An E4M3 query attends as is, its scale folded into softmax_scale.
+            if q_fp8 is None:
+                qp, softmax_scale = q[nd:], self.scale
+            else:
+                qp, softmax_scale = q_fp8[nd:], self.scale * q_scale_float
             k2q_row_ptr, k2q_q_indices, schedule = build_k2q_csr(
                 prefill_topk,
                 p.cu_seqlens_q,
@@ -375,7 +375,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                     max_seqlen_k=p.max_seq_len,
                     blk_kv=SPARSE_BLOCK_SIZE,
                     causal=True,
-                    softmax_scale=self.scale,
+                    softmax_scale=softmax_scale,
                     page_table=p.block_table,
                     seqused_k=p.seq_lens,
                     schedule=schedule,
@@ -393,7 +393,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                 topK=self.topk_blocks,
                 blk_kv=SPARSE_BLOCK_SIZE,
                 causal=True,
-                softmax_scale=self.scale,
+                softmax_scale=softmax_scale,
                 cu_seqlens_q=p.cu_seqlens_q,
                 cu_seqlens_k=p.cu_seqlens_k,
                 max_seqlen_q=p.max_query_len,

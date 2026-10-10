@@ -17,7 +17,7 @@ else()
   FetchContent_Declare(
     fmha_sm100
     GIT_REPOSITORY https://github.com/vllm-project/MSA.git
-    GIT_TAG be4a52aea420b6bef73be9af1a649859964790cb
+    GIT_TAG 968061ab16cb14991a5c7d4c0e8eabf531be0dcf
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
@@ -36,11 +36,14 @@ set(FMHA_SM100_PY_ROOT "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100")
 
 install(FILES
   "${FMHA_SM100_PY_ROOT}/__init__.py"
+  "${FMHA_SM100_PY_ROOT}/_jit_cache.py"
   "${FMHA_SM100_PY_ROOT}/api.py"
   "${FMHA_SM100_PY_ROOT}/bench_utils.py"
   "${FMHA_SM100_PY_ROOT}/jit.py"
+  "${FMHA_SM100_PY_ROOT}/msa_warmup.py"
   "${FMHA_SM100_PY_ROOT}/nvfp4_kv.py"
   "${FMHA_SM100_PY_ROOT}/q8kv4_decode_adapter.py"
+  "${FMHA_SM100_PY_ROOT}/q8kv4_prefill_adapter.py"
   "${FMHA_SM100_PY_ROOT}/sparse.py"
   "${FMHA_SM100_PY_ROOT}/sparse_fmha_adapter.py"
   DESTINATION vllm/third_party/fmha_sm100
@@ -61,6 +64,12 @@ install(DIRECTORY "${FMHA_SM100_PY_ROOT}/decode_q8kv4/"
 
 install(DIRECTORY "${FMHA_SM100_PY_ROOT}/kvouter/"
   DESTINATION vllm/third_party/fmha_sm100/kvouter
+  COMPONENT fmha_sm100
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE)
+
+install(DIRECTORY "${FMHA_SM100_PY_ROOT}/prefill_q8kv4/"
+  DESTINATION vllm/third_party/fmha_sm100/prefill_q8kv4
   COMPONENT fmha_sm100
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE)
