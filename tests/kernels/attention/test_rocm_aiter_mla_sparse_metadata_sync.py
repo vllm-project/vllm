@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import sys
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -44,6 +46,7 @@ def _make_builder():
     builder.kv_cache_dtype = "fp8"
     builder.mla_dims = SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)
     builder.topk_tokens = topk_tokens
+    builder._seq_lens_ub_slack = 0
     builder.req_id_per_token_buffer = torch.zeros(
         max_num_batched_tokens, dtype=torch.int32, device="cpu"
     )
@@ -223,3 +226,52 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
 
     assert events == []
     assert fake_get_mla_metadata_v1_mock.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "slack,ub_offset,expect_sync",
+    [
+        # No spec decode: the upper bound is exact.
+        (0, 0, False),
+        # Spec decode, context upper bounds (17, 9) minus slack are >= topk (4).
+        (2, 2, False),
+        # Spec decode, context upper bound 7 minus slack 8 < topk: needs exact.
+        (8, 0, True),
+    ],
+)
+def test_persistent_metadata_key_from_upper_bound(
+    monkeypatch, slack, ub_offset, expect_sync
+):
+    """The metadata key skips the seq_lens D2H copy when the host upper bound
+    provably gives the same key, and matches the exact key either way."""
+    syncs: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_gpu_sync_allowed():
+        syncs.append("sync")
+        yield
+
+    _patch_build_deps(monkeypatch)
+    monkeypatch.setattr(sparse_mod, "gpu_sync_allowed", fake_gpu_sync_allowed)
+    common_metadata = _make_common_metadata()
+
+    exact = _make_builder()
+    exact.build(
+        common_prefix_len=0,
+        common_attn_metadata=replace(common_metadata, seq_lens_cpu_upper_bound=None),
+    )
+    assert syncs == ["sync"]
+    syncs.clear()
+
+    builder = _make_builder()
+    builder._seq_lens_ub_slack = slack
+    upper_bound = common_metadata.seq_lens + ub_offset
+    builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=replace(
+            common_metadata, seq_lens_cpu_upper_bound=upper_bound
+        ),
+    )
+
+    assert syncs == (["sync"] if expect_sync else [])
+    assert builder._prev_metadata_key == exact._prev_metadata_key
