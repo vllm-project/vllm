@@ -190,6 +190,7 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+    VLLM_MIMO_OPROJ_FP8: bool = False
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
@@ -1569,6 +1570,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
         "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
     ),
+    # Quantize MiMo-v2's bf16 o_proj checkpoint weights online to per-tensor
+    # FP8 with dynamic activations.
+    "VLLM_MIMO_OPROJ_FP8": lambda: os.environ.get("VLLM_MIMO_OPROJ_FP8", "0") == "1",
     # The online quantization dtype for humming kernel
     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)

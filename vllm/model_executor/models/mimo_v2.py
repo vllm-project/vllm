@@ -6,6 +6,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -13,6 +14,7 @@ from vllm.config import (
     get_current_vllm_config,
     str_dtype_to_torch_dtype,
 )
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -36,8 +38,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    kFp8StaticTensorSym,
     scaled_quantize,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -270,11 +274,16 @@ class MiMoV2Attention(nn.Module):
             v_head_size=self.v_head_dim,
         )
 
+        o_proj_quant_config = quant_config
+        if envs.VLLM_MIMO_OPROJ_FP8:
+            o_proj_quant_config = OnlineQuantizationConfig(
+                QuantizationConfigArgs(linear=QuantSpec(weight=kFp8StaticTensorSym))
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.v_head_dim,
             hidden_size,
             bias=False,
-            quant_config=quant_config if "mtp.layers" not in prefix else None,
+            quant_config=o_proj_quant_config if "mtp.layers" not in prefix else None,
             reduce_results=True,
             prefix=f"{prefix}.o_proj",
         )
