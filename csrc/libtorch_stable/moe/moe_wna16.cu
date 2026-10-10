@@ -216,7 +216,9 @@ __global__ void moe_wna16_gemm_kernel(
       if (mul_topk_weight) {
         res[m] *= topk_weights[token_index];
       }
-      atomicAdd(&output[token_index * size_n + offset_n],
+      const int64_t output_offset =
+          static_cast<int64_t>(token_index) * size_n + offset_n;
+      atomicAdd(&output[output_offset],
                 Dtype::float2num(res[m]));
     }
 
