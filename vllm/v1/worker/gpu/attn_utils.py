@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
@@ -23,7 +24,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.hisparse.binding import (
     init_hisparse_kv_cache,
-    resolve_hisparse_block_size,
+    resolve_hisparse_specs,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -39,6 +40,8 @@ from vllm.v1.worker.utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
     bind_kv_cache_to_layers,
+    customize_attention_spec,
+    map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
 )
 
@@ -140,9 +143,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             if isinstance(spec, AttentionSpec):
-                spec = attn_module.get_attn_backend().customize_spec(spec)
+                spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
             kv_cache_spec[layer_name] = spec
-    resolve_hisparse_block_size(vllm_config, kv_cache_spec, attn_layers)
+    if vllm_config.attention_config.hisparse_config is not None:
+        kv_cache_spec = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
     return kv_cache_spec
 
 
@@ -223,6 +227,14 @@ def init_attn_backend(
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
+            if (
+                envs.VLLM_BATCH_INVARIANT
+                and not attn_backend.supports_batch_invariance()
+            ):
+                raise RuntimeError(
+                    "VLLM batch_invariant mode is not supported for "
+                    f"{attn_backend.get_name()}."
+                )
             if layer_name in fast_prefill_eligible_layers:
                 attn_backend = create_fast_prefill_custom_backend(
                     "FastPrefill", attn_backend
@@ -372,6 +384,7 @@ def init_kv_cache(
     kv_cache_allocation_context: AbstractContextManager | None = None,
     *,
     block_tables: "BlockTables | None" = None,
+    attn_groups: Iterable[AttentionGroup] = (),
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
@@ -397,14 +410,12 @@ def init_kv_cache(
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).
     num_attn_module = (
-        2
-        if vllm_config.model_config.hf_config.model_type
-        in ("longcat_flash", "longcat_flash_ngram")
-        else 1
+        2 if vllm_config.model_config.hf_config.model_type == "longcat_flash" else 1
     )
-    bindable_caches = {
-        name: cache for name, cache in kv_caches.items() if name in forward_context
-    }
+    bindable_caches = map_kv_caches_to_kernel_blocks(
+        {name: cache for name, cache in kv_caches.items() if name in forward_context},
+        attn_groups,
+    )
     bind_kv_cache_to_layers(
         bindable_caches,
         forward_context,
@@ -529,8 +540,8 @@ def build_attn_metadata(
                     cached_metadata[reuse_key], block_table, slot_mapping
                 )
             elif for_cudagraph_capture:
-                metadata = attn_metadata_builder.build_for_cudagraph_capture(
-                    common_attn_metadata
+                metadata = attn_group.build_metadata_for_cudagraph_capture(
+                    common_attn_metadata, ubatch_idx
                 )
             else:
                 attn_metadata_extra_kwargs = (
@@ -541,10 +552,8 @@ def build_attn_metadata(
                     if model_specific_attn_metadata is not None
                     else {}
                 )
-                metadata = attn_metadata_builder.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=common_attn_metadata,
-                    **attn_metadata_extra_kwargs,
+                metadata = attn_group.build_metadata(
+                    common_attn_metadata, ubatch_idx, **attn_metadata_extra_kwargs
                 )
             if reuse_key is not None and reuse_key not in cached_metadata:
                 cached_metadata[reuse_key] = metadata

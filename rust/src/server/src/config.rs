@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ use vllm_text::backend::hf::HfOverrides;
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How the HTTP server obtains its listening socket.
+/// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
     /// Bind a fresh TCP listener on the given host/port.
@@ -229,6 +230,8 @@ pub struct Config {
     pub served_model_name: Vec<String>,
     /// HTTP listener setup.
     pub listener_mode: HttpListenerMode,
+    /// gRPC listener setup. When `None`, no gRPC server is started.
+    pub grpc_listener_mode: Option<HttpListenerMode>,
     /// Tool-call parser selection.
     pub tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -256,6 +259,10 @@ pub struct Config {
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
+    /// Minimum number of newly generated tokens batched into each streamed
+    /// output after the first one. Requests can raise it with their own
+    /// `stream_interval`.
+    pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
@@ -272,9 +279,6 @@ pub struct Config {
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
-    /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
-    /// started.
-    pub grpc_port: Option<u16>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when

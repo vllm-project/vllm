@@ -30,7 +30,6 @@ repos:
   - id: markdownlint-cli2
     language_version: lts
     args: [--config, tools/pre_commit/.markdownlint.yaml, --fix]
-    exclude: (^|/)CLAUDE\.md$
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -177,6 +176,14 @@ repos:
     files: ^\.github/mergify\.yml$
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
+  - id: check-agent-files
+    name: Check agent instruction files and skills
+    language: python
+    entry: python tools/pre_commit/check_agent_files.py
+    files: ^(\.agents/|\.claude/|(.*/)?(AGENTS|CLAUDE)\.md$|tools/pre_commit/check_agent_files\.py$)
+    pass_filenames: false
+    additional_dependencies: [PyYAML, regex]
+    verbose: true # `note:` lines are advisory, so the hook passes
   - id: check-buildkite-step-keys
     name: Check every Buildkite step declares an explicit key
     language: python
@@ -192,29 +199,13 @@ repos:
     additional_dependencies: [PyYAML, regex]
     verbose: true # full-scan `note:` lines are advisory, so the hook passes
     require_serial: true # one full scan, not one per pre-commit file batch
-  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.10
-    entry: python tools/pre_commit/mypy.py "3.10"
-    <<: &mypy_common
-      language: python
-      types_or: [python, pyi]
-      require_serial: true
-      additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
-  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.11
+  - id: mypy # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for the oldest supported Python version
     entry: python tools/pre_commit/mypy.py "3.11"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
-  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.12
-    entry: python tools/pre_commit/mypy.py "3.12"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
-  - id: mypy-3.13 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.13
-    entry: python tools/pre_commit/mypy.py "3.13"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
+    language: python
+    types_or: [python, pyi]
+    require_serial: true
+    additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, "pydantic==2.13.5"]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh

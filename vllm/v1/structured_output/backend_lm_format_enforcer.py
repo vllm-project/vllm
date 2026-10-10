@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 import json
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -117,7 +116,7 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
                 grammar_spec,
             )
         elif request_type == StructuredOutputOptions.CHOICE:
-            choices = ast.literal_eval(grammar_spec)
+            choices = json.loads(grammar_spec)
             character_level_parser = lmformatenforcer.UnionParser(
                 [lmformatenforcer.StringParser(choice) for choice in choices]
             )
