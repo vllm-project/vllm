@@ -12,6 +12,7 @@ generation. Supported dataset types include:
 
 import argparse
 import ast
+import hashlib
 import io
 import json
 import logging
@@ -1496,10 +1497,12 @@ class TimedTrace(BenchmarkDataset):
             key = f"{h}:{expanded_size}"
 
             if key not in self._expanded_generated_prompts:
-                # Convert key to a deterministic seed
-                key_seed = hash(key) & 0xFFFFFFFF  # Convert to 32-bit int
+                # Seed by chunk identity so partial chunks retain the same prefix.
+                chunk_seed = int.from_bytes(
+                    hashlib.sha256(str(h).encode()).digest()[:4], "big"
+                )
                 self._expanded_generated_prompts[key] = self._sample_token(
-                    expanded_size, tokenizer, seed=key_seed
+                    expanded_size, tokenizer, seed=chunk_seed
                 )
             # once inserted get the tokenized prompt and append to the list
             raw_tokenized_prompt.extend(self._expanded_generated_prompts[key])
