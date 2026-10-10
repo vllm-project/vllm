@@ -2222,7 +2222,10 @@ def initialize_model_parallel(
         # DCP spans PCP first, then TP for full TP x PCP groups.
         dcp_ranks = dcp_ranks.transpose(-1, -2)
     group_ranks = dcp_ranks.reshape(-1, dcp_size).unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
+    # torch.distributed orders group members by sorted global rank, so a
+    # full TP x PCP group's members must be listed in that order too, or
+    # rank_in_group disagrees with the collectives' output order.
+    group_ranks = [sorted(x.tolist()) for x in group_ranks]
     _DCP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,
