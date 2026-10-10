@@ -552,6 +552,8 @@ class FlashInferBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        if not cls.is_attention_jit_usable():
+            return "FlashInfer attention JIT is unavailable"
         if (
             kv_cache_dtype is not None
             and kv_cache_dtype.startswith("nvfp4")
@@ -562,6 +564,13 @@ class FlashInferBackend(AttentionBackend):
             if has_sink:
                 return "the sink prefill wrapper cannot read an NVFP4 KV cache"
         return None
+
+    @classmethod
+    def is_attention_jit_usable(cls) -> bool:
+        """Whether FlashInfer's attention JIT modules can be loaded or built."""
+        from vllm.utils.flashinfer import is_flashinfer_jit_usable
+
+        return is_flashinfer_jit_usable()
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

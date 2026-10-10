@@ -73,6 +73,23 @@ def _flashinfer_nvcc_path() -> str | None:
     return shutil.which(os.path.join(cuda_home, "bin", "nvcc"))
 
 
+def is_flashinfer_jit_usable() -> bool:
+    """Check package/toolchain prerequisites for FlashInfer attention JIT.
+
+    FlashInfer's JIT-cache wheel supplies precompiled modules. Otherwise,
+    its runtime JIT needs both nvcc and ninja. The separate cubin package only
+    supplies TRTLLM-gen cubins and is not sufficient for attention JIT modules.
+    This prerequisite check does not verify per-kernel artifacts for every
+    active GPU architecture; the selector uses it to decide whether the
+    FlashInfer path is eligible, not to guarantee a particular kernel loads.
+    """
+    if importlib.util.find_spec("flashinfer") is None:
+        return False
+    if importlib.util.find_spec("flashinfer_jit_cache") is not None:
+        return True
+    return _flashinfer_nvcc_path() is not None and shutil.which("ninja") is not None
+
+
 @functools.cache
 def has_flashinfer_cubin() -> bool:
     """Return `True` if flashinfer-cubin package is available."""
