@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
+    get_tp_group,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
@@ -127,7 +128,17 @@ class LogitsProcessor(PluggableLayer):
             # NOTE(woosuk): Here, the outputs of every device should not be None
             # because XLA requires strict SPMD among all devices. Every device
             # should execute the same operations after gathering the logits.
-            logits = tensor_model_parallel_all_gather(logits)
+            group = get_tp_group()
+            gather = getattr(group.device_communicator, "custom_all_gather", None)
+            gathered = None if gather is None else gather(logits)
+            if gathered is None:
+                logits = tensor_model_parallel_all_gather(logits)
+            else:
+                logits = (
+                    gathered.view(group.world_size, *logits.shape)
+                    .movedim(0, -2)
+                    .reshape(*logits.shape[:-1], group.world_size * logits.shape[-1])
+                )
         else:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
