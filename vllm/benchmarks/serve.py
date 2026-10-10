@@ -814,7 +814,10 @@ async def benchmark(
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
     probe_request_rate: float = 0.0,
+    metrics_url: str | None = None,
 ):
+    metrics_base_url = metrics_url or base_url
+
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     except KeyError:
@@ -961,8 +964,8 @@ async def benchmark(
     else:
         print("Self timing is set, using the timestamps from the trace file.")
 
-    spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
-    diffusion_metrics_before = await fetch_diffusion_metrics(base_url, session)
+    spec_decode_metrics_before = await fetch_spec_decode_metrics(metrics_base_url, session)
+    diffusion_metrics_before = await fetch_diffusion_metrics(metrics_base_url, session)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -1089,7 +1092,7 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
+    spec_decode_metrics_after = await fetch_spec_decode_metrics(metrics_base_url, session)
     spec_decode_stats: dict[str, Any] | None = None
     if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
         delta_drafts = (
@@ -1131,7 +1134,7 @@ async def benchmark(
                 "per_position_acceptance_rates": per_pos_rates,
             }
 
-    diffusion_metrics_after = await fetch_diffusion_metrics(base_url, session)
+    diffusion_metrics_after = await fetch_diffusion_metrics(metrics_base_url, session)
     diffusion_stats: dict[str, Any] | None = None
     if diffusion_metrics_before is not None and diffusion_metrics_after is not None:
         delta_steps = (
@@ -1608,6 +1611,16 @@ def add_cli_args(parser: FlexibleArgumentParser):
         type=str,
         default=None,
         help="Server or API base url if not using http host and port.",
+    )
+    parser.add_argument(
+        "--metrics-url",
+        type=str,
+        default=None,
+        help="Base URL to scrape server metrics from (speculative-decoding and"
+        " diffusion counters). Defaults to the request base URL. Point this"
+        " at the instance that owns the metrics when instances sit behind a"
+        " router that does not proxy /metrics, e.g. P/D disaggregation:"
+        " use the decode instance.",
     )
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
     parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -2222,6 +2235,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         endpoint_type=backend,
         api_url=api_url,
         base_url=base_url,
+        metrics_url=args.metrics_url,
         model_id=model_id,
         model_name=model_name,
         tokenizer=tokenizer,
