@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_ATOM_M3_MONO: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1264,6 +1265,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Experimental MiniMax-M3 TP4 target-layer fusion through ATOM kernels.
+    "VLLM_ROCM_USE_ATOM_M3_MONO": lambda: (
+        os.getenv("VLLM_ROCM_USE_ATOM_M3_MONO", "0").lower() in ("true", "1")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.

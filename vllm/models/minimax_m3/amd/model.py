@@ -18,10 +18,14 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
+
+if TYPE_CHECKING:
+    from vllm.models.minimax_m3.amd.mono import M3Mono
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -370,13 +374,14 @@ class MiniMaxM3MoE(nn.Module):
         else:
             self.e_score_correction_bias = None
 
-        # Router weights are stored in fp32; GateLinear upcasts the bf16
-        # activations and computes the gate in fp32 (fp32 router logits).
+        router_dtype = getattr(config, "router_dtype", "float32")
+        if router_dtype not in ("float32", "bfloat16"):
+            raise ValueError("router_dtype must be float32 or bfloat16")
         self.gate = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
-            params_dtype=torch.float32,
+            params_dtype=getattr(torch, router_dtype),
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
@@ -479,7 +484,7 @@ class MiniMaxM3MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
+        # Router logits stay FP32 for either supported weight dtype.
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -814,6 +819,25 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
+
+    @property
+    def kv_cache(self) -> torch.Tensor:
+        return self._kv_cache
+
+    @kv_cache.setter
+    def kv_cache(self, value: torch.Tensor) -> None:
+        if value is getattr(self, "_kv_cache", None):
+            return
+        owner_ref = getattr(self, "_mono_model_ref", None)
+        if owner_ref is not None and (model := owner_ref()) is not None:
+            from vllm.models.minimax_m3.amd.mono import detach_model_cache
+
+            detach_model_cache(model, value)
+        self._kv_cache = value
+        self.kv_cache_k = torch.tensor([])
+        self.kv_cache_v = torch.tensor([])
+        self._aiter_sparse_pa_cache_data_ptr = 0
+        self._aiter_sparse_pa_block_page_stride = 0
 
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
@@ -1369,6 +1393,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self._mono: M3Mono | None = None
+        self._mono_config = vllm_config if envs.VLLM_ROCM_USE_ATOM_M3_MONO else None
 
         self.vocab_size = config.vocab_size
 
@@ -1486,8 +1512,19 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         # EAGLE3 is not yet compatible with pipeline parallel
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        if self._mono is None and self._mono_config is not None:
+            from vllm.models.minimax_m3.amd.mono import prepare_model
+
+            prepare_model(self, self._mono_config)
+        mono = self._mono
+        use_mono = mono is not None and mono.begin_forward(hidden_states.shape[0])
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            if use_mono and mono is not None and idx in mono.layer_ids:
+                hidden_states, residual = mono.forward_layer(
+                    idx - mono.layer_ids[0], hidden_states, residual, positions
+                )
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
