@@ -196,6 +196,69 @@ class StreamingParserEngine:
         self._array_started: bool = False
         self._array_in_element: bool = False
 
+    def _reset_pending_tool_start(self) -> None:
+        # A tool-call opener seen in CONTENT/REASONING whose transition is
+        # held back until it is known to open a real call (see
+        # ``ParserEngineConfig.tool_start_confirm_terminals``), plus the text
+        # that followed it in the meantime.
+        self._pending_tool_start: str | None = None
+        self._pending_tool_start_value: str = ""
+        self._pending_tool_start_token_count: int = 0
+        self._pending_tool_start_held: str = ""
+        self._pending_tool_start_held_token_count: int = 0
+        self._pending_tool_start_feed: int = 0
+
+    def _hold_after_pending_tool_start(self, text: str, token_count: int) -> None:
+        self._pending_tool_start_held += text
+        self._pending_tool_start_held_token_count += token_count
+
+    def _abandon_pending_tool_start(self) -> list[SemanticEvent]:
+        """The held opener was quoted text: emit it, and everything held
+        after it, in the channel it appeared in."""
+        text = self._pending_tool_start_value + self._pending_tool_start_held
+        token_count = (
+            self._pending_tool_start_token_count
+            + self._pending_tool_start_held_token_count
+        )
+        self._reset_pending_tool_start()
+        return self._emit_for_state(text, token_count)
+
+    def _commit_pending_tool_start(self) -> list[SemanticEvent]:
+        """The held opener starts a real call: process it as it would have
+        been without holding, then replay the text held after it."""
+        terminal = self._pending_tool_start
+        assert terminal is not None
+        value = self._pending_tool_start_value
+        token_count = self._pending_tool_start_token_count
+        held = self._pending_tool_start_held
+        held_token_count = self._pending_tool_start_held_token_count
+        self._reset_pending_tool_start()
+        events = self._on_terminal(terminal, value, token_count, confirmed=True)
+        events.extend(self._on_content(held, held_token_count))
+        return events
+
+    def _hand_off_pending_tool_start(
+        self, terminal: str, value: str, token_count: int
+    ) -> list[SemanticEvent]:
+        """Reasoning pass (``skip_tool_parsing``): the held opener is
+        confirmed in a later delta than the one it arrived in. The tool pass
+        only receives this delta's token IDs, so the opener's ID is gone and
+        its forwarded text would read as content. End reasoning and forward
+        the call from the confirming terminal instead; an empty block is
+        dropped, as the tool pass would drop it."""
+        opener = self._pending_tool_start
+        assert opener is not None
+        opener_value = self._pending_tool_start_value
+        self._reset_pending_tool_start()
+        events = [
+            e
+            for e in self._on_terminal(opener, opener_value, confirmed=True)
+            if e.type != EventType.TEXT_CHUNK
+        ]
+        if terminal not in self._tool_exit_terminals:
+            events.extend(self._on_terminal(terminal, value, token_count))
+        return events
+
     def reset(self, initial_state: ParserState | None = None) -> None:
         """Reset mutable state for reuse across requests.
 
@@ -220,12 +283,15 @@ class StreamingParserEngine:
         self._in_skipped_tool_span = False
         self._reset_args_state()
         self._reset_array_state()
+        self._reset_pending_tool_start()
+        self._feed_count = 0
 
     def feed(
         self,
         delta_text: str,
         delta_token_ids: Sequence[int],
     ) -> list[SemanticEvent]:
+        self._feed_count += 1
         if delta_token_ids:
             self._ever_had_token_ids = True
 
@@ -293,6 +359,18 @@ class StreamingParserEngine:
 
     def finish(self) -> list[SemanticEvent]:
         events = self._process_scanner_items(self._scanner.flush_pending())
+
+        if self._pending_tool_start is not None:
+            # Output ended before the opener was resolved. Prose after it
+            # means it was quoted; whitespace alone (or a partial
+            # ``<function`` still in the lexer) is a call cut off by
+            # max_tokens or a stop string, dropped as before.
+            if self._pending_tool_start_held.isspace() or (
+                not self._pending_tool_start_held
+            ):
+                events.extend(self._commit_pending_tool_start())
+            else:
+                events.extend(self._abandon_pending_tool_start())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
 
@@ -407,8 +485,36 @@ class StreamingParserEngine:
         return markers
 
     def _on_terminal(
-        self, terminal: str, value: str, token_count: int = 0
+        self,
+        terminal: str,
+        value: str,
+        token_count: int = 0,
+        *,
+        confirmed: bool = False,
     ) -> list[SemanticEvent]:
+        if self._pending_tool_start is not None:
+            if self._has_drops and terminal == DROP_TERMINAL:
+                return []
+            if terminal in self.config.tool_start_confirm_terminals:
+                if (
+                    self.skip_tool_parsing
+                    and self._ever_had_token_ids
+                    and self._pending_tool_start_feed != self._feed_count
+                ):
+                    return self._hand_off_pending_tool_start(
+                        terminal, value, token_count
+                    )
+                events = self._commit_pending_tool_start()
+            elif (self.state, terminal) in self.config.transitions:
+                # A structural marker of the enclosing channel (``</think>``,
+                # another opener) shows the held opener was quoted text.
+                events = self._abandon_pending_tool_start()
+            else:
+                self._hold_after_pending_tool_start(value, token_count)
+                return []
+            events.extend(self._on_terminal(terminal, value, token_count))
+            return events
+
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
@@ -422,6 +528,24 @@ class StreamingParserEngine:
 
         if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
             return self._emit_for_state(value, token_count)
+
+        if (
+            not confirmed
+            and self.config.tool_start_confirm_terminals
+            and transition.next_state == ParserState.TOOL_PREAMBLE
+            # The reasoning pass only decides whether an opener ends
+            # reasoning; after that the tool pass makes the call.
+            and (
+                self.state == ParserState.REASONING
+                or (self.state == ParserState.CONTENT and not self.skip_tool_parsing)
+            )
+            and not (transition.skip_in_token_id_mode and self._ever_had_token_ids)
+        ):
+            self._pending_tool_start = terminal
+            self._pending_tool_start_value = value
+            self._pending_tool_start_token_count = token_count
+            self._pending_tool_start_feed = self._feed_count
+            return []
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
             # Inkling reuses one terminal for tool, text, and reasoning exits.
@@ -481,6 +605,9 @@ class StreamingParserEngine:
         return self._apply_transition(transition, value, token_count)
 
     def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        if self._pending_tool_start is not None:
+            self._hold_after_pending_tool_start(text, token_count)
+            return []
         if self.state == ParserState.MESSAGE_HEADER:
             self._message_header_buffer += text
             self._message_header_token_count += token_count

@@ -10,11 +10,13 @@ Validates that ``Qwen3Parser`` correctly handles
 """
 
 import dataclasses
+from unittest.mock import MagicMock
 
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import simulate_reasoning_streaming
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.engine.registered_adapters import (
@@ -750,3 +752,194 @@ class TestThinkingDisabled:
         reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."
+
+
+@pytest.mark.parametrize(
+    "parser_cls",
+    [Qwen3Parser, _Qwen3DelegatingParser],
+    ids=["single-engine", "delegating"],
+)
+class TestQuotedToolCallMarker:
+    """Regression tests for #56658: a ``<tool_call>`` that the model quotes
+    in prose or reasoning, rather than one that opens a call, must not drop
+    the text after it (or, inside reasoning, the final answer).
+
+    ``delegating`` is the composition used by ``vllm serve`` with
+    ``--reasoning-parser qwen3 --tool-call-parser qwen3_coder``.
+    """
+
+    _REQUEST_TOOLS = [
+        {
+            "type": "function",
+            "function": {"name": "get_weather", "parameters": {}},
+        }
+    ]
+    # One token per character for ordinary text, so token-ID mode sees a full
+    # ID stream as it does when serving.
+    _CHAR_VOCAB = {chr(c): 1000 + c for c in (10, *range(32, 127))}
+
+    def _tokenizer(self):
+        return make_mock_tokenizer(
+            {**_QWEN3_VOCAB, **self._CHAR_VOCAB}, special_tokens=list(_QWEN3_VOCAB)
+        )
+
+    def _token_ids(self, chunk: str) -> list[int]:
+        ids, i = [], 0
+        while i < len(chunk):
+            special = next((t for t in _QWEN3_VOCAB if chunk.startswith(t, i)), None)
+            if special is not None:
+                ids.append(_QWEN3_VOCAB[special])
+                i += len(special)
+            else:
+                ids.append(self._CHAR_VOCAB[chunk[i]])
+                i += 1
+        return ids
+
+    def _request(self):
+        req = MagicMock(spec=ChatCompletionRequest)
+        req.tools = self._REQUEST_TOOLS
+        req.tool_choice = "auto"
+        req.include_reasoning = True
+        return req
+
+    @staticmethod
+    def _chunks(text: str, chunk_size: int) -> list[str]:
+        """Split into deltas of ``chunk_size`` tokens; special tokens are
+        never split, as in a real detokenized stream. Generation ends with
+        the EOS token."""
+        tokens, i = [], 0
+        while i < len(text):
+            special = next((t for t in _QWEN3_VOCAB if text.startswith(t, i)), None)
+            tokens.append(special or text[i])
+            i += len(tokens[-1])
+        chunks = [
+            "".join(tokens[i : i + chunk_size])
+            for i in range(0, len(tokens), chunk_size)
+        ]
+        return [*chunks, "<|im_end|>"]
+
+    def _stream(self, parser_cls, chunks: list[str], with_token_ids: bool):
+        parser = parser_cls(self._tokenizer())
+        request = self._request()
+        reasoning, content, tool_names = "", "", []
+        for i, chunk in enumerate(chunks):
+            token_ids = self._token_ids(chunk) if with_token_ids else []
+            delta = parser.parse_delta(
+                chunk,
+                token_ids,
+                request,
+                prompt_token_ids=[_IM_START_ID],
+                finished=i == len(chunks) - 1,
+            )
+            if delta is None:
+                continue
+            reasoning += delta.reasoning or ""
+            content += delta.content or ""
+            for tc in delta.tool_calls or []:
+                if tc.function and tc.function.name:
+                    tool_names.append(tc.function.name)
+        return reasoning, content, tool_names
+
+    def _parse(self, parser_cls, text: str):
+        parser = parser_cls(self._tokenizer())
+        return parser.parse(text, self._request(), enable_auto_tools=True)
+
+    @pytest.mark.parametrize(
+        "text, expected_reasoning, expected_content",
+        [
+            pytest.param(
+                "Done.</think>The literal marker is `<tool_call>` and it "
+                "starts a tool call.",
+                "Done.",
+                "The literal marker is `<tool_call>` and it starts a tool call.",
+                id="quoted-in-content",
+            ),
+            pytest.param(
+                "I should mention `<tool_call>` literally.</think>"
+                "The final answer is 42.",
+                "I should mention `<tool_call>` literally.",
+                "The final answer is 42.",
+                id="quoted-in-reasoning",
+            ),
+            pytest.param(
+                "Done.</think>Wrap calls in <tool_call>\n tags. Then reply.",
+                "Done.",
+                "Wrap calls in <tool_call>\n tags. Then reply.",
+                id="quoted-then-whitespace-then-prose",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+    @pytest.mark.parametrize("with_token_ids", [False, True])
+    def test_quoted_marker_keeps_following_text(
+        self,
+        parser_cls,
+        text,
+        expected_reasoning,
+        expected_content,
+        chunk_size,
+        with_token_ids,
+    ):
+        reasoning, content, tool_calls = self._parse(parser_cls, text)
+        assert reasoning == expected_reasoning
+        assert content == expected_content
+        assert not tool_calls
+
+        reasoning, content, tool_names = self._stream(
+            parser_cls, self._chunks(text, chunk_size), with_token_ids
+        )
+        assert reasoning == expected_reasoning
+        assert content == expected_content
+        assert tool_names == []
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+    @pytest.mark.parametrize("with_token_ids", [False, True])
+    def test_real_call_after_quoted_marker(
+        self, parser_cls, chunk_size, with_token_ids
+    ):
+        """A quoted marker does not stop a later real call from parsing."""
+        text = (
+            "Calls use `<tool_call>` blocks.</think>Checking.\n"
+            "<tool_call>\n<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n</tool_call>"
+        )
+        reasoning, content, tool_calls = self._parse(parser_cls, text)
+        assert reasoning == "Calls use `<tool_call>` blocks."
+        assert content.strip() == "Checking."
+        assert [tc.name for tc in tool_calls] == ["get_weather"]
+
+        reasoning, content, tool_names = self._stream(
+            parser_cls, self._chunks(text, chunk_size), with_token_ids
+        )
+        assert reasoning == "Calls use `<tool_call>` blocks."
+        assert content.strip() == "Checking."
+        assert tool_names == ["get_weather"]
+
+    @pytest.mark.parametrize("with_token_ids", [False, True])
+    def test_trailing_opener_before_eos_is_dropped(self, parser_cls, with_token_ids):
+        """An opener cut off by EOS is a truncated call: dropped, and the EOS
+        token is not leaked into content."""
+        text = "Done.</think>DONE\n<tool_call>"
+        reasoning, content, tool_names = self._stream(
+            parser_cls, self._chunks(text, 1000), with_token_ids
+        )
+        assert reasoning == "Done."
+        assert content.strip() == "DONE"
+        assert tool_names == []
+
+    @pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+    @pytest.mark.parametrize("with_token_ids", [False, True])
+    def test_real_call_ends_reasoning(self, parser_cls, chunk_size, with_token_ids):
+        """A real call straight from reasoning still ends reasoning, with no
+        tool markup leaking into content."""
+        text = (
+            "Let me check.\n<tool_call>\n<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n</function>\n</tool_call>"
+        )
+        reasoning, content, tool_names = self._stream(
+            parser_cls, self._chunks(text, chunk_size), with_token_ids
+        )
+        assert reasoning == "Let me check.\n"
+        assert content == ""
+        assert tool_names == ["get_weather"]

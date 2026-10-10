@@ -199,6 +199,10 @@ def qwen3_config(
         stream_arg_deltas=True,
         strip_trailing_reasoning_whitespace=False,
         tool_args_json=False,
+        # A <tool_call> followed by prose rather than <function= (or an
+        # empty block's </tool_call>) is the model quoting the marker, not
+        # opening a call.
+        tool_start_confirm_terminals=frozenset({"FUNC_PREFIX", "TOOL_END"}),
     )
 
 
