@@ -728,8 +728,76 @@ class TestNixlHandshake:
         worker.get_transfer_results = MagicMock(
             return_value=KVConnectorTransferResults(finished_sending={"sent"})
         )
+        # The runner reads completions through get_transfer_results, so it must
+        # agree with get_finished: replicated ranks report their synthetic
+        # completions too, or the world_size aggregation never finishes.
         results = connector.get_transfer_results(set())
-        assert results.finished_sending == ({"sent"} if expected_tracked else set())
+        assert results.finished_sending == {"sent"}
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_replicated_pcp_producer_send_aggregation_completes(
+        self, default_vllm_config, dist_init
+    ):
+        """PCP=2 replicated producer: D reads from the canonical rank 0 and
+        notifies only it; rank 1 reports a synthetic completion. The
+        world_size=2 aggregation must report the request as sent so the
+        scheduler frees its blocks on P."""
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        req_id = "req"
+        connectors = []
+        for pcp_rank in (0, 1):
+            with (
+                patch(
+                    "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
+                    "base_worker.get_current_attn_backends",
+                    return_value=[FlashAttentionBackend],
+                ),
+                patch(
+                    "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
+                    "base_worker.get_pcp_group"
+                ) as mock_get_pcp_group,
+            ):
+                mock_get_pcp_group.return_value.rank_in_group = pcp_rank
+                connector = NixlConnector(
+                    vllm_config,
+                    KVConnectorRole.WORKER,
+                    make_kv_cache_config(block_size=16),
+                )
+            worker = connector.connector_worker
+            worker.transfer_topo = MagicMock()
+            metadata = NixlConnectorMetadata()
+            metadata.reqs_in_batch.add(req_id)
+            metadata.reqs_to_send[req_id] = time.perf_counter() + 30
+            worker.start_load_kv(metadata)
+            connectors.append(connector)
+        connectors[0].connector_worker._get_new_notifs = MagicMock(
+            return_value={req_id}
+        )
+
+        aggregator = KVOutputAggregator.from_connector(connectors[0], world_size=2)
+        outputs = [
+            ModelRunnerOutput(
+                req_ids=[],
+                req_id_to_index={},
+                sampled_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                kv_connector_output=KVConnectorOutput(
+                    finished_sending=c.get_transfer_results(set()).finished_sending
+                ),
+            )
+            for c in connectors
+        ]
+        aggregated = aggregator.aggregate(outputs)
+        assert aggregated.kv_connector_output.finished_sending == {req_id}
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
