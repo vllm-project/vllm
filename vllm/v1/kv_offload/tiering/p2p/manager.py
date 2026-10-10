@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from typing_extensions import override
 
@@ -35,6 +35,7 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -205,6 +206,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     ``has_pending_work()`` keeps the engine ticking so the control transport
     and existing sessions are polled even when no requests are scheduled.
     """
+
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
 
     def __init__(
         self,

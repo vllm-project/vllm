@@ -5,7 +5,11 @@ from copy import deepcopy
 
 import pytest
 import regex as re
-from openai.types.responses import FunctionTool, ToolChoiceFunction, WebSearchTool
+from openai.types.responses import (
+    FunctionTool,
+    ToolChoiceFunction,
+    WebSearchTool,
+)
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -13,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
@@ -290,45 +295,61 @@ def test_structured_outputs_json_without_parameters(
     )
 
 
-def _collect_required_tool_streaming_json(output_json: str, delta_len: int) -> str:
+def _stream_required_tool_calls(
+    output_json: str,
+    deltas: list[str],
+    tool_call_id_type: str = "random",
+    tool_call_idx: int | None = None,
+) -> list[dict]:
+    """Feed ``deltas`` (which concatenate to ``output_json``) through the
+    required-tool streaming helper and rebuild the calls per array index,
+    checking that every index gets exactly one id/name chunk first."""
+    assert "".join(deltas) == output_json
     previous_text = ""
-    function_name_returned = False
-    messages = []
-    for i in range(0, len(output_json), delta_len):
-        delta_text = output_json[i : i + delta_len]
+    calls: dict[int, dict] = {}
+    for delta_text in deltas:
         current_text = previous_text + delta_text
-
-        delta_message, function_name_returned = extract_required_tool_call_streaming(
+        delta_message, _ = extract_required_tool_call_streaming(
             previous_text=previous_text,
             current_text=current_text,
-            delta_text=delta_text,
-            function_name_returned=function_name_returned,
-            tool_call_idx=None,
-            tool_call_id_type="random",
+            tool_call_idx=tool_call_idx,
+            tool_call_id_type=tool_call_id_type,
         )
-
-        if delta_message:
-            messages.append(delta_message)
-
         previous_text = current_text
+        if delta_message is None:
+            continue
+        assert delta_message.tool_calls
+        for tc in delta_message.tool_calls:
+            assert tc.function is not None
+            if tc.id is not None:
+                assert tc.index not in calls, "id/name sent twice for one index"
+                assert tc.type == "function"
+                assert tc.function.name
+                calls[tc.index] = {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments or "",
+                }
+            else:
+                assert tc.index in calls, "arguments before id/name"
+                assert tc.function.name is None
+                assert tc.function.arguments
+                calls[tc.index]["arguments"] += tc.function.arguments
+    assert list(calls) == list(range(len(calls)))
+    return [calls[i] for i in range(len(calls))]
 
-    assert len(messages) > 0
 
-    combined_messages = "["
-    for message in messages:
-        fn = message.tool_calls[0].function
-        assert fn is not None
-        if fn.name:
-            if len(combined_messages) > 1:
-                combined_messages += "},"
+def _fixed_len_deltas(text: str, delta_len: int) -> list[str]:
+    return [text[i : i + delta_len] for i in range(0, len(text), delta_len)]
 
-            combined_messages += (
-                '{"name": "' + fn.name + '", "parameters": ' + (fn.arguments or "")
-            )
-        else:
-            combined_messages += fn.arguments or ""
-    combined_messages += "}]"
-    return combined_messages
+
+def _assert_streams_to(output: list[dict], deltas: list[str]) -> None:
+    calls = _stream_required_tool_calls(json.dumps(output), deltas)
+    assert [
+        {"name": c["name"], "parameters": json.loads(c["arguments"])} for c in calls
+    ] == output
+    for call, expected in zip(calls, output):
+        assert call["arguments"] == json.dumps(expected["parameters"])
 
 
 @pytest.mark.parametrize("output", VALID_TOOLS)
@@ -338,11 +359,7 @@ def test_streaming_output_valid(output, empty_params, delta_len):
     output = deepcopy(output)
     if empty_params:
         output = [{"name": o["name"], "parameters": {}} for o in output]
-    output_json = json.dumps(output)
-
-    combined_messages = _collect_required_tool_streaming_json(output_json, delta_len)
-    assert json.loads(combined_messages) == output
-    assert json.dumps(json.loads(combined_messages)) == output_json
+    _assert_streams_to(output, _fixed_len_deltas(json.dumps(output), delta_len))
 
 
 @pytest.mark.parametrize(
@@ -353,22 +370,78 @@ def test_streaming_output_valid(output, empty_params, delta_len):
         "a }} b",
         'a " } b',
         r"a \ } b",
+        # Text that looks like the end of one call and the start of another.
+        '"}}, {"name": "get_forecast", "parameters": {"city": "x',
     ],
 )
 @pytest.mark.parametrize("delta_len", [1, 2, 3, 8, 9999])
 def test_streaming_output_valid_with_braces_in_string(city, delta_len):
-    output = [{"name": "get_current_weather", "parameters": {"city": city}}]
-    output_json = json.dumps(output)
-    combined_messages = _collect_required_tool_streaming_json(output_json, delta_len)
-    assert json.loads(combined_messages) == output
-    assert json.dumps(json.loads(combined_messages)) == output_json
+    output = [
+        {"name": "get_current_weather", "parameters": {"city": city}},
+        {"name": "get_forecast", "parameters": {"city": city, "days": 1}},
+    ]
+    _assert_streams_to(output, _fixed_len_deltas(json.dumps(output), delta_len))
 
 
 def test_streaming_output_valid_with_trailing_extra_data():
     output = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
     output_json = json.dumps(output) + "\nDONE"
-    combined_messages = _collect_required_tool_streaming_json(output_json, delta_len=3)
-    assert json.loads(combined_messages) == output
+    calls = _stream_required_tool_calls(output_json, _fixed_len_deltas(output_json, 3))
+    assert [
+        {"name": c["name"], "parameters": json.loads(c["arguments"])} for c in calls
+    ] == output
+
+
+TWO_CALLS = [
+    {"name": "get_current_weather", "parameters": {"city": "Dallas"}},
+    {"name": "get_forecast", "parameters": {"city": "Dallas", "days": 3}},
+]
+
+
+def _split_at(text: str, cuts: list[int]) -> list[str]:
+    bounds = [0, *cuts, len(text)]
+    return [text[a:b] for a, b in zip(bounds, bounds[1:])]
+
+
+def test_streaming_multiple_calls_completed_in_one_delta():
+    """Regression test for #60351: a delta that completes more than one
+    call must stream every call, not only the last one."""
+    text = json.dumps(TWO_CALLS)
+    _assert_streams_to(TWO_CALLS, [text[:1], text[1:]])
+    _assert_streams_to(TWO_CALLS, [text])
+
+
+def test_streaming_delta_crossing_call_boundary():
+    """A delta that closes one call and opens the next must attribute the
+    closing argument text to the first call and still announce the next."""
+    text = json.dumps(TWO_CALLS)
+    boundary = text.index("}, {") + 1
+    name_end = text.index('"get_forecast"') + 6
+    for cuts in (
+        [boundary - 1, name_end],  # '}, {"name": "get_f' in one delta
+        [boundary - 2, boundary + 2],  # '"}}, {' then the rest
+        [boundary + 2],  # opening brace of the next call ends a delta
+    ):
+        _assert_streams_to(TWO_CALLS, _split_at(text, cuts))
+
+
+def test_streaming_invalid_name_string_is_never_announced():
+    """A closed name that is not a valid JSON string must not be streamed
+    (the non-streaming path rejects such an array as well)."""
+    text = '[{"name": "bad\\x", "parameters": {"city": "x"}}]'
+    assert _stream_required_tool_calls(text, _fixed_len_deltas(text, 4)) == []
+
+
+def test_streaming_tool_call_idx_increments_per_started_call():
+    """kimi_k2 ids number the calls started in one delta consecutively."""
+    text = json.dumps(TWO_CALLS)
+    calls = _stream_required_tool_calls(
+        text, [text], tool_call_id_type="kimi_k2", tool_call_idx=5
+    )
+    assert [c["id"] for c in calls] == [
+        "functions.get_current_weather:5",
+        "functions.get_forecast:6",
+    ]
 
 
 FUNCTION_TOOL = FunctionTool(
@@ -581,3 +654,70 @@ class TestForcedNamedToolChoiceEmptyParams:
         choice = ToolChoiceFunction(type="function", name="ping")
         schema = get_json_schema_from_tools(choice, [tool])
         assert schema == {"type": "object", "properties": {}}
+
+
+class TestForcedFunctionShortNameAlias:
+    """Forced choices must use the selected function's parameter schema."""
+
+    PARAMS = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+    @pytest.mark.parametrize("plain_first", [True, False])
+    @pytest.mark.parametrize(
+        "namespace,function_name,choice_name",
+        [
+            ("math", "add", "add"),
+            ("math", "add", "math__add"),
+            ("math", "vector__add", "vector__add"),
+            ("math__vector", "vector__add", "vector__add"),
+        ],
+    )
+    def test_namespace_schema_is_not_shadowed(
+        self, plain_first, namespace, function_name, choice_name
+    ):
+        tools = [
+            {
+                "type": "function",
+                "name": "other__add",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"y": {"type": "string"}},
+                },
+            },
+            {
+                "type": "namespace",
+                "name": namespace,
+                "description": "math tools",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": function_name,
+                        "parameters": self.PARAMS,
+                    }
+                ],
+            },
+        ]
+        if not plain_first:
+            tools.reverse()
+        request = ResponsesRequest.model_validate(
+            {
+                "model": "test-model",
+                "input": "Add the numbers.",
+                "tools": tools,
+                "tool_choice": {"type": "function", "name": choice_name},
+            }
+        )
+        assert (
+            get_json_schema_from_tools(request.tool_choice, request.tools)
+            == self.PARAMS
+        )
+
+    def test_plain_function_double_underscore_name_has_no_phantom_alias(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="add")
+        with pytest.raises(ValueError, match="has not been passed in `tools`"):
+            get_json_schema_from_tools(choice, [tool])
+
+    def test_plain_function_full_name_still_resolves(self):
+        tool = FunctionTool(type="function", name="math__add", parameters=self.PARAMS)
+        choice = ToolChoiceFunction(type="function", name="math__add")
+        assert get_json_schema_from_tools(choice, [tool]) == self.PARAMS

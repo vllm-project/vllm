@@ -475,17 +475,22 @@ def test_extract_tool_calls_pre_v11_tokenizer(
     assert extracted_tool_calls.content == expected_content
 
 
-def test_extract_tool_calls_pre_v11_multiple_bot_tokens_raises(
+def test_extract_tool_calls_pre_v11_multiple_bot_tokens(
     mistral_pre_v11_tool_parser,
 ):
+    """A second BOT token must not fail the request; like streaming, only the
+    calls after the first BOT token are extracted."""
     model_output = (
         '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 1}}]'
         '[TOOL_CALLS] [{"name": "sub", "arguments":{"b": 2}}]'
     )
-    with pytest.raises(ValueError, match="Only one BOT token"):
-        mistral_pre_v11_tool_parser.extract_tool_calls(
-            model_output, request=_DUMMY_REQUEST
-        )
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert [(tc.function.name, tc.function.arguments) for tc in result.tool_calls] == [
+        ("add", '{"a": 1}')
+    ]
 
 
 def test_extract_tool_calls_pre_v11_regex_fallback(
@@ -506,15 +511,126 @@ def test_extract_tool_calls_pre_v11_regex_fallback(
     assert result.tool_calls[0].function.arguments == json.dumps({"a": 1, "b": 2})
 
 
-def test_extract_tool_calls_pre_v11_regex_fallback_fails(
-    mistral_pre_v11_tool_parser,
+@pytest.mark.parametrize(
+    "stringified_tool_calls",
+    ["not json at all", "42", '["add"]', '{"foo": 1}'],
+    ids=["invalid_json", "scalar", "list_of_str", "not_a_call"],
+)
+def test_extract_tool_calls_pre_v11_no_tool_call_returns_content(
+    mistral_pre_v11_tool_parser, stringified_tool_calls
 ):
-    model_output = "[TOOL_CALLS] not json at all"
+    """Output that holds no tool call is returned as content instead of failing
+    the request."""
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        f"[TOOL_CALLS] {stringified_tool_calls}", request=_DUMMY_REQUEST
+    )
+    assert result == ExtractedToolCallInformation(
+        tools_called=False, tool_calls=[], content=stringified_tool_calls
+    )
+
+
+# (model_output, expected (name, arguments), streamed content). Non-streaming
+# drops the text after the calls; streaming returns it as content.
+_PRE_V11_UNUSUAL_CALLS = [
+    pytest.param(
+        '[TOOL_CALLS] {"name": "add", "arguments": {"a": 1}}',
+        [("add", '{"a": 1}')],
+        "",
+        id="bare_object",
+    ),
+    # The next three end the bare object and start the trailing text in the
+    # same token, in each state the object can close from.
+    pytest.param(
+        '[TOOL_CALLS] {"name": "add", "arguments": {"a": 1}}, '
+        '{"name": "sub", "arguments": {"b": 2}}',
+        [("add", '{"a": 1}')],
+        ', {"name": "sub", "arguments": {"b": 2}}',
+        id="bare_object_then_text",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] {"arguments": {"a": 1}, "name": "add"}, '
+        '{"name": "sub", "arguments": {"b": 2}}',
+        [("add", '{"a": 1}')],
+        ', {"name": "sub", "arguments": {"b": 2}}',
+        id="bare_object_name_last_then_text",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] {"name": "add", "arguments": "{\\"a\\": 1}"}, '
+        '{"name": "sub", "arguments": {"b": 2}}',
+        [("add", '{"a": 1}')],
+        ', {"name": "sub", "arguments": {"b": 2}}',
+        id="bare_object_string_arguments_then_text",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"arguments": {"a": 1}}]',
+        [("", '{"a": 1}')],
+        "",
+        id="missing_name",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"name": "add", "arguments": "{\\"a\\": 1}"}, '
+        '{"name": "sub", "arguments": {"b": 2}}]',
+        [("add", '{"a": 1}'), ("sub", '{"b": 2}')],
+        "",
+        id="string_arguments",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 1}}, "junk"]',
+        [("add", '{"a": 1}')],
+        "",
+        id="entry_not_a_call",
+    ),
+    # Mistral-7B-Instruct-v0.3 emits repeated BOT tokens at temperature 0.
+    pytest.param(
+        '[TOOL_CALLS] [TOOL_CALLS] [{"name": "add", "arguments": {"a": 1}}]',
+        [("add", '{"a": 1}')],
+        "",
+        id="consecutive_bot_tokens",
+    ),
+    pytest.param(
+        '[TOOL_CALLS] [TOOL_CALLS] {"name": "add", "arguments": {"a": 1}}',
+        [("add", '{"a": 1}')],
+        "",
+        id="consecutive_bot_tokens_bare_object",
+    ),
+]
+
+
+@pytest.mark.parametrize("model_output,expected,_", _PRE_V11_UNUSUAL_CALLS)
+def test_extract_tool_calls_pre_v11_unusual_calls(
+    mistral_pre_v11_tool_parser, model_output, expected, _
+):
     result = mistral_pre_v11_tool_parser.extract_tool_calls(
         model_output, request=_DUMMY_REQUEST
     )
-    assert result == ExtractedToolCallInformation(
-        tools_called=False, tool_calls=[], content="not json at all"
+    assert result.tools_called
+    assert [
+        (tc.function.name, tc.function.arguments) for tc in result.tool_calls
+    ] == expected
+    assert result.content is None
+
+
+@pytest.mark.parametrize(
+    "model_output,expected,expected_content", _PRE_V11_UNUSUAL_CALLS
+)
+def test_extract_tool_calls_streaming_pre_v11_unusual_calls(
+    mistral_pre_v11_tool_parser,
+    mistral_pre_v11_tokenizer,
+    model_output,
+    expected,
+    expected_content,
+):
+    """Streaming extracts the same calls as the non-streaming path."""
+    _test_extract_tool_calls_streaming(
+        mistral_pre_v11_tool_parser,
+        mistral_pre_v11_tokenizer,
+        model_output,
+        None,
+        [
+            ToolCall(function=FunctionCall(name=name, arguments=arguments))
+            for name, arguments in expected
+        ],
+        expected_content,
     )
 
 
@@ -882,6 +998,7 @@ def _test_extract_tool_calls_streaming(
             # if a new tool is being called, set up empty arguments
             if tool_call.index != tool_call_idx:
                 tool_call_idx = tool_call.index
+                function_names.append("")
                 function_args_strs.append("")
                 tool_call_ids.append(None)
 
@@ -895,7 +1012,7 @@ def _test_extract_tool_calls_streaming(
                 # IN ENTIRETY, exactly one time.
                 if tool_call.function.name:
                     assert isinstance(tool_call.function.name, str)
-                    function_names.append(tool_call.function.name)
+                    function_names[tool_call.index] = tool_call.function.name
 
                 if tool_call.function.arguments:
                     # make sure they're a string and then add them to the list

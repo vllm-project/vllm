@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import time
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
-from starlette.datastructures import Headers
 
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
@@ -32,11 +31,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -221,20 +216,6 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             status_code=e.status_code,
         )
 
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
-
-        if is_tracing_enabled:
-            return extract_trace_headers(headers)
-
-        if contains_trace_headers(headers):
-            log_tracing_disabled_warning()
-
-        return None
-
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
         """Pulls the data parallel rank from a header, if provided."""
@@ -346,32 +327,33 @@ def format_token_id_placeholder(token_id: int) -> str:
     return f"token_id:{token_id}"
 
 
-def resolve_token_id_placeholder(
-    token: str, tokenizer: TokenizerLike
-) -> tuple[str, list[int] | None]:
-    """Decode a 'token_id:N' placeholder back to a token string and UTF-8 bytes.
+def decode_token_ids(
+    token_ids: list[int], tokenizer: TokenizerLike
+) -> list[tuple[str, list[int] | None]]:
+    """Decode token ids individually to their token strings and UTF-8 bytes.
 
-    Returns (token, None) unchanged if token is not a placeholder.
-    This is the inverse of format_token_id_placeholder / _get_decoded_token
-    when return_as_token_id=True.
+    Uses the engine's per-token detokenization, which restores the
+    SentencePiece leading space that `convert_tokens_to_string` drops, so the
+    strings match the coupled endpoints. Ids are decoded in one batch (callers
+    pass a position's sampled id together with its top-k ids). An id with no
+    vocab entry decodes to ("", None).
     """
-    suffix = token.removeprefix("token_id:")
-    if suffix == token:
-        return token, None
-    try:
-        token_id = int(suffix)
-    except ValueError:
-        return token, None
-    token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
-    if token_repr is None:
-        logger.warning_once(
-            "resolve_token_id_placeholder: token_id %d has no vocab entry; "
-            "substituting empty string",
-            token_id,
-        )
-        return "", None
-    token_str = tokenizer.convert_tokens_to_string([token_repr])
-    return token_str, list(token_str.encode("utf-8", errors="replace"))
+    pieces = tokenizer.convert_ids_to_tokens(token_ids)
+    known = [tid for tid, piece in zip(token_ids, pieces) if piece is not None]
+    decoded = iter(convert_ids_list_to_tokens(tokenizer, known))
+    out: list[tuple[str, list[int] | None]] = []
+    for tid, piece in zip(token_ids, pieces):
+        if piece is None:
+            logger.warning_once(
+                "decode_token_ids: token_id %d has no vocab entry; "
+                "substituting empty string",
+                tid,
+            )
+            out.append(("", None))
+            continue
+        token_str = next(decoded)
+        out.append((token_str, list(token_str.encode("utf-8", errors="replace"))))
+    return out
 
 
 def clamp_prompt_logprobs(
