@@ -13,6 +13,7 @@ without modifying core code:
     })
 """
 
+import functools
 import importlib
 import inspect
 import sys
@@ -24,6 +25,9 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _registry: dict[str, tuple[Callable[..., Any], Callable[..., Any]]] = {}
+
+# Consumed by Triton itself rather than passed to the kernel.
+_LAUNCH_OPTIONS = frozenset(("num_warps", "num_stages", "num_ctas", "maxnreg"))
 
 
 def _kernel_arg_names(kernel: Callable[..., Any]) -> tuple[str, ...]:
@@ -44,7 +48,9 @@ class KernelOverride:
     kernel's argument names. This wrapper forwards those launch arguments
     to the platform implementation: by keyword when the implementation's
     parameter names match the kernel's, otherwise positionally in the
-    kernel's parameter order.
+    kernel's parameter order. Triton launch options (``num_warps``, ...)
+    are dropped, and implementations with a keyword-only ``grid``
+    parameter receive the launch grid.
     """
 
     def __init__(self, kernel: Callable[..., Any], impl: Callable[..., Any]) -> None:
@@ -56,25 +62,32 @@ class KernelOverride:
         self.func = impl
         self.__name__ = getattr(impl, "__name__", "kernel_override")
         self.__module__ = getattr(kernel, "__module__", "")
+        params = inspect.signature(impl).parameters
+        self._takes_grid = "grid" in params
         self._forward_by_name = (
-            tuple(inspect.signature(impl).parameters) == self.arg_names
+            tuple(name for name in params if name != "grid") == self.arg_names
         )
 
     def __getitem__(self, grid: Any) -> Callable[..., Any]:
+        if self._takes_grid:
+            return functools.partial(self._launch, grid=grid)
         return self._launch
 
     def _launch(self, *args: Any, **kwargs: Any) -> Any:
-        if args:
+        for option in _LAUNCH_OPTIONS.intersection(kwargs):
+            del kwargs[option]
+        if args or self._forward_by_name:
             return self._impl(*args, **kwargs)
-        if self._forward_by_name:
-            return self._impl(**kwargs)
+        extra = {"grid": kwargs.pop("grid")} if self._takes_grid else {}
         unexpected = [name for name in kwargs if name not in self.arg_names]
         if unexpected:
             raise RuntimeError(
                 f"Override for {self.__name__!r} received unexpected launch "
                 f"arguments: {unexpected}"
             )
-        return self._impl(*(kwargs[name] for name in self.arg_names if name in kwargs))
+        return self._impl(
+            *(kwargs[name] for name in self.arg_names if name in kwargs), **extra
+        )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self._impl(*args, **kwargs)

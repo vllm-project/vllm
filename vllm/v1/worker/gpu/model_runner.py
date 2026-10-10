@@ -189,6 +189,8 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    sampler_cls: type[Sampler] = Sampler
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -474,7 +476,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "custom_logits_processors": custom_logits_processors,
             }
             if self.vllm_config.watermark_config is None:
-                self.sampler = Sampler(**sampler_kwargs)
+                self.sampler = self.sampler_cls(**sampler_kwargs)
             else:
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)

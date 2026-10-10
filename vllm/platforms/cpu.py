@@ -723,6 +723,10 @@ class CpuPlatform(Platform):
             }
         )
 
+        from vllm.v1.worker.cpu.kernels import get_kernel_overrides
+
+        register_kernels(get_kernel_overrides())
+
     @classmethod
     def pack_kv_cache(
         cls,
