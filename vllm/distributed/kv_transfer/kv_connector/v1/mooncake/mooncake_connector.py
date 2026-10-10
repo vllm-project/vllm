@@ -2820,18 +2820,30 @@ class MooncakeConnectorWorker:
 
 
 def group_concurrent_contiguous(
-    src_indices: list[int], dst_indices: list[int]
+    src_indices: list[int],
+    dst_indices: list[int],
 ) -> tuple[list[list[int]], list[list[int]]]:
-    """Vectorised NumPy implementation."""
-    if len(src_indices) == 0:
+    assert len(src_indices) == len(dst_indices), (
+        "Source and destination block lists must have equal lengths"
+    )
+    if not src_indices:
         return [], []
 
-    brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
-    src_groups = np.split(src_indices, brk)
-    dst_groups = np.split(dst_indices, brk)
+    src_groups = []
+    dst_groups = []
+    start = 0
 
-    src_groups = [g.tolist() for g in src_groups]
-    dst_groups = [g.tolist() for g in dst_groups]
+    for i in range(1, len(src_indices)):
+        if (
+            src_indices[i] != src_indices[i - 1] + 1
+            or dst_indices[i] != dst_indices[i - 1] + 1
+        ):
+            src_groups.append(src_indices[start:i])
+            dst_groups.append(dst_indices[start:i])
+            start = i
+
+    src_groups.append(src_indices[start:])
+    dst_groups.append(dst_indices[start:])
 
     return src_groups, dst_groups
 
