@@ -89,6 +89,22 @@ class PleShortConvAttentionMetadata(ShortConvAttentionMetadata):
     non_spec_token_indx: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
+    # Align-mode state carry / boundary checkpoints for the PLE short conv.
+    # Rows follow the kernels' order: decodes, prefills, spec requests.
+    ple_block_size: int = 0
+    ple_kmax: int = 0
+    # Carry: block of the last computed token (src) -> block of the last
+    # scheduled token (dst). Decode/spec rows live in persistent buffers.
+    ple_src_d: torch.Tensor | None = None
+    ple_dst_d: torch.Tensor | None = None
+    ple_src_spec: torch.Tensor | None = None
+    ple_dst_spec: torch.Tensor | None = None
+    ple_src_p: torch.Tensor | None = None
+    ple_dst_p: torch.Tensor | None = None
+    ple_bt_p: torch.Tensor | None = None
+    ple_seq_lens_p: torch.Tensor | None = None
+    ple_num_computed_p: torch.Tensor | None = None
+
 
 class PleShortConvAttentionBackend(ShortConvAttentionBackend):
     @staticmethod
@@ -150,6 +166,90 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         self.has_initial_states_d = torch.empty(
             (self.decode_cudagraph_max_bs,), dtype=torch.bool, device=device
         )
+        # PLE align-mode carry blocks, padded for full CUDA graph replay.
+        self.ple_src_d = torch.empty(
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+        )
+        self.ple_dst_d = torch.empty(
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+        )
+        self.ple_src_spec = torch.empty(
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+        )
+        self.ple_dst_spec = torch.empty(
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+        )
+
+    def _ple_carry_blocks(
+        self, m: CommonAttentionMetadata, idx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """(src, dst) block ids per row: src holds the state after the
+        computed tokens, dst is the block the kernels address."""
+        bs = self.kv_cache_spec.block_size
+        bt = m.block_table_tensor
+        idx = idx.to(device=bt.device, dtype=torch.long)
+        bt_rows = bt.index_select(0, idx)
+        seq_lens = m.seq_lens.index_select(0, idx)
+        num_computed = m.compute_num_computed_tokens().index_select(0, idx)
+        last_col = bt.shape[1] - 1
+        dst_col = ((seq_lens - 1) // bs).clamp(min=0, max=last_col)
+        src_col = ((num_computed - 1) // bs).clamp(min=0, max=last_col)
+        dst = bt_rows.gather(1, dst_col.unsqueeze(1).long()).squeeze(1)
+        src = bt_rows.gather(1, src_col.unsqueeze(1).long()).squeeze(1)
+        src = torch.where(num_computed > 0, src, dst)
+        return src.to(torch.int32), dst.to(torch.int32)
+
+    def _ple_align_fields(
+        self,
+        m: CommonAttentionMetadata,
+        decode_idx: torch.Tensor | None,
+        prefill_idx: torch.Tensor | None,
+        spec_idx: torch.Tensor | None,
+        max_prefill_query_len: int,
+        pad_d: int | None = None,
+        pad_spec: int | None = None,
+    ) -> dict[str, Any]:
+        """Per-row carry blocks (align mode only), plus the prefill rows
+        needed to write exact boundary checkpoints.
+
+        In align mode the kernels address the block of the last scheduled
+        token, while a resumed request's state lives in the block of the last
+        computed token. ``pad_*`` copies the decode/spec rows into the
+        persistent buffers (padded with NULL_BLOCK_ID) for CUDA graph replay.
+        """
+        if self.vllm_config.cache_config.mamba_cache_mode != "align":
+            return {}
+        bs = self.kv_cache_spec.block_size
+        out: dict[str, Any] = {
+            "ple_block_size": bs,
+            "ple_kmax": max_prefill_query_len // bs + 2,
+        }
+        groups = (
+            ("d", decode_idx, pad_d, self.ple_src_d, self.ple_dst_d),
+            ("spec", spec_idx, pad_spec, self.ple_src_spec, self.ple_dst_spec),
+            ("p", prefill_idx, None, None, None),
+        )
+        for name, idx, pad, src_buf, dst_buf in groups:
+            if idx is None or idx.numel() == 0:
+                continue
+            src, dst = self._ple_carry_blocks(m, idx)
+            if pad is not None and src_buf is not None and dst_buf is not None:
+                n = src.numel()
+                src_buf[:n].copy_(src, non_blocking=True)
+                dst_buf[:n].copy_(dst, non_blocking=True)
+                src_buf[n:pad].fill_(NULL_BLOCK_ID)
+                dst_buf[n:pad].fill_(NULL_BLOCK_ID)
+                src, dst = src_buf[:pad], dst_buf[:pad]
+            out[f"ple_src_{name}"] = src
+            out[f"ple_dst_{name}"] = dst
+            if name == "p":
+                bt = m.block_table_tensor
+                idx_l = idx.to(device=bt.device, dtype=torch.long)
+                num_computed = m.compute_num_computed_tokens()
+                out["ple_bt_p"] = bt.index_select(0, idx_l)
+                out["ple_seq_lens_p"] = m.seq_lens.index_select(0, idx_l)
+                out["ple_num_computed_p"] = num_computed.index_select(0, idx_l)
+        return out
 
     def _build_non_spec_metadata(
         self,
@@ -189,6 +289,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             )
 
         has_initial_states_d = None
+        ple_pad_d: int | None = None
         if metadata.num_decodes > 0:
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
             has_initial_states_d = num_computed_tokens[: metadata.num_decodes] > 0
@@ -208,6 +309,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                     False
                 )
                 has_initial_states_d = self.has_initial_states_d[:num_decode_rows]
+                ple_pad_d = num_decode_rows
 
         max_prefill_query_len = 0
         if metadata.num_prefills > 0:
@@ -222,6 +324,16 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 .item()
             )
 
+        dev = common_attn_metadata.block_table_tensor.device
+        nd, np_ = metadata.num_decodes, metadata.num_prefills
+        align_fields = self._ple_align_fields(
+            common_attn_metadata,
+            torch.arange(nd, device=dev) if nd > 0 else None,
+            torch.arange(nd, nd + np_, device=dev) if np_ > 0 else None,
+            None,
+            max_prefill_query_len,
+            pad_d=ple_pad_d,
+        )
         return replace(
             metadata,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
@@ -232,6 +344,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             has_initial_states_d=has_initial_states_d,
             non_spec_query_start_loc=common_attn_metadata.query_start_loc,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            **align_fields,
         )
 
     def build(  # type: ignore[override]
@@ -414,6 +527,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         # Request-level buffers use ``m.num_reqs`` while token-level buffers
         # use their independently bounded token count.
         batch_size = m.num_reqs
+        ple_pad_spec: int | None = None
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
@@ -422,6 +536,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             and num_spec_decodes <= self.decode_cudagraph_max_bs
             and num_spec_decode_tokens <= self.decode_cudagraph_max_tokens
         ):
+            ple_pad_spec = batch_size
             assert spec_state_indices_tensor is not None
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True
@@ -449,7 +564,16 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
             num_accepted_tokens[num_spec_decodes:].fill_(1)
 
+        align_fields = self._ple_align_fields(
+            m,
+            decode_req_idx_cpu if num_decodes > 0 else None,
+            prefill_req_idx_cpu if num_prefills > 0 else None,
+            spec_req_idx_cpu if num_spec_decodes > 0 else None,
+            max_prefill_query_len,
+            pad_spec=ple_pad_spec,
+        )
         return PleShortConvAttentionMetadata(
+            **align_fields,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
