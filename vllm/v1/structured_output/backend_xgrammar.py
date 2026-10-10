@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
-
 import vllm.envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -404,6 +404,72 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     return check_object(schema)
 
 
+def _merge_allof(schema: dict[str, Any]) -> dict[str, Any]:
+    """Flatten object-composition ``allOf`` into the parent object schema.
+
+    xgrammar degrades multi-branch ``allOf`` to ``AnySpec`` ("accept
+    anything", mlc-ai/xgrammar#937), and falling back to the guidance
+    backend does not help in all cases: the V1 structured-output manager
+    locks one backend per engine, so a guidance-resolved request arriving
+    on an engine that already locked xgrammar is still compiled by
+    xgrammar and silently degrades to AnySpec (vllm-project/vllm#56556).
+
+    For every node whose ``allOf`` branches are all object-typed (the
+    common property-mixin composition pattern), merge the branches into
+    the parent node -- union of ``properties``, deduplicated union of
+    ``required``, best-effort copy of other non-structural fields -- and
+    drop ``allOf``. Nodes mixing non-object branches are left untouched so
+    that they keep going through the unsupported-features fallback.
+
+    Operates on a deep copy and never mutates the input schema.
+    """
+
+    def merge(node: Any) -> Any:
+        if isinstance(node, list):
+            return [merge(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        # Recurse first so nested allOf are flattened bottom-up.
+        node = {key: merge(value) for key, value in node.items()}
+        all_of = node.get("allOf")
+        if not (isinstance(all_of, list) and all_of):
+            return node
+        if not all(
+            isinstance(branch, dict)
+            and (branch.get("type") == "object" or "properties" in branch)
+            for branch in all_of
+        ):
+            # Mixed scalar/object branches: leave the node alone; the
+            # unsupported-features check keeps routing it to the fallback.
+            return node
+        merged_props: dict[str, Any] = {}
+        merged_required: list[str] = []
+        extra: dict[str, Any] = {}
+        for branch in all_of:
+            merged_props.update(branch.get("properties", {}))
+            for req in branch.get("required", []):
+                if req not in merged_required:
+                    merged_required.append(req)
+            for key, value in branch.items():
+                if key not in ("allOf", "properties", "required", "type"):
+                    extra.setdefault(key, value)
+        node.pop("allOf")
+        node.setdefault("type", "object")
+        properties = dict(node.get("properties", {}))
+        properties.update(merged_props)
+        node["properties"] = properties
+        required = list(node.get("required", []))
+        for req in merged_required:
+            if req not in required:
+                required.append(req)
+        if required:
+            node["required"] = required
+        node.update(extra)
+        return node
+
+    return merge(copy.deepcopy(schema))
+
+
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
@@ -454,6 +520,14 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             schema = so_params.json
+
+        # Flatten compositional allOf before xgrammar sees it, so that
+        # object-composition allOf schemas are compiled as plain object
+        # schemas instead of degrading to AnySpec
+        # (https://github.com/mlc-ai/xgrammar/issues/937). Write the merged
+        # schema back so the engine compiles the flattened version too.
+        schema = _merge_allof(schema)
+        so_params.json = schema
 
         try:
             if has_xgrammar_unsupported_json_features(schema):
