@@ -1256,6 +1256,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             kv_c_and_k_pe_cache=kv_pages,
             topk_indices=topk_indices.unsqueeze(0),  # (T, topk) -> (1, T, topk)
             kernel_metadata=fp8_metadata,
+            # s_q = T can reach max_num_batched_tokens: reuse the workspace.
+            use_workspace=True,
         )
         # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
         out = _attn_out.squeeze(0)
@@ -1281,10 +1283,41 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
+        use_workspace: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the FP8 sparse decode kernel, padding heads to 64/128.
+
+        With ``use_workspace`` the padded q and the kernel output live in the
+        workspace reserved in ``__init__`` (sized for max_num_batched_tokens), so
+        large mixed batches do not allocate O(T * padded_heads) per call. The
+        returned ``out`` then aliases the workspace and must be consumed before
+        the workspace is reused (e.g. by the next layer).
+        """
         # q shape: (batch, seq_len, num_heads, head_dim)
-        actual_num_heads = q.size(2)
+        batch, seq_len, actual_num_heads, head_dim = q.shape
         padded_num_heads = self.fp8_decode_padded_heads
+
+        out: torch.Tensor | None = None
+        padded_q_ws: torch.Tensor | None = None
+        if use_workspace:
+            *_, padded_q_ws, padded_out_ws, _ = (
+                current_workspace_manager().get_simultaneous(*self.workspace_specs)
+            )
+            assert q.dtype == padded_out_ws.dtype, (
+                f"Workspace staging expects a {padded_out_ws.dtype} query, got "
+                f"{q.dtype}"
+            )
+            # Flat views: the reserved buffers are head-padded for the BF16
+            # prefill kernel, which may be wider than the FP8 decode padding.
+            out_numel = batch * seq_len * padded_num_heads * 512
+            assert padded_out_ws.numel() >= out_numel, (
+                f"FP8 mixed-batch output ({batch=}, {seq_len=}, "
+                f"{padded_num_heads=}) exceeds the reserved workspace "
+                f"{tuple(padded_out_ws.shape)}"
+            )
+            out = padded_out_ws.view(-1)[:out_numel].view(
+                batch, seq_len, padded_num_heads, 512
+            )
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
         if actual_num_heads < padded_num_heads:
@@ -1292,7 +1325,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 f"Padding num_heads from {actual_num_heads} to "
                 f"{padded_num_heads} for FP8 sparse decode kernel"
             )
-            q_padded = q.new_zeros((q.size(0), q.size(1), padded_num_heads, q.size(3)))
+            padded_shape = (batch, seq_len, padded_num_heads, head_dim)
+            if padded_q_ws is not None:
+                q_numel = batch * seq_len * padded_num_heads * head_dim
+                assert padded_q_ws.numel() >= q_numel, (
+                    f"Padded FP8 query {padded_shape} exceeds the reserved "
+                    f"workspace {tuple(padded_q_ws.shape)}"
+                )
+                q_padded = padded_q_ws.view(-1)[:q_numel].view(padded_shape)
+                q_padded[:, :, actual_num_heads:].zero_()
+            else:
+                q_padded = q.new_zeros(padded_shape)
             q_padded[:, :, :actual_num_heads, :] = q
             q = q_padded
 
@@ -1306,6 +1349,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             is_fp8_kvcache=True,
             indices=topk_indices,
             softmax_scale=self.softmax_scale,
+            out=out,
         )
 
         # Slice output and lse back to actual head count if we padded

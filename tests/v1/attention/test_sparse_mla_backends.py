@@ -110,6 +110,7 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.worker.workspace import current_workspace_manager
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -1267,6 +1268,106 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
         num_topk_tokens,
     )
     torch.testing.assert_close(captured["indices"], reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_heads", [8, 64])
+def test_flashmla_fp8_mixed_batch_stages_in_workspace(workspace_init, num_heads):
+    """The FP8 mixed-batch path runs the decode kernel with s_q = all tokens of
+    the step, so its padded q and output scale with max_num_batched_tokens.
+    Staging them in the workspace reserved at init must give bit-identical
+    results to the allocating path, alias the workspace, and not allocate
+    them per call (the startup memory profile never sees those allocations).
+    """
+    ok, reason = flashmla.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+
+    device = torch.device(DEVICE_TYPE)
+    dtype = torch.bfloat16
+    num_tokens, max_tokens, topk = 512, 1024, 128
+    num_blocks, block_size = 16, 64
+    num_slots = num_blocks * block_size
+    kv_lora_rank, rope_dim = 512, 64
+    head_size = kv_lora_rank + rope_dim
+    padded_heads = FlashMLASparseImpl._compute_fp8_decode_padded_heads(num_heads)
+
+    # Same layout FlashMLASparseImpl.__init__ reserves for fp8_ds_mla.
+    workspace_specs = [
+        ((max_tokens, num_heads, head_size), dtype),
+        ((num_slots, head_size), dtype),
+        ((max_tokens, padded_heads, head_size), dtype),
+        ((max_tokens, padded_heads, kv_lora_rank), dtype),
+        ((max_tokens, num_heads, kv_lora_rank), dtype),
+    ]
+    manager = current_workspace_manager()
+    workspaces = manager.get_simultaneous(*workspace_specs)
+    manager.lock()
+
+    torch.manual_seed(0)
+    kv_cache = torch.zeros(
+        (num_blocks, block_size, 656), dtype=torch.uint8, device=device
+    )
+    ops.concat_and_cache_mla(
+        torch.randn(num_slots, kv_lora_rank, dtype=dtype, device=device),
+        torch.randn(num_slots, rope_dim, dtype=dtype, device=device),
+        kv_cache,
+        torch.arange(num_slots, dtype=torch.int64, device=device),
+        "fp8_ds_mla",
+        torch.ones(1, dtype=torch.float32, device=device),
+    )
+    q = torch.randn(1, num_tokens, num_heads, head_size, dtype=dtype, device=device)
+    topk_indices = torch.randint(
+        0, num_slots, (1, num_tokens, topk), dtype=torch.int32, device=device
+    )
+    topk_indices[..., topk // 2 :] = -1
+
+    scheduler_metadata, _ = flashmla.get_mla_metadata()
+    kernel_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
+        scheduler_metadata=scheduler_metadata,
+        cache_lens=torch.tensor([num_slots], dtype=torch.int32, device=device),
+        dummy_block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
+    )
+    stub_impl = SimpleNamespace(
+        fp8_decode_padded_heads=padded_heads,
+        workspace_specs=workspace_specs,
+        softmax_scale=head_size**-0.5,
+    )
+
+    def run(use_workspace: bool) -> tuple[torch.Tensor, torch.Tensor, int]:
+        torch.accelerator.synchronize()
+        torch.accelerator.reset_peak_memory_stats()
+        before = torch.accelerator.memory_allocated()
+        out, lse = FlashMLASparseImpl._fp8_flash_mla_kernel(
+            stub_impl,
+            q=q,
+            kv_c_and_k_pe_cache=kv_cache,
+            topk_indices=topk_indices,
+            kernel_metadata=kernel_metadata,
+            use_workspace=use_workspace,
+        )
+        torch.accelerator.synchronize()
+        return out, lse, torch.accelerator.max_memory_allocated() - before
+
+    ref_out, ref_lse, ref_peak = run(use_workspace=False)
+    ref_out = ref_out.clone()
+    # Stale workspace contents (e.g. from another layer) must not leak in.
+    for workspace in workspaces[2:4]:
+        workspace.fill_(float("nan"))
+    out, lse, peak = run(use_workspace=True)
+
+    assert out.shape == ref_out.shape == (1, num_tokens, num_heads, kv_lora_rank)
+    torch.testing.assert_close(out, ref_out, rtol=0, atol=0)
+    torch.testing.assert_close(lse, ref_lse, rtol=0, atol=0)
+    padded_out = workspaces[3]
+    assert out.data_ptr() == padded_out.data_ptr()
+
+    staged_bytes = num_tokens * padded_heads * kv_lora_rank * dtype.itemsize
+    if num_heads < padded_heads:
+        staged_bytes += num_tokens * padded_heads * head_size * dtype.itemsize
+    assert ref_peak - peak >= staged_bytes, (
+        f"workspace staging saved {ref_peak - peak} bytes, expected at least "
+        f"{staged_bytes} (padded q + output)"
+    )
 
 
 @pytest.mark.parametrize(
