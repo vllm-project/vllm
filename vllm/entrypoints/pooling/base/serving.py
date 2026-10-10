@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator
 from concurrent.futures import Executor
 from http import HTTPStatus
 from typing import ClassVar
@@ -10,12 +10,10 @@ from typing import ClassVar
 import torch
 from fastapi import Request
 from fastapi.responses import Response
-from starlette.datastructures import Headers
 
 from vllm import PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
@@ -24,11 +22,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 from ...serve.engine.protocol import ErrorResponse
@@ -259,20 +253,6 @@ class PoolingBaseServing(ABC, BaseServing):
                 "greater than max_model_len."
                 " Please request a smaller truncation size."
             )
-
-        return None
-
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
-
-        if is_tracing_enabled:
-            return extract_trace_headers(headers)
-
-        if contains_trace_headers(headers):
-            log_tracing_disabled_warning()
 
         return None
 
