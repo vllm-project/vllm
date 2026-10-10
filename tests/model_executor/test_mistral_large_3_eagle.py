@@ -55,8 +55,16 @@ class DummyNorm(nn.Module):
 class DummyDecoderLayer(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.use_sequence_parallel_moe = False
 
-    def forward(self, positions, hidden_states, residual, llama_4_scaling=None):
+    def forward(
+        self,
+        positions,
+        hidden_states,
+        residual,
+        llama_4_scaling=None,
+        input_is_sequence_parallel=False,
+    ):
         return hidden_states, residual
 
 
