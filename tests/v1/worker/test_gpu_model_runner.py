@@ -4,11 +4,12 @@
 import gc
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
@@ -61,6 +62,7 @@ from vllm.v1.worker.block_table import (
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
@@ -1953,3 +1955,105 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+class TestReloadDraftWeights:
+    """reload_draft_weights swaps a newly trained draft into a running engine."""
+
+    def _make_runner(self, cls=GPUModelRunner, draft_load_config=None):
+        runner = object.__new__(cls)
+        runner.load_config = Mock()
+        runner.load_config.load_format = "safetensors"
+        runner.speculative_config = SimpleNamespace(
+            draft_model_config=SimpleNamespace(model="draft/original", revision="v1"),
+            draft_load_config=draft_load_config,
+        )
+        runner.get_model = Mock(return_value=Mock())
+        return runner
+
+    def _reload(self, runner, draft_model, weights, **kwargs):
+        loader = Mock()
+        loader.get_all_weights.return_value = weights
+        runner.get_draft_model = Mock(return_value=draft_model)
+        with (
+            patch.object(
+                gpu_model_runner_module, "get_model_loader", return_value=loader
+            ) as get_loader,
+            patch.object(
+                gpu_model_runner_module, "initialize_layerwise_reload"
+            ) as initialize_reload,
+            patch.object(
+                gpu_model_runner_module, "finalize_layerwise_reload"
+            ) as finalize_reload,
+        ):
+            runner.reload_draft_weights(**kwargs)
+        return loader, get_loader, initialize_reload, finalize_reload
+
+    def test_reload_from_new_path_loads_only_the_draft(self):
+        runner = self._make_runner()
+        draft_model = Mock()
+        weights = iter([("fc.weight", torch.zeros(1))])
+
+        loader, get_loader, initialize_reload, finalize_reload = self._reload(
+            runner, draft_model, weights, weights_path="draft/updated"
+        )
+
+        draft_config = runner.speculative_config.draft_model_config
+        assert draft_config.model == "draft/updated"
+        assert draft_config.revision is None
+        get_loader.assert_called_once_with(runner.load_config)
+        loader.get_all_weights.assert_called_once_with(draft_config, draft_model)
+        draft_model.load_weights.assert_called_once_with(weights)
+        runner.get_model.return_value.load_weights.assert_not_called()
+        initialize_reload.assert_called_once_with(draft_model)
+        finalize_reload.assert_called_once_with(draft_model, draft_config)
+
+    def test_reload_without_draft_model_raises(self):
+        runner = self._make_runner()
+        runner.get_draft_model = Mock(return_value=None)
+
+        with pytest.raises(ValueError, match="No speculative draft model"):
+            runner.reload_draft_weights(weights_path="draft/updated")
+
+    def test_v2_runner_delegates_to_v1(self):
+        runner = self._make_runner(GPUModelRunnerV2)
+        draft_model = Mock()
+
+        self._reload(runner, draft_model, iter([]), weights_path="draft/updated")
+
+        draft_model.load_weights.assert_called_once()
+        assert runner.speculative_config.draft_model_config.model == "draft/updated"
+
+    def test_reload_never_writes_target_owned_submodules(self):
+        """A draft checkpoint that ships the shared embedding must not touch the
+        target's embedding, and the shared module must be re-attached after."""
+
+        class _TinyDraft(nn.Module):
+            def __init__(self, embed_tokens: nn.Module):
+                super().__init__()
+                self.embed_tokens = embed_tokens
+                self.fc = nn.Linear(4, 4, bias=False)
+
+            def load_weights(self, weights):
+                from vllm.model_executor.models.utils import AutoWeightsLoader
+
+                return AutoWeightsLoader(self).load_weights(weights)
+
+        target_model = nn.Module()
+        target_model.embed_tokens = nn.Embedding(8, 4)
+        original_embed = target_model.embed_tokens.weight.detach().clone()
+        draft_model = _TinyDraft(target_model.embed_tokens)
+        runner = self._make_runner()
+        runner.get_model = Mock(return_value=target_model)
+        weights = iter(
+            [
+                ("embed_tokens.weight", torch.full((8, 4), 7.0)),
+                ("fc.weight", torch.eye(4)),
+            ]
+        )
+
+        self._reload(runner, draft_model, weights, weights_path="draft/updated")
+
+        assert draft_model.embed_tokens is target_model.embed_tokens
+        assert torch.equal(target_model.embed_tokens.weight, original_embed)
+        assert torch.equal(draft_model.fc.weight, torch.eye(4))

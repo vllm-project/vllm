@@ -477,6 +477,45 @@ class ExecuteModelState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
 
 
+class _DiscardWeights(nn.Module):
+    """Swallows checkpoint tensors aimed at a draft submodule owned by the target."""
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        for _ in weights:
+            pass
+        return set()
+
+
+@contextmanager
+def _detach_target_owned_draft_modules(
+    draft_model: nn.Module, target_model: nn.Module
+) -> Iterator[None]:
+    """Unbind draft submodules that are live target objects while draft weights
+    load, so a draft checkpoint can never overwrite target storage (EAGLE drafters
+    share the target embedding; MTP drafters alias the target lm_head)."""
+    if not isinstance(draft_model, nn.Module) or not isinstance(
+        target_model, nn.Module
+    ):
+        yield
+        return
+    target_ids = {id(module) for module in target_model.modules()}
+    detached: list[tuple[nn.Module, str, nn.Module]] = []
+    for name, module in draft_model.named_modules(remove_duplicate=False):
+        if not name or id(module) not in target_ids:
+            continue
+        parent_name, _, attr = name.rpartition(".")
+        parent = draft_model.get_submodule(parent_name) if parent_name else draft_model
+        if id(parent) not in target_ids:
+            detached.append((parent, attr, module))
+    for parent, attr, _ in detached:
+        setattr(parent, attr, _DiscardWeights())
+    try:
+        yield
+    finally:
+        for parent, attr, module in detached:
+            setattr(parent, attr, module)
+
+
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
@@ -5550,6 +5589,71 @@ class GPUModelRunner(
 
         self.reset_encoder_cache()
         self.reset_mm_cache()
+
+    def reload_draft_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+    ) -> None:
+        """Reload the speculative draft model's weights in place.
+
+        Lets a draft model that keeps training while the engine serves (e.g. on
+        the live request stream) be swapped in without restarting the engine or
+        touching the target model: draft submodules that are live target objects
+        (the embedding shared by EAGLE drafters, the lm_head aliased by MTP
+        drafters) are detached while the checkpoint is loaded.
+
+        Args:
+            weights_iterator: weights to load into the draft model.
+            weights_path: checkpoint to load from when ``weights_iterator`` is
+                not given. Defaults to the draft model's configured path.
+
+        Raises:
+            ValueError: if no speculative draft model is loaded.
+
+        """
+        get_draft_model = getattr(self, "get_draft_model", None)
+        draft_model = get_draft_model() if callable(get_draft_model) else None
+        if draft_model is None or self.speculative_config is None:
+            raise ValueError("No speculative draft model is loaded")
+        draft_model_config = self.speculative_config.draft_model_config
+        assert draft_model_config is not None
+
+        if weights_path is not None:
+            draft_model_config.model = weights_path
+            draft_model_config.revision = None
+        if weights_iterator is None:
+            load_config = self.speculative_config.draft_load_config or self.load_config
+            model_loader = get_model_loader(load_config)
+            if not hasattr(model_loader, "get_all_weights"):
+                raise NotImplementedError(
+                    f"Draft model reloading with `{load_config.load_format}` format"
+                )
+            weights_iterator = cast(
+                Iterable[tuple[str, torch.Tensor]],
+                model_loader.get_all_weights(draft_model_config, draft_model),
+            )
+
+        logger.info("Reloading draft model weights in place...")
+        counter_before_reloading = time.perf_counter()
+        with _detach_target_owned_draft_modules(draft_model, self.get_model()):
+            initialize_layerwise_reload(draft_model)
+            draft_model.load_weights(weights_iterator)
+            finalize_layerwise_reload(draft_model, draft_model_config)
+        # Drafters that derive fused buffers from their layer weights at the end
+        # of load_weights (dflash) rebuilt them on meta tensors inside the
+        # layerwise lifecycle; rebuild once more now that the real ones are back.
+        rebuild_fused_state = getattr(
+            getattr(draft_model, "model", None) or draft_model,
+            "_build_fused_kv_buffers",
+            None,
+        )
+        if callable(rebuild_fused_state):
+            rebuild_fused_state()
+        logger.info(
+            "Reloading draft model weights took %.2f seconds",
+            time.perf_counter() - counter_before_reloading,
+        )
 
     def _get_prompt_logprobs_dict(
         self,
