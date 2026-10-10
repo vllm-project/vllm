@@ -1282,11 +1282,13 @@ async def benchmark(
             "completed": metrics.completed,
             "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
-            "total_output_tokens": metrics.total_output,
+            "total_output_tokens": metrics.total_output if tokenizer else None,
             "request_throughput": metrics.request_throughput,
             "request_goodput": metrics.request_goodput if goodput_config_dict else None,
-            "output_throughput": metrics.output_throughput,
-            "total_token_throughput": metrics.total_token_throughput,
+            "output_throughput": metrics.output_throughput if tokenizer else None,
+            "total_token_throughput": (
+                metrics.total_token_throughput if tokenizer else None
+            ),
             "input_lens": [output.prompt_len for output in outputs],
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
@@ -1296,7 +1298,9 @@ async def benchmark(
             "queue_times": [output.client_queue_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
-            "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
+            "max_output_tokens_per_s": (
+                metrics.max_output_tokens_per_s if tokenizer else None
+            ),
             "max_concurrent_requests": metrics.max_concurrent_requests,
             "rtfx": metrics.rtfx,
         }
@@ -1304,6 +1308,7 @@ async def benchmark(
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
+            "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
             "total_input_sequences": metrics.total_input_sequences,
             "request_throughput": metrics.request_throughput,
@@ -1524,10 +1529,24 @@ def save_to_pytorch_benchmark_format(
         "mean_itl_ms",
         "std_itl_ms",
         "p99_itl_ms",
+        "median_e2el_ms",
+        "mean_e2el_ms",
+        "std_e2el_ms",
+        "p99_e2el_ms",
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
-    ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
+    ignored_metrics = [
+        "input_lens",
+        "output_lens",
+        "ttfts",
+        "itls",
+        "latencies",
+        "start_times",
+        "queue_times",
+        "generated_texts",
+        "errors",
+    ]
     pt_records = convert_to_pytorch_benchmark_format(
         args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
@@ -2279,6 +2298,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.request_rate if args.request_rate < float("inf") else "inf"
     )
     result_json["burstiness"] = args.burstiness
+    result_json["num_warmups"] = args.num_warmups
     result_json["max_concurrency"] = args.max_concurrency
 
     if args.ramp_up_strategy is not None:
@@ -2385,6 +2405,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "start_times",
             "ttfts",
             "itls",
+            "latencies",
+            "queue_times",
             "generated_texts",
             "errors",
         ]:
