@@ -1294,6 +1294,19 @@ class Gemma4ForConditionalGeneration(
     # Image processing
     # ------------------------------------------------------------------ #
 
+    def _get_max_soft_tokens(self) -> int:
+        max_soft_tokens = int(self.config.vision_config.default_output_length)
+        mm_processor_kwargs = getattr(
+            getattr(self, "multimodal_config", None),
+            "mm_processor_kwargs",
+            None,
+        )
+        if isinstance(mm_processor_kwargs, Mapping):
+            value, _ = _get_max_soft_tokens(mm_processor_kwargs)
+            if isinstance(value, int) and value in _SUPPORTED_SOFT_TOKENS:
+                max_soft_tokens = value
+        return max_soft_tokens
+
     def _process_image_input(
         self,
         image_input: Gemma4ImageInputs,
@@ -1324,17 +1337,7 @@ class Gemma4ForConditionalGeneration(
         pool_position_ids = pixel_position_ids
 
         if self._enable_mm_lora:
-            max_soft_tokens = vision_cfg.default_output_length
-            mm_processor_kwargs = getattr(
-                getattr(self, "multimodal_config", None),
-                "mm_processor_kwargs",
-                None,
-            )
-            if isinstance(mm_processor_kwargs, Mapping):
-                value, _ = _get_max_soft_tokens(mm_processor_kwargs)
-                if isinstance(value, int) and value in _SUPPORTED_SOFT_TOKENS:
-                    max_soft_tokens = value
-
+            max_soft_tokens = self._get_max_soft_tokens()
             max_patches = max_soft_tokens * pooling_k2
             padded_position_ids: list[torch.Tensor] = []
             for idx in range(total_images):
@@ -1836,11 +1839,7 @@ class Gemma4ForConditionalGeneration(
         pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
 
         # Retrieve the model's actual configured maximum tokens:
-        configured_max_tokens = getattr(
-            self.config.vision_config,
-            "num_soft_tokens",
-            _SUPPORTED_SOFT_TOKENS[2],
-        )
+        configured_max_tokens = self._get_max_soft_tokens()
         # Dynamically compute the slot capacity per item bounded by both the
         # current graph budget and the user's maximum config:
         per_item_output = min(token_budget, configured_max_tokens)
@@ -1863,7 +1862,7 @@ class Gemma4ForConditionalGeneration(
             dtype=torch.long,
         )
         dummy_gather_indices = torch.zeros(
-            (token_budget,),
+            (token_budget, 2),
             device=device,
             dtype=torch.long,
         )
@@ -1929,17 +1928,16 @@ class Gemma4ForConditionalGeneration(
 
         # ONLY allocate an array of exact size `total_tokens`.
         # DO NOT pad it. The upstream Graph Manager handles the padding securely.
-        gather_indices = torch.zeros((total_tokens,), dtype=torch.long, device=device)
+        # Each row is an (item, token) index into the pooled output.
+        gather_indices = torch.zeros((total_tokens, 2), dtype=torch.long, device=device)
 
         if modality == "image":
             dst_offset = 0
             for i, n_tok in enumerate(per_item_out_tokens):
                 safe_n_tok = min(n_tok, per_item_output)
-                src_start = i * per_item_output
-                src_end = src_start + safe_n_tok
-                gather_indices[dst_offset : dst_offset + safe_n_tok] = torch.arange(
-                    src_start, src_end, dtype=torch.long, device=device
-                )
+                dst = gather_indices[dst_offset : dst_offset + safe_n_tok]
+                dst[:, 0] = i
+                dst[:, 1] = torch.arange(safe_n_tok, dtype=torch.long, device=device)
                 dst_offset += safe_n_tok
         elif modality == "video":
             video_frame_counts = mm_kwargs["video_frame_counts"]
@@ -1954,19 +1952,15 @@ class Gemma4ForConditionalGeneration(
             frame_output_tokens = np_patches // pool_ratio
             safe_frame_output_tokens = min(frame_output_tokens, per_item_output)
 
+            frame_token_ids = torch.arange(
+                safe_frame_output_tokens, dtype=torch.long, device=device
+            )
             dst_offset = 0
-            frame_idx = 0
-            for fc in fc_list:
-                for f in range(fc):
-                    src_start = (frame_idx + f) * per_item_output
-                    src_end = src_start + safe_frame_output_tokens
-                    gather_indices[
-                        dst_offset : dst_offset + safe_frame_output_tokens
-                    ] = torch.arange(
-                        src_start, src_end, dtype=torch.long, device=device
-                    )
-                    dst_offset += safe_frame_output_tokens
-                frame_idx += fc
+            for frame_idx in range(sum(fc_list)):
+                dst = gather_indices[dst_offset : dst_offset + safe_frame_output_tokens]
+                dst[:, 0] = frame_idx
+                dst[:, 1] = frame_token_ids
+                dst_offset += safe_frame_output_tokens
 
         return EncoderCudaGraphReplayBuffers(
             values={
@@ -2015,8 +2009,7 @@ class Gemma4ForConditionalGeneration(
         if getattr(vt.config, "standardize", False):
             pooled_states = (pooled_states - vt.std_bias) * vt.std_scale
 
-        flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
-        gathered_states = flat_pooled[gather_indices]
+        gathered_states = pooled_states[gather_indices[:, 0], gather_indices[:, 1]]
 
         # Cast to the projection layer's dtype to resolve mixed-precision crash
         target_dtype = self.embed_vision.embedding_projection.weight.dtype
@@ -2260,16 +2253,7 @@ class Gemma4ForConditionalGeneration(
 
             if modality == "image":
                 pixel_values_key = "pixel_values"
-                max_soft_tokens = int(vision_config.default_output_length)
-                mm_processor_kwargs = getattr(
-                    getattr(self, "multimodal_config", None),
-                    "mm_processor_kwargs",
-                    None,
-                )
-                if isinstance(mm_processor_kwargs, Mapping):
-                    val, _ = _get_max_soft_tokens(mm_processor_kwargs)
-                    if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
-                        max_soft_tokens = val
+                max_soft_tokens = self._get_max_soft_tokens()
             else:
                 pixel_values_key = "pixel_values_videos"
                 max_soft_tokens = _VIDEO_MAX_SOFT_TOKENS
