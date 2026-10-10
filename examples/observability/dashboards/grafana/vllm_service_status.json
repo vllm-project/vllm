@@ -1,0 +1,920 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Simple status board for the users of a vLLM service: is each model up, how fast does it answer, and how busy is it. Designed to be read from a distance.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "vllm"
+      ],
+      "targetBlank": false,
+      "title": "vLLM dashboards",
+      "type": "dashboards"
+    }
+  ],
+  "panels": [
+    {
+      "type": "row",
+      "title": "$model_name",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "repeat": "model_name"
+    },
+    {
+      "type": "stat",
+      "title": "Status",
+      "description": "*Online*: the model's servers are reporting. *Sleeping*: all of its engines were put to sleep to free GPU memory. *Down*: no server of the model is reporting.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "(2 - (max(vllm:engine_sleep_state{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", sleep_state=\"awake\"}) == bool 0)) or vector(0)",
+          "legendFormat": "$model_name",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "Down"
+                },
+                "1": {
+                  "color": "blue",
+                  "index": 1,
+                  "text": "Sleeping"
+                },
+                "2": {
+                  "color": "green",
+                  "index": 2,
+                  "text": "Online"
+                }
+              }
+            }
+          ],
+          "noValue": "Down",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": false
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2
+    },
+    {
+      "type": "stat",
+      "title": "Response time",
+      "description": "Typical wait until the first token of an answer arrives, including time in the queue (median time to first token over the last 5 minutes).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "(histogram_quantile(0.5, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])))) and on () count(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "index": 0,
+                  "text": "No requests"
+                }
+              }
+            }
+          ],
+          "noValue": "No requests",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "Output speed",
+      "description": "How fast answers are written: tokens generated per second for each request being answered, over the last 5 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "(sum(rate(vllm:generation_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])) / (sum(avg_over_time(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])) > 0)) and on () count(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "index": 0,
+                  "text": "No requests"
+                }
+              }
+            }
+          ],
+          "noValue": "No requests",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 20
+              }
+            ]
+          },
+          "unit": "suffix: tok/s",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 4
+    },
+    {
+      "type": "stat",
+      "title": "Success rate",
+      "description": "Share of requests finished in the last 5 minutes without a server error. Requests cancelled by the client count as successful.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "(1 - (sum(rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", finished_reason=\"error\"}[5m])) / (sum(rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])) > 0))) and on () count(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "index": 0,
+                  "text": "No requests"
+                }
+              }
+            }
+          ],
+          "noValue": "No requests",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 0.95
+              },
+              {
+                "color": "green",
+                "value": 0.99
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 5
+    },
+    {
+      "type": "stat",
+      "title": "Requests / min",
+      "description": "Requests finished per minute, over the last 5 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "(60 * sum(rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m]))) and on () count(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "index": 0,
+                  "text": "No requests"
+                }
+              }
+            }
+          ],
+          "noValue": "No requests",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 6
+    },
+    {
+      "type": "state-timeline",
+      "title": "",
+      "description": "Status over the selected time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "(2 - (max(vllm:engine_sleep_state{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", sleep_state=\"awake\"}) == bool 0)) or vector(0)",
+          "legendFormat": "Status",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "Down"
+                },
+                "1": {
+                  "color": "blue",
+                  "index": 1,
+                  "text": "Sleeping"
+                },
+                "2": {
+                  "color": "green",
+                  "index": 2,
+                  "text": "Online"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 7
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "",
+      "description": "Response time over the selected time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])))",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 7
+      },
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "",
+      "description": "Output speed over the selected time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(vllm:generation_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])) / (sum(avg_over_time(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])) > 0)",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "unit": "suffix: tok/s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 20
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 7
+      },
+      "id": 9
+    },
+    {
+      "type": "timeseries",
+      "title": "",
+      "description": "Success rate over the selected time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "1 - (sum(rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", finished_reason=\"error\"}[5m])) / (sum(rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m])) > 0))",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "axisSoftMin": 0.9,
+            "thresholdsStyle": {
+              "mode": "area"
+            }
+          },
+          "unit": "percentunit",
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "orange",
+                "value": 0.95
+              },
+              {
+                "color": "green",
+                "value": 0.99
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 7
+      },
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "",
+      "description": "Requests per minute over the selected time range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "60 * sum(rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}[5m]))",
+          "legendFormat": "__auto",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "locale",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 7
+      },
+      "id": 11
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "vllm"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "default",
+          "value": "default"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(vllm:num_requests_running, job)",
+        "hide": 2,
+        "includeAll": true,
+        "label": "Job",
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": "label_values(vllm:num_requests_running, job)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(vllm:num_requests_running{job=~\"$job\"}, model_name)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Model",
+        "multi": true,
+        "name": "model_name",
+        "options": [],
+        "query": "label_values(vllm:num_requests_running{job=~\"$job\"}, model_name)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\"}, instance)",
+        "hide": 2,
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": "label_values(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\"}, instance)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "vLLM / Service Status",
+  "uid": "vllm-status",
+  "version": 1,
+  "weekStart": ""
+}
