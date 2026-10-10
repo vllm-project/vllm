@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses import ToolChoiceFunction
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -30,6 +29,7 @@ from vllm.parser.chat_parsing.response_templates import (
     load_response_template,
 )
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.utils import iter_response_function_tool_dicts
 

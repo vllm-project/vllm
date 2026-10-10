@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.entrypoints.chat_utils import parse_chat_messages
+from vllm.renderers.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
 from vllm.tokenizers.deepseek_v4 import get_deepseek_v4_tokenizer
 from vllm.tokenizers.registry import TokenizerRegistry

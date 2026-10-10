@@ -66,7 +66,7 @@ from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.entrypoints.chat_utils import (
+    from vllm.renderers.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
     )
@@ -362,7 +362,7 @@ class BaseRenderer(ABC, Generic[_T]):
         no-op if the background warmup — or a prior reset_mm_cache that joined
         it — already ran it.
         """
-        from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+        from vllm.renderers.chat_utils import ChatTemplateResolutionError
 
         # prevent MM processor hangs
         with set_default_torch_num_threads(1):

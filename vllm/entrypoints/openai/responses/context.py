@@ -21,9 +21,6 @@ from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -41,6 +38,9 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 )
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 

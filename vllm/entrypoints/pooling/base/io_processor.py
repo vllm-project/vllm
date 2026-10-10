@@ -10,12 +10,12 @@ from vllm import (
     PoolingRequestOutput,
 )
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateConfig,
-)
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 from vllm.renderers import BaseRenderer, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatTemplateConfig,
+)
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async
 from vllm.utils.mistral import is_mistral_tokenizer

@@ -28,11 +28,6 @@ from vllm.config.model import (
 )
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    load_chat_template,
-)
 from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
@@ -44,6 +39,11 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    load_chat_template,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext

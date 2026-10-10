@@ -13,8 +13,8 @@ import torch
 from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.utils.mem_constants import KiB_bytes, MiB_bytes
 from vllm.utils.mem_utils import format_mib
 

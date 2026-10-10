@@ -10,9 +10,9 @@ from mistral_common.exceptions import InvalidMessageStructureException
 from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _validate_apply_chat_template_args,

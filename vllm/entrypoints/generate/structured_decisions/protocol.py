@@ -8,10 +8,10 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.utils import random_uuid
 
 
