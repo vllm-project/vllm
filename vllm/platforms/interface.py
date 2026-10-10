@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
-    from vllm.v1.worker.tpsp_utils import TPSPContext, TPSPScanResult
+    from vllm.v1.worker.tpsp_utils import TPSPContext, TPSPOpsGroup, TPSPScanResult
 else:
     FlexibleArgumentParser = object
 
@@ -157,18 +157,13 @@ class TPSPBackend(ABC):
 
     def profile(
         self,
-        o_proj: torch.nn.Module,
-        o_norm: torch.nn.Module,
-        down_proj: torch.nn.Module,
-        down_norm: torch.nn.Module,
+        ops_groups: list["TPSPOpsGroup"],
         max_batched_tokens: int,
     ) -> "TPSPContext | None":
-        """Select independent chunks and a shared threshold for two projections."""
+        """Select independent chunks and a shared threshold for ops groups."""
         from vllm.v1.worker.tpsp_utils import profile_tpsp
 
-        return profile_tpsp(
-            self, o_proj, o_norm, down_proj, down_norm, max_batched_tokens
-        )
+        return profile_tpsp(self, ops_groups, max_batched_tokens)
 
     def profile_projection(
         self,

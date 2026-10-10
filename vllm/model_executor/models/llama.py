@@ -58,7 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.worker.tpsp_utils import TPSPContext, tpsp_shard_residual
+from vllm.v1.worker.tpsp_utils import TPSPContext, TPSPOpsGroup, tpsp_shard_residual
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
@@ -348,7 +348,7 @@ class LlamaDecoderLayer(nn.Module):
                 residual = tpsp_shard_residual(residual)
             backend = self.tpsp_context.backend
             hidden_states, residual = backend.fused_gemm_rs_norm_ag(
-                self.tpsp_context.o_proj,
+                self.tpsp_context.handles["o_proj"],
                 hidden_states,
                 self.self_attn.o_proj,
                 residual,
@@ -356,7 +356,7 @@ class LlamaDecoderLayer(nn.Module):
             )
             hidden_states = self.mlp(hidden_states, tpsp_active=True)
             return backend.fused_gemm_rs_norm_ag(
-                self.tpsp_context.down_proj,
+                self.tpsp_context.handles["down_proj"],
                 hidden_states,
                 self.mlp.down_proj,
                 residual,
@@ -460,14 +460,19 @@ class LlamaModel(nn.Module, EagleModelMixin):
             get_tp_group().device_group.group_name,
             first_layer.self_attn.o_proj.weight.device,
         )
-        args = (
-            first_layer.self_attn.o_proj,
-            first_layer.post_attention_layernorm,
-            first_layer.mlp.down_proj,
-            self.layers[1].input_layernorm,
-            self.max_tpsp_batched_tokens,
-        )
-        context = backend.profile(*args)
+        ops_groups = [
+            TPSPOpsGroup(
+                "o_proj",
+                first_layer.self_attn.o_proj,
+                first_layer.post_attention_layernorm,
+            ),
+            TPSPOpsGroup(
+                "down_proj",
+                first_layer.mlp.down_proj,
+                self.layers[1].input_layernorm,
+            ),
+        ]
+        context = backend.profile(ops_groups, self.max_tpsp_batched_tokens)
         if context is not None:
             for layer in islice(self.layers, self.start_layer, self.end_layer):
                 layer.tpsp_context = context

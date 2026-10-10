@@ -19,6 +19,7 @@ from vllm.platforms.interface import TPSPBackend
 from vllm.v1.worker import tpsp_utils
 from vllm.v1.worker.tpsp_utils import (
     TPSPContext,
+    TPSPOpsGroup,
     TPSPProfile,
     TPSPScanResult,
     scan_threshold,
@@ -338,12 +339,11 @@ def _check_tpsp_backend(
                 handles.append(handle)
             pair = scan_threshold(
                 backend,
-                handles[0],
-                o_proj,
-                o_norm,
-                handles[1],
-                down_proj,
-                down_norm,
+                [
+                    TPSPOpsGroup("o_proj", o_proj, o_norm),
+                    TPSPOpsGroup("down_proj", down_proj, down_norm),
+                ],
+                {"o_proj": handles[0], "down_proj": handles[1]},
                 128,
             )
             assert pair.measurements and pair.measurements[0].tokens == 128
@@ -544,8 +544,7 @@ def test_llama_tpsp_forward(monkeypatch):
         model.tpsp_context = TPSPContext(
             TPSPProfile(threshold is not None, threshold, 8),
             backend,
-            o_plan,
-            down_plan,
+            {"o_proj": o_plan, "down_proj": down_plan},
         )
         if threshold is not None:
             layer.tpsp_context = model.tpsp_context
@@ -657,17 +656,25 @@ def test_llama_tpsp_forward(monkeypatch):
         torch.testing.assert_close(result, torch.full((2, 2), 7, dtype=torch.bfloat16))
     assert calls == [
         (
-            layer.self_attn.o_proj,
-            layer.post_attention_layernorm,
-            layer.mlp.down_proj,
-            next_layer.input_layernorm,
+            [
+                TPSPOpsGroup(
+                    "o_proj", layer.self_attn.o_proj, layer.post_attention_layernorm
+                ),
+                TPSPOpsGroup(
+                    "down_proj", layer.mlp.down_proj, next_layer.input_layernorm
+                ),
+            ],
             8,
         )
     ]
     assert model.tpsp_context is None
     assert not model.tpsp_requested
 
-    enabled_profile = TPSPContext(TPSPProfile(True, 1, 8), backend, o_plan, down_plan)
+    enabled_profile = TPSPContext(
+        TPSPProfile(True, 1, 8),
+        backend,
+        {"o_proj": o_plan, "down_proj": down_plan},
+    )
     model.tpsp_requested = True
 
     class ProfileBackend(Backend):
@@ -715,7 +722,7 @@ def test_llama_tpsp_profiles_next_layer_norm(monkeypatch):
     )
 
     def check_profile(*args):
-        assert args[3] is second.input_layernorm
+        assert args[0][1].norm is second.input_layernorm
         raise RuntimeError("profile called")
 
     monkeypatch.setattr(
@@ -826,31 +833,93 @@ def test_tpsp_projection_profile_keeps_distinct_configs(monkeypatch):
         ),
     )
 
-    profile = backend.profile(
-        layer.self_attn.o_proj,
-        layer.post_attention_layernorm,
-        layer.mlp.down_proj,
-        model.norm,
-        8,
-    )
+    groups = [
+        TPSPOpsGroup("o_proj", layer.self_attn.o_proj, layer.post_attention_layernorm),
+        TPSPOpsGroup("down_proj", layer.mlp.down_proj, model.norm),
+    ]
+    profile = backend.profile(groups, 8)
     assert profile.profile.enabled and profile.profile.threshold_tokens == 3
     assert profile.backend is backend
-    assert (profile.o_proj.config, profile.down_proj.config) == (16, 32)
-    assert profile.o_proj is not profile.down_proj
+    assert (
+        profile.handles["o_proj"].config,
+        profile.handles["down_proj"].config,
+    ) == (16, 32)
+    assert profile.handles["o_proj"] is not profile.handles["down_proj"]
 
     monkeypatch.setattr(
         tpsp_utils,
         "scan_threshold",
         lambda *args: TPSPScanResult(2, 2, 8, "disabled", "no benefit"),
     )
-    disabled = backend.profile(
-        layer.self_attn.o_proj,
-        layer.post_attention_layernorm,
-        layer.mlp.down_proj,
-        model.norm,
-        8,
-    )
+    disabled = backend.profile(groups, 8)
     assert disabled is None
     assert len(backend.closed) == 3
     assert backend.closed[-1] is None
     assert backend.closed[-2] is not backend.closed[-3]
+
+
+def test_tpsp_profile_accepts_multiple_named_groups(monkeypatch):
+    from vllm.distributed import parallel_state
+
+    monkeypatch.setattr(
+        parallel_state,
+        "get_tp_group",
+        lambda: SimpleNamespace(
+            world_size=2,
+            rank_in_group=0,
+            device_group=SimpleNamespace(group_name="test"),
+        ),
+    )
+
+    class Backend(TPSPBackend):
+        def __init__(self):
+            super().__init__("test", torch.device("cpu"))
+            self.closed = []
+            self.profiled = []
+
+        def open(self, **kwargs):
+            return object()
+
+        def profile_projection(self, handle, *, projection, **kwargs):
+            self.profiled.append(projection)
+            return TPSPScanResult(2, 2, 8, "candidate", "", config=1)
+
+        def set_config(self, handle, config):
+            raise NotImplementedError
+
+        def fused_gemm_rs_norm_ag(self, *args, **kwargs):
+            raise NotImplementedError
+
+        def close(self, context=None):
+            self.closed.append(context)
+
+    backend = Backend()
+    groups = []
+    for name in ("first", "second", "third"):
+        projection = nn.Module()
+        projection.weight = nn.Parameter(torch.ones(2, 2))
+        projection.input_size_per_partition = 2
+        norm = nn.Module()
+        norm.weight = nn.Parameter(torch.ones(2))
+        norm.variance_epsilon = 1e-5
+        groups.append(TPSPOpsGroup(name, projection, norm))
+
+    def check_threshold(selected_backend, selected_groups, handles, max_tokens):
+        assert selected_backend is backend
+        assert selected_groups is groups
+        assert list(handles) == [group.name for group in groups]
+        assert max_tokens == 8
+        return TPSPScanResult(2, 2, 8, "enabled", "", threshold_tokens=3)
+
+    monkeypatch.setattr(tpsp_utils, "scan_threshold", check_threshold)
+    context = backend.profile(groups, 8)
+    assert context is not None
+    assert backend.profiled == [group.projection for group in groups]
+    assert list(context.handles) == [group.name for group in groups]
+    assert len({id(handle) for handle in context.handles.values()}) == 3
+
+    with pytest.raises(ValueError, match="unique"):
+        backend.profile([groups[0], groups[0]], 8)
+    with pytest.raises(ValueError, match="named ops groups"):
+        backend.profile([], 8)
+    assert not backend.closed
