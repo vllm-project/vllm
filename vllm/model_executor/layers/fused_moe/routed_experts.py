@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
@@ -153,6 +154,7 @@ class RoutedExperts(PluggableLayer):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters
         self._loaded_expert_biases: set[str] = set()
+        self._fused_shared_expert_quantizer = self._get_fused_shared_expert_quantizer()
 
         self.quant_method = self._get_quant_method(
             self.layer_name,
@@ -630,6 +632,31 @@ class RoutedExperts(PluggableLayer):
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
+    def _get_fused_shared_expert_quantizer(
+        self,
+    ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None:
+        """Return the quantizer for an online-quantized fused shared expert."""
+        online_config = getattr(self.quant_config, "online_quantization_config", None)
+        prefix = self.moe_config.shared_expert_prefix
+        if (
+            online_config is None
+            or prefix is None
+            or self.expert_map_manager.num_fused_shared_experts == 0
+        ):
+            return None
+        # FSE compatibility checks require every shared-expert projection to
+        # use the routed experts' weight key.
+        resolved = online_config.resolve_quant_method_cls(
+            LinearBase, f"{prefix}.down_proj"
+        )
+        if resolved is None:
+            return None
+        from vllm.model_executor.layers.quantization.online.base import (
+            ONLINE_SHARED_EXPERT_QUANTIZERS,
+        )
+
+        return ONLINE_SHARED_EXPERT_QUANTIZERS[resolved[3].weight]
+
     @overload
     def weight_loader(
         self,
@@ -686,6 +713,35 @@ class RoutedExperts(PluggableLayer):
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
+
+        # A full-precision fused shared expert is quantized into the checkpoint
+        # layout, then loaded like a pre-quantized expert weight and scale.
+        if (
+            self._fused_shared_expert_quantizer is not None
+            and self.moe_config.num_logical_experts
+            <= global_expert_id
+            < self.moe_config.num_logical_experts
+            + self.expert_map_manager.num_fused_shared_experts
+            and weight_name.endswith("_weight")
+            and loaded_weight.is_floating_point()
+            and loaded_weight.dtype != param.dtype
+        ):
+            weight, weight_scale = self._fused_shared_expert_quantizer(
+                loaded_weight.to(self.moe_config.device)
+            )
+            stem = "w2" if shard_id == "w2" else "w13"
+            self.weight_loader(
+                getattr(self, f"{stem}_weight_scale"),
+                weight_scale,
+                f"{weight_name}_scale",
+                shard_id,
+                global_expert_id,
+                return_success=True,
+            )
+            loaded = self.weight_loader(
+                param, weight, weight_name, shard_id, global_expert_id, True
+            )
+            return loaded if return_success else None
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ/AWQ (K-first format).

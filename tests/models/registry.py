@@ -583,7 +583,6 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "EmbeddingGemma2Model": _HfExamplesInfo(
         "google/embeddinggemma-2",
-        min_transformers_version="5.18.0",
         is_available_online=False,
     ),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
@@ -776,10 +775,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
-        },
+        "nvidia/audio-flamingo-3-hf"
     ),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BailingMoeV3VLForConditionalGeneration": _HfExamplesInfo(
@@ -818,12 +814,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/Cosmos3-Edge",
         max_model_len=4096,
         use_original_num_layers=True,
-        hf_overrides={
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "*-",
-            }
-        },
+        hf_overrides={"text_config": {"layers_block_type": ["full_attention", "mlp"]}},
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",

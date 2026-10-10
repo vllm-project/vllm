@@ -155,6 +155,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/models/test_deepseek_v4_vl_rocm.py
+      - tests/models/test_deepseek_v4_aiter_mega_moe.py
       - vllm/models/deepseek_v4/amd/
       - vllm/models/deepseek_v4/common/
       - vllm/model_executor/layers/fused_moe/
@@ -170,6 +171,7 @@ steps:
       # Common qnorm/RoPE/cache kernels already run in the H100 AMD mirror.
       # Pin the tested BF16 Triton routing and shared-expert path before imports.
       - VLLM_ROCM_USE_AITER_MOE=0 pytest -v -s models/test_deepseek_v4_vl_rocm.py
+      - pytest -v -s models/test_deepseek_v4_aiter_mega_moe.py
 
 # Own job so mHC never shares a process with FlashInfer's import-time
 # ptxas override.
@@ -254,6 +256,7 @@ steps:
         --ignore=kernels/test_fused_qk_norm_rope_gate.py
         --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
         --ignore=kernels/test_top_k_per_row.py
+        --ignore=kernels/test_cpu_fused_sampling.py
         --ignore=kernels/test_bf16x3_router_gemm_cutedsl.py
         --ignore=kernels/test_bf16x3_router_gemm_rocm.py
         --ignore=kernels/test_ll_bf16_gemm.py
@@ -501,6 +504,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
+  automatic_shard: true
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/mamba/
@@ -547,6 +551,21 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
+
+- label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
+  key: kernels-minimax-m3-attention-b200
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/config/cache.py
+  - vllm/v1/kv_cache_interface.py
+  - tests/v1/attention/utils.py
+  - tests/kernels/attention/test_minimax_m3.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_minimax_m3.py
 
 - label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
@@ -597,7 +616,6 @@ steps:
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-  - tests/kernels/attention/test_minimax_m3.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
@@ -643,7 +661,6 @@ steps:
           pytest -v -s tests/kernels/moe/test_flashinfer.py
           pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
           pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-          pytest -v -s tests/kernels/attention/test_minimax_m3.py
           ;;
         *)
           echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2

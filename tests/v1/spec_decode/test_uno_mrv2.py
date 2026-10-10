@@ -2051,7 +2051,7 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         slot_mappings_by_layer={},
         hidden_states=target_hidden,
         aux_hidden_states=None,
-        dp_sync=None,
+        dp_sync_state=None,
         finished_req_ids=set(),
         ec_connector_output=None,
         cudagraph_stats=None,
@@ -2125,7 +2125,7 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         assert args[3] is target_hidden
         assert kwargs == {
             "num_speculative_tokens": 2,
-            "dp_sync": None,
+            "dp_sync_state": None,
             "mm_inputs": None,
         }
         events.append(f"propose-step-{proposer._step}")
