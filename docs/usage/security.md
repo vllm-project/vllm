@@ -173,6 +173,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `--enable-scale-out` is set, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
+- `/v1/decisions` - Text decisions API
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
 - `/v1/systemone` - Structured decisions API
