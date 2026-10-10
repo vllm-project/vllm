@@ -427,9 +427,12 @@ def test_select_common_block_size_no_valid_option():
         select_common_block_size(48, [backend_a, backend_b])
 
 
-def _mock_backend(supported: list, *, exact: bool = False):
+def _mock_backend(
+    supported: list, *, exact: bool = False, preferred: int | None = None
+):
     """Backend accepting multiples of ``supported``, or only those exact sizes
-    when ``exact`` (as CPU_MLA does)."""
+    when ``exact`` (as CPU_MLA does). ``preferred`` overrides the size the
+    backend asks for."""
     from vllm.v1.attention.backend import AttentionBackend
 
     class _MockBackendCls(AttentionBackend):
@@ -447,6 +450,12 @@ def _mock_backend(supported: list, *, exact: bool = False):
             def supports_block_size(cls, block_size: int | None) -> bool:
                 return block_size is None or block_size in supported
 
+        if preferred is not None:
+
+            @classmethod
+            def get_preferred_block_size(cls, default_block_size: int) -> int:
+                return preferred
+
     return _MockBackendCls
 
 
@@ -463,11 +472,30 @@ def _mock_backend(supported: list, *, exact: bool = False):
         ([[32, 64]], 32),
         # Neither divides the other, so only the LCM satisfies both.
         ([[32], [48]], 96),
+        # Both accept the default 16 and prefer 64, so the largest shared
+        # preference wins over 16.
+        ([([MultipleOf(16)], 64), ([MultipleOf(16)], 64)], 64),
     ],
 )
 def test_preferred_block_size_satisfies_every_backend(backends, expected):
-    classes = [_mock_backend(s) for s in backends]
+    classes = []
+    for spec in backends:
+        if isinstance(spec, tuple):
+            supported, preferred = spec
+            classes.append(_mock_backend(supported, preferred=preferred))
+        else:
+            classes.append(_mock_backend(spec))
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == expected
+
+
+def test_preferred_block_size_keeps_default_when_largest_preference_is_rejected():
+    # 128 is the larger preference, but the exact backend rejects it.
+    # Both still accept 16, so the old default path stays.
+    classes = [
+        _mock_backend([16, 32], exact=True, preferred=128),
+        _mock_backend([MultipleOf(16)], preferred=16),
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 16, None) == 16
 
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
