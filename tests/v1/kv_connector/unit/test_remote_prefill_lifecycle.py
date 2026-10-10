@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
@@ -26,6 +27,11 @@ pytestmark = pytest.mark.cpu_test
 
 def _num_waiting_requests(scheduler) -> int:
     return len(scheduler.waiting) + len(scheduler.kv_holding_waiting)
+
+
+def _kv_fetch_stages(scheduler) -> tuple[int, ...]:
+    """(waiting_to_start, in_progress, completed_waiting) request counts."""
+    return tuple(scheduler._kv_fetch_counts[s] for s in KV_FETCH_STAGES)
 
 
 def test_basic_lifecycle():
@@ -50,10 +56,12 @@ def test_basic_lifecycle():
 
     scheduler.add_request(request)
     request_id = request.request_id
+    assert _kv_fetch_stages(scheduler) == (1, 0, 0)
 
     # STEP (1):
     # (1a): schedule()
     scheduler_output = scheduler.schedule()
+    assert _kv_fetch_stages(scheduler) == (0, 1, 0)
 
     # Nothing running and empty scheduler output.
     assert len(scheduler.running) == 0
@@ -105,11 +113,13 @@ def test_basic_lifecycle():
     )
     assert _num_waiting_requests(scheduler) == 1
     assert request_id in scheduler.finished_recving_kv_req_ids
+    assert _kv_fetch_stages(scheduler) == (0, 0, 1)
 
     # STEP (3):
     # (3a): schedule(): this should actually schedule.
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 1
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
 
     # Confirm the block are actually allocated.
     num_hashed_blocks = 0
@@ -580,6 +590,24 @@ def test_cannot_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
+
+
+def test_kv_fetch_stages_cleared_on_abort():
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=int(BLOCK_SIZE * 2.5),
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+    scheduler.schedule()
+    assert _kv_fetch_stages(scheduler) == (0, 1, 0)
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert _kv_fetch_stages(scheduler) == (0, 0, 0)
 
 
 @patch(

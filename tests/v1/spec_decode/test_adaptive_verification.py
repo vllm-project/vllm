@@ -25,7 +25,7 @@ def make_manager(
     num_reqs, num_steps = confidences.shape
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
     manager.num_speculative_steps = num_steps
-    manager._stale_confidences = [SimpleNamespace(np=confidences)]
+    manager._stale_confidences = [SimpleNamespace(np=confidences)]  # type: ignore[list-item]  # CPU-only confidence buffer.
     manager._stale_idx = 0
     manager.req_states = SimpleNamespace(
         req_id_to_index={"low": 0, "high": 1},
@@ -176,6 +176,7 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
         {"low": 3, "high": 3},
         {"low": [1, 2], "high": [3, 4]},
     )
+    assert manager._batch_budget is not None
     valid_drafts, num_non_draft_tokens, draft_budget = manager._batch_budget
 
     assert draft_budget == 1
@@ -183,14 +184,16 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     assert num_non_draft_tokens == {"low": 1, "high": 1}
 
 
-def test_profiled_batches_seed_cost_curves_via_consumer():
+def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
     manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
     manager.num_speculative_steps = 7
     manager.num_bonus_tokens = 1
     curves: dict[str, list[tuple[int, float]]] = {}
-    manager.set_cost_curves = lambda draft, verify: curves.update(
-        draft=draft, verify=verify
+    monkeypatch.setattr(
+        manager,
+        "set_cost_curves",
+        lambda draft, verify: curves.update(draft=draft, verify=verify),
     )
 
     timings = [
@@ -258,6 +261,7 @@ def test_budget_caps_at_one_rejection_sampler_chunk():
         {"low": 3, "high": 3},
         {"low": [1, 2], "high": [3, 4]},
     )
+    assert manager._batch_budget is not None
     _, _, draft_budget = manager._batch_budget
     assert draft_budget <= 1
 
@@ -285,6 +289,7 @@ def test_zero_budget_rebuilds_cpu_cu_num_logits():
         {"low": 3, "high": 3, "prefill": 40},
         {"low": [1, 2], "high": [3, 4]},
     )
+    assert manager._batch_budget is not None
     _, _, draft_budget = manager._batch_budget
     assert draft_budget == 0
 
@@ -323,6 +328,7 @@ def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
     manager.get_num_tokens(
         {"low": 3, "high": 3, "prefill": 40}, scheduled_spec_decode_tokens
     )
+    assert manager._batch_budget is not None
     assert manager._batch_budget[2] == 0
 
     req_ids = ["low", "high", "prefill"]
