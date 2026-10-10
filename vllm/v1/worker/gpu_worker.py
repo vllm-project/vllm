@@ -103,7 +103,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.cudagraph_utils import has_compiled_submodule
-from .gpu.warmup import warmup_kernels
+from .gpu.warmup import warmup_batch_sizes, warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -1023,6 +1023,15 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+
+        if (
+            self.use_v2_model_runner
+            and self.vllm_config.kernel_config.enable_batch_size_warmup
+        ):
+            # After capture, so that every captured graph is replayed once.
+            warmup_batch_sizes(
+                self.model_runner, self.execute_model, self.sample_tokens
+            )
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

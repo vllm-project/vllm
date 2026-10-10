@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
@@ -467,3 +468,293 @@ def _warmup_kernels(
     if model_runner.kv_block_zeroer is not None:
         model_runner.kv_block_zeroer.zero_block_ids([0])
     torch.accelerator.synchronize()
+
+
+# (decode requests, prefill lengths) of one batch-size warmup step.
+BatchSizeWarmupStep = tuple[int, tuple[int, ...]]
+
+
+def plan_batch_size_warmup(
+    *,
+    decode_query_len: int,
+    max_num_reqs: int,
+    token_budget: int,
+    max_prompt_len: int,
+    cudagraph_capture_sizes: Sequence[int],
+) -> list[BatchSizeWarmupStep]:
+    """Steps that reach every decode batch shape and logits row count once.
+
+    With `q = decode_query_len` and prompts of `q + 1` tokens:
+
+    1. Prefill a pool of `pool` requests.
+    2. For `r = pool .. 1`: decode the first `r` pool requests (`q * r`
+       logits rows, every uniform decode CUDA graph). With speculative
+       decoding, also decode `r - 1` of them next to `b = 1 .. q - 1` new
+       prefills (`q * (r - 1) + b` rows), so every row count a step can have
+       up to `q * pool` is reached.
+    3. One prefill of exactly `s` tokens for every CUDA graph capture size
+       `s` (the mixed-batch graphs), except `s = q`, a one-request decode.
+
+    The decode count never increases, so each step can retire the pool
+    requests it no longer decodes. The plan depends only on the config, so
+    every TP rank runs the same steps and collectives.
+    """
+    q = decode_query_len
+    prompt_len = q + 1
+    pool = min(max_num_reqs, token_budget // prompt_len)
+    if pool < 1:
+        return []
+    steps: list[BatchSizeWarmupStep] = [(0, (prompt_len,) * pool)]
+    for r in range(pool, 0, -1):
+        steps.append((r, ()))
+        for b in range(1, q):
+            if r - 1 + b <= max_num_reqs and q * (r - 1) + b * prompt_len <= (
+                token_budget
+            ):
+                steps.append((r - 1, (prompt_len,) * b))
+    max_size = min(token_budget, max_prompt_len)
+    steps += [
+        (0, (size,))
+        for size in sorted(set(cudagraph_capture_sizes))
+        if size != q and size <= max_size
+    ]
+    return steps
+
+
+def _batch_size_warmup_skip_reason(model_runner: GPUModelRunner) -> str | None:
+    parallel_config = model_runner.parallel_config
+    if model_runner.is_pooling_model:
+        return "pooling model"
+    if model_runner.vllm_config.is_mm_encoder_only or model_runner.is_encoder_decoder:
+        return "encoder model"
+    if parallel_config.pipeline_parallel_size > 1:
+        return "pipeline parallel"
+    if parallel_config.data_parallel_size > 1:
+        # DP engines may size different KV caches and so plan different steps.
+        return "data parallel"
+    if model_runner.pcp_manager is not None:
+        return "prefill context parallel"
+    if model_runner.adaptive_verification is not None:
+        return "adaptive verification"
+    if model_runner.num_speculative_steps > 0 and model_runner.speculator is None:
+        return "speculative decoding without a speculator"
+    return None
+
+
+def _default_sampling_params(model_runner: GPUModelRunner) -> SamplingParams:
+    """The sampling parameters requests get by default (generation config)."""
+    defaults = model_runner.model_config.get_diff_sampling_param()
+    keys = (
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+        "presence_penalty",
+        "frequency_penalty",
+    )
+    return SamplingParams(
+        **{k: defaults[k] for k in keys if defaults.get(k) is not None}
+    )
+
+
+class _BatchSizeWarmupBuilder:
+    """Turns `BatchSizeWarmupStep`s into `SchedulerOutput`s.
+
+    Tracks each request's computed tokens and KV blocks, reserving what the
+    scheduler would (lookahead included). Blocks start at 1 and are recycled
+    once their request has finished.
+    """
+
+    def __init__(
+        self,
+        model_runner: GPUModelRunner,
+        sampling_params: SamplingParams,
+    ) -> None:
+        self.q = model_runner.decode_query_len
+        self.num_spec_steps = model_runner.num_speculative_steps
+        kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
+        self.specs = [g.kv_cache_spec for g in kv_cache_groups]
+        self.block_count = _warmup_block_counter(model_runner)
+        self.sampling_params = sampling_params
+        self.vocab_size = model_runner.model_config.get_vocab_size()
+        self.next_block = 1
+        self.free_blocks: list[int] = []
+        self.num_new_reqs = 0
+        # The first step's prefills form the decode pool; later prefills
+        # finish at the start of the next step.
+        self.pool_filled = False
+        self.pool: list[str] = []
+        self.finishing: list[str] = []
+        # req_id -> (computed tokens, block ids held per KV cache group)
+        self.reqs: dict[str, tuple[int, list[list[int]]]] = {}
+        self.max_context = 0
+
+    def _alloc(self, n: int) -> list[int]:
+        ids = self.free_blocks[:n]
+        del self.free_blocks[:n]
+        extra = n - len(ids)
+        ids += range(self.next_block, self.next_block + extra)
+        self.next_block += extra
+        return ids
+
+    def _finish(self, req_ids: list[str]) -> set[str]:
+        for req_id in req_ids:
+            _, held = self.reqs.pop(req_id)
+            self.free_blocks += [b for ids in held for b in ids]
+        return set(req_ids)
+
+    def build(self, step: BatchSizeWarmupStep) -> SchedulerOutput:
+        num_decode, prefill_lens = step
+        assert num_decode <= len(self.pool)
+        q = self.q
+        out = SchedulerOutput.make_empty()
+        out.finished_req_ids = self._finish(self.finishing + self.pool[num_decode:])
+        self.finishing, self.pool = [], self.pool[:num_decode]
+        out.num_common_prefix_blocks = [0] * len(self.specs)
+
+        cached = CachedRequestData.make_empty()
+        for req_id in self.pool:
+            computed, held = self.reqs[req_id]
+            after = computed + q
+            deltas = [
+                self.block_count(after, spec) - len(ids)
+                for spec, ids in zip(self.specs, held)
+            ]
+            new_ids = tuple(self._alloc(n) for n in deltas)
+            cached.req_ids.append(req_id)
+            cached.num_computed_tokens.append(computed)
+            cached.num_output_tokens.append(1)
+            cached.new_block_ids.append(new_ids if any(deltas) else None)
+            self.reqs[req_id] = (after, [a + b for a, b in zip(held, new_ids)])
+            self.max_context = max(self.max_context, after)
+            out.num_scheduled_tokens[req_id] = q
+            if self.num_spec_steps > 0:
+                out.scheduled_spec_decode_tokens[req_id] = [0] * self.num_spec_steps
+        out.scheduled_cached_reqs = cached
+
+        for prompt_len in prefill_lens:
+            req_id = f"_batch_size_warmup_{self.num_new_reqs}_"
+            self.num_new_reqs += 1
+            token_ids = [i % self.vocab_size for i in range(prompt_len)]
+            block_ids = [
+                self._alloc(self.block_count(prompt_len, spec)) for spec in self.specs
+            ]
+            out.scheduled_new_reqs.append(
+                NewRequestData(
+                    req_id=req_id,
+                    prompt_token_ids=token_ids,
+                    mm_features=[],
+                    sampling_params=self.sampling_params,
+                    pooling_params=None,
+                    block_ids=tuple(block_ids),
+                    num_computed_tokens=0,
+                    lora_request=None,
+                    prefill_token_ids=token_ids,
+                )
+            )
+            self.reqs[req_id] = (prompt_len, block_ids)
+            self.max_context = max(self.max_context, prompt_len)
+            out.num_scheduled_tokens[req_id] = prompt_len
+            (self.finishing if self.pool_filled else self.pool).append(req_id)
+
+        self.pool_filled = True
+        out.total_num_scheduled_tokens = sum(out.num_scheduled_tokens.values())
+        return out
+
+    def build_cleanup(self) -> SchedulerOutput:
+        out = SchedulerOutput.make_empty()
+        out.finished_req_ids = self._finish(list(self.reqs))
+        self.pool, self.finishing = [], []
+        return out
+
+
+@torch.inference_mode()
+def warmup_batch_sizes(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+) -> None:
+    """Run every decode batch size and logits row count once before serving.
+
+    Runs after CUDA graph capture, so the first replay of every captured
+    graph and the first eager logits GEMM, logits gather and sampler call at
+    every row count happen here rather than on a live request. Kernel
+    selection, lazy module loading and graph upload on that first use can
+    otherwise stall serving for seconds, or stall one TP rank while its peers
+    wait in a collective.
+    """
+    reason = _batch_size_warmup_skip_reason(model_runner)
+    if reason is not None:
+        logger.warning("Skipping batch-size warmup: %s.", reason)
+        return
+
+    scheduler_config = model_runner.scheduler_config
+    token_budget = min(
+        scheduler_config.max_num_batched_tokens,
+        scheduler_config.max_num_scheduled_tokens
+        or scheduler_config.max_num_batched_tokens,
+        model_runner.max_num_tokens,
+    )
+    max_prompt_len = (
+        model_runner.max_model_len - model_runner.vllm_config.num_lookahead_tokens
+    )
+    compilation_config = model_runner.compilation_config
+    capture_sizes = (
+        compilation_config.cudagraph_capture_sizes or []
+        if compilation_config.cudagraph_mode
+        else []
+    )
+    steps = plan_batch_size_warmup(
+        decode_query_len=model_runner.decode_query_len,
+        max_num_reqs=model_runner.max_num_reqs,
+        token_budget=token_budget,
+        max_prompt_len=max_prompt_len,
+        cudagraph_capture_sizes=capture_sizes,
+    )
+    sampling_params = _default_sampling_params(model_runner)
+
+    # Dry run on the CPU: the KV blocks and context length the steps need.
+    dry_run = _BatchSizeWarmupBuilder(model_runner, sampling_params)
+    for step in steps:
+        dry_run.build(step)
+    num_blocks = model_runner.kv_cache_config.num_blocks
+    if (
+        not steps
+        or dry_run.next_block > num_blocks
+        or dry_run.max_context > max_prompt_len
+    ):
+        logger.warning(
+            "Skipping batch-size warmup: %d steps need %d KV blocks (%d exist) "
+            "and %d tokens of context (%d allowed).",
+            len(steps),
+            dry_run.next_block,
+            num_blocks,
+            dry_run.max_context,
+            max_prompt_len,
+        )
+        return
+
+    builder = _BatchSizeWarmupBuilder(model_runner, sampling_params)
+    start = time.perf_counter()
+    model_runner.kv_connector.set_disabled(True)
+    try:
+        for step in steps:
+            worker_execute_model(builder.build(step))
+            output = worker_sample_tokens(None)
+            if hasattr(output, "get_output"):
+                # As the async output thread does while serving.
+                output.get_output()
+        worker_execute_model(builder.build_cleanup())
+    finally:
+        model_runner.kv_connector.set_disabled(False)
+    if model_runner.kv_block_zeroer is not None:
+        model_runner.kv_block_zeroer.zero_block_ids([0])
+    torch.accelerator.synchronize()
+    logger.info(
+        "Batch-size warmup ran %d steps (decode batches of 1 to %d requests) "
+        "in %.1f s.",
+        len(steps),
+        len(steps[0][1]),
+        time.perf_counter() - start,
+    )
