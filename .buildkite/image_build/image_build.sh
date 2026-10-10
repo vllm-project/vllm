@@ -291,6 +291,16 @@ CI_HCL_PATH="${CI_HCL_PATH:-/tmp/ci.hcl}"
 ZSTD_HCL_PATH="${ZSTD_HCL_PATH:-.buildkite/image_build/zstd.hcl}"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
 BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" -f "${ZSTD_HCL_PATH}")
+BAKE_ARGS=()
+
+# VLLM_CI_COLD_BUILD=1 forces a from-scratch build for measurement runs:
+# no layer cache, no sccache, no ccache. VLLM_USE_PRECOMPILED already defaults
+# to "0" (falsy per vllm/envs.py), so precompiled-wheel reuse stays off.
+if [[ "${VLLM_CI_COLD_BUILD:-0}" == "1" ]]; then
+    echo "--- :cold_face: VLLM_CI_COLD_BUILD=1: disabling layer cache, sccache, and ccache"
+    BAKE_ARGS+=(--no-cache --set "${TARGET}.args.CCACHE_DISABLE=1")
+    export USE_SCCACHE=0
+fi
 
 prepare_cache_tags
 ecr_login
@@ -361,8 +371,26 @@ BUILD_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
 BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
 BUILD_STATUS=0
-docker --debug buildx bake "${BAKE_FILES[@]}" \
+
+# Log host memory usage every 5s during the bake (goes to the job log).
+# Killed explicitly below; a trap would clobber the BUILD_TMP_DIR EXIT trap.
+(
+  while true; do
+    awk '
+      /^MemTotal:/ { total = $2 }
+      /^MemAvailable:/ {
+        printf "Host memory used: %.2f GiB\n", (total - $2) / 1048576
+      }
+    ' /proc/meminfo
+    sleep 5
+  done
+) >&2 &
+memory_sampler_pid=$!
+
+docker --debug buildx bake "${BAKE_FILES[@]}" "${BAKE_ARGS[@]}" \
     --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
+
+kill "$memory_sampler_pid" 2>/dev/null || true
 
 record_buildkit_trace "${BUILD_METADATA_FILE}" || true
 

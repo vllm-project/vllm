@@ -162,6 +162,12 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
+# Escape hatch for cold-build measurements: with CCACHE_DISABLE=1, ccache
+# (the CMAKE_*_COMPILER_LAUNCHER fallback when sccache is off) execs the real
+# compiler directly, so nothing is served from /root/.cache/ccache.
+ARG CCACHE_DISABLE=""
+ENV CCACHE_DISABLE=${CCACHE_DISABLE}
+
 # Install uv and bootstrap /opt/venv from the Python interpreter included in
 # the manylinux image.
 RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" "${UV_INSTALL_DIR}" \
