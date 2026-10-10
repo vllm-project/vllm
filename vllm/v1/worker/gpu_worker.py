@@ -86,7 +86,7 @@ from vllm.utils.mem_utils import (
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
@@ -816,12 +816,25 @@ class Worker(WorkerBase):
             self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %d", max_model_len)
 
+    def estimate_metadata_memory(
+        self, kv_cache_groups: list[KVCacheGroupSpec], max_model_len: int
+    ) -> int:
+        # A replayed startup plan supplies a KV-only budget on this worker,
+        # even when the engine's config still requests automatic profiling.
+        if self.cache_config.kv_cache_memory_bytes is not None:
+            return 0
+        with set_current_vllm_config(self.vllm_config):
+            return self.model_runner.estimate_metadata_memory(
+                kv_cache_groups, max_model_len
+            )
+
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+        self.metadata_memory_bytes = kv_cache_config.metadata_memory_bytes
 
         # Adopt the engine core's layout and prefix-cache granularity; workers
         # spawned after resolution (e.g. elastic EP scale-up) only see them
@@ -964,6 +977,7 @@ class Worker(WorkerBase):
                 self.total_consumed
                 + self.peak_activation_memory
                 + cuda_graph_memory_bytes
+                + self.metadata_memory_bytes
             )
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.init_snapshot.free_memory
@@ -976,6 +990,9 @@ class Worker(WorkerBase):
                 - redundancy_buffer_memory
             )
 
+            available_kv_budget = (
+                self.available_kv_cache_memory_bytes - self.metadata_memory_bytes
+            )
             msg = (
                 f"Free memory on device "
                 f"({format_gib(self.init_snapshot.free_memory)}/"
@@ -987,7 +1004,9 @@ class Worker(WorkerBase):
                 f"GiB for consumed memory (weights + non-torch), "
                 f"{format_gib(self.peak_activation_memory)} GiB "
                 f"for peak activation, and {format_gib(cuda_graph_memory_bytes)} "
-                f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
+                f"GiB for CUDAGraph memory, plus "
+                f"{format_gib(self.metadata_memory_bytes)} GiB reserved for "
+                f"attention metadata. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "
                 f"({format_gib(kv_cache_memory_bytes_to_requested_limit)} GiB) to fit "
@@ -995,7 +1014,7 @@ class Worker(WorkerBase):
                 f"{kv_cache_memory_bytes_to_gpu_limit}` "
                 f"({format_gib(kv_cache_memory_bytes_to_gpu_limit)} GiB) to fully "
                 f"utilize gpu memory. Current kv cache memory in use is "
-                f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
+                f"{format_gib(available_kv_budget)} GiB."
             )
 
             logger.info(msg)

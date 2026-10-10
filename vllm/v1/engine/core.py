@@ -319,7 +319,12 @@ class EngineCore:
         max_model_len_before = vllm_config.model_config.max_model_len
 
         kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory
+            vllm_config,
+            kv_cache_specs,
+            available_gpu_memory,
+            estimate_metadata_memory=lambda groups, length: self.collective_rpc(
+                "estimate_metadata_memory", args=(groups, length)
+            ),
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout

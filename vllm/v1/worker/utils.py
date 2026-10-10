@@ -5,14 +5,15 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import product as iprod
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
 from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -306,12 +307,9 @@ class AttentionGroup:
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width or self.kernel_block_size is not None:
-            max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
-                vllm_config, vllm_config.model_config.max_model_len
+            width = self.get_block_table_width(
+                vllm_config, vllm_config.model_config.max_model_len, kernel_block_size
             )
-            width = get_block_table_width(max_num_blocks, self.kv_cache_spec.block_size)
-            if kernel_block_size is not None:
-                width *= self.kv_cache_spec.block_size // kernel_block_size
             if builder_cls.requires_block_table_width:
                 builder_kwargs["block_table_width"] = width
         if self.kernel_block_size is not None:
@@ -441,6 +439,40 @@ class AttentionGroup:
             (kv_cache.stride(0) * self.kernel_block_stride, *kv_cache.stride()[1:]),
         )
 
+    def get_block_table_width(
+        self,
+        vllm_config: VllmConfig,
+        max_model_len: int,
+        kernel_block_size: int | None,
+    ) -> int:
+        max_num_blocks = self.kv_cache_spec.max_num_blocks_per_req(
+            vllm_config, max_model_len
+        )
+        width = get_block_table_width(max_num_blocks, self.kv_cache_spec.block_size)
+        if kernel_block_size is not None:
+            if isinstance(self.kv_cache_spec, AttentionSpec):
+                kernel_block_size = select_common_block_size(
+                    kernel_block_size, [self.backend], [self.kv_cache_spec]
+                )
+            width *= self.kv_cache_spec.block_size // kernel_block_size
+        return width
+
+    def get_memory_reservation_bytes(
+        self,
+        vllm_config: VllmConfig,
+        max_model_len: int,
+        kernel_block_size: int | None,
+    ) -> int:
+        builder_cls = self.backend.get_builder_cls()
+        block_table_width = (
+            self.get_block_table_width(vllm_config, max_model_len, kernel_block_size)
+            if builder_cls.requires_block_table_width
+            else None
+        )
+        return builder_cls.get_memory_reservation_bytes(
+            vllm_config, block_table_width=block_table_width
+        )
+
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
@@ -455,6 +487,71 @@ class AttentionGroup:
     ) -> None:
         metadata = attn_metadata[self.layer_names[0]]
         self.get_metadata_builder().update_draft_decode_metadata(metadata)
+
+
+def get_attention_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    *,
+    active_layer_names: set[str] | None = None,
+    fast_prefill_eligible_layers: set[str] | None = None,
+    skip_non_layer_views: bool = False,
+) -> list[list[AttentionGroup]]:
+    """Discover builder groups without allocating their device buffers."""
+    from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
+
+    result: list[list[AttentionGroup]] = []
+    for group_id, kv_group in enumerate(kv_cache_groups):
+        if skip_non_layer_views and not kv_group.kv_cache_spec.has_layer_views:
+            result.append([])
+            continue
+        layer_names = kv_group.layer_names
+        if active_layer_names is not None:
+            layer_names = [name for name in layer_names if name in active_layer_names]
+        layers = get_layers_from_vllm_config(
+            vllm_config, cast(type[Any], AttentionLayerBase), layer_names
+        )
+        groups: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
+        for name in layer_names:
+            backend = layers[name].get_attn_backend()
+            if fast_prefill_eligible_layers and name in fast_prefill_eligible_layers:
+                backend = create_fast_prefill_custom_backend("FastPrefill", backend)
+            spec = kv_group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[name]
+            key = (backend.full_cls_name(), spec, getattr(layers[name], "num_heads", 0))
+            if key not in groups:
+                groups[key] = AttentionGroup(backend, [name], spec, group_id)
+            else:
+                groups[key].layer_names.append(name)
+        result.append(list(groups.values()))
+    return result
+
+
+def get_metadata_memory_reservation(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+    max_model_len: int,
+    *,
+    num_metadata_builders: int,
+) -> tuple[int, list[int]]:
+    """Reserve unprofiled buffers using the runtime's grouping and block widths."""
+    kernel_block_sizes = prepare_kernel_block_sizes(
+        kv_cache_config,
+        attn_groups,
+        kv_cache_layout=vllm_config.cache_config.get_resolved_kv_cache_layout(),
+    )
+    total = 0
+    for group_id, groups in enumerate(attn_groups):
+        kernel_block_size = (
+            kernel_block_sizes[group_id] if group_id < len(kernel_block_sizes) else None
+        )
+        for group in groups:
+            total += num_metadata_builders * group.get_memory_reservation_bytes(
+                vllm_config, max_model_len, kernel_block_size
+            )
+    return total, kernel_block_sizes
 
 
 def map_kv_caches_to_kernel_blocks(
@@ -628,7 +725,10 @@ def allocate_kv_cache(
 
 
 def prepare_kernel_block_sizes(
-    kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+    *,
+    kv_cache_layout: KVCacheLayout | None = None,
 ) -> list[int]:
     """Generate kernel_block_sizes that matches each block_size.
 
@@ -639,6 +739,7 @@ def prepare_kernel_block_sizes(
     Args:
         kv_cache_config: The KV cache configuration.
         attn_groups: Attention groups indexed by KV cache group id.
+        kv_cache_layout: Resolved layout when planning before tensor strides exist.
 
     Returns:
         List of kernel block sizes for each cache group.
@@ -664,7 +765,8 @@ def prepare_kernel_block_sizes(
             # blocks, so they are never split group-wide.
             selected_kernel_size = (
                 kv_manager_block_size
-                if any(
+                if (kv_cache_layout is not None and kv_cache_layout.is_block_outermost)
+                or any(
                     t.block_stride > t.layer_stride
                     for t in kv_cache_config.kv_cache_tensors
                     if not set(t.layers).isdisjoint(kv_cache_group.layer_names)

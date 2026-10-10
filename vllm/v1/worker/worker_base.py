@@ -20,7 +20,7 @@ from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
     record_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -103,6 +103,12 @@ class WorkerBase:
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
+
+    def estimate_metadata_memory(
+        self, kv_cache_groups: list[KVCacheGroupSpec], max_model_len: int
+    ) -> int:
+        """Unprofiled attention metadata reservation for this worker."""
+        return 0
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""

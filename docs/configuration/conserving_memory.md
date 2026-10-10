@@ -77,6 +77,14 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
 
 ## Adjust cache size
 
+When sizing the GPU KV cache automatically, vLLM reserves memory for attention
+metadata allocated after profiling, such as the sparse MLA indexer's expanded
+block table. This reservation also participates in `max_model_len="auto"`
+selection. For this buffer, reducing `max_num_batched_tokens` or `max_model_len`
+reduces memory usage. Explicit `kv_cache_memory_bytes` and
+`num_gpu_blocks_override` remain KV-only capacity settings; they must leave room
+for metadata and other non-KV allocations.
+
 If you run out of CPU RAM, try the following options:
 
 - (Multi-modal models only) you can set the size of multi-modal cache by setting `mm_processor_cache_gb` engine argument (default 4 GiB).

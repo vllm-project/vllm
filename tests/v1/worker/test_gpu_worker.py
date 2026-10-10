@@ -258,6 +258,19 @@ def test_startup_plan_apply_gate(plan_env):
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
 
 
+def test_startup_plan_does_not_reserve_metadata_again(plan_env):
+    """A separate engine config must not re-deduct a worker's saved KV budget."""
+    maybe_save_startup_plan(_plan_worker(), 50 * GiB_bytes)
+    engine_cache_config = SimpleNamespace(kv_cache_memory_bytes=None)
+    worker = _plan_worker()
+    maybe_apply_startup_plan(worker)
+
+    assert engine_cache_config.kv_cache_memory_bytes is None
+    assert worker.cache_config.kv_cache_memory_bytes == 50 * GiB_bytes
+    # No model runner is needed: the saved budget already excludes metadata.
+    assert gpu_worker.Worker.estimate_metadata_memory(worker, [], 1024) == 0
+
+
 # Memory accounting of the profiling run (Worker.determine_available_memory).
 
 # The fallback reads only the sign of the measured drop and this process's torch

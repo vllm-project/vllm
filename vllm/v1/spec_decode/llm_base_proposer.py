@@ -1706,6 +1706,43 @@ class SpecDecodeBaseProposer:
             == 1
         ), "All drafting layers should belong to the same kv cache group"
 
+    def get_metadata_memory_reservation(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
+        max_model_len: int,
+    ) -> int:
+        """Include the drafter's additional, non-ubatched metadata builders."""
+        all_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        total = 0
+        for group_id, kv_group in enumerate(kv_cache_config.kv_cache_groups):
+            layer_names = sorted(
+                self._draft_attn_layer_names.intersection(kv_group.layer_names)
+            )
+            seen = set()
+            for layer_name in layer_names:
+                backend = all_layers[layer_name].get_attn_backend()
+                backend_key = backend.full_cls_name()
+                if backend_key in seen:
+                    continue
+                seen.add(backend_key)
+                spec = kv_group.kv_cache_spec
+                if isinstance(spec, UniformTypeKVCacheSpecs):
+                    spec = spec.kv_cache_specs[layer_name]
+                group = AttentionGroup(backend, [layer_name], spec, group_id)
+                kernel_block_size = (
+                    kernel_block_sizes[group_id]
+                    if group_id < len(kernel_block_sizes)
+                    else None
+                )
+                total += group.get_memory_reservation_bytes(
+                    self.vllm_config, max_model_len, kernel_block_size
+                )
+        return total
+
     def initialize_attn_backend(
         self,
         kv_cache_config: KVCacheConfig,

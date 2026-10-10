@@ -608,6 +608,20 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # it, whether the graph holds one draft forward or a multi-step loop.
     supports_draft_decode_metadata_update: bool = False
 
+    @classmethod
+    def get_memory_reservation_bytes(
+        cls,
+        vllm_config: "VllmConfig",
+        *,
+        block_table_width: int | None = None,
+    ) -> int:
+        """Persistent buffer bytes not included in forward/graph profiling.
+
+        Reservations must be non-negative and nondecreasing with context length.
+        Do not include allocations already measured by either profiling pass.
+        """
+        return 0
+
     @abstractmethod
     def __init__(
         self,
