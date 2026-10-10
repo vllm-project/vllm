@@ -633,13 +633,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),
-    # Use tensor descriptors for Q/K/V loads and output stores in the
-    # Triton unified-attention kernel.  Enables HW 2D block reads on
-    # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
-    # compile time so other platforms see no overhead.  Tri-state override:
-    # unset (default) lets the `triton_attn` backend auto-select per
-    # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
-    # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
+    # Tensor descriptors (2D block IO on Intel XPU) in the Triton kernels with a
+    # TD path (unified attention, fused MoE, scaled_mm, Mamba2 SSD prefill).
+    # Tri-state, applies to all of them: unset auto-selects per platform
+    # (XPU only); ``1`` forces TD on; ``0`` forces it off.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
