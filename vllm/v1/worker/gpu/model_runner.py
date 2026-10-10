@@ -1277,7 +1277,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         # batch_idx -> req_id
         req_ids = sort_batch_req_ids(
-            num_tokens_per_req, draft_tokens, self.decode_query_len
+            num_tokens_per_req,
+            draft_tokens,
+            self.decode_query_len,
+            self.req_states.num_computed_tokens_np,
+            self.req_states.req_id_to_index,
         )
 
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
@@ -2422,12 +2426,29 @@ def sort_batch_req_ids(
     num_tokens_per_req: dict[str, int],
     draft_tokens: dict[str, list[int]],
     decode_query_len: int,
+    num_computed_tokens: np.ndarray | None = None,
+    req_id_to_index: dict[str, int] | None = None,
 ) -> list[str]:
-    # Order verification/decode -> short_extend -> prefill;
-    # split_decodes_and_prefills relies on decode-like requests leading.
-    key = lambda r: (
-        not draft_tokens.get(r),
-        (num := num_tokens_per_req[r]) != decode_query_len,
-        num,
-    )
+    # Order verification/decode -> short_extend -> extend -> prefill.
+    # split_decodes_prefills_and_extends takes the first context-less request as
+    # the start of the prefills and does not re-check the rest, and the prefill
+    # path never reads the KV cache, so a context-less request sorted ahead of one
+    # with context silently drops that request's history. The context term
+    # precedes the decode-length term because split_dcp_context_queries splits at
+    # decode_threshold=1, where a context-less decode_query_len chunk is a prefill.
+    def key(r: str) -> tuple[bool, bool, bool, int]:
+        num = num_tokens_per_req[r]
+        # seq_len == query_len in the classifier, i.e. no computed context.
+        no_context = (
+            num_computed_tokens is not None
+            and req_id_to_index is not None
+            and num_computed_tokens[req_id_to_index[r]] == 0
+        )
+        return (
+            not draft_tokens.get(r),
+            num > 1 and no_context,  # single-token requests stay with the decodes
+            num != decode_query_len,
+            num,
+        )
+
     return sorted(num_tokens_per_req, key=key)
