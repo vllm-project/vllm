@@ -9,8 +9,9 @@ and multiple GPUs, so it is exercised separately.
 """
 
 import logging
+import socket
 from functools import wraps
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import pybase64 as base64
@@ -18,20 +19,30 @@ import pytest
 import ray
 import torch
 
+from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import (
     WeightTransferEngineFactory,
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.m2n_common import (
+    M2N_WIRE_SCHEMA_VERSION,
     REPLICATE,
     REPLICATED,
+    M2NLayout,
     M2NMesh,
+    M2NNcclRuntime,
     M2NParamMeta,
+    M2NWireParam,
+    check_data_plane_agreement,
     check_placements,
+    check_runtime_ready_agreement,
+    check_source_plan_agreement,
     check_transferable,
     publish_destination_placements,
     resolve_layout,
+    source_plan_digest,
     validate_layout,
+    validate_local_tensor,
 )
 from vllm.distributed.weight_transfer.m2n_engine import (
     M2NWeightTransferEngine,
@@ -43,16 +54,26 @@ from vllm.distributed.weight_transfer.m2n_layout import (
     resolve_parameter_destinations,
 )
 from vllm.distributed.weight_transfer.m2n_source import (
+    M2NManifestEntry,
+    M2NWeightSource,
+    ManifestM2NWeightSource,
     mesh_from_tensor,
     placements_from_tensor,
 )
-from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
+from vllm.distributed.weight_transfer.m2n_trainer import (
+    M2NTrainerInitInfo,
+    M2NTrainerWeightTransferEngine,
+)
+from vllm.distributed.weight_transfer.nccl_common import (
+    stateless_init_metadata_group,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
 
@@ -110,6 +131,76 @@ class TestSourceLayout:
         assert placements_from_tensor(torch.zeros(4)) is REPLICATED
         assert mesh_from_tensor(torch.zeros(4), 4) == M2NMesh((4, 1), 0)
 
+    def test_manifest_preserves_order_and_materializes_lazily(self):
+        calls: list[int] = []
+
+        def provider(index, value):
+            def get_tensor():
+                calls.append(index)
+                return value
+
+            return get_tensor
+
+        source = ManifestM2NWeightSource(
+            [
+                M2NManifestEntry(
+                    "second",
+                    torch.float32,
+                    (4,),
+                    M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+                    provider(0, torch.ones(4)),
+                ),
+                M2NManifestEntry(
+                    "first",
+                    torch.float32,
+                    (2,),
+                    M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+                    provider(1, torch.full((2,), 2.0)),
+                ),
+            ]
+        )
+
+        assert [meta.name for meta in source.metadata()] == ["second", "first"]
+        assert calls == []
+        assert [name for name, _ in source] == ["second", "first"]
+        assert calls == [0, 1]
+
+    def test_trainer_boundary_rejects_duplicate_manifest_names(self):
+        entry = M2NManifestEntry(
+            "w",
+            torch.float32,
+            (4,),
+            M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+            lambda: torch.zeros(4),
+        )
+        source = ManifestM2NWeightSource([entry, entry])
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
+
+        with pytest.raises(ValueError, match="duplicate parameter 'w'"):
+            engine._prepare_source_plan(source, num_trainer_ranks=1)
+
+    @pytest.mark.parametrize(
+        ("tensor", "match"),
+        [
+            (torch.zeros(4, dtype=torch.float32), "dtype"),
+            (torch.zeros(2, 3).T, "non-contiguous"),
+            (torch.zeros(3), "local shape"),
+        ],
+    )
+    def test_local_tensor_must_match_manifest(self, tensor, match):
+        shape = (3, 2) if match == "non-contiguous" else (4,)
+        dtype = torch.bfloat16 if match == "dtype" else torch.float32
+        meta = M2NParamMeta(
+            "w",
+            dtype,
+            shape,
+            M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+        )
+        with pytest.raises(ValueError, match=rf"parameter 'w'.*{match}"):
+            validate_local_tensor(meta, tensor)
+
 
 class TestTransferable:
     def test_unsupported_dtype_names_the_parameter(self):
@@ -121,32 +212,95 @@ class TestTransferable:
             check_transferable("w", torch.bfloat16, (2, 2, 2, 2))
 
 
+class TestPreflightAgreement:
+    def test_source_error_is_reported_before_data_plane(self):
+        group = Mock(world_size=2)
+        group.all_gather_obj.return_value = [
+            {
+                "phase": "source",
+                "digest": None,
+                "declared_digest": None,
+                "error": "ValueError: bad local manifest",
+            },
+            {
+                "phase": "source",
+                "digest": None,
+                "declared_digest": None,
+                "error": "ValueError: bad local manifest",
+            },
+        ]
+
+        with pytest.raises(RuntimeError, match="bad local manifest"):
+            check_source_plan_agreement(
+                group, [], local_error="ValueError: bad local manifest"
+            )
+
+    def test_data_plane_identity_must_match(self):
+        group = Mock(world_size=2)
+
+        def gather(envelope):
+            peer = dict(envelope)
+            peer["mode"] = "uid"
+            peer["uid_digest"] = "different"
+            return [envelope, peer]
+
+        group.all_gather_obj.side_effect = gather
+        with pytest.raises(RuntimeError, match="data-plane identity disagrees"):
+            check_data_plane_agreement(group, None, max_cta=None)
+
+    def test_runtime_error_is_shared_before_pynccl(self):
+        group = Mock(world_size=2)
+        group.all_gather_obj.return_value = [
+            {"phase": "runtime_ready", "error": None},
+            {"phase": "runtime_ready", "error": "ImportError: no nccl_m2n"},
+        ]
+
+        with pytest.raises(RuntimeError, match="no nccl_m2n"):
+            check_runtime_ready_agreement(group, None)
+
+
 class TestWireTypes:
+    @staticmethod
+    def _param(
+        name="w",
+        dtype_name="bfloat16",
+        shape=(16, 16),
+        src_mesh_dims=(1, 1),
+        src_placements=None,
+    ):
+        return M2NWireParam(
+            name=name,
+            dtype_name=dtype_name,
+            shape=shape,
+            src_mesh_dims=src_mesh_dims,
+            src_placements=src_placements,
+        )
+
     def _init_info(self, **overrides):
+        param = self._param()
         fields = dict(
+            schema_version=M2N_WIRE_SCHEMA_VERSION,
             master_address="127.0.0.1",
             master_port=1234,
             rank_offset=1,
             world_size=3,
-            src_mesh_dims=[1, 1],
             dst_mesh_dims=[2, 1],
-            names=["w"],
-            dtype_names=["bfloat16"],
-            shapes=[[16, 16]],
-            src_placements=[None],
+            source_digest=source_plan_digest([param]),
+            params=[param.to_dict()],
         )
         fields.update(overrides)
+        if "params" in overrides and "source_digest" not in overrides:
+            params = [M2NWireParam.from_dict(value) for value in fields["params"]]
+            fields["source_digest"] = source_plan_digest(params)
         return M2NWeightTransferInitInfo(**fields)
 
     def test_accepts_a_consistent_plan(self):
-        assert self._init_info().names == ["w"]
+        assert [param.name for param in self._init_info().parse_wire_params()] == ["w"]
 
-    def test_accepts_pre_shared_nccl_unique_id(self):
-        info = self._init_info(
-            master_address=None,
-            master_port=None,
-            nccl_unique_id_b64=VALID_UID_B64,
-        )
+    def test_uid_selects_data_plane_without_removing_metadata_rendezvous(self):
+        info = self._init_info(nccl_unique_id_b64=VALID_UID_B64)
+        assert info.master_address == "127.0.0.1"
+        assert info.master_port == 1234
         assert info.nccl_unique_id_bytes == b"\x00" * 128
         assert VALID_UID_B64 not in repr(info)
 
@@ -163,12 +317,14 @@ class TestWireTypes:
 
         assert placements == [(REPLICATE, 0), REPLICATED]
 
-    def test_rejects_both_rendezvous_modes(self):
-        with pytest.raises(ValueError, match="not both"):
-            self._init_info(nccl_unique_id_b64=VALID_UID_B64)
+    def test_metadata_rendezvous_is_required_with_uid(self):
+        with pytest.raises(ValueError, match="master_address"):
+            self._init_info(master_address="", nccl_unique_id_b64=VALID_UID_B64)
 
     def test_trainer_accepts_pre_shared_nccl_unique_id(self):
         info = M2NTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=1234,
             nccl_unique_id_b64=VALID_UID_B64,
             world_size=3,
             num_trainer_ranks=1,
@@ -177,9 +333,220 @@ class TestWireTypes:
         assert info.nccl_unique_id_bytes == b"\x00" * 128
         assert VALID_UID_B64 not in repr(info)
 
-    def test_ragged_plan_rejected(self):
-        with pytest.raises(ValueError, match="`shapes`"):
-            self._init_info(shapes=[])
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            lambda value: value.pop("shape"),
+            lambda value: value.update(extra="field"),
+            lambda value: value.update(src_mesh_dims=[1]),
+            lambda value: value.update(src_placements=[REPLICATE, REPLICATE]),
+        ],
+    )
+    def test_malformed_wire_parameter_rejected(self, mutation):
+        value = self._param().to_dict()
+        mutation(value)
+        with pytest.raises((TypeError, ValueError)):
+            M2NWireParam.from_dict(value)
+
+    def test_source_digest_authenticates_ordered_plan(self):
+        params = [self._param("a"), self._param("b")]
+        info = self._init_info(
+            params=[param.to_dict() for param in params],
+            source_digest=source_plan_digest(list(reversed(params))),
+        )
+        with pytest.raises(ValueError, match="source digest"):
+            info.parse_wire_params()
+
+    def test_trainer_disagreement_is_rejected_before_pynccl(self, monkeypatch):
+        group = Mock(rank=1, world_size=3)
+
+        def gather(envelope):
+            peer = dict(envelope)
+            peer["digest"] = "different"
+            return [envelope, peer, envelope]
+
+        group.all_gather_obj.side_effect = gather
+        init_metadata = Mock(return_value=group)
+        make_pynccl = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
+            init_metadata,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.import_m2n", Mock()
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.pynccl_from_metadata_group",
+            make_pynccl,
+        )
+        vllm_config = SimpleNamespace(
+            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
+        )
+        engine = M2NWeightTransferEngine(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            torch.nn.Module(),
+        )
+
+        with pytest.raises(RuntimeError, match="source digest disagrees"):
+            engine.init_transfer_engine(self._init_info())
+
+        make_pynccl.assert_not_called()
+
+    def test_worker_rank_offset_selects_deployment_global_ranks(self, monkeypatch):
+        group = Mock(rank=2, world_size=3)
+        group.all_gather_obj.side_effect = lambda envelope: [envelope] * 3
+        init_metadata = Mock(return_value=group)
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
+            init_metadata,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.import_m2n", Mock()
+        )
+        monkeypatch.setattr(
+            M2NWeightTransferEngine,
+            "_prepare_destination_plan",
+            lambda engine, info: setattr(engine, "_parameter_destinations", []),
+        )
+        runtime = M2NNcclRuntime("/canonical/libnccl.so.2", 1, object())
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.prepare_m2n_local_runtime",
+            Mock(return_value=(runtime, 0, Mock())),
+        )
+        comm = Mock()
+        make_pynccl = Mock(return_value=comm)
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.pynccl_from_metadata_group",
+            make_pynccl,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "validate_m2n_nccl_communicator",
+            Mock(),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "publish_destination_placements",
+            Mock(return_value=[]),
+        )
+        vllm_config = SimpleNamespace(
+            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
+        )
+        engine = M2NWeightTransferEngine(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            torch.nn.Module(),
+        )
+        info = self._init_info(params=[], worker_rank_offset=2)
+
+        engine.init_transfer_engine(info)
+
+        assert init_metadata.call_args.args[0].rank_offset == 2
+        assert info.rank_offset == 1
+        make_pynccl.assert_called_once_with(group, 0, library_path=runtime.library_path)
+
+    def test_uid_data_plane_still_uses_tcp_metadata(self, monkeypatch):
+        group = Mock(rank=1, world_size=3)
+        group.all_gather_obj.side_effect = lambda envelope: [envelope] * 3
+        init_metadata = Mock(return_value=group)
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.worker_init_metadata_group",
+            init_metadata,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.import_m2n", Mock()
+        )
+        monkeypatch.setattr(
+            M2NWeightTransferEngine,
+            "_prepare_destination_plan",
+            lambda engine, info: setattr(engine, "_parameter_destinations", []),
+        )
+        runtime = M2NNcclRuntime("/canonical/libnccl.so.2", 1, object())
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.prepare_m2n_local_runtime",
+            Mock(return_value=(runtime, 0, Mock())),
+        )
+        uid_init = Mock(return_value=Mock())
+        tcp_init = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.uid_init_process_group",
+            uid_init,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.pynccl_from_metadata_group",
+            tcp_init,
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "validate_m2n_nccl_communicator",
+            Mock(),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine."
+            "publish_destination_placements",
+            Mock(return_value=[]),
+        )
+        vllm_config = SimpleNamespace(
+            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
+        )
+        engine = M2NWeightTransferEngine(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            torch.nn.Module(),
+        )
+
+        engine.init_transfer_engine(
+            self._init_info(params=[], nccl_unique_id_b64=VALID_UID_B64)
+        )
+
+        init_metadata.assert_called_once()
+        uid_init.assert_called_once_with(
+            b"\x00" * 128,
+            rank=1,
+            world_size=3,
+            device=0,
+            library_path=runtime.library_path,
+        )
+        tcp_init.assert_not_called()
+
+    def test_partial_worker_initialization_aborts_owned_resources(self):
+        vllm_config = SimpleNamespace(
+            parallel_config=Mock(), model_config=SimpleNamespace(quantization=None)
+        )
+        engine = M2NWeightTransferEngine(
+            WeightTransferConfig(backend="nccl_m2n"),
+            vllm_config,
+            torch.device("cuda:0"),
+            torch.nn.Module(),
+        )
+        handle = Mock()
+        group = Mock()
+
+        def fail_after_allocation(this, init_info):
+            this._handle = handle
+            this.model_update_group = group
+            raise RuntimeError("late init failure")
+
+        engine._init_transfer_engine = MethodType(fail_after_allocation, engine)
+
+        with pytest.raises(RuntimeError, match="late init failure"):
+            engine.init_transfer_engine(self._init_info())
+
+        handle.destroy.assert_called_once_with()
+        group.destroy.assert_called_once_with()
+        assert engine._handle is None
+        assert engine.model_update_group is None
+
+    @pytest.mark.parametrize("worker_rank_offset", [0, 3])
+    def test_worker_rank_offset_must_stay_in_destination_interval(
+        self, worker_rank_offset
+    ):
+        with pytest.raises(ValueError, match="worker_rank_offset"):
+            self._init_info(worker_rank_offset=worker_rank_offset)
 
     def test_destination_mesh_must_cover_the_workers(self):
         """The trainer declares the inference mesh, so one that does not cover
@@ -193,49 +560,36 @@ class TestWireTypes:
             self._init_info(rank_offset=3, world_size=3)
 
     @pytest.mark.parametrize("dtype_name", ["not_a_dtype", "Tensor"])
-    def test_invalid_dtype_name_names_parameter(self, monkeypatch, dtype_name):
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.import_m2n",
-            lambda: object(),
-        )
+    def test_invalid_dtype_name_names_parameter(self, dtype_name):
         engine = object.__new__(M2NWeightTransferEngine)
+        param = self._param(dtype_name=dtype_name)
 
         with pytest.raises(ValueError, match=r"parameter 'w'.*dtype"):
-            engine.init_transfer_engine(self._init_info(dtype_names=[dtype_name]))
+            engine._prepare_source_plan((param,), num_trainer_ranks=1)
 
     def _init_32_to_4_plan(self, monkeypatch, destination):
-        m2n = Mock()
-        m2n.Handle.create.return_value = object()
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.import_m2n", lambda: m2n
-        )
         monkeypatch.setattr(
             "vllm.distributed.weight_transfer.m2n_engine."
             "resolve_parameter_destinations",
             lambda *args, **kwargs: [destination],
-        )
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine.worker_init_process_group",
-            lambda *args, **kwargs: object(),
-        )
-        monkeypatch.setattr(
-            "vllm.distributed.weight_transfer.m2n_engine."
-            "publish_destination_placements",
-            lambda *args: args[2],
         )
 
         engine = object.__new__(M2NWeightTransferEngine)
         engine.parallel_config = Mock(pipeline_parallel_size=1)
         engine.model_config = Mock(quantization=None)
         engine.model = torch.nn.Module()
-        engine.init_transfer_engine(
+        param = self._param(
+            shape=(32, 8),
+            src_mesh_dims=(1, 32),
+            src_placements=(REPLICATE, 0),
+        )
+        engine._prepare_source_plan((param,), num_trainer_ranks=32)
+        engine._prepare_destination_plan(
             self._init_info(
                 rank_offset=32,
                 world_size=36,
-                src_mesh_dims=[1, 32],
                 dst_mesh_dims=[1, 4],
-                shapes=[[32, 8]],
-                src_placements=[[REPLICATE, 0]],
+                params=[param.to_dict()],
             )
         )
 
@@ -255,11 +609,18 @@ class TestWireTypes:
         engine._handle = object()
         engine.model_update_group = object()
         engine._index = {"valid": 0}
-        engine._metas = [M2NParamMeta("valid", torch.float32, (4,), REPLICATED)]
+        engine._metas = [
+            M2NParamMeta(
+                "valid",
+                torch.float32,
+                (4,),
+                M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+            )
+        ]
         engine._reshard = Mock()
 
         with pytest.raises(ValueError, match=r"parameter 'unknown'"):
-            engine.receive_weights(
+            engine._receive_weights(
                 M2NWeightTransferUpdateInfo(names=["valid", "unknown"])
             )
 
@@ -286,7 +647,12 @@ class TestWireTypes:
         engine.model = model
         engine._index = {"pair.weight": 0, "direct": 1, "pair.scale": 2}
         engine._metas = [
-            M2NParamMeta(name, torch.float32, (1,), REPLICATED)
+            M2NParamMeta(
+                name,
+                torch.float32,
+                (1,),
+                M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+            )
             for name in engine._index
         ]
         engine._parameter_destinations = [
@@ -307,7 +673,7 @@ class TestWireTypes:
         )
         monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
 
-        engine.receive_weights(
+        engine._receive_weights(
             M2NWeightTransferUpdateInfo(names=["pair.weight", "direct", "pair.scale"])
         )
 
@@ -317,6 +683,35 @@ class TestWireTypes:
         assert direct.item() == 2
         assert reshard_order == ["pair.weight", "direct", "pair.scale"]
         assert stream.synchronize.call_count == 2
+
+    def test_subset_can_be_repeated_from_the_initialization_plan(self, monkeypatch):
+        engine = object.__new__(M2NWeightTransferEngine)
+        engine._handle = object()
+        engine.model_update_group = object()
+        engine.device = torch.device("cpu")
+        engine.model = Mock()
+        layout = M2NLayout(M2NMesh((1, 1), 0), REPLICATED)
+        engine._metas = [
+            M2NParamMeta("a", torch.float32, (1,), layout),
+            M2NParamMeta("b", torch.float32, (1,), layout),
+        ]
+        engine._index = {meta.name: index for index, meta in enumerate(engine._metas)}
+        engine._parameter_destinations = [
+            M2NDestination("a", REPLICATED, torch.zeros(1)),
+            M2NDestination("b", REPLICATED, torch.zeros(1)),
+        ]
+        engine._reshard = Mock()
+        monkeypatch.setattr(
+            "vllm.distributed.weight_transfer.m2n_engine.comm_ptr", lambda group: 0
+        )
+        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+
+        update = M2NWeightTransferUpdateInfo(names=["b"])
+        engine._receive_weights(update)
+        engine._receive_weights(update)
+
+        assert engine._reshard.call_count == 2
+        assert all(call.args[2].name == "b" for call in engine._reshard.call_args_list)
 
     def test_trainer_rank_must_be_a_trainer_rank(self):
         """A trainer rank must fall within the trainer portion of the group."""
@@ -359,6 +754,166 @@ class TestWireTypes:
             master_address="127.0.0.1", master_port=1234, world_size=4, rank=0
         )
         assert info.is_sender
+
+    def test_reserved_socket_is_not_sent_to_workers(self):
+        source = ManifestM2NWeightSource([])
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=True
+        )
+        with socket.socket() as reservation:
+            info = M2NTrainerInitInfo(
+                rank=0,
+                master_address="127.0.0.1",
+                master_port=1234,
+                world_size=2,
+                listen_socket=reservation,
+            )
+            payload = engine._worker_init_info(info)
+
+        assert "listen_socket" not in payload
+
+
+def test_metadata_group_receives_reserved_socket(monkeypatch):
+    reservation = Mock()
+    create = Mock(return_value=Mock())
+    monkeypatch.setattr("vllm.distributed.utils.StatelessProcessGroup.create", create)
+
+    stateless_init_metadata_group(
+        "127.0.0.1",
+        1234,
+        rank=0,
+        world_size=2,
+        listen_socket=reservation,
+    )
+
+    create.assert_called_once_with(
+        host="127.0.0.1",
+        port=1234,
+        rank=0,
+        world_size=2,
+        listen_socket=reservation,
+    )
+
+
+class _StaticM2NSource(M2NWeightSource):
+    def __init__(self, metadata, values):
+        self._metadata = metadata
+        self._values = values
+
+    def metadata(self):
+        return list(self._metadata)
+
+    def __iter__(self):
+        return iter(self._values)
+
+
+class TestTrainerSourceContract:
+    @staticmethod
+    def _meta(name="weight"):
+        return M2NParamMeta(
+            name,
+            torch.float32,
+            (4,),
+            M2NLayout(M2NMesh((1, 1), 0), REPLICATED),
+        )
+
+    @staticmethod
+    def _engine(source):
+        engine = M2NTrainerWeightTransferEngine(
+            client=Mock(), source=source, is_sender=False
+        )
+        engine._m2n = Mock()
+        engine._handle = object()
+        engine._metas = source.metadata()
+        engine._dst_mesh = M2NMesh((1, 1), 1)
+        engine._dst_placements = [REPLICATED] * len(engine._metas)
+        engine.group = Mock(comm=1)
+        return engine
+
+    def test_partial_trainer_initialization_aborts_owned_resources(self):
+        source = _StaticM2NSource([], [])
+        engine = self._engine(source)
+        handle = Mock()
+        group = Mock()
+        executor = Mock()
+        engine._handle = handle
+        engine.group = group
+        engine._executor = executor
+
+        engine._abort(RuntimeError("init failed"))
+
+        group.destroy.assert_called_once_with()
+        handle.destroy.assert_called_once_with()
+        executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        assert engine.group is None
+        assert engine._handle is None
+
+    @pytest.mark.parametrize(
+        ("case", "match"),
+        [
+            ("missing", "first missing: 'weight'"),
+            ("extra", "first extra"),
+            ("reordered", "yielded 'other'.*declared 'weight'"),
+        ],
+    )
+    def test_source_cardinality_and_order(self, monkeypatch, case, match):
+        tensor = Mock(spec=torch.Tensor)
+        tensor.dtype = torch.float32
+        tensor.shape = (4,)
+        tensor.device = torch.device("cuda:0")
+        tensor.is_contiguous.return_value = True
+        tensor.detach.return_value = tensor
+        tensor.record_stream = Mock()
+        values = {
+            "missing": [],
+            "extra": [("weight", tensor), ("extra", tensor)],
+            "reordered": [("other", tensor)],
+        }[case]
+        source = _StaticM2NSource([self._meta()], values)
+        engine = self._engine(source)
+        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        with pytest.raises(RuntimeError, match=match):
+            engine._send()
+
+    @pytest.mark.parametrize(
+        ("case", "match"),
+        [
+            ("dtype", "dtype"),
+            ("shape", "local shape"),
+            ("device", "expected cuda:0"),
+            ("contiguity", "non-contiguous"),
+        ],
+    )
+    def test_materialized_tensor_is_validated_before_reshard(
+        self, monkeypatch, case, match
+    ):
+        tensor = Mock(spec=torch.Tensor)
+        tensor.dtype = torch.float32
+        tensor.shape = (4,)
+        tensor.device = torch.device("cuda:0")
+        tensor.is_contiguous.return_value = True
+        if case == "dtype":
+            tensor.dtype = torch.float16
+        elif case == "shape":
+            tensor.shape = (2,)
+        elif case == "device":
+            tensor.device = torch.device("cpu")
+        else:
+            tensor.is_contiguous.return_value = False
+
+        source = _StaticM2NSource([self._meta()], [("weight", tensor)])
+        engine = self._engine(source)
+        monkeypatch.setattr(torch.cuda, "current_stream", Mock())
+        monkeypatch.setattr(torch.accelerator, "synchronize", Mock())
+        monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+
+        with pytest.raises(ValueError, match=match):
+            engine._send()
+
+        engine._m2n.reshard.assert_not_called()
 
 
 class TestRegistration:
@@ -409,7 +964,12 @@ def _assigned_device() -> "torch.device":
 
 
 @ray.remote(num_gpus=1)
-def _m2n_trainer_send(nccl_unique_id_b64: str, world_size: int) -> bool:
+def _m2n_trainer_send(
+    master_address: str,
+    master_port: int,
+    world_size: int,
+    nccl_unique_id_b64: str | None = None,
+) -> bool:
     """Send one parameter through the real trainer engine."""
     device = _assigned_device()
 
@@ -441,6 +1001,8 @@ def _m2n_trainer_send(nccl_unique_id_b64: str, world_size: int) -> bool:
 
     engine = WeightTransferTrainerFactory.trainer_init(
         init_info=M2NTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
             nccl_unique_id_b64=nccl_unique_id_b64,
             world_size=world_size,
             num_trainer_ranks=1,
@@ -458,12 +1020,14 @@ def _m2n_trainer_send(nccl_unique_id_b64: str, world_size: int) -> bool:
 
 @ray.remote(num_gpus=1)
 def _m2n_worker_receive(
-    nccl_unique_id_b64: str,
+    master_address: str,
+    master_port: int,
     world_size: int,
     worker_rank: int = 0,
+    worker_rank_offset: int | None = None,
+    nccl_unique_id_b64: str | None = None,
 ) -> dict:
     """Receive that parameter through the real worker engine."""
-    import contextlib
     from unittest.mock import MagicMock
 
     device = _assigned_device()
@@ -515,26 +1079,24 @@ def _m2n_worker_receive(
     engine = M2NWeightTransferEngine(
         WeightTransferConfig(backend="nccl_m2n"), vllm_config, device, recorder
     )
-    # Transport-only: receive_weights enters set_current_vllm_config, and
-    # vllm_config here is a mock.
-    import vllm.config as _vllm_config_mod
-
-    _vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
-
+    param = M2NWireParam("weight", DTYPE, tuple(SHAPE), (1, 1), REPLICATED)
     engine.init_transfer_engine(
         M2NWeightTransferInitInfo(
+            schema_version=M2N_WIRE_SCHEMA_VERSION,
+            master_address=master_address,
+            master_port=master_port,
             nccl_unique_id_b64=nccl_unique_id_b64,
             rank_offset=1,  # trainer occupies rank 0
             world_size=world_size,
-            src_mesh_dims=[1, 1],
             dst_mesh_dims=[1, world_size - 1],
-            names=["weight"],
-            dtype_names=[DTYPE],
-            shapes=[SHAPE],
-            src_placements=[None],  # replicated on the single trainer rank
+            source_digest=source_plan_digest([param]),
+            params=[param.to_dict()],
+            worker_rank_offset=worker_rank_offset,
         )
     )
+    engine.start_weight_update()
     engine.receive_weights(M2NWeightTransferUpdateInfo(names=["weight"]))
+    engine.finish_weight_update()
     torch.accelerator.synchronize()
 
     full = torch.arange(
@@ -560,11 +1122,136 @@ def _m2n_worker_receive(
     return result
 
 
+@ray.remote(num_gpus=1)
+def _mixed_layout_trainer_send(
+    master_address: str,
+    master_port: int,
+    trainer_rank: int,
+) -> bool:
+    """Send two tensors that use different 2-D source mesh factorizations."""
+    device = _assigned_device()
+
+    class NoopClient:
+        def init_weight_transfer_engine(self, init_info):
+            pass
+
+        def start_weight_update(self):
+            pass
+
+        def update_weights(self, update_info):
+            pass
+
+        def finish_weight_update(self, weight_version=None):
+            pass
+
+    row_full = torch.arange(16, dtype=torch.float32, device=device).reshape(4, 4)
+    column_full = row_full + 100
+    row_local = row_full.chunk(2, dim=0)[trainer_rank].contiguous()
+    column_local = column_full.chunk(2, dim=1)[trainer_rank].contiguous()
+    source = ManifestM2NWeightSource(
+        [
+            M2NManifestEntry(
+                "row_sharded",
+                torch.float32,
+                (4, 4),
+                M2NLayout(M2NMesh((1, 2), 0), (REPLICATE, 0)),
+                lambda: row_local,
+            ),
+            M2NManifestEntry(
+                "column_sharded",
+                torch.float32,
+                (4, 4),
+                M2NLayout(M2NMesh((2, 1), 0), (1, REPLICATE)),
+                lambda: column_local,
+            ),
+        ]
+    )
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=M2NTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=4,
+            num_trainer_ranks=2,
+            dst_mesh_dims=(2, 1),
+            rank=trainer_rank,
+        ),
+        client=NoopClient(),
+        source=source,
+    )
+    engine.send_weights()
+    engine.shutdown()
+    return True
+
+
+@ray.remote(num_gpus=1)
+def _mixed_layout_worker_receive(
+    master_address: str,
+    master_port: int,
+    worker_rank: int,
+) -> dict[str, list]:
+    device = _assigned_device()
+    from unittest.mock import MagicMock
+
+    from vllm.config.parallel import ParallelConfig
+
+    class Recorder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.received = {}
+
+        def load_weights(self, weights):
+            for name, tensor in weights:
+                self.received[name] = tensor.clone()
+
+    parallel_config = MagicMock(spec=ParallelConfig)
+    parallel_config.rank = worker_rank
+    parallel_config.world_size = 2
+    parallel_config.data_parallel_rank = 0
+    parallel_config.data_parallel_index = 0
+    parallel_config.tensor_parallel_size = 2
+    parallel_config.pipeline_parallel_size = 1
+    vllm_config = MagicMock()
+    vllm_config.parallel_config = parallel_config
+    vllm_config.model_config = SimpleNamespace(quantization=None)
+    recorder = Recorder()
+    engine = M2NWeightTransferEngine(
+        WeightTransferConfig(backend="nccl_m2n"),
+        vllm_config,
+        device,
+        recorder,
+    )
+    params = [
+        M2NWireParam("row_sharded", "float32", (4, 4), (1, 2), (REPLICATE, 0)),
+        M2NWireParam("column_sharded", "float32", (4, 4), (2, 1), (1, REPLICATE)),
+    ]
+    engine.init_transfer_engine(
+        M2NWeightTransferInitInfo(
+            schema_version=M2N_WIRE_SCHEMA_VERSION,
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=2,
+            world_size=4,
+            dst_mesh_dims=[2, 1],
+            source_digest=source_plan_digest(params),
+            params=[param.to_dict() for param in params],
+        )
+    )
+    engine.start_weight_update()
+    engine.receive_weights(
+        M2NWeightTransferUpdateInfo(names=["row_sharded", "column_sharded"])
+    )
+    engine.finish_weight_update()
+    result = {name: tensor.cpu().tolist() for name, tensor in recorder.received.items()}
+    engine.shutdown()
+    return result
+
+
 @pytest.mark.skipif(
     torch.accelerator.device_count() < 2,
     reason="Need at least 2 GPUs: one trainer rank and one inference worker.",
 )
-def test_m2n_weight_transfer_between_processes():
+@pytest.mark.parametrize("data_plane", ["tcp", "uid"])
+def test_m2n_weight_transfer_between_processes(data_plane):
     """A parameter survives a real reshard from a trainer process to a worker.
 
     This is the only test here that moves bytes: it builds both engines, joins
@@ -574,17 +1261,30 @@ def test_m2n_weight_transfer_between_processes():
     pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
     _init_ray()
 
-    from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
-
-    nccl = NCCLLibrary()
-    nccl_unique_id_b64 = base64.b64encode(
-        bytes(nccl.ncclGetUniqueId().internal)
-    ).decode()
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
     world_size = 2  # 1 trainer + 1 inference worker
+    nccl_unique_id_b64 = None
+    if data_plane == "uid":
+        from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 
-    worker = _m2n_worker_receive.remote(nccl_unique_id_b64, world_size)
-    trainer = _m2n_trainer_send.remote(nccl_unique_id_b64, world_size)
-    trainer_ok, result = ray.get([trainer, worker])
+        nccl_unique_id_b64 = base64.b64encode(
+            bytes(NCCLLibrary().ncclGetUniqueId().internal)
+        ).decode()
+
+    worker = _m2n_worker_receive.remote(
+        master_address,
+        master_port,
+        world_size,
+        nccl_unique_id_b64=nccl_unique_id_b64,
+    )
+    trainer = _m2n_trainer_send.remote(
+        master_address,
+        master_port,
+        world_size,
+        nccl_unique_id_b64,
+    )
+    trainer_ok, result = ray.get([trainer, worker], timeout=300)
 
     assert trainer_ok, "trainer engine did not complete"
     assert result["count"] == 1, f"expected one parameter, got {result['count']}"
@@ -602,20 +1302,16 @@ def test_m2n_weight_transfer_to_tp2_shards():
     pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
     _init_ray()
 
-    from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
-
-    nccl = NCCLLibrary()
-    nccl_unique_id_b64 = base64.b64encode(
-        bytes(nccl.ncclGetUniqueId().internal)
-    ).decode()
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
     world_size = 3
 
     workers = [
-        _m2n_worker_receive.remote(nccl_unique_id_b64, world_size, rank)
+        _m2n_worker_receive.remote(master_address, master_port, world_size, rank)
         for rank in range(2)
     ]
-    trainer = _m2n_trainer_send.remote(nccl_unique_id_b64, world_size)
-    trainer_ok, *results = ray.get([trainer, *workers])
+    trainer = _m2n_trainer_send.remote(master_address, master_port, world_size)
+    trainer_ok, *results = ray.get([trainer, *workers], timeout=300)
 
     assert trainer_ok, "trainer engine did not complete"
     for rank, result in enumerate(results):
@@ -624,6 +1320,40 @@ def test_m2n_weight_transfer_to_tp2_shards():
         assert result["shape"] == [SHAPE[0] // 2, SHAPE[1]]
         assert result["direct"]
         assert result["exact"], f"worker {rank} received the wrong shard"
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4,
+    reason="Need 4 GPUs: two trainer ranks and two inference workers.",
+)
+def test_m2n_transfer_with_per_parameter_source_meshes():
+    """One collective sequence accepts heterogeneous source factorizations."""
+    pytest.importorskip("nccl.m2n", reason="nccl_m2n backend needs the m2n runtime")
+    _init_ray()
+
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
+    trainers = [
+        _mixed_layout_trainer_send.remote(master_address, master_port, rank)
+        for rank in range(2)
+    ]
+    workers = [
+        _mixed_layout_worker_receive.remote(master_address, master_port, rank)
+        for rank in range(2)
+    ]
+    results = ray.get(trainers + workers, timeout=300)
+    trainer_results, worker_results = results[:2], results[2:]
+
+    assert trainer_results == [True, True]
+    expected_row = torch.arange(16, dtype=torch.float32).reshape(4, 4).tolist()
+    expected_column = (
+        torch.arange(16, dtype=torch.float32).reshape(4, 4) + 100
+    ).tolist()
+    for result in worker_results:
+        assert result == {
+            "row_sharded": expected_row,
+            "column_sharded": expected_column,
+        }
 
 
 class _Model(torch.nn.Module):
