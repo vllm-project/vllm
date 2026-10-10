@@ -10,18 +10,15 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
-from vllm.v1.worker.utils import AttentionGroup, get_uniform_decode_token_count
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
 
@@ -51,7 +48,6 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
-        self.use_fused_multi_step_decode = False
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -82,45 +78,6 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         False for Gemma4 MTP (Q-only, shares target KV, constant positions).
         """
         return True
-
-    def set_attn(
-        self,
-        model_state: ModelState,
-        kv_cache_config: KVCacheConfig,
-        block_tables: BlockTables,
-        target_input_buffers: InputBuffers,
-        target_attn_groups: list[list[AttentionGroup]],
-    ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
-        self._configure_fused_multi_step_decode()
-
-    def _configure_fused_multi_step_decode(self) -> None:
-        if self.num_speculative_steps == 1:
-            self.use_fused_multi_step_decode = False
-            return
-
-        unsupported_backends = sorted(
-            {
-                attn_group.backend.get_name()
-                for attn_groups in self.attn_groups
-                for attn_group in attn_groups
-                if not attn_group.supports_draft_decode_metadata_update
-            }
-        )
-        self.use_fused_multi_step_decode = not unsupported_backends
-        if unsupported_backends:
-            logger.info_once(
-                "Fused multi-step draft decode is not supported by attention "
-                "backend(s) %s; falling back to rebuilding attention metadata "
-                "between draft steps.",
-                ", ".join(unsupported_backends),
-            )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
@@ -181,7 +138,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         assert self.decode_cudagraph_manager is not None
         decode_fn = (
             self._generate_fused_drafts
-            if self.use_fused_multi_step_decode
+            if self.supports_decode_metadata_update
             else self._generate_draft
         )
         self.decode_cudagraph_manager.capture(
@@ -192,7 +149,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing decode CUDA graphs",
-            specialize_spec_tokens=self.use_fused_multi_step_decode
+            specialize_spec_tokens=self.supports_decode_metadata_update
             and self.speculative_config.uses_dynamic_speculative_decoding(),
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
@@ -384,7 +341,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         # Generate the remaining num_speculative_steps - 1 draft tokens.
         decode_fn = (
             self._fused_multi_step_decode
-            if self.use_fused_multi_step_decode
+            if self.supports_decode_metadata_update
             else self._multi_step_decode
         )
         decode_fn(

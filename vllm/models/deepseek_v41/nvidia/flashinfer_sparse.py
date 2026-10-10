@@ -206,23 +206,35 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBui
         metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build, replay_start
         )
-        num_tokens = metadata.num_decode_tokens
-        if not common_attn_metadata.causal and num_tokens > 0:
-            assert metadata.decode_swa_lens is not None
-            assert metadata.seq_lens is not None
-            assert metadata.token_to_req_indices is not None
-            topk_lens = self._decode_topk_lens[:num_tokens]
-            seq_lens = self._decode_seq_lens[:num_tokens]
-            torch.clamp(metadata.decode_swa_lens, min=self.window_size, out=topk_lens)
-            torch.index_select(
-                metadata.seq_lens,
-                0,
-                metadata.token_to_req_indices[:num_tokens],
-                out=seq_lens,
-            )
-            metadata.flashinfer_decode_topk_lens = topk_lens
-            metadata.flashinfer_decode_seq_lens = seq_lens
+        if not common_attn_metadata.causal and metadata.num_decode_tokens > 0:
+            self._fill_noncausal_decode_lens(metadata)
         return metadata
+
+    def update_draft_decode_metadata(
+        self, metadata: "DeepseekSparseSWAMetadata"
+    ) -> None:
+        super().update_draft_decode_metadata(metadata)
+        if metadata.flashinfer_decode_topk_lens is not None:
+            self._fill_noncausal_decode_lens(metadata)
+
+    def _fill_noncausal_decode_lens(
+        self, metadata: "DeepseekSparseSWAMetadata"
+    ) -> None:
+        num_tokens = metadata.num_decode_tokens
+        assert metadata.decode_swa_lens is not None
+        assert metadata.seq_lens is not None
+        assert metadata.token_to_req_indices is not None
+        topk_lens = self._decode_topk_lens[:num_tokens]
+        seq_lens = self._decode_seq_lens[:num_tokens]
+        torch.clamp(metadata.decode_swa_lens, min=self.window_size, out=topk_lens)
+        torch.index_select(
+            metadata.seq_lens,
+            0,
+            metadata.token_to_req_indices[:num_tokens],
+            out=seq_lens,
+        )
+        metadata.flashinfer_decode_topk_lens = topk_lens
+        metadata.flashinfer_decode_seq_lens = seq_lens
 
 
 class DeepseekSparseSWAFlashInferBackend(DeepseekSparseSWABackend):
