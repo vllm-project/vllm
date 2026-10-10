@@ -352,6 +352,12 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     _ = scheduler.schedule()
     assert req.num_output_placeholders > 0
 
+    if scheduler.use_v2_model_runner:
+        # MRV2 staggers same-request decodes by pp_size steps to match the
+        # worker-side sampled-token broadcast cadence.
+        output = scheduler.schedule()
+        assert req.request_id not in output.num_scheduled_tokens
+
     # before any update_from_output, we still expect the request can be
     # scheduled again (multi-step in-flight).
     output = scheduler.schedule()
