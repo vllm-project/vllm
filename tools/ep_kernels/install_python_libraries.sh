@@ -15,6 +15,8 @@ DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93602a15e95f55f6ee8df8f1aaa0e4
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
+# Directory holding vendored DeepEP patches applied by this script
+PATCHES_DIR=${PATCHES_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patches"}
 CUDA_VERSION_MAJOR=$("${CUDA_HOME}"/bin/nvcc --version | grep -E -o "release [0-9]+" | cut -d ' ' -f 2)
 
 # Parse arguments
@@ -181,6 +183,19 @@ do_build() {
     pushd "$WORKSPACE"
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
+
+    # DeepEP GIN barrier data-visibility fix (temporary until upstream ships a fix):
+    # the world-team barrier signals completion on context 0 only while data puts ride
+    # contexts 1..N (RDMA) and NVLink TMA stores (same-node peers), so the completion
+    # signal can overtake in-flight data and receivers read stale raw-buffer rows
+    # (silent dispatch corruption -> combine illegal memory accesses).
+    # The patch is pinned to DeepEP d4f41e4e; skip loudly on any other ref.
+    if [[ "$name" == "DeepEP" ]] && \
+        [[ "$(git rev-parse HEAD)" == d4f41e4e* ]] && \
+        ! grep -q "Signal on every context, not just context 0" \
+            deep_ep/include/deep_ep/common/comm.cuh; then
+        patch --batch -p1 < "${PATCHES_DIR}/deepep-gin-barrier-data-visibility.patch"
+    fi
 
     # DeepEP CUDA 13 patch
     if [[ "$name" == "DeepEP" && "${CUDA_VERSION_MAJOR}" -ge 13 ]]; then
