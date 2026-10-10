@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe as fi_moe
 from tests.kernels.moe.utils import make_test_quant_config
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
@@ -29,9 +30,13 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import 
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_cutlass_fused_moe_workspace,
+)
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     100
@@ -51,6 +56,85 @@ MNK_FACTORS = [
     (224, 1024, 1024),
     (224, 1024, 1536),
 ]
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutlass_fused_moe_workspace(),
+    reason="Requires caller-owned CUTLASS MoE workspace support",
+)
+@pytest.mark.parametrize("dp_size", [1, 2])
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
+@torch.inference_mode()
+def test_flashinfer_workspace_reused_after_lock(
+    dp_size, activation, workspace_init, monkeypatch
+):
+    """Small-first warmup must cover a gathered batch and reuse storage per layer."""
+    parallel = FusedMoEParallelConfig.make_no_parallel()
+    parallel.dp_size = dp_size
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=activation,
+        device="cuda",
+        moe_parallel_config=parallel,
+        in_dtype=torch.bfloat16,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=32,
+    )
+    layers = [FlashInferExperts(config, FusedMoEQuantConfig.make()) for _ in range(2)]
+    max_rows = 32 * dp_size
+    x = torch.randn(max_rows, 256, device="cuda", dtype=torch.bfloat16) / 10
+    w1 = (
+        torch.randn(
+            8,
+            512 * (2 if activation.is_gated else 1),
+            256,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 10
+    )
+    w2 = torch.randn(8, 256, 512, device="cuda", dtype=torch.bfloat16) / 10
+    ids = torch.tensor([0, 1], device="cuda").expand(max_rows, 2)
+    weights = torch.full((max_rows, 2), 0.5, device="cuda")
+    buffers = []
+    kernel = fi_moe.flashinfer_cutlass_fused_moe
+
+    def compare_with_unbuffered(**kwargs):
+        # Assert that the new path really ran, then compare the same kernel
+        # with and without caller-owned scratch.
+        buffers.append(kwargs["workspace_buffer"])
+        result = kernel(**kwargs)
+        reference = torch.empty_like(kwargs["output"])
+        kernel(**{**kwargs, "workspace_buffer": None, "output": reference})
+        torch.testing.assert_close(kwargs["output"], reference)
+        return result
+
+    monkeypatch.setattr(fi_moe, "flashinfer_cutlass_fused_moe", compare_with_unbuffered)
+    for layer, rows in [(layers[0], 1), (layers[1], max_rows), (layers[0], 16)]:
+        layer.apply(
+            output=torch.empty_like(x[:rows]),
+            hidden_states=x[:rows],
+            w1=w1,
+            w2=w2,
+            topk_weights=weights[:rows],
+            topk_ids=ids[:rows],
+            activation=activation,
+            global_num_experts=8,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=None,
+            workspace2=None,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        current_workspace_manager().lock()
+    assert all(buffer is buffers[0] for buffer in buffers)
 
 
 @pytest.mark.parametrize(

@@ -29,7 +29,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
+    flashinfer_cutlass_fused_moe_workspace_size,
     has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_cutlass_fused_moe_workspace,
+)
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
 )
 
 logger = init_logger(__name__)
@@ -91,6 +97,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.tp_size = moe_config.moe_parallel_config.tp_size
         self.out_dtype = moe_config.in_dtype
         self.use_dp = moe_config.moe_parallel_config.dp_size > 1
+        # Upper bound on input.size(0) seen by the kernel. With DP the MoE
+        # input can be gathered across DP ranks before the experts run.
+        self._max_workspace_rows = moe_config.max_num_tokens * max(
+            1, moe_config.moe_parallel_config.dp_size
+        )
+        self._workspace_nbytes: dict[tuple, int] = {}
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
@@ -242,6 +254,110 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)
 
+    def _get_workspace_buffer(
+        self,
+        hidden_states: torch.Tensor,
+        fc1_expert_weights: torch.Tensor,
+        fc2_expert_weights: torch.Tensor,
+        top_k: int,
+        activation: MoEActivation,
+        use_mxfp8_act_scaling: bool,
+        use_w4_group_scaling: bool,
+    ) -> torch.Tensor | None:
+        """Return a persistent FlashInfer CUTLASS MoE workspace, or None.
+
+        Without a caller-owned workspace, FlashInfer allocates and frees its
+        GEMM scratch (about 20 GiB for 16k tokens with DP=8) through the
+        PyTorch caching allocator on every MoE layer call, which fragments the
+        allocator during large prefills. Size one buffer for the largest batch
+        once, during memory profiling, and share it across all MoE layers that
+        run sequentially in the current ubatch and lane.
+        """
+        if (
+            not has_flashinfer_cutlass_fused_moe_workspace()
+            or not is_workspace_manager_initialized()
+            # Unexpectedly large batches keep the per-call allocation rather
+            # than pinning one more persistent buffer per distinct size.
+            or hidden_states.size(0) > self._max_workspace_rows
+        ):
+            return None
+
+        # Always size for the maximum so every call shares a single buffer.
+        rows = self._max_workspace_rows
+        hidden_size = fc2_expert_weights.size(1)
+        # fc1 rows are logical (unpacked): inter_size, times 2 if gated.
+        inter_size = fc1_expert_weights.size(1) // (2 if activation.is_gated else 1)
+        num_experts_total = fc2_expert_weights.size(0) * self.ep_size
+        size_key = (
+            rows,
+            hidden_size,
+            inter_size,
+            num_experts_total,
+            top_k,
+            hidden_states.dtype,
+            fc1_expert_weights.dtype,
+            activation,
+            use_mxfp8_act_scaling,
+            use_w4_group_scaling,
+        )
+        nbytes = self._workspace_nbytes.get(size_key)
+        if nbytes is None:
+            try:
+                nbytes = int(
+                    flashinfer_cutlass_fused_moe_workspace_size(
+                        rows,
+                        hidden_size,
+                        inter_size,
+                        num_experts_total,
+                        top_k,
+                        x_dtype=hidden_states.dtype,
+                        weight_dtype=fc1_expert_weights.dtype,
+                        output_dtype=self.out_dtype,
+                        activation_type=activation_to_flashinfer_type(activation),
+                        tp_size=self.tp_size,
+                        tp_rank=self.tp_rank,
+                        ep_size=self.ep_size,
+                        ep_rank=self.ep_rank,
+                        use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
+                        use_w4_group_scaling=use_w4_group_scaling,
+                        use_mxfp8_act_scaling=use_mxfp8_act_scaling,
+                        device=hidden_states.device,
+                    )
+                )
+            except (RuntimeError, ValueError) as e:
+                logger.warning_once(
+                    "FlashInfer CUTLASS MoE workspace sizing failed (%s); "
+                    "falling back to per-call workspace allocation.",
+                    e,
+                )
+                nbytes = 0
+            self._workspace_nbytes[size_key] = nbytes
+        if nbytes <= 0:
+            return None
+
+        device = hidden_states.device
+        key = ("flashinfer_cutlass_fused_moe_workspace", device, nbytes)
+
+        def _allocate() -> torch.Tensor:
+            logger.info_once(
+                "Reserving a persistent %.2f GiB FlashInfer CUTLASS MoE "
+                "workspace for up to %d tokens.",
+                nbytes / (1 << 30),
+                rows,
+            )
+            return torch.empty((nbytes,), dtype=torch.uint8, device=device)
+
+        try:
+            return current_workspace_manager().get_persistent_resource(key, _allocate)
+        except AssertionError:
+            # The workspace is locked and this size was not reserved in warmup.
+            logger.warning_once(
+                "FlashInfer CUTLASS MoE workspace of %d bytes was not reserved "
+                "during warmup; falling back to per-call allocation.",
+                nbytes,
+            )
+            return None
+
     def apply(
         self,
         output: torch.Tensor,
@@ -362,6 +478,19 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
 
+        workspace_kwargs = {}
+        workspace = self._get_workspace_buffer(
+            hidden_states,
+            fc1_expert_weights,
+            fc2_expert_weights,
+            topk_ids.size(1),
+            activation,
+            use_mxfp8_act_scaling,
+            use_w4_group_scaling,
+        )
+        if workspace is not None:
+            workspace_kwargs["workspace_buffer"] = workspace
+
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
             token_selected_experts=topk_ids.to(torch.int),
@@ -386,6 +515,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
+            **workspace_kwargs,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
