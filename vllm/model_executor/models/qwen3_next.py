@@ -183,9 +183,18 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
+        # These configs encode routed-gate quantization per layer. Keep other
+        # formats on Qwen3-Next's historical unquantized gate path.
+        gate_quant_config = (
+            quant_config
+            if quant_config is not None
+            and quant_config.get_name() in ("inc", "modelopt_mixed", "auto_gptq")
+            else None
+        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
+            quant_config=gate_quant_config,
             prefix=f"{prefix}.gate",
         )
 
