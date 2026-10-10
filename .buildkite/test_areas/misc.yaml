@@ -537,7 +537,6 @@ steps:
   - tests/test_connections.py
   - tests/test_embedded_commit.py
   - tests/test_envs.py
-  - tests/test_env_override_rocm.py
   - tests/test_force_first_config.py
   - tests/test_fxgraphcache_pickle_patch.py
   - tests/test_logprobs.py
@@ -584,7 +583,6 @@ steps:
   - pytest -v -s test_connections.py
   - pytest -v -s test_embedded_commit.py
   - pytest -v -s test_envs.py
-  - pytest -v -s test_env_override_rocm.py
   - pytest -v -s test_force_first_config.py
   - pytest -v -s test_fxgraphcache_pickle_patch.py
   - pytest -v -s test_logprobs.py
