@@ -1306,7 +1306,7 @@ def test_resolve_need_send_accounts_for_remote_tp_fanout():
         ready=asyncio.Event(),
     )
 
-    worker.resolve_need_send(send_meta, remote_tp_ranks=[0, 1])
+    worker.resolve_need_send(send_meta, remote_tp_rank_count=2)
 
     assert send_meta.need_send == 2
 

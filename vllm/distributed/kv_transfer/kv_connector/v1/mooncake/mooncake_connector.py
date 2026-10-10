@@ -1499,13 +1499,14 @@ class MooncakeConnectorWorker:
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
-        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
-        if meta.remote_tp_rank not in remote_tp_ranks:
+        if not self.transfer_topo.is_handshake_target_rank(
+            meta.remote_tp_rank, meta.remote_tp_size
+        ):
             # This D worker does not pair with the P worker.
             msg = (
                 "This D tp_rank "
                 f"{meta.remote_tp_rank} is not paired with P tp_rank "
-                f"{self.tp_rank}; expected one of {remote_tp_ranks}."
+                f"{self.tp_rank}."
             )
             logger.error(msg)
             response = MooncakeXferResponse(
@@ -1514,6 +1515,8 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
+        tp_ratio = self.transfer_topo.tp_ratio(meta.remote_tp_size)
+        remote_tp_rank_count = max(1, -tp_ratio)
         if _pp_mismatch_hides_packed_layers(
             self.pp_size,
             meta.remote_pp_size,
@@ -1622,7 +1625,7 @@ class MooncakeConnectorWorker:
                     send_meta.sending += 1
                     if not send_meta.need_send:
                         self.resolve_need_send(
-                            send_meta, remote_tp_ranks, meta.remote_pp_size
+                            send_meta, remote_tp_rank_count, meta.remote_pp_size
                         )
                     ready_reqs.append((d_req_id, send_meta))
                 else:
@@ -1698,20 +1701,21 @@ class MooncakeConnectorWorker:
     def resolve_need_send(
         self,
         send_meta: SendBlockMeta,
-        remote_tp_ranks: list[int],
+        remote_tp_rank_count: int,
         remote_pp_size: int = 1,
     ):
         # Prepare for heterogeneous TP (one P pairs to multiple D)
-        send_meta.need_send = len(remote_tp_ranks)
+        send_meta.need_send = remote_tp_rank_count
         if remote_pp_size > 1 and remote_pp_size != self.pp_size:
             # Each consumer PP stage pulls every producer stage, including
             # peers with no shared layers.
             send_meta.need_send *= remote_pp_size
         logger.debug(
-            "Mooncake request %s will be served by %d consumer workers: TP ranks=%s",
+            "Mooncake request %s will be served by %d consumer workers "
+            "from %d TP ranks",
             send_meta.transfer_id,
             send_meta.need_send,
-            remote_tp_ranks,
+            remote_tp_rank_count,
         )
 
     def _logical_to_kernel_block_ids(

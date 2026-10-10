@@ -4332,6 +4332,112 @@ def test_compatibility_hash_validation(
             assert len(result) == 1
 
 
+def test_handshake_validates_peer_topology_before_expanding_rank_list(monkeypatch):
+    worker = object.__new__(NixlConnectorWorker)
+    worker._is_csa_linear = False
+    worker.use_host_buffer = True
+    worker.transfer_topo = MagicMock()
+    worker.pcp_size = 1
+    worker.dcp_size = 1
+    worker.compat_hash = "compat"
+    worker.enforce_compat_hash = True
+    worker._validate_remote_parallel_config = MagicMock()
+
+    remote_metadata = NixlAgentMetadata(
+        engine_id="remote",
+        agent_metadata=b"",
+        kv_caches_base_addr=[],
+        device_id=0,
+        num_blocks=0,
+        block_lens=[],
+        block_strides=[],
+        kv_cache_layout="LBHNC",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="test",
+        physical_blocks_per_logical_kv_block=1,
+        tp_size=1,
+        pp_size=1,
+    )
+    handshake_payload = NixlHandshakePayload(
+        compatibility_hash="compat",
+        agent_metadata_bytes=msgspec.msgpack.encode(remote_metadata),
+    )
+    mock_socket = MagicMock()
+    mock_socket.recv_multipart.return_value = [
+        msgspec.msgpack.encode(handshake_payload),
+        msgspec.msgpack.encode(time.perf_counter()),
+    ]
+    zmq_context = MagicMock()
+    zmq_context.__enter__.return_value = mock_socket
+    monkeypatch.setattr(nixl.base_worker, "zmq_ctx", lambda *_: zmq_context)
+    monkeypatch.setattr(nixl.base_worker, "make_zmq_path", lambda *_: "tcp://test")
+
+    with pytest.raises(ValueError, match="topology mismatch"):
+        worker._nixl_handshake(
+            host="localhost",
+            port=1234,
+            remote_tp_size=5_000_000,
+            expected_engine_id="remote",
+        )
+    worker.transfer_topo.handshake_target_ranks.assert_not_called()
+
+
+def test_handshake_expands_ranks_after_peer_topology_validation(monkeypatch):
+    worker = object.__new__(NixlConnectorWorker)
+    worker._is_csa_linear = False
+    worker.use_host_buffer = True
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.handshake_target_ranks.return_value = [0, 1]
+    worker.pcp_size = 1
+    worker.dcp_size = 1
+    worker.compat_hash = "compat"
+    worker.enforce_compat_hash = True
+    worker._validate_remote_parallel_config = MagicMock()
+    worker.add_remote_agent = MagicMock(return_value="agent")
+
+    remote_metadata = NixlAgentMetadata(
+        engine_id="remote",
+        agent_metadata=b"",
+        kv_caches_base_addr=[],
+        device_id=0,
+        num_blocks=0,
+        block_lens=[],
+        block_strides=[],
+        kv_cache_layout="LBHNC",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="test",
+        physical_blocks_per_logical_kv_block=1,
+        tp_size=2,
+        pp_size=1,
+    )
+    handshake_payload = NixlHandshakePayload(
+        compatibility_hash="compat",
+        agent_metadata_bytes=msgspec.msgpack.encode(remote_metadata),
+    )
+    mock_socket = MagicMock()
+    mock_socket.recv_multipart.return_value = [
+        msgspec.msgpack.encode(handshake_payload),
+        msgspec.msgpack.encode(time.perf_counter()),
+    ]
+    zmq_context = MagicMock()
+    zmq_context.__enter__.return_value = mock_socket
+    monkeypatch.setattr(nixl.base_worker, "zmq_ctx", lambda *_: zmq_context)
+    monkeypatch.setattr(nixl.base_worker, "make_zmq_path", lambda *_: "tcp://test")
+
+    agents, _ = worker._nixl_handshake(
+        host="localhost",
+        port=1234,
+        remote_tp_size=2,
+        expected_engine_id="remote",
+    )
+
+    assert agents == {(0, 0): "agent", (0, 1): "agent"}
+    worker.transfer_topo.handshake_target_ranks.assert_called_once_with(2, 1)
+    assert mock_socket.recv_multipart.call_count == 2
+
+
 @pytest.mark.parametrize(
     "error_scenario",
     [
