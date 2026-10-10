@@ -134,7 +134,7 @@ class PassConfig:
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
-    """Enable flashinfer allreduce fusion."""
+    """Enable AllReduce/RMSNorm fusion with an eligible backend."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]

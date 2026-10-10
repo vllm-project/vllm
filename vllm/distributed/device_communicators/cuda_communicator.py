@@ -91,6 +91,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
         )
+        from vllm.distributed.device_communicators.cute_allreduce import CuteAllReduce
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
         )
@@ -115,6 +116,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
+        self.cute_allreduce: CuteAllReduce | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
@@ -128,6 +130,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
                 device=self.device,
+            )
+
+        if unique_name.split(":")[0] == "tp" and current_platform.is_cuda():
+            from vllm.config import get_current_vllm_config_or_none
+
+            self.cute_allreduce = CuteAllReduce.create(
+                self, get_current_vllm_config_or_none()
             )
 
         if self.use_flashinfer_allreduce and self.world_size > 1:
@@ -767,6 +776,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             raise ValueError("No PyNCCL communicator found")
 
     def destroy(self):
+        if self.cute_allreduce is not None:
+            self.cute_allreduce.destroy()
+            self.cute_allreduce = None
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
             self.pynccl_comm = None
