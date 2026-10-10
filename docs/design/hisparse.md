@@ -30,10 +30,13 @@ configured, `MultiConnector` composes it with `HiSparseConnector`.
 
 `host_pool_gib` is configured on `HiSparseConnector` and is the usable
 host-cache capacity per data-parallel replica, not a node-wide memory budget.
-Tensor-parallel ranks hold replicated views of that logical cache. Those views
-may use private per-rank backing or one shared
-physical allocation without changing the configured capacity. Physical host
-memory consumption is therefore topology- and implementation-dependent. The
+MLA tensor-parallel ranks hold replicated views of that logical cache, using
+private per-rank backing or one shared physical allocation. QSA stores full K/V
+heads in private per-rank pools, with each rank writing its own shard. Its
+logical capacity counts each unique K/V head once; heads replicated when TP
+exceeds the K/V head count still consume physical memory in each rank's pool.
+Padding also contributes to physical allocation, not logical capacity. Physical
+host memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
@@ -44,6 +47,69 @@ steady-state maximum concurrency` line charges running requests that read from
 host only their active tail pages, plus one request being admitted at its full
 footprint. Host-pool metrics are listed in
 [Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
+
+## QSA configuration and validation scope
+
+For a model using the Qwen4Exp QSA implementation, configure `HiSparseConnector`
+to enable main K/V offloading. This also selects Model Runner V2 and supplies
+default `HiSparseConfig` values. For example, replace `QSA_MODEL` with the model
+identifier or checkpoint path:
+
+```bash
+vllm serve QSA_MODEL \
+  --dtype bfloat16 --kv-cache-dtype bfloat16 \
+  --attention-config '{"indexer_kv_dtype":"bf16"}' \
+  --enforce-eager --no-async-scheduling \
+  --no-enable-prefix-caching --no-enable-chunked-prefill \
+  --max-model-len 8192 --max-num-batched-tokens 8192 \
+  --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
+```
+
+This example selects eager execution, synchronous scheduling, and BF16 main
+K/V and indexer keys, with MTP, prefix caching, and chunked prefill disabled.
+Choose the context length and host capacity for the workload. The hybrid KV
+cache manager must remain enabled. Add `--tensor-parallel-size` as appropriate
+for the model and device count; `host_pool_gib` remains a logical capacity per
+DP replica.
+
+HiSparse QSA automatically resolves the device layout to `BLNHC`, so one copy row
+contains a token's K and V for every local K/V head. The host pool uses compact
+token rows within each layer. HiSparse preserves the indexer's sparse selection;
+compressed indexer keys, raw-key rings, and recurrent state remain GPU-resident.
+
+The NVIDIA CUDA single-engine implementation has been checked in the following
+configurations. The rows describe complementary checks; they do not imply that
+every combination of dtype, execution mode, and topology has been tested.
+
+| Path | Validated configuration and behavior |
+| --- | --- |
+| Eager decode | Synchronous TP2 execution with MTP disabled; full K/V offload, physical page reuse, and host refill with private per-rank K/V shards |
+| Cache dtypes | BF16 model/query dtype with independently selected BF16 or FP8 main K/V and indexer formats; all four combinations cover original scales, complete K/V rows, nonresident prefill, and selected-K/V replay, with matching eager on/off model evaluations |
+| MTP, FULL replay, and async scheduling | TP2 with three draft tokens, shared logical selection, native `FULL_DECODE_ONLY` replay, and async scheduling; real page reuse and host refill cover target verification and draft decoding, including acceptance/rejection, padding, and stable replay storage |
+| Prefix and request lifecycle | BF16 at TP1 with MTP disabled and `FULL_DECODE_ONLY` plus async scheduling; chunked prefill, shared prefixes with private writable tails, cancellation of a prefix-sharing request, and natural preemption/recompute with state invalidation and resource return |
+
+Use `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` for full decode graphs.
+HiSparse rejects `cudagraph_mode=FULL`, which also requires full prefill graphs.
+
+The dtype representation checks and lifecycle checks exercise their respective
+shared paths; they do not constitute a full dtype-by-lifecycle matrix. Existing
+backend restrictions on recurrent-state formats and supported parallelism still
+apply. Related MLA HiSparse and non-offload QSA paths have regression coverage.
+
+HiSparse preserves the indexer's selection budget, logical positions, and valid
+counts in these paths. It does not change the dtypes or ownership of raw indexer
+rings and recurrent state. Model evaluations compare each offload configuration
+against its matching non-offload configuration, with the same prompts, decoding
+settings, and output budget. Reports retain per-response finish reasons, including
+responses that reach the output limit. Results for one dtype or execution mode do
+not establish the others. Cache-correctness checks and model-quality evaluations
+do not establish throughput, latency, or capacity gains; those require separate
+workload-specific measurements.
+
+NIXL P/D integration for QSA is separate follow-up work, including transfer and
+lifecycle handling for main K/V, indexer caches, and hybrid state. The P/D import
+and generic indexer offloading sections below describe the connector
+architecture; they do not establish validated QSA P/D combinations.
 
 ## Ownership
 
@@ -68,8 +134,8 @@ sees only device pools.
 The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
-For single-node MP tensor parallelism, every TP worker maps the same pinned host
-pool and uses the same block and layer offsets. MLA source KV is replicated
+For MLA with single-node MP tensor parallelism, every TP worker maps the same
+pinned host pool and uses the same block and layer offsets. Source KV is replicated
 across TP ranks, so this stores one physical copy instead of one copy per rank.
 TP rank 0 writes the shared host pool; peers wait on its IPC events before
 reading it. Other executor and parallel layouts retain private per-rank pools.
@@ -165,7 +231,7 @@ fused decode resolver described above.
 HiSparse does not keep a private CPU copy of indexer KV. The indexer remains a
 normal prefix-cacheable GPU cache group. If `OffloadingConnector` is configured
 with HiSparse, it stores and restores that group through the generic KV
-offloading path; HiSparse continues to own only the sparse MLA host tier.
+offloading path; HiSparse continues to own only the main sparse-attention host tier.
 
 The two prefix sources can have different hit lengths. When the HiSparse host
 prefix extends beyond the GPU-resident indexer prefix, the scheduler asks

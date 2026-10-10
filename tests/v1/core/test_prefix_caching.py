@@ -6318,3 +6318,463 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+@pytest.fixture
+def qsa_hisparse_manager():
+    """Build real QSA groups with complete K/V and the default hot capacity."""
+    from vllm.config import HiSparseConfig, KVTransferConfig
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import (
+        generate_scheduler_kv_cache_config,
+        get_kv_cache_config_from_groups,
+        get_kv_cache_groups,
+        init_none_hash,
+    )
+    from vllm.v1.kv_cache_interface import (
+        HiSparseHotSpec,
+        HiSparseResidentSpec,
+        MLAAttentionSpec,
+        SparseCacheRole,
+        SparseFullAttentionSpec,
+    )
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    init_none_hash(sha256)
+    specs = {}
+    for layer in range(2):
+        name = f"model.layers.{layer}.self_attn"
+        specs[name] = SparseFullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            total_num_kv_heads=2,
+            head_size=32,
+            head_size_v=32,
+            dtype=torch.bfloat16,
+            top_k=35,
+        )
+        specs[f"{name}.indexer"] = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(), max_model_len=128),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
+        ),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=64,
+            prefix_cache_retention_interval=None,
+            mamba_cache_mode="none",
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLNHC,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1 / 2048},
+        ),
+    )
+    cache = get_kv_cache_config_from_groups(
+        config,
+        get_kv_cache_groups(config, specs),
+        available_memory=2**20,
+    )
+    # Two layers x 16 tokens x 2 unique heads x K/V x 32 dims x BF16:
+    # 8192 logical bytes/block; each rank owns 4096 bytes across both layers.
+    assert cache.hisparse_host_num_blocks == 64
+    assert cache.hisparse_host_block_stride == 4096
+    assert cache.hisparse_shared_host_pool is False
+    resident = [
+        group.kv_cache_spec
+        for group in cache.kv_cache_groups
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+    ]
+    hot = [
+        group.kv_cache_spec
+        for group in cache.kv_cache_groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    ]
+    assert len(resident) == len(hot) == 2
+    assert all(spec.page_size_bytes == 2048 for spec in resident + hot)
+    # Default 2 x top_k = 70 logical hot rows occupy five 16-token blocks.
+    assert all(spec.blocks_per_request == 5 for spec in hot)
+    # EngineCore derives scheduler specs from worker configs before creating
+    # KVCacheManager; worker UniformTypeKVCacheSpecs are not manager specs.
+    scheduler_cache = generate_scheduler_kv_cache_config([cache, cache])
+    return make_kv_cache_manager(
+        scheduler_cache,
+        max_model_len=128,
+        enable_caching=False,
+        hash_block_size=16,
+    )
+
+
+def _qsa_request(name, first_token=0):
+    from vllm.utils.hashing import sha256
+
+    return make_request(name, list(range(first_token, first_token + 16)), 16, sha256)
+
+
+def _qsa_connector(manager):
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+        HiSparseConnectorScheduler,
+    )
+    from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+
+    coordinator = get_hisparse_coordinator(manager)
+    connector = HiSparseConnectorScheduler(async_speculative=False)
+    connector.bind_coordinator(coordinator)
+    return connector, coordinator
+
+
+def _qsa_worker_update(connector, *rank_messages):
+    """Use the production rank aggregation and scheduler connector boundary."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+        HiSparseConnectorWorkerMetadata,
+    )
+    from vllm.v1.outputs import KVConnectorOutput
+
+    metadata = HiSparseConnectorWorkerMetadata({}, {})
+    for enqueued, completed in rank_messages:
+        metadata = metadata.aggregate(
+            HiSparseConnectorWorkerMetadata(
+                {transfer_id: 1 for transfer_id in enqueued},
+                {transfer_id: 1 for transfer_id in completed},
+            )
+        )
+    connector.update_connector_output(
+        KVConnectorOutput(kv_connector_worker_meta=metadata)
+    )
+
+
+def test_qsa_partial_prefix_cow_restores_a_private_writable_tail(
+    qsa_hisparse_manager,
+):
+    """A real 640-token hit preserves its 64-row tail before B can write it."""
+    page_size = 576
+    cache = qsa_hisparse_manager.kv_cache_config
+    groups = []
+    for group in cache.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec)):
+            spec = replace(
+                spec,
+                block_size=page_size,
+                page_size=spec.page_size_bytes * page_size // spec.block_size,
+            )
+        else:
+            padded = spec.page_size_padded
+            spec = replace(
+                spec,
+                block_size=page_size,
+                page_size_padded=(
+                    padded * page_size // spec.block_size if padded else None
+                ),
+            )
+        groups.append(replace(group, kv_cache_spec=spec))
+    groups.append(
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=page_size,
+                shapes=(1, 1),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        )
+    )
+    manager = make_kv_cache_manager(
+        KVCacheConfig(
+            num_blocks=128,
+            kv_cache_tensors=[],
+            kv_cache_groups=groups,
+            hisparse_host_num_blocks=64,
+        ),
+        max_model_len=4096,
+        enable_caching=True,
+        hash_block_size=64,
+    )
+    connector, coordinator = _qsa_connector(manager)
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    initial_free = (
+        manager.block_pool.get_num_free_blocks(),
+        host_pool.get_num_free_blocks(),
+    )
+
+    def build_metadata(request, count, new_blocks):
+        connector.requests[request.request_id] = request
+        output = SchedulerOutput.make_empty()
+        output.scheduled_cached_reqs.req_ids = [request.request_id]
+        output.scheduled_cached_reqs.num_computed_tokens = [request.num_computed_tokens]
+        output.scheduled_cached_reqs.new_block_ids = [new_blocks.get_block_ids()]
+        output.num_scheduled_tokens = {request.request_id: count}
+        output.total_num_scheduled_tokens = count
+        copies, retained = manager.take_kv_cache_block_copies()
+        output.kv_cache_block_copies = copies or None
+        return connector.build_connector_meta(output), retained
+
+    def complete_metadata(metadata):
+        counts = {
+            transfer.transfer_id: 2 for transfer in metadata.command.page_transfers
+        }
+        connector.update_connector_output(
+            KVConnectorOutput(
+                kv_connector_worker_meta=HiSparseConnectorWorkerMetadata(
+                    counts,
+                    counts,
+                    tuple(copy.dst_block_id for copy in metadata.host_block_copies),
+                )
+            )
+        )
+
+    producer = make_request("producer", list(range(641)), 64, sha256)
+    for count in (576, 64, 1):
+        manager.new_step_starts()
+        allocated = manager.allocate_slots(producer, count)
+        assert allocated is not None
+        metadata, retained = build_metadata(producer, count, allocated)
+        complete_metadata(metadata)
+        manager.block_pool.free_blocks(retained)
+        producer.num_computed_tokens += count
+
+    original = manager.get_blocks(producer.request_id).blocks
+    original_ids = manager.get_block_ids(producer.request_id)
+    source_tail = original[coordinator.host_group_id][1]
+    resident_groups = [
+        i
+        for i, group in enumerate(groups)
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+    ]
+    assert len(resident_groups) == 2
+    original_tails = tuple(original[i][1] for i in resident_groups)
+    consumer = make_request(
+        "consumer", list(range(640)) + list(range(1000, 1017)), 64, sha256
+    )
+    manager.new_step_starts()
+    hit_blocks, hit_tokens, _ = manager.get_computed_blocks(consumer)
+    assert hit_tokens == 640
+    assert hit_blocks.blocks[coordinator.host_group_id][1] is source_tail
+    allocated = manager.allocate_slots(consumer, 16, hit_tokens, hit_blocks)
+    assert allocated is not None
+    consumer.num_computed_tokens = hit_tokens
+    metadata, retained = build_metadata(consumer, 16, allocated)
+    current = manager.get_blocks(consumer.request_id).blocks
+    private_host = current[coordinator.host_group_id][1]
+    private_tails = tuple(current[i][1] for i in resident_groups)
+
+    assert private_host is not source_tail and not private_host.is_null
+    assert [
+        (copy.src_block_id, copy.dst_block_id) for copy in metadata.host_block_copies
+    ] == [(source_tail.block_id, private_host.block_id)]
+    assert all(not block.is_null for block in private_tails), (
+        "A partial local prefix hit must allocate every owner's writable tail"
+    )
+    assert all(new is not old for new, old in zip(private_tails, original_tails))
+    residency = metadata.residency_updates[consumer.request_id]
+    assert residency.pages == [0, 1]
+    assert residency.block_ids == tuple(
+        [original[group_id][0].block_id, tail.block_id]
+        for group_id, tail in zip(resident_groups, private_tails)
+    )
+    assert all(current[group_id][0].is_null for group_id in resident_groups)
+    assert coordinator.take_residency_updates([consumer.request_id]) == {}
+    restores = [
+        transfer for transfer in metadata.command.page_transfers if transfer.restore
+    ]
+    assert len(restores) == 1, "The inherited 64 rows need a pre-forward restore"
+    restore = restores[0]
+    assert not restore.after_forward
+    assert restore.host_block_id == private_host.block_id
+    assert restore.resident_block_ids == tuple(
+        block.block_id for block in private_tails
+    )
+    (mirror,) = metadata.row_mirrors[consumer.request_id]
+    assert mirror.source_starts == tuple(
+        block.block_id * page_size + 64 for block in private_tails
+    )
+    assert mirror.destination_start == private_host.block_id * page_size + 64
+    assert mirror.num_rows == 16
+    assert manager.get_block_ids(producer.request_id) == original_ids
+    assert source_tail.ref_cnt >= 2 and private_host.ref_cnt >= 3
+    assert all(block.ref_cnt >= 2 for block in private_tails)
+
+    # The worker may acknowledge the COW before the restore completes.
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=HiSparseConnectorWorkerMetadata(
+                {restore.transfer_id: 2}, {}, (private_host.block_id,)
+            )
+        )
+    )
+    assert source_tail.ref_cnt == 1
+    assert private_host.ref_cnt == 2
+    assert all(block.ref_cnt == 2 for block in private_tails)
+    _qsa_worker_update(connector, ([], [restore.transfer_id]))
+    assert private_host.ref_cnt == 2
+    assert all(block.ref_cnt == 2 for block in private_tails)
+    _qsa_worker_update(connector, ([], [restore.transfer_id]))
+    assert private_host.ref_cnt == 1
+    assert all(block.ref_cnt == 1 for block in private_tails)
+    manager.block_pool.free_blocks(retained)
+    assert not coordinator.has_pending_work()
+    manager.free(consumer)
+    assert manager.get_block_ids(producer.request_id) == original_ids
+    assert source_tail.ref_cnt == 1
+    manager.free(producer)
+    assert (
+        manager.block_pool.get_num_free_blocks(),
+        host_pool.get_num_free_blocks(),
+    ) == initial_free
+
+
+def test_qsa_private_tp2_partial_ack_keeps_both_kv_layers_and_host_unpublished(
+    qsa_hisparse_manager,
+):
+    """One rank's completion cannot release either layer or publish host KV."""
+    manager = qsa_hisparse_manager
+    connector, coordinator = _qsa_connector(manager)
+    initial_free = (
+        manager.block_pool.get_num_free_blocks(),
+        coordinator.host_manager.block_pool.get_num_free_blocks(),
+    )
+    request = _qsa_request("request")
+    assert _allocate_scheduled(manager, request, num_new_tokens=16) is not None
+    (transfer,) = coordinator.build_offload_command().page_transfers
+    state = coordinator.request_states[request.request_id]
+    host = coordinator.host_manager.req_to_blocks[request.request_id][0]
+    resident = tuple(
+        layer.req_to_blocks[request.request_id][0]
+        for layer in coordinator.resident_managers
+    )
+    endpoints = (host, *resident)
+    assert len(resident) == 2
+    assert all(block.ref_cnt == 2 for block in endpoints)
+
+    # Both private writers enqueue, but only rank 0 reports completion.
+    _qsa_worker_update(
+        connector,
+        ([transfer.transfer_id], [transfer.transfer_id]),
+        ([transfer.transfer_id], []),
+    )
+    assert all(block.ref_cnt == 2 for block in endpoints)
+    assert state.valid_pages == set()
+    assert state.ready_prefix_pages == 0
+    assert state.pending_pages == {0: transfer.transfer_id}
+    assert coordinator.has_pending_work()
+
+    _qsa_worker_update(connector, ([], [transfer.transfer_id]))
+    assert all(block.ref_cnt == 1 for block in endpoints)
+    assert state.valid_pages == {0}
+    assert state.ready_prefix_pages == 1
+    assert state.pending_pages == {}
+    assert not coordinator.has_pending_work()
+
+    # A repeated late metadata delivery must not release the request's own pin.
+    _qsa_worker_update(connector, ([], [transfer.transfer_id]))
+    assert all(block.ref_cnt == 1 for block in endpoints)
+    manager.free(request)
+    assert all(block.ref_cnt == 0 for block in endpoints)
+    assert (
+        manager.block_pool.get_num_free_blocks(),
+        coordinator.host_manager.block_pool.get_num_free_blocks(),
+    ) == initial_free
+
+
+def test_qsa_aborted_transfer_cannot_publish_into_recreated_request_state(
+    qsa_hisparse_manager,
+):
+    """Late completion releases old leases without changing a replacement request."""
+    from vllm.v1.request import RequestStatus
+
+    manager = qsa_hisparse_manager
+    connector, coordinator = _qsa_connector(manager)
+    initial_free = (
+        manager.block_pool.get_num_free_blocks(),
+        coordinator.host_manager.block_pool.get_num_free_blocks(),
+    )
+    old = _qsa_request("reused-request-id")
+    assert _allocate_scheduled(manager, old, num_new_tokens=16) is not None
+    (old_transfer,) = coordinator.build_offload_command().page_transfers
+    old_state = coordinator.request_states[old.request_id]
+    old_host = coordinator.host_manager.req_to_blocks[old.request_id][0]
+    old_resident = tuple(
+        layer.req_to_blocks[old.request_id][0]
+        for layer in coordinator.resident_managers
+    )
+    old_endpoints = (old_host, *old_resident)
+    _qsa_worker_update(
+        connector,
+        ([old_transfer.transfer_id], [old_transfer.transfer_id]),
+        ([old_transfer.transfer_id], []),
+    )
+
+    # Scheduler cancellation reaches this real KVCacheManager.free boundary.
+    old.status = RequestStatus.FINISHED_ABORTED
+    manager.free(old)
+    assert old.request_id not in coordinator.request_states
+    assert all(block.ref_cnt == 1 for block in old_endpoints)
+    assert coordinator.has_pending_work()
+
+    replacement = _qsa_request(old.request_id, first_token=1000)
+    assert _allocate_scheduled(manager, replacement, num_new_tokens=16) is not None
+    (new_transfer,) = coordinator.build_offload_command().page_transfers
+    new_state = coordinator.request_states[replacement.request_id]
+    new_host = coordinator.host_manager.req_to_blocks[replacement.request_id][0]
+    new_resident = tuple(
+        layer.req_to_blocks[replacement.request_id][0]
+        for layer in coordinator.resident_managers
+    )
+    new_endpoints = (new_host, *new_resident)
+    assert new_state is not old_state
+    assert new_transfer.transfer_id != old_transfer.transfer_id
+    assert {id(block) for block in old_endpoints}.isdisjoint(
+        id(block) for block in new_endpoints
+    )
+    assert all(block.ref_cnt == 2 for block in new_endpoints)
+
+    _qsa_worker_update(connector, ([], [old_transfer.transfer_id]))
+    assert all(block.ref_cnt == 0 for block in old_endpoints)
+    assert all(block.ref_cnt == 2 for block in new_endpoints)
+    assert old_state.pending_pages == {}
+    assert old_state.valid_pages == set()
+    assert coordinator.request_states[replacement.request_id] is new_state
+    assert new_state.valid_pages == set()
+    assert new_state.ready_prefix_pages == 0
+    assert new_state.pending_pages == {0: new_transfer.transfer_id}
+
+    # Re-delivery remains harmless after the original pending object disappeared.
+    _qsa_worker_update(connector, ([], [old_transfer.transfer_id]))
+    assert all(block.ref_cnt == 0 for block in old_endpoints)
+    assert all(block.ref_cnt == 2 for block in new_endpoints)
+    assert new_state.pending_pages == {0: new_transfer.transfer_id}
+    assert new_state.valid_pages == set()
+
+    _qsa_worker_update(
+        connector,
+        ([new_transfer.transfer_id], [new_transfer.transfer_id]),
+        ([new_transfer.transfer_id], [new_transfer.transfer_id]),
+    )
+    assert new_state.valid_pages == {0}
+    assert new_state.pending_pages == {}
+    assert all(block.ref_cnt == 1 for block in new_endpoints)
+    assert not coordinator.has_pending_work()
+    manager.free(replacement)
+    assert all(block.ref_cnt == 0 for block in (*old_endpoints, *new_endpoints))
+    assert (
+        manager.block_pool.get_num_free_blocks(),
+        coordinator.host_manager.block_pool.get_num_free_blocks(),
+    ) == initial_free

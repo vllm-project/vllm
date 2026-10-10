@@ -16,7 +16,7 @@ MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 @config
 class HiSparseConfig:
-    """Configuration for HiSparse sparse-MLA KV offloading."""
+    """Configuration for HiSparse DSA and QSA KV offloading."""
 
     device_buffer_size: int | None = Field(default=None, gt=0)
     """Total per-request GPU hot-buffer rows, including the newest-token slot.
@@ -105,7 +105,7 @@ class AttentionConfig:
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
-    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
+    Model Runner V2-only HiSparse DSA and QSA decode hot-buffering. It is inferred
     with defaults when HiSparseConnector is configured (directly or via
     MultiConnector); set it explicitly only to tune its fields."""
 

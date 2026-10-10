@@ -480,6 +480,127 @@ def test_hisparse_requires_v2_model_runner():
         _ = config.use_v2_model_runner
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="QSA requires NVIDIA CUDA")
+@pytest.mark.parametrize(
+    ("model_kind", "layer_type", "supported"),
+    [
+        ("qsa", "full_attention", True),
+        ("wrapped_qsa", "full_attention", True),
+        ("qsa_mtp", "full_attention", True),
+        ("qsa_mtp_full_async", "full_attention", True),
+        ("qsa_mtp_full_async_fp8", "full_attention", True),
+        ("dense_qwen4", "full_attention", False),
+        ("other_indexer", "full_attention", False),
+    ],
+)
+def test_hisparse_accepts_only_supported_qsa_models(
+    tmp_path: Path, model_kind: str, layer_type: str, supported: bool
+):
+    """Local QSA configs need no DSA alias; indexer fields alone are not enough."""
+    from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
+    from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+
+    from vllm.engine.arg_utils import EngineArgs
+
+    use_mtp = model_kind.startswith("qsa_mtp")
+    full_async = model_kind.startswith("qsa_mtp_full_async")
+    fp8 = model_kind.endswith("_fp8")
+    fields = dict(
+        architectures=["Qwen4ExpForCausalLM"],
+        num_hidden_layers=1,
+        layer_types=[layer_type],
+        hidden_size=256,
+        intermediate_size=512,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_experts=4,
+        num_experts_per_tok=2,
+        ple_layer_ids=[],
+    )
+    if use_mtp:
+        fields["mtp_num_hidden_layers"] = 1
+    if model_kind != "dense_qwen4":
+        fields.update(
+            indexer_n_heads=8,
+            indexer_kv_heads=1,
+            indexer_head_dim=128,
+            indexer_compress_ratio=4,
+            indexer_budget=2048,
+        )
+    if model_kind == "other_indexer":
+        fields["architectures"] = ["Qwen3NextForCausalLM"]
+        hf_config = Qwen3NextConfig(**fields)
+    else:
+        hf_config = Qwen4ExpTextConfig(**fields)
+        if model_kind == "wrapped_qsa":
+            hf_config = Qwen4ExpConfig(
+                architectures=["Qwen4ExpForConditionalGeneration"],
+                text_config=hf_config,
+            )
+    hf_config.save_pretrained(tmp_path)
+    args = EngineArgs(
+        model=str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        language_model_only=True,
+        dtype="bfloat16",
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=2,
+        enforce_eager=not full_async,
+        async_scheduling=full_async,
+        kv_cache_dtype="fp8" if fp8 else "auto",
+        compilation_config=(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4]}
+            if full_async
+            else {}
+        ),
+        enable_prefix_caching=False,
+        enable_chunked_prefill=False,
+        disable_hybrid_kv_cache_manager=False,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(), indexer_kv_dtype="fp8" if fp8 else "bf16"
+        ),
+        speculative_config=(
+            {
+                "method": "mtp",
+                "num_speculative_tokens": 3,
+                "index_share_for_mtp_iteration": True,
+            }
+            if use_mtp
+            else None
+        ),
+    )
+    if supported:
+        config = args.create_engine_config()
+        assert config.attention_config.hisparse_config is not None
+        assert not hasattr(config.model_config.hf_config, "index_topk")
+        if use_mtp:
+            from vllm.models.qwen4_exp.nvidia.mtp import _make_draft_vllm_config
+
+            draft = _make_draft_vllm_config(config, mtp_start_layer_idx=1)
+            assert draft.model_config.hf_config.model_type == "qwen4_exp_mtp"
+            assert draft.attention_config.hisparse_config is not None
+            for candidate in (config, draft):
+                assert candidate.cache_config.cache_dtype == ("fp8" if fp8 else "auto")
+                assert candidate.attention_config.indexer_kv_dtype == (
+                    "fp8" if fp8 else "bf16"
+                )
+                assert candidate.scheduler_config.async_scheduling == full_async
+                if full_async:
+                    assert (
+                        candidate.compilation_config.cudagraph_mode.decode_mode()
+                        == (CUDAGraphMode.FULL)
+                    )
+                    assert not candidate.model_config.enforce_eager
+            assert config.speculative_config.num_speculative_tokens == 3
+            assert config.speculative_config.index_share_for_mtp_iteration
+    else:
+        with pytest.raises(ValueError, match="HiSparse is only supported"):
+            args.create_engine_config()
+
+
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)

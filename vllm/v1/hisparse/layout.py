@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
+    SparseFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     compute_layout_strides,
 )
@@ -34,6 +35,8 @@ logger = init_logger(__name__)
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
+
+_SourceSpec = MLAAttentionSpec | SparseFullAttentionSpec
 
 
 @dataclass(frozen=True)
@@ -56,30 +59,36 @@ def get_hisparse_kv_cache_groups(
     if attention_config is None or attention_config.hisparse_config is None:
         return None
 
-    mla_specs: dict[str, KVCacheSpec] = {
+    sparse_specs: dict[str, KVCacheSpec] = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MLAAttentionSpec)
+        if isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
     }
     other_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
         if not isinstance(
-            spec, (MLAAttentionSpec, HiSparseResidentSpec, HiSparseHotSpec)
+            spec,
+            (
+                MLAAttentionSpec,
+                SparseFullAttentionSpec,
+                HiSparseResidentSpec,
+                HiSparseHotSpec,
+            ),
         )
     }
-    if not mla_specs:
+    if not sparse_specs:
         return None
 
     from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 
-    mla_group_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
-    assert mla_group_spec is not None
-    mla_group = KVCacheGroupSpec(list(mla_specs), mla_group_spec)
+    sparse_group_spec = UniformTypeKVCacheSpecs.from_specs(sparse_specs)
+    assert sparse_group_spec is not None
+    sparse_group = KVCacheGroupSpec(list(sparse_specs), sparse_group_spec)
     regular_groups = (
         get_kv_cache_groups(vllm_config, other_specs) if other_specs else []
     )
-    return _lay_out_hisparse_groups(vllm_config, [mla_group, *regular_groups])
+    return _lay_out_hisparse_groups(vllm_config, [sparse_group, *regular_groups])
 
 
 def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
@@ -91,10 +100,10 @@ def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
 
 def _partition_hisparse_specs(
     groups: list[KVCacheGroupSpec],
-) -> tuple[dict[str, MLAAttentionSpec], dict[str, MLAAttentionSpec]]:
+) -> tuple[dict[str, _SourceSpec], dict[str, MLAAttentionSpec]]:
     group_spec = groups[0].kv_cache_spec
     if not isinstance(group_spec, UniformTypeKVCacheSpecs):
-        raise ValueError("HiSparse requires uniform sparse-MLA cache specs.")
+        raise ValueError("HiSparse requires uniform sparse-attention cache specs.")
 
     specs = group_spec.kv_cache_specs
     if any(
@@ -102,14 +111,22 @@ def _partition_hisparse_specs(
         for spec in specs.values()
     ):
         raise ValueError("HiSparse does not support DeepSeek V4.")
-    if not all(isinstance(spec, MLAAttentionSpec) for spec in specs.values()):
-        raise ValueError("HiSparse requires its first cache group to contain MLA only.")
+    if not all(
+        isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
+        for spec in specs.values()
+    ):
+        raise ValueError(
+            "HiSparse requires its first cache group to contain sparse attention only."
+        )
 
     source_specs = {
         name: spec
         for name, spec in specs.items()
-        if isinstance(spec, MLAAttentionSpec)
-        and spec.cache_role is SparseCacheRole.SPARSE
+        if isinstance(spec, SparseFullAttentionSpec)
+        or (
+            isinstance(spec, MLAAttentionSpec)
+            and spec.cache_role is SparseCacheRole.SPARSE
+        )
     }
     indexer_specs = {
         name: spec
@@ -118,7 +135,13 @@ def _partition_hisparse_specs(
         and spec.cache_role is SparseCacheRole.INDEXER
     }
     if not source_specs or not indexer_specs:
-        raise ValueError("HiSparse requires sparse-MLA and indexer cache specs.")
+        raise ValueError("HiSparse requires sparse attention and indexer cache specs.")
+    if any(
+        isinstance(spec, SparseFullAttentionSpec) for spec in source_specs.values()
+    ) and not all(
+        isinstance(spec, SparseFullAttentionSpec) for spec in source_specs.values()
+    ):
+        raise ValueError("HiSparse cannot mix MLA and sparse full-attention sources.")
     return source_specs, indexer_specs
 
 
@@ -133,11 +156,19 @@ def _lay_out_hisparse_groups(
         raise ValueError("HiSparse requires one resolved GPU block size.")
     gpu_block_size = block_sizes.pop()
 
-    config = ResolvedHiSparseConfig.from_vllm_config(
-        vllm_config,
-        vllm_config.model_config.hf_config.index_topk,
-        gpu_block_size,
-    )
+    sparse_full_specs = [
+        spec
+        for spec in source_specs.values()
+        if isinstance(spec, SparseFullAttentionSpec)
+    ]
+    if sparse_full_specs:
+        top_k_values = {spec.top_k for spec in sparse_full_specs}
+        if len(top_k_values) != 1:
+            raise ValueError("HiSparse requires one sparse selection capacity.")
+        top_k = top_k_values.pop()
+    else:
+        top_k = vllm_config.model_config.hf_config.index_topk
+    config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, top_k, gpu_block_size)
     assert config is not None
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
         cast(dict[str, KVCacheSpec], indexer_specs)
@@ -152,7 +183,7 @@ def _lay_out_hisparse_groups(
 
     indexer_page = sum(spec.page_size_bytes for spec in indexer_specs.values())
     hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
-    hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
+    hot_units: list[list[tuple[str, _SourceSpec]]] = []
     for layer_name, layer_spec in source_specs.items():
         if layer_spec.is_index_group_leader or not hot_units:
             hot_units.append([])
@@ -161,7 +192,7 @@ def _lay_out_hisparse_groups(
     resident_groups: list[KVCacheGroupSpec] = []
     hot_groups: list[KVCacheGroupSpec] = []
 
-    def append_hot_group(layers: list[tuple[str, MLAAttentionSpec]]) -> None:
+    def append_hot_group(layers: list[tuple[str, _SourceSpec]]) -> None:
         page_sizes = {spec.page_size_bytes for _, spec in layers}
         if len(page_sizes) != 1:
             raise ValueError(
@@ -195,7 +226,7 @@ def _lay_out_hisparse_groups(
             )
         )
 
-    current: list[tuple[str, MLAAttentionSpec]] = []
+    current: list[tuple[str, _SourceSpec]] = []
     current_page = 0
     for unit in hot_units:
         unit_page = sum(spec.page_size_bytes for _, spec in unit)
@@ -236,12 +267,34 @@ def create_hisparse_layout(
 ) -> HiSparseLayout:
     """Size the host pool for groups laid out by `get_hisparse_kv_cache_groups`."""
     (source_group,) = [group for group in groups if group.host_resident]
-    shared_host_pool = use_shared_hisparse_host_pool(vllm_config)
+    source_group_spec = source_group.kv_cache_spec
+    assert isinstance(source_group_spec, UniformTypeKVCacheSpecs)
+    sparse_full_specs = [
+        spec
+        for spec in source_group_spec.kv_cache_specs.values()
+        if isinstance(spec, SparseFullAttentionSpec)
+    ]
+    # Sparse full attention stores distinct TP shards. Each rank writes its
+    # own host cache; MLA retains its existing replicated, rank-0 writer pool.
+    shared_host_pool = not sparse_full_specs and use_shared_hisparse_host_pool(
+        vllm_config
+    )
     host_block_stride = get_hisparse_host_block_stride(
         source_group.kv_cache_spec.page_size_bytes,
         use_shared_host_pool=shared_host_pool,
     )
-    host_num_blocks = host_budget // host_block_stride
+    # host_pool_gib is logical capacity per DP replica, independent of TP.
+    # Count each full K/V head once even when TP replicates some heads. Rank
+    # padding and replicated shards remain physical allocation costs only.
+    logical_block_bytes = (
+        sum(
+            spec.num_states * spec.total_num_kv_heads * spec.state_content_size_bytes
+            for spec in sparse_full_specs
+        )
+        if sparse_full_specs
+        else host_block_stride
+    )
+    host_num_blocks = host_budget // logical_block_bytes
     if host_num_blocks <= 0:
         raise ValueError("HiSparse has no allocatable host blocks.")
     # Every computed page needs a host block, so one request at max_model_len

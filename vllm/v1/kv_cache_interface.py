@@ -673,6 +673,66 @@ class FullAttentionSpec(AttentionSpec):
         return merged_spec
 
 
+@dataclass(frozen=True, kw_only=True)
+class SparseFullAttentionSpec(FullAttentionSpec):
+    """Complete K/V history whose decode reads a sparse token selection.
+
+    Unlike MLA's replicated latent cache, these K/V heads are TP shards.
+    The total number of unique heads defines the logical host-pool capacity;
+    ``num_kv_heads`` continues to describe this worker's physical cache.
+    """
+
+    top_k: int
+    """Maximum selected token slots, excluding a packed selection's count."""
+    total_num_kv_heads: int
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.top_k <= 0:
+            raise ValueError("Sparse attention top_k must be positive.")
+        if (
+            self.num_kv_heads <= 0
+            or self.total_num_kv_heads < self.num_kv_heads
+            or self.total_num_kv_heads % self.num_kv_heads
+        ):
+            raise ValueError(
+                "Sparse attention total_num_kv_heads must be a positive "
+                "multiple of the worker's num_kv_heads."
+            )
+
+    @property
+    def is_index_group_leader(self) -> bool:
+        # Each sparse full-attention layer owns its selection and hot-cache LRU.
+        return True
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, SparseFullAttentionSpec) for spec in specs), (
+            "Sparse full-attention specs must be merged separately."
+        )
+        assert all(
+            spec.top_k == specs[0].top_k
+            and spec.total_num_kv_heads == specs[0].total_num_kv_heads
+            for spec in specs
+        ), "Sparse full-attention layers must have the same selection and head counts."
+        merged = FullAttentionSpec.merge(
+            [
+                replace_as(
+                    spec,
+                    FullAttentionSpec,
+                    drop=("top_k", "total_num_kv_heads"),
+                )
+                for spec in specs
+            ]
+        )
+        return replace_as(
+            merged,
+            cls,
+            top_k=specs[0].top_k,
+            total_num_kv_heads=specs[0].total_num_kv_heads,
+        )
+
+
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
         return

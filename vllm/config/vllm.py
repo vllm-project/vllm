@@ -1829,12 +1829,29 @@ class VllmConfig:
                     "HiSparse requires --scheduler-reserve-full-isl; remove "
                     "--no-scheduler-reserve-full-isl."
                 )
-            if self.model_config is not None and not hasattr(
-                self.model_config.hf_config, "index_topk"
-            ):
-                raise ValueError(
-                    "HiSparse is only supported for DSA models with index_topk."
+            if self.model_config is not None:
+                hf_text_config = self.model_config.hf_text_config
+                is_qsa = (
+                    hf_text_config.model_type in ("qwen4_exp_text", "qwen4_exp_mtp")
+                    and getattr(hf_text_config, "indexer_n_heads", None) is not None
+                    and any(
+                        layer_type
+                        in (
+                            "full_attention",
+                            "qwen_sparse_attention",
+                            "indexed_attention",
+                        )
+                        for layer_type in getattr(hf_text_config, "layer_types", ())
+                    )
                 )
+                if (
+                    not hasattr(self.model_config.hf_config, "index_topk")
+                    and not is_qsa
+                ):
+                    raise ValueError(
+                        "HiSparse is only supported for DSA models with index_topk "
+                        "or Qwen4Exp QSA models."
+                    )
             if self.kv_transfer_config is not None and (
                 self.kv_transfer_config.kv_connector
                 not in (

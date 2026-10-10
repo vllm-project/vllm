@@ -70,6 +70,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_FP8: tl.constexpr,
+    PHYSICAL_INDICES: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
@@ -108,27 +109,26 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
 
     for tile in range(split_id, tile_end, NUM_SPLITS):
         columns = tile * BLOCK_N + column_offsets
-        logical_token = tl.load(
+        selected_token = tl.load(
             indices_ptr + row * stride_indices_row + columns,
             mask=columns < TOPK,
             other=-1,
         )
-        safe_token = tl.maximum(logical_token, 0)
-        logical_page = safe_token // PAGE_SIZE
+        safe_token = tl.maximum(selected_token, 0)
+        selected_page = safe_token // PAGE_SIZE
         page_offset = safe_token % PAGE_SIZE
-        valid = (
-            (request >= 0)
-            & (request < num_requests)
-            & (logical_token >= 0)
-            & (logical_page < PAGE_TABLE_WIDTH)
-        )
-        physical_page = tl.load(
-            block_table_ptr
-            + safe_request * stride_table_req
-            + tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1),
-            mask=valid,
-            other=-1,
-        )
+        valid = (request >= 0) & (request < num_requests) & (selected_token >= 0)
+        if PHYSICAL_INDICES:
+            physical_page = selected_page
+        else:
+            valid &= selected_page < PAGE_TABLE_WIDTH
+            physical_page = tl.load(
+                block_table_ptr
+                + safe_request * stride_table_req
+                + tl.minimum(selected_page, PAGE_TABLE_WIDTH - 1),
+                mask=valid,
+                other=-1,
+            )
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
@@ -604,6 +604,7 @@ def qsa_sparse_paged_attention(
     v_scale: float | None = None,
     *,
     output_gate: torch.Tensor,
+    physical_indices: bool = False,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
@@ -617,6 +618,10 @@ def qsa_sparse_paged_attention(
     the expand kernel; never a token index). The kernel reads it as the
     tile-loop bound. use_prefill_config only steers the top of the config table; see
     _select_config.
+
+    With physical_indices=True, selection entries address rows in the supplied
+    cache directly, bypassing block_table translation. HiSparse callers pass
+    the attention cache view matching the resolver's physical row stride.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -732,6 +737,7 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         IS_FP8=is_fp8,
+        PHYSICAL_INDICES=physical_indices,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -875,6 +881,7 @@ def warmup_qsa_sparse_paged_attention(
             BLOCK_M=block_m,
             BLOCK_N=block_n,
             IS_FP8=is_fp8,
+            PHYSICAL_INDICES=False,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),

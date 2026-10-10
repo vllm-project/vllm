@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
 )
 
 
@@ -866,13 +867,17 @@ class QSACompressedKeyCache(_QSAStateCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        del vllm_config
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
             tokens_per_state=self.compress_ratio,
+            cache_role=(
+                SparseCacheRole.INDEXER
+                if vllm_config.attention_config.hisparse_config is not None
+                else SparseCacheRole.SPARSE
+            ),
         )
 
 

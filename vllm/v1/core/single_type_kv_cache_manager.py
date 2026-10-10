@@ -2505,6 +2505,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
 
     def __init__(self, kv_cache_spec: HiSparseResidentSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
+        self._partial_local_tails: dict[str, int] = {}
         self.residency_changes: dict[str, dict[int, KVCacheBlock]] = {}
 
     def get_num_blocks_to_allocate(
@@ -2534,7 +2535,11 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         required = cdiv(num_tokens, self.block_size)
         if apply_admission_cap:
             required = min(required, self.max_admission_blocks_per_request)
-        return max(required - max(existing, host_pages), 0)
+        needs_private_tail = (
+            request_id not in self.num_cached_block
+            and num_local_computed_tokens % self.block_size != 0
+        )
+        return int(needs_private_tail) + max(required - max(existing, host_pages), 0)
 
     def allocate_external_computed_blocks(
         self,
@@ -2567,21 +2572,35 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         req_blocks.extend([self._null_block] * num_host_pages)
         self.num_cached_block[request_id] = 0
         assert self.coordinator is not None
-        self.coordinator.commit_computed_blocks(request_id, num_host_pages)
+        num_full_pages, tail_tokens = divmod(num_local_computed_tokens, self.block_size)
+        # Only sealed pages can share resident copies. A partial hit needs a
+        # private writable page, allocated after all groups touch their hits.
+        self.coordinator.commit_computed_blocks(request_id, num_full_pages)
+        if tail_tokens and num_external_computed_tokens == 0:
+            self._partial_local_tails[request_id] = num_full_pages
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
         del num_tokens_main_model
         req_blocks = self.req_to_blocks[request_id]
+        private_tail = []
+        tail_page = self._partial_local_tails.pop(request_id, None)
+        if tail_page is not None:
+            assert req_blocks[tail_page].is_null
+            private_tail = self.block_pool.get_new_blocks(1)
+            req_blocks[tail_page] = private_tail[0]
+            assert self.coordinator is not None
+            self.coordinator.plan_prefix_tail_restore(request_id, tail_page)
         num_new_blocks = cdiv(num_tokens, self.block_size) - len(req_blocks)
         if num_new_blocks <= 0:
-            return []
+            return private_tail
         new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
         req_blocks.extend(new_blocks)
-        return new_blocks
+        return private_tail + new_blocks
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self._partial_local_tails.pop(request_id, None)
         assert self.coordinator is not None
         self.coordinator.free(request_id)
         blocks = self.get_residency_row(request_id)
