@@ -116,7 +116,7 @@ def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
 @pytest.mark.parametrize("scale_format", ["packed", "float32", "ceil_ue8m0"])
 @pytest.mark.parametrize("hidden_size", [256, 2048])
 @pytest.mark.parametrize("clamp_limit", [None, 10.0])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA graph test")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm graph test")
 def test_silu_quant_skips_expert_padding_on_graph_replay(
     counts: list[int],
     group_size: int,
