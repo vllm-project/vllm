@@ -18,19 +18,25 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     KVChecksumRecord,
     KVChecksumScheduled,
 )
+from vllm.distributed.kv_transfer.kv_checksum.scheduler import _sum_replicas
 from vllm.distributed.kv_transfer.kv_checksum.worker import (
     KVChecksumOutput,
     KVChecksumWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheTensor,
     MambaSpec,
+    MambaStateSplit,
     MLAAttentionSpec,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.worker.utils import allocate_kv_cache
 
 pytestmark = pytest.mark.cpu_test
 
@@ -382,6 +388,57 @@ def test_gathers_are_chunked_without_changing_results(monkeypatch):
     )
 
 
+def _mamba_name(layer: int) -> str:
+    return f"model.layers.{layer}.linear_attn"
+
+
+# conv (4 x 8 bf16 = 64 bytes) and ssm (2 x 8 fp32 = 64 bytes): 16 pieces,
+# then an extra state (5 fp32 = 20 bytes) that is not checksummed.
+MAMBA_SHAPES = ((4, 8), (2, 8), (5,))
+MAMBA_DTYPES = (torch.bfloat16, torch.float32, torch.float32)
+MAMBA_COVERED_BYTES = 128
+
+
+def _mamba_spec(shapes=MAMBA_SHAPES, dtypes=MAMBA_DTYPES, **kwargs) -> MambaSpec:
+    return MambaSpec(block_size=10000, shapes=shapes, dtypes=dtypes, **kwargs)
+
+
+def _mamba_cache(
+    content_bytes: int, page_bytes: int, seed: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """A Mamba layer's ``[blocks, 1, 1, content]`` int8 cache view over padded
+    pages, as bound by the model runner, and the pages it views."""
+    gen = torch.Generator().manual_seed(seed)
+    pages = torch.randint(
+        0, 256, (NUM_BLOCKS, page_bytes), generator=gen, dtype=torch.uint8
+    )
+    view = pages[:, :content_bytes].view(torch.int8).view(NUM_BLOCKS, 1, 1, -1)
+    return view, pages
+
+
+def _mamba_reference(
+    states: dict[int, torch.Tensor],
+    block_id: int,
+    covered_bytes: int = MAMBA_COVERED_BYTES,
+) -> np.uint64:
+    """The definition for Mamba state: per (layer, state shard) the slice of
+    the covered state bytes, s = sum_j x_j * (2j + 1), weighted by
+    m = 2 * (layer * H + shard) + 1. ``states`` maps layer * H + shard to its
+    pages."""
+    total = np.uint64(0)
+    for slice_index, pages in states.items():
+        pieces = pages[block_id, :covered_bytes].contiguous()
+        x = pieces.view(torch.int64).numpy().view(np.uint64)
+        j = np.arange(len(x), dtype=np.uint64)
+        with np.errstate(over="ignore"):
+            s = (x * (np.uint64(2) * j + np.uint64(1))).sum(dtype=np.uint64)
+            total += (np.uint64(2) * np.uint64(slice_index) + np.uint64(1)) * s
+    return total
+
+
+MAMBA_BLOCKS = KVChecksumBlocks(num_tokens=39, groups={0: (0, [3])})
+
+
 _LOGICAL = _logical_kv(heads=2)
 
 
@@ -399,12 +456,8 @@ def _misaligned_cache() -> torch.Tensor:
     "group, caches, worker_kwargs",
     [
         (
-            _group(
-                MambaSpec(
-                    block_size=BLOCK_SIZE, shapes=((4,),), dtypes=(torch.float32,)
-                )
-            ),
-            {_name(0): _cache(_LOGICAL)},
+            _group(_mamba_spec(((3,),), (torch.float16,)), _mamba_name(0)),
+            {_mamba_name(0): _mamba_cache(6, 8)[0]},
             {},
         ),
         (_group(_spec(2, num_head_slots=2)), {_name(0): _cache(_LOGICAL)}, {}),
@@ -431,7 +484,7 @@ def _misaligned_cache() -> torch.Tensor:
         ),
     ],
     ids=[
-        "mamba",
+        "mamba-state-not-whole-pieces",
         "packed-head-slots",
         "host-resident",
         "unknown-replication",
@@ -456,6 +509,302 @@ def test_unsupported_groups_are_skipped(group, caches, worker_kwargs):
     assert set(checksums) == {1}
     # Rank 0 holds the model's first heads, so its part covers only those.
     np.testing.assert_array_equal(checksums[1].values[:, 0], _reference({9: _LOGICAL}))
+
+
+def test_mamba_state_checksum_covers_the_transferred_states():
+    """A Mamba layer's state is one slice of its conv and ssm bytes: extra
+    states and page padding (never transferred, possibly stale) do not count,
+    a flipped state bit does."""
+    cache, pages = _mamba_cache(content_bytes=148, page_bytes=160)
+    worker = _worker(
+        _config(_group(_mamba_spec(), _mamba_name(2))), {_mamba_name(2): cache}
+    )
+    [group] = _send(worker, MAMBA_BLOCKS).values()
+    expected = _mamba_reference({2 * MAX_KV_HEADS_PER_LAYER: pages}, 3)
+    assert group.values[0, 0] == expected
+
+    pages[3, MAMBA_COVERED_BYTES:] ^= 0xFF  # Extra state and padding.
+    assert _send(worker, MAMBA_BLOCKS)[0].values[0, 0] == expected
+    pages[3, MAMBA_COVERED_BYTES - 1] ^= 1
+    assert _send(worker, MAMBA_BLOCKS)[0].values[0, 0] != expected
+
+
+def test_mamba_state_checksum_on_allocated_kv_cache():
+    """On the model runner's views of an allocated cache (two Mamba layers
+    interleaved per block, padded pages, a nonzero offset), each layer's
+    checksum covers its own state bytes, located independently here from the
+    tensor's offset and strides."""
+    page, layers = 160, [_mamba_name(2), _mamba_name(5)]
+    tensor = KVCacheTensor(
+        size=8 + 2 * page * NUM_BLOCKS,
+        layers=layers,
+        layer_stride=page,
+        block_stride=2 * page,
+        offset=8,
+    )
+    spec = _mamba_spec(page_size_padded=page)
+    config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[tensor],
+        kv_cache_groups=[_group(spec, *layers)],
+    )
+    caches = allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.LBHNC)
+    raw = torch.empty(0, dtype=torch.uint8).set_(caches[layers[0]].untyped_storage())
+    raw.copy_(torch.randint(0, 256, raw.shape, dtype=torch.uint8))
+
+    def pages(layer: int) -> torch.Tensor:
+        starts = [
+            tensor.offset + layer * tensor.layer_stride + b * tensor.block_stride
+            for b in range(NUM_BLOCKS)
+        ]
+        return torch.stack([raw[start : start + page] for start in starts])
+
+    worker = _worker(config, caches)
+    expected = _mamba_reference(
+        {2 * MAX_KV_HEADS_PER_LAYER: pages(0), 5 * MAX_KV_HEADS_PER_LAYER: pages(1)},
+        3,
+    )
+    assert _send(worker, MAMBA_BLOCKS)[0].values[0, 0] == expected
+
+
+@pytest.mark.parametrize("tp_replicated", [False, True])
+def test_mamba_state_tp_shards_and_replicas(tp_replicated):
+    """TP-sharded state sums its shards (each weighed by its shard index);
+    replicated state is checked per replica, the producer sending replica 0."""
+    spec = _mamba_spec(tp_replicated=tp_replicated)
+    caches = [_mamba_cache(148, 160, seed=rank) for rank in range(2)]
+    if tp_replicated:
+        caches[1][1].copy_(caches[0][1])
+    workers = [
+        _worker(
+            _config(_group(spec, _mamba_name(2))),
+            {_mamba_name(2): caches[rank][0]},
+            tp_rank=rank,
+            tp_size=2,
+        )
+        for rank in range(2)
+    ]
+    first = 2 * MAX_KV_HEADS_PER_LAYER
+    if tp_replicated:
+        expected = _mamba_reference({first: caches[0][1]}, 3)
+        sent = [_send(worker, MAMBA_BLOCKS) for worker in workers]
+        assert sent[1] == {} and sent[0][0].values[0, 0] == expected
+        for rank, worker in enumerate(workers):
+            [received] = _recv(worker, MAMBA_BLOCKS).values()
+            assert received.replica_keys == [(2, rank)]
+            assert received.values[0, 0] == expected
+    else:
+        expected = _mamba_reference({first: caches[0][1], first + 1: caches[1][1]}, 3)
+        total = sum(_send(worker, MAMBA_BLOCKS)[0].values[0, 0] for worker in workers)
+        assert np.uint64(total) == expected
+
+
+def test_mamba_fingerprint_follows_state_shapes_not_block_size():
+    """Producer and consumer compare a Mamba group only if its checksummed
+    states have the same shapes (which change with the TP size), whatever
+    their block sizes (the sequence length without prefix caching)."""
+
+    def fingerprint(spec: MambaSpec) -> int:
+        cache = _mamba_cache(148, 160)[0]
+        worker = _worker(_config(_group(spec, _mamba_name(2))), {_mamba_name(2): cache})
+        return _send_record(worker, MAMBA_BLOCKS).fingerprints[0]
+
+    base = fingerprint(_mamba_spec())
+    assert (
+        fingerprint(
+            MambaSpec(block_size=4096, shapes=MAMBA_SHAPES, dtypes=MAMBA_DTYPES)
+        )
+        == base
+    )
+    assert fingerprint(_mamba_spec(shapes=((4, 8), (2, 8), (6,)))) == base
+    assert fingerprint(_mamba_spec(shapes=((2, 16), (2, 8), (5,)))) != base
+
+
+# A TP-split Mamba2 layer, globally: conv [x, B, C] of 8 rows each by 3 bf16
+# columns, and a temporal state of 8 heads of 2 x 2 fp32.
+SPLIT_ROWS = 8
+
+
+def _split_states(fp32_conv: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+    gen = torch.Generator().manual_seed(0)
+    conv = torch.randint(-(2**31), 2**31, (3 * SPLIT_ROWS, 3), generator=gen)
+    temporal = torch.randint(-(2**31), 2**31, (SPLIT_ROWS, 2, 2), generator=gen)
+    temporal = temporal.to(torch.int32).view(torch.float32)
+    if fp32_conv:
+        return conv.to(torch.int32).view(torch.float32), temporal
+    return conv.to(torch.int16).view(torch.bfloat16), temporal
+
+
+def _split_layer(
+    states: tuple[torch.Tensor, torch.Tensor],
+    tp_size: int,
+    rank: int,
+    one_group: bool = False,
+    dim_first: bool = True,
+) -> tuple[MambaSpec, torch.Tensor]:
+    """A rank's spec and ``[blocks, 1, 1, state]`` cache with its shard of
+    the global ``states`` in block 3. With ``one_group``, every rank holds B
+    and C whole, as with a single Mamba2 group."""
+    conv, temporal = states
+    rows = SPLIT_ROWS // tp_size
+    shard = slice(rank * rows, (rank + 1) * rows)
+    x, b, c = conv.split(SPLIT_ROWS)
+    if one_group:
+        group_rows, replicas = SPLIT_ROWS, tp_size
+        local_conv = torch.cat([x[shard], b, c])
+    else:
+        group_rows, replicas = rows, 1
+        local_conv = torch.cat([x[shard], b[shard], c[shard]])
+    if not dim_first:
+        local_conv = local_conv.T.contiguous()
+    local_temporal = temporal[shard].contiguous()
+    spec = _mamba_spec(
+        shapes=(tuple(local_conv.shape), tuple(local_temporal.shape)),
+        dtypes=(local_conv.dtype, local_temporal.dtype),
+        state_splits=(
+            MambaStateSplit(
+                0 if dim_first else 1,
+                ((rows, 1), (group_rows, replicas), (group_rows, replicas)),
+            ),
+            MambaStateSplit(0, ((rows, 1),)),
+        ),
+    )
+    content = torch.cat(
+        [t.view(torch.uint8).flatten() for t in (local_conv, local_temporal)]
+    )
+    cache, pages = _mamba_cache(len(content), len(content) + 8, seed=rank)
+    pages[3, : len(content)] = content
+    return spec, cache
+
+
+def _split_reference(states: tuple[torch.Tensor, torch.Tensor]) -> np.uint64:
+    """The definition for TP-split Mamba state: one slice per global row (the
+    conv rows, then the temporal heads), whose pieces are its elements read
+    unsigned."""
+    conv, temporal = states
+    total = np.uint64(0)
+    for row, data in enumerate([*conv, *temporal]):
+        unsigned = np.uint16 if data.element_size() == 2 else np.uint32
+        x = data.contiguous().view(
+            torch.int16 if unsigned == np.uint16 else torch.int32
+        )
+        x = x.flatten().numpy().view(unsigned).astype(np.uint64)
+        j = np.arange(len(x), dtype=np.uint64)
+        m = np.uint64(2 * (2 * MAX_KV_HEADS_PER_LAYER + row) + 1)
+        with np.errstate(over="ignore"):
+            total += m * (x * (np.uint64(2) * j + np.uint64(1))).sum(dtype=np.uint64)
+    return total
+
+
+def _split_workers(
+    states, tp_size, **kwargs
+) -> tuple[list[KVChecksumWorker], list[torch.Tensor]]:
+    workers, caches = [], []
+    for rank in range(tp_size):
+        spec, cache = _split_layer(states, tp_size, rank, **kwargs)
+        caches.append(cache)
+        workers.append(
+            _worker(
+                _config(_group(spec, _mamba_name(2))),
+                {_mamba_name(2): cache},
+                tp_rank=rank,
+                tp_size=tp_size,
+            )
+        )
+    return workers, caches
+
+
+@pytest.mark.parametrize("fp32_conv", [False, True])
+@pytest.mark.parametrize("dim_first", [True, False])
+@pytest.mark.parametrize("one_group", [False, True])
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_split_mamba_state_checksum_is_tp_independent(
+    tp_size, one_group, dim_first, fp32_conv
+):
+    """With its TP split known, a Mamba layer's producer checksum (replica 0
+    of replicated B and C) is the definition over the global state, whatever
+    the TP size, conv layout or conv dtype, so producers and consumers of
+    different TP sizes compare it."""
+    states = _split_states(fp32_conv)
+    workers, _ = _split_workers(
+        states, tp_size, one_group=one_group, dim_first=dim_first
+    )
+    total = np.uint64(0)
+    for worker in workers:
+        for group in _send(worker, MAMBA_BLOCKS).values():
+            with np.errstate(over="ignore"):
+                total += group.values.sum(dtype=np.uint64)
+    assert total == _split_reference(states)
+
+
+def test_split_mamba_state_checks_each_replica():
+    """Replicated B and C are checked per replica: corrupting one rank's copy
+    fails that replica's check only."""
+    states = _split_states()
+    workers, caches = _split_workers(states, 2, one_group=True)
+
+    def checks():
+        groups = [group for w in workers for group in _recv(w, MAMBA_BLOCKS).values()]
+        return [int(check[0]) for check in _sum_replicas(groups, 1)]
+
+    expected = int(_split_reference(states))
+    assert checks() == [expected, expected]
+    # Rank 1's copy of B, after its x rows of 3 bf16.
+    caches[1][3, 0, 0, SPLIT_ROWS // 2 * 3 * 2] ^= 1
+    first, second = checks()
+    assert first == expected and second != expected
+
+
+def test_split_mamba_fingerprint_is_tp_independent():
+    """The fingerprint of a TP-split Mamba layer follows its global shapes:
+    equal across TP sizes and conv layouts, different for other conv widths
+    (e.g. other speculative token counts)."""
+
+    def fingerprint(states, tp_size, **kwargs) -> int:
+        [worker, *_], _ = _split_workers(states, tp_size, **kwargs)
+        return _send_record(worker, MAMBA_BLOCKS).fingerprints[0]
+
+    states = _split_states()
+    base = fingerprint(states, 1)
+    assert fingerprint(states, 2) == base
+    assert fingerprint(states, 2, dim_first=False) == base
+    wider = (torch.cat([states[0], states[0][:, :1]], dim=1), states[1])
+    assert fingerprint(wider, 2) != base
+
+
+def test_state_splits_cover_state_shapes():
+    """The model layers' TP splits partition the split dimension of the state
+    shapes they describe, into segments whose global sizes do not depend on
+    the TP size; with one Mamba2 group, B and C are whole on every rank."""
+    calc = MambaStateShapeCalculator
+
+    def cases(tp_size):
+        yield (
+            calc.mamba1_state_shape(tp_size, 64, 16, 4),
+            calc.mamba1_state_splits(tp_size, 64),
+        )
+        yield (
+            calc.gated_delta_net_state_shape(tp_size, 4, 8, 16, 32, 4),
+            calc.gated_delta_net_state_splits(tp_size, 4, 8, 16, 32),
+        )
+        for n_groups in (1, 4):
+            yield (
+                calc.mamba2_state_shape(tp_size, 64, n_groups, 8, 8, 16, 4),
+                calc.mamba2_state_splits(tp_size, 64, n_groups, 8, 16),
+            )
+
+    global_sizes = []
+    for tp_size in (1, 2, 4):
+        sizes = []
+        for shapes, splits in cases(tp_size):
+            assert splits is not None
+            for shape, split in zip(shapes, splits):
+                assert sum(local for local, _ in split.segments) == shape[split.axis]
+                sizes.append([local * tp_size // r for local, r in split.segments])
+        global_sizes.append(sizes)
+    assert global_sizes[0] == global_sizes[1] == global_sizes[2]
+    [conv, _] = calc.mamba2_state_splits(2, 64, 1, 8, 16)
+    assert conv.segments == ((32, 1), (16, 2), (16, 2))
 
 
 def test_recv_checksummed_only_when_its_load_finishes():

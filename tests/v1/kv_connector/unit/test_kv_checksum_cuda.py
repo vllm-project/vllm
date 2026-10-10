@@ -12,6 +12,7 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_checksum import worker as checksum_worker
 from vllm.distributed.kv_transfer.kv_checksum.checksum import (
+    MAX_KV_HEADS_PER_LAYER,
     KVChecksumBlocks,
     KVChecksumScheduled,
 )
@@ -19,15 +20,23 @@ from vllm.triton_utils import HAS_TRITON
 
 from .test_kv_checksum import (
     BLOCKS,
+    MAMBA_BLOCKS,
     NUM_BLOCKS,
     _cache,
     _config,
     _group,
     _logical_kv,
+    _mamba_cache,
+    _mamba_name,
+    _mamba_reference,
+    _mamba_spec,
     _name,
     _reference,
     _send,
     _spec,
+    _split_layer,
+    _split_reference,
+    _split_states,
     _worker,
 )
 
@@ -88,6 +97,44 @@ def test_triton_kernel_accumulates_into_a_strided_column():
     values = out.cpu().numpy().view(np.uint64)
     np.testing.assert_array_equal(values[:, 1], _reference({0: logical}))
     assert not values[:, 0].any() and not values[:, 2].any()
+
+
+@needs_triton
+def test_triton_kernel_sums_multi_chunk_mamba_states():
+    """A Mamba state of 24K pieces (192 KiB) spans two kernel chunks, the
+    last partial, whose sums add up atomically into one value."""
+    shapes, dtypes = ((256, 128), (128, 128)), (torch.float32, torch.float32)
+    covered = 4 * (256 + 128) * 128
+    cache, pages = _mamba_cache(covered, covered + 64)
+    worker = _worker(
+        _config(_group(_mamba_spec(shapes, dtypes), _mamba_name(2))),
+        {_mamba_name(2): cache.cuda()},
+    )
+    expected = _mamba_reference({2 * MAX_KV_HEADS_PER_LAYER: pages}, 3, covered)
+    assert _send(worker, MAMBA_BLOCKS)[0].values[0, 0] == expected
+
+
+@needs_triton
+@pytest.mark.parametrize("dim_first", [True, False])
+def test_triton_kernel_sums_split_mamba_rows(dim_first):
+    """Rows of TP-split Mamba state are slices of 2-byte pieces, which the
+    kernel reads unsigned: TP2 shards with replicated B and C sum to the
+    definition over the global state."""
+    states = _split_states()
+    total = np.uint64(0)
+    for rank in range(2):
+        spec, cache = _split_layer(states, 2, rank, one_group=True, dim_first=dim_first)
+        worker = _worker(
+            _config(_group(spec, _mamba_name(2))),
+            {_mamba_name(2): cache.cuda()},
+            tp_rank=rank,
+            tp_size=2,
+        )
+        assert all(view.use_triton for view in worker._layer_views[0])
+        for group in _send(worker, MAMBA_BLOCKS).values():
+            with np.errstate(over="ignore"):
+                total += group.values.sum(dtype=np.uint64)
+    assert total == _split_reference(states)
 
 
 def test_copy_is_ordered_after_checksums_for_any_reader():

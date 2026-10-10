@@ -16,6 +16,7 @@ import hashlib
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from math import prod
 
 import numpy as np
 import torch
@@ -39,17 +40,23 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import PIN_MEMORY, current_stream
+from vllm.utils.torch_utils import PIN_MEMORY, current_stream, get_dtype_size
 from vllm.v1.core.kv_cache_planning import layer_tp_replicas
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
 logger = init_logger(__name__)
+
+# The leading states of a Mamba layer's page that are checksummed: the states
+# NIXL transfers (conv and ssm; see derive_mamba_conv_split and
+# _build_mamba_local), or the only state of a layer with one.
+_MAMBA_CHECKSUMMED_STATES = 2
 
 # Upper bound on the bytes of KV gathered per kernel launch, which bounds the
 # transient device memory of a checksum pass for long prompts.
@@ -57,14 +64,15 @@ _MAX_GATHER_BYTES = 64 * 1024 * 1024
 
 
 class _LayerView:
-    """One layer's KV cache as 8-byte pieces, for weighted sums.
+    """One layer's KV cache as integer pieces, for weighted sums.
 
     ``pieces`` is ``[num_blocks, kernel_blocks, heads, tokens, pieces]``. A
     piece ``j`` of slice ``(layer, head)`` weighs ``m * (2 * j + 1)``, with
     ``m = 2 * (layer * H + head) + 1`` for the global head (see
     ``checksum.py``). ``weights`` are those of a block holding the request's
     first tokens; a block starting at token ``f`` adds ``f`` times
-    ``offset_weights`` to them.
+    ``offset_weights`` to them. Pieces narrower than 8 bytes count as
+    unsigned.
 
     On CUDA with Triton the sums come from ``layer_checksum``; otherwise from
     PyTorch ops on gathered blocks.
@@ -76,7 +84,7 @@ class _LayerView:
         """Set up the weighted sums of this rank's slices.
 
         Args:
-            pieces: The layer's cache viewed as 8-byte pieces.
+            pieces: The layer's cache viewed as integer pieces.
             first_slice: ``layer * H + head`` of this rank's first head.
             replica_key: The replicas and replica index of this rank's heads.
 
@@ -104,6 +112,9 @@ class _LayerView:
         position = self.token_index * num_pieces + piece
         self.weights = slice_weight * (2 * position + 1)
         self.offset_weights = 2 * num_pieces * slice_weight
+        piece_bits = 8 * pieces.element_size()
+        self.piece_mask = (1 << piece_bits) - 1 if piece_bits < 64 else None
+        # Gathered rows are widened to int64.
         self.rows_per_gather = max(
             1, _MAX_GATHER_BYTES // (tokens_per_block * heads * num_pieces * 8)
         )
@@ -147,6 +158,9 @@ class _LayerView:
             rows = self.pieces.index_select(0, block_ids[start:end])
             valid = valid_tokens[start:end].view(-1, 1, 1, 1, 1)
             rows.masked_fill_(self.token_index >= valid, 0)
+            rows = rows.to(torch.int64)
+            if self.piece_mask is not None:
+                rows &= self.piece_mask
             out[start:end] += (rows * self.weights).sum(dim=dims) + first_tokens[
                 start:end
             ] * (rows * self.offset_weights).sum(dim=dims)
@@ -158,12 +172,22 @@ def _layer_spec(group_spec: KVCacheSpec, layer_name: str) -> KVCacheSpec:
     return group_spec
 
 
-def _group_fingerprint(group: KVCacheGroupSpec) -> int:
+def _group_fingerprint(group: KVCacheGroupSpec, tp_size: int) -> int:
     """The sum of a hash of each of the group's layers on this worker."""
     total = 0
     for layer_name in group.layer_names:
         spec = _layer_spec(group.kv_cache_spec, layer_name)
-        identity = (layer_name, type(spec).__name__, str(getattr(spec, "dtype", None)))
+        identity: tuple = (layer_name, type(spec).__name__)
+        if isinstance(spec, MambaSpec) and spec.state_splits is not None:
+            identity += (
+                _global_state_shapes(spec, tp_size),
+                [str(d) for d in spec.dtypes[: len(spec.state_splits)]],
+            )
+        elif isinstance(spec, MambaSpec):
+            states = _MAMBA_CHECKSUMMED_STATES
+            identity += (spec.shapes[:states], [str(d) for d in spec.dtypes[:states]])
+        else:
+            identity += (str(getattr(spec, "dtype", None)),)
         digest = hashlib.sha256(repr(identity).encode()).digest()
         total += int.from_bytes(digest[:8], "little")
     return total % 2**64
@@ -208,6 +232,123 @@ def _layer_number(layer_name: str) -> int:
         ) from e
 
 
+def _attention_pieces(
+    spec: KVCacheSpec,
+    cache: torch.Tensor,
+    num_blocks: int,
+    tp_size: int,
+    uniform_kv_heads: int | None,
+) -> tuple[torch.Tensor, int, int]:
+    """An attention layer's 8-byte piece view, TP replicas and heads per rank."""
+    if not isinstance(spec, AttentionSpec) or not spec.has_layer_views:
+        raise _UnsupportedGroupError(
+            f"{type(spec).__name__} has no per-token KV blocks"
+        )
+    if spec.tokens_per_state != 1:
+        raise _UnsupportedGroupError(
+            f"{type(spec).__name__} stores {spec.tokens_per_state} tokens per state"
+        )
+    if spec.num_head_slots is not None:
+        raise _UnsupportedGroupError("its KV heads are packed into head slots")
+    pieces = _as_pieces(cache, num_blocks)
+    if pieces.shape[1] * pieces.shape[3] != spec.block_size:
+        raise _UnsupportedGroupError(
+            f"the kernel blocks of its cache of shape {tuple(cache.shape)} do not "
+            f"tile its {spec.block_size}-token blocks"
+        )
+    return pieces, _tp_replicas(spec, tp_size, uniform_kv_heads), spec.num_kv_heads
+
+
+def _mamba_pieces(
+    spec: MambaSpec, cache: torch.Tensor, num_blocks: int, tp_size: int
+) -> tuple[torch.Tensor, int, int]:
+    """Like ``_attention_pieces``, for a Mamba layer: each block's leading
+    ``_MAMBA_CHECKSUMMED_STATES`` states are one slice of one head and token.
+    """
+    covered = sum(
+        prod(shape) * get_dtype_size(dtype)
+        for shape, dtype in zip(
+            spec.shapes[:_MAMBA_CHECKSUMMED_STATES],
+            spec.dtypes[:_MAMBA_CHECKSUMMED_STATES],
+        )
+    )
+    if cache.dim() != 4 or cache.shape[0] != num_blocks or cache.shape[1:3] != (1, 1):
+        raise _UnsupportedGroupError(
+            f"its state cache of shape {tuple(cache.shape)} is not one page per block"
+        )
+    try:
+        pages = cache.view(torch.uint8)[:, 0, 0, :covered].view(torch.int64)
+    except RuntimeError as e:
+        raise _UnsupportedGroupError(
+            "its states or pages are not whole 8-byte pieces"
+        ) from e
+    replicas = tp_size if spec.tp_replicated else 1
+    return pages[:, None, None, None, :], replicas, 1
+
+
+def _global_state_shapes(spec: MambaSpec, tp_size: int) -> list[tuple]:
+    """Per split state: its global segment sizes and its other dimensions."""
+    assert spec.state_splits is not None
+    shapes = []
+    for shape, split in zip(spec.shapes, spec.state_splits):
+        segments = tuple(size * tp_size // r for size, r in split.segments)
+        others = shape[: split.axis] + shape[split.axis + 1 :]
+        shapes.append((segments, others))
+    return shapes
+
+
+def _mamba_rows(
+    spec: MambaSpec, cache: torch.Tensor, num_blocks: int, number: int, tp_size: int
+) -> list["_LayerCache"]:
+    """A Mamba layer's TP-split states, each global row (the TP-split
+    dimension, see ``MambaStateSplit``) one slice of its elements, read as
+    unsigned 2- or 4-byte pieces. Slices are numbered across the layer's
+    states in their global order, so a rank holds those of its shard of each
+    segment whatever the TP size.
+    """
+    assert spec.state_splits is not None
+    if cache.dim() != 4 or cache.shape[0] != num_blocks or cache.shape[1:3] != (1, 1):
+        raise _UnsupportedGroupError(
+            f"its state cache of shape {tuple(cache.shape)} is not one page per block"
+        )
+    pages = cache.view(torch.uint8)[:, 0, 0]
+    caches: list[_LayerCache] = []
+    offset = global_rows = 0
+    for shape, dtype, split in zip(spec.shapes, spec.dtypes, spec.state_splits):
+        size = get_dtype_size(dtype)
+        if size not in (2, 4):
+            raise _UnsupportedGroupError(f"its {dtype} states are not 2 or 4 bytes")
+        nbytes = prod(shape) * size
+        if offset + nbytes > pages.shape[1]:
+            raise _UnsupportedGroupError("its state cache is smaller than its states")
+        state = pages[:, offset : offset + nbytes]
+        offset += nbytes
+        try:
+            # [blocks, rows, pieces]: the TP-split dimension, then the rest.
+            elements = state.view(torch.int16 if size == 2 else torch.int32)
+            rows = elements.unflatten(1, shape).movedim(split.axis + 1, 1)
+            if rows.dim() > 3:
+                rows = rows.view(num_blocks, rows.shape[1], -1)
+        except RuntimeError as e:
+            raise _UnsupportedGroupError("its states cannot be viewed by rows") from e
+        if sum(local for local, _ in split.segments) != rows.shape[1]:
+            raise _UnsupportedGroupError("its state splits do not match its states")
+        local_rows = 0
+        for local, replicas in split.segments:
+            caches.append(
+                _LayerCache(
+                    number,
+                    rows[:, None, local_rows : local_rows + local, None],
+                    replicas,
+                    heads=local,
+                    first_head=global_rows,
+                )
+            )
+            local_rows += local
+            global_rows += local * tp_size // replicas
+    return caches
+
+
 def _as_pieces(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
     """A ``[blocks, kernel_blocks, heads, tokens, pieces]`` 8-byte piece view."""
     if cache.dim() != 4 or cache.shape[0] % num_blocks:
@@ -226,12 +367,16 @@ def _as_pieces(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
 
 @dataclass
 class _LayerCache:
-    """One distinct KV cache of a group, under the lowest layer number using it."""
+    """One distinct KV cache of a group, or segment of a Mamba state, under the
+    lowest layer number using it. Rank ``r`` holds shard ``r // replicas``:
+    the ``heads`` slices from ``first_head + shard * heads`` in the layer.
+    """
 
     number: int
     pieces: torch.Tensor
     replicas: int
     heads: int
+    first_head: int = 0
 
 
 def _build_layer_views(
@@ -252,41 +397,41 @@ def _build_layer_views(
         raise _UnsupportedGroupError("its KV is host-resident")
     # KV-sharing layers alias their target's cache: count each cache once,
     # under the lowest layer number that uses it.
-    layers: dict[tuple[int, tuple[int, ...]], _LayerCache] = {}
+    layers: dict[tuple[int, tuple[int, ...], int], _LayerCache] = {}
     for layer_name in group.layer_names:
         spec = _layer_spec(group.kv_cache_spec, layer_name)
-        if not isinstance(spec, AttentionSpec) or not spec.has_layer_views:
-            raise _UnsupportedGroupError(
-                f"{type(spec).__name__} has no per-token KV blocks"
-            )
-        if spec.tokens_per_state != 1:
-            raise _UnsupportedGroupError(
-                f"{type(spec).__name__} stores {spec.tokens_per_state} tokens per state"
-            )
-        if spec.num_head_slots is not None:
-            raise _UnsupportedGroupError("its KV heads are packed into head slots")
         cache = kv_caches.get(layer_name)
         if cache is None:
             raise _UnsupportedGroupError(f"layer {layer_name} has no KV cache")
-        pieces = _as_pieces(cache, num_blocks)
-        if pieces.shape[1] * pieces.shape[3] != spec.block_size:
-            raise _UnsupportedGroupError(
-                f"layer {layer_name}'s kernel blocks do not tile its "
-                f"{spec.block_size}-token blocks"
-            )
+        if isinstance(spec, MambaSpec) and isinstance(
+            group.kv_cache_spec, UniformTypeKVCacheSpecs
+        ):
+            # The scheduler picks a Mamba group's state block by its group spec.
+            raise _UnsupportedGroupError("its Mamba layers have different specs")
         number = _layer_number(layer_name)
-        identity = (cache.data_ptr(), cache.stride())
-        if identity in layers:
-            layers[identity].number = min(layers[identity].number, number)
-            continue
-        replicas = _tp_replicas(spec, tp_size, uniform_kv_heads)
-        layers[identity] = _LayerCache(number, pieces, replicas, spec.num_kv_heads)
+        if isinstance(spec, MambaSpec) and spec.state_splits is not None:
+            caches = _mamba_rows(spec, cache, num_blocks, number, tp_size)
+        elif isinstance(spec, MambaSpec):
+            pieces, replicas, heads = _mamba_pieces(spec, cache, num_blocks, tp_size)
+            caches = [_LayerCache(number, pieces, replicas, heads)]
+        else:
+            pieces, replicas, heads = _attention_pieces(
+                spec, cache, num_blocks, tp_size, uniform_kv_heads
+            )
+            caches = [_LayerCache(number, pieces, replicas, heads)]
+        for layer in caches:
+            identity = (cache.data_ptr(), cache.stride(), layer.first_head)
+            if identity in layers:
+                layers[identity].number = min(layers[identity].number, number)
+            else:
+                layers[identity] = layer
 
-    numbers = [layer.number for layer in layers.values()]
-    if len(set(numbers)) != len(numbers):
+    slices = [(layer.number, layer.first_head) for layer in layers.values()]
+    if len(set(slices)) != len(slices):
         raise _UnsupportedGroupError("two of its KV caches share a layer number")
     if any(
-        layer.heads * (tp_size // layer.replicas) > MAX_KV_HEADS_PER_LAYER
+        layer.first_head + layer.heads * (tp_size // layer.replicas)
+        > MAX_KV_HEADS_PER_LAYER
         for layer in layers.values()
     ):
         raise _UnsupportedGroupError(
@@ -298,7 +443,9 @@ def _build_layer_views(
         views.append(
             _LayerView(
                 layer.pieces,
-                first_slice=layer.number * MAX_KV_HEADS_PER_LAYER + shard * layer.heads,
+                first_slice=layer.number * MAX_KV_HEADS_PER_LAYER
+                + layer.first_head
+                + shard * layer.heads,
                 replica_key=(layer.replicas, replica),
             )
         )
@@ -460,7 +607,7 @@ class KVChecksumWorker:
         self._fingerprints: dict[int, int] = {}
         for group_id in kv_cache_config.transfer_group_ids:
             group = kv_cache_config.kv_cache_groups[group_id]
-            self._fingerprints[group_id] = _group_fingerprint(group)
+            self._fingerprints[group_id] = _group_fingerprint(group, tp_size)
             try:
                 views = _build_layer_views(
                     group,

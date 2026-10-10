@@ -9,6 +9,7 @@ kv_checksum_fail_closed and kv_load_failure_policy."""
 from dataclasses import dataclass
 from typing import Any
 
+import pybase64 as base64
 import pytest
 import torch
 
@@ -17,11 +18,14 @@ from vllm.distributed.kv_transfer.kv_checksum.scheduler import (
     KVChecksumScheduler,
 )
 from vllm.distributed.kv_transfer.kv_checksum.worker import KVChecksumWorker
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
+    MambaStateSplit,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import FinishReason, Request, RequestStatus
@@ -45,12 +49,59 @@ CELL_BYTES = 32  # K + V of 8 bf16 values.
 LAYERS = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
 # A second group, standing in for one a worker cannot checksum.
 EXTRA_LAYER = "model.layers.2.self_attn.attn"
+# A Mamba (GDN) layer: conv 4 x 8 bf16 and ssm 2 x 8 fp32 per TP rank, 128
+# bytes in a 160-byte page. With prefix caching its states align to the
+# attention blocks: a request's row ends with its running state, then one
+# speculative scratch block.
+MAMBA_LAYER = "model.layers.3.linear_attn"
+MAMBA_SPEC = MambaSpec(
+    block_size=BLOCK_SIZE,
+    shapes=((4, 8), (2, 8)),
+    dtypes=(torch.bfloat16, torch.float32),
+    mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    mamba_cache_mode="align",
+    num_speculative_blocks=1,
+)
+MAMBA_STATE_BYTES, MAMBA_PAGE_BYTES = 128, 160
+
+
+def _split_mamba_spec(tp_size: int) -> MambaSpec:
+    """A Mamba2 layer with one group, whose TP split is known: conv [x, B, C]
+    of 4, 2 and 2 rows by 8 bf16 columns, B and C held whole by every rank,
+    and a temporal state of 2 heads of 8 fp32, globally."""
+    x, heads = 4 // tp_size, 2 // tp_size
+    return MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((x + 4, 8), (heads, 8)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+        state_splits=(
+            MambaStateSplit(0, ((x, 1), (2, tp_size), (2, tp_size))),
+            MambaStateSplit(0, ((heads, 1),)),
+        ),
+    )
+
+
+def _split_shard(conv: torch.Tensor, temporal: torch.Tensor, tp_size, rank):
+    """A rank's state bytes of the global ``_split_mamba_spec`` states."""
+    x, heads = 4 // tp_size, 2 // tp_size
+    local_conv = torch.cat([conv[rank * x : (rank + 1) * x], conv[4:]])
+    local_temporal = temporal[rank * heads : (rank + 1) * heads]
+    return torch.cat(
+        [
+            t.contiguous().view(torch.uint8).flatten()
+            for t in (local_conv, local_temporal)
+        ]
+    )
 
 
 def _kv_cache_config(
     heads: int,
     layers: list[str],
     extra_group: bool = False,
+    mamba_spec: MambaSpec | None = None,
     block_size: int = BLOCK_SIZE,
 ) -> KVCacheConfig:
     spec = FullAttentionSpec(
@@ -59,6 +110,8 @@ def _kv_cache_config(
     groups = [KVCacheGroupSpec(layers, spec)]
     if extra_group:
         groups.append(KVCacheGroupSpec([EXTRA_LAYER], spec))
+    if mamba_spec is not None:
+        groups.append(KVCacheGroupSpec([MAMBA_LAYER], mamba_spec))
     return KVCacheConfig(
         num_blocks=NUM_BLOCKS, kv_cache_tensors=[], kv_cache_groups=groups
     )
@@ -78,10 +131,13 @@ class _Engine:
         fail_closed: bool = False,
         policy: str = "fail",
         extra_group: str | None = None,
+        mamba: bool | str = False,
         block_size: int = BLOCK_SIZE,
     ):
         """``extra_group``: None, or whether the workers can checksum a second
-        group ("covered") or skip it for lack of a cache ("skipped")."""
+        group ("covered") or skip it for lack of a cache ("skipped").
+        ``mamba``: add a Mamba group, as hybrid models have; "split" for one
+        whose TP split is known (``_split_mamba_spec``)."""
         vllm_config = create_vllm_config(
             kv_connector=connector,
             kv_role=kv_role,
@@ -93,14 +149,25 @@ class _Engine:
         kv_transfer_config.kv_checksum_fail_closed = fail_closed
         vllm_config.parallel_config.tensor_parallel_size = tp_size
         vllm_config.parallel_config.pipeline_parallel_size = pp_size
+        if mamba:
+            vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+            vllm_config.cache_config.mamba_cache_mode = "align"
         stages = [LAYERS[i::pp_size] for i in range(pp_size)]
         has_extra = extra_group is not None
+        self.split_mamba = mamba == "split"
+        mamba_spec = (
+            (_split_mamba_spec(tp_size) if self.split_mamba else MAMBA_SPEC)
+            if mamba
+            else None
+        )
+        self.tp_size = tp_size
         # Like the engine's, the scheduler's config is the first worker's.
         self.connector = connector
-        self.scheduler = create_scheduler(
-            vllm_config,
-            kv_cache_config=_kv_cache_config(HEADS, stages[0], has_extra, block_size),
+        scheduler_config = _kv_cache_config(
+            HEADS, stages[0], has_extra, mamba_spec, block_size
         )
+        self.scheduler = create_scheduler(vllm_config, kv_cache_config=scheduler_config)
+        self.mamba_group = len(scheduler_config.kv_cache_groups) - 1 if mamba else None
         self.block_size = block_size
         # Per layer, [blocks, heads, tokens, cell] bytes; ranks view their heads.
         self.kv = {
@@ -109,6 +176,11 @@ class _Engine:
             )
             for layer in LAYERS
         }
+        # Per TP rank, the Mamba layer's state pages (its own shard).
+        self.states = [
+            torch.zeros(NUM_BLOCKS, 2 * MAMBA_PAGE_BYTES, dtype=torch.uint8)
+            for _ in range(tp_size)
+        ]
         replicas = max(1, tp_size // HEADS)
         heads_per_rank = max(1, HEADS // tp_size)
         self.workers = []
@@ -123,9 +195,16 @@ class _Engine:
                 }
                 if extra_group == "covered":
                     caches[EXTRA_LAYER] = torch.zeros_like(caches[layers[0]])
+                if mamba_spec is not None:
+                    # The model runner's [blocks, 1, 1, state] int8 page view.
+                    content = mamba_spec.state_content_size_bytes
+                    state = self.states[tp_rank][:, :content]
+                    caches[MAMBA_LAYER] = state.view(torch.int8)[:, None, None, :]
                 self.workers.append(
                     KVChecksumWorker(
-                        _kv_cache_config(heads_per_rank, layers, has_extra, block_size),
+                        _kv_cache_config(
+                            heads_per_rank, layers, has_extra, mamba_spec, block_size
+                        ),
                         caches,
                         tp_rank=tp_rank,
                         tp_size=tp_size,
@@ -161,6 +240,10 @@ class _Engine:
                 checksums = checksums.aggregate(worker_output)
         requests = [self.scheduler.requests[i] for i in output.num_scheduled_tokens]
         model_runner_output = create_model_runner_output(requests)
+        # Like the model runner, sample nothing for a prefill not yet done.
+        for i, request in enumerate(requests):
+            if request.is_prefill_chunk:
+                model_runner_output.sampled_token_ids[i] = []
         model_runner_output.kv_connector_output = KVConnectorOutput(
             finished_recving=finished_recving, kv_checksums=checksums
         )
@@ -184,6 +267,27 @@ class _Transfer:
     """Checksums the producer's connector sends itself, if it does."""
     block_ids: list[int]
     """The producer's blocks, by position."""
+    state_block: int | None = None
+    """The producer's Mamba state block, if any."""
+    split_state: tuple[torch.Tensor, torch.Tensor] | None = None
+    """The global states of a ``_split_mamba_spec`` layer, if any."""
+
+
+def _state_block(
+    engine: _Engine, output: SchedulerOutput, req_id: str, send: bool
+) -> int | None:
+    """The request's running-state block, the one the model writes: its Mamba
+    row's last block before the speculative scratch blocks. Also checks that
+    the workers checksum that block."""
+    if engine.mamba_group is None:
+        return None
+    row = engine.scheduler.kv_cache_manager.get_blocks(req_id).blocks
+    state_block = row[engine.mamba_group][-1 - MAMBA_SPEC.num_speculative_blocks]
+    scheduled = output.kv_checksum_scheduled
+    assert scheduled is not None
+    blocks = (scheduled.reqs_to_send if send else scheduled.reqs_to_recv)[req_id]
+    assert blocks.groups[engine.mamba_group] == (0, [state_block.block_id])
+    return state_block.block_id
 
 
 def _prefill(producer: _Engine, request: Request) -> _Transfer:
@@ -192,13 +296,39 @@ def _prefill(producer: _Engine, request: Request) -> _Transfer:
         assert request.kv_transfer_params is not None
         request.kv_transfer_params["transfer_id"] = f"xfer-{request.request_id}"
     producer.scheduler.add_request(request)
+    # Prefill may take several steps (Mamba states align chunks to blocks).
     output = producer.schedule()
+    for _ in range(NUM_TOKENS):
+        scheduled = output.kv_checksum_scheduled
+        if scheduled is not None and request.request_id in scheduled.reqs_to_send:
+            break
+        producer.finish_step(output)
+        output = producer.schedule()
+    else:
+        raise AssertionError("the prefill never finished")
     _, block_ids = _block_ids(output, request.request_id, send=True)
     gen = torch.Generator().manual_seed(0)
     for kv in producer.kv.values():
         for block_id in block_ids:
             kv[block_id] = torch.randint(
                 0, 256, kv[block_id].shape, generator=gen, dtype=torch.uint8
+            )
+    state_block = _state_block(producer, output, request.request_id, send=True)
+    split_state = None
+    if state_block is not None and producer.split_mamba:
+        conv = torch.randint(-(2**15), 2**15, (8, 8), generator=gen)
+        temporal = torch.randint(-(2**31), 2**31, (2, 8), generator=gen)
+        split_state = (
+            conv.to(torch.int16).view(torch.bfloat16),
+            temporal.to(torch.int32).view(torch.float32),
+        )
+        for rank, states in enumerate(producer.states):
+            shard = _split_shard(*split_state, producer.tp_size, rank)
+            states[state_block, : len(shard)] = shard
+    elif state_block is not None:
+        for states in producer.states:
+            states[state_block] = torch.randint(
+                0, 256, states[state_block].shape, generator=gen, dtype=torch.uint8
             )
     [engine_output] = producer.finish_step(output)[0].outputs
     assert engine_output.finish_reason == FinishReason.LENGTH
@@ -220,7 +350,7 @@ def _prefill(producer: _Engine, request: Request) -> _Transfer:
         assert params is not None
         sent = getattr(meta, "push_finished_kv_checksums", {}).get(request.request_id)
         assert (sent is not None) != (KV_TRANSFER_PARAMS_KEY in params)
-    return _Transfer(params, sent, block_ids)
+    return _Transfer(params, sent, block_ids, state_block, split_state)
 
 
 def _copy_blocks(
@@ -229,6 +359,7 @@ def _copy_blocks(
     transfer: _Transfer,
     start: int,
     block_ids: list[int],
+    state_block: int | None = None,
 ) -> None:
     """The connector's transfer: the producer's tokens into the consumer's
     blocks at the same token positions."""
@@ -241,6 +372,17 @@ def _copy_blocks(
                     kv[block_id, :, token % c_size] = producer.kv[layer][
                         remote_block_id, :, token % p_size
                     ]
+    if state_block is not None and transfer.split_state is not None:
+        for rank, states in enumerate(consumer.states):
+            shard = _split_shard(*transfer.split_state, consumer.tp_size, rank)
+            states[state_block, : len(shard)] = shard
+    elif (
+        state_block is not None
+        and transfer.state_block is not None
+        and len(producer.states) == len(consumer.states)
+    ):
+        for p_states, c_states in zip(producer.states, consumer.states):
+            c_states[state_block] = p_states[transfer.state_block]
 
 
 def _load(
@@ -248,7 +390,7 @@ def _load(
     consumer: _Engine,
     request: Request,
     transfer: _Transfer,
-    corrupt: bool = False,
+    corrupt: str | None = None,
 ):
     """Start the load of ``request`` on the consumer, copy the producer's
     blocks into the consumer's, and report the load finished with the
@@ -258,9 +400,18 @@ def _load(
     output = consumer.schedule()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     start, block_ids = _block_ids(output, request.request_id, send=False)
-    _copy_blocks(producer, consumer, transfer, start, block_ids)
-    if corrupt:
+    state_block = _state_block(consumer, output, request.request_id, send=False)
+    _copy_blocks(producer, consumer, transfer, start, block_ids, state_block)
+    if corrupt == "kv":
         consumer.kv[LAYERS[1]][block_ids[-1], 0, 0, 0] ^= 1
+    elif corrupt == "state":
+        assert state_block is not None
+        consumer.states[0][state_block, MAMBA_STATE_BYTES - 1] ^= 1
+    elif corrupt == "last-replica":
+        # The last rank's copy of B, after its x rows of 16 bytes each.
+        assert state_block is not None
+        x_bytes = 4 // consumer.tp_size * 16
+        consumer.states[-1][state_block, x_bytes] ^= 1
     received = {request.request_id: transfer.sent} if transfer.sent else None
     return consumer.finish_step(output, {request.request_id}, received)
 
@@ -324,7 +475,9 @@ def test_different_block_sizes_are_compared(
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
-    engine_outputs = _load(producer, consumer, request, transfer, corrupt)
+    engine_outputs = _load(
+        producer, consumer, request, transfer, "kv" if corrupt else None
+    )
     assert _error_ids(engine_outputs) == ({request.request_id} if corrupt else set())
 
 
@@ -382,7 +535,7 @@ def test_load_starting_inside_a_producer_block_is_unverified():
     assert _error_ids(engine_outputs) == {request.request_id}
 
 
-@pytest.mark.parametrize("fault", ["corrupt", "no-checksums"])
+@pytest.mark.parametrize("fault", ["corrupt", "no-checksums", "malformed"])
 @pytest.mark.parametrize(
     "fail_closed,policy", [(False, "fail"), (True, "fail"), (True, "recompute")]
 )
@@ -390,19 +543,32 @@ def test_load_starting_inside_a_producer_block_is_unverified():
 def test_bad_load_follows_failure_policy(
     connector, fault, fail_closed, policy, caplog_vllm
 ):
-    """A corrupted or unverifiable load is only logged when fail-open; when
-    fail-closed it is a KV load failure: the request fails, or recomputes its
-    prompt locally."""
+    """A corrupted load, or one with missing or malformed checksums, is only
+    logged when fail-open; when fail-closed it is a KV load failure: the
+    request fails, or recomputes its prompt locally."""
     producer = _Engine("kv_producer", connector)
     consumer = _Engine("kv_consumer", connector, fail_closed=fail_closed, policy=policy)
     transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
     if fault == "no-checksums":
         transfer.params.pop(KV_TRANSFER_PARAMS_KEY, None)
         transfer.sent = None
+    elif fault == "malformed":
+        # Deeply nested msgpack, as a client could send in kv_transfer_params.
+        malformed = b"\x94\x01\x01\x01" + b"\x91" * 100000 + b"\x01"
+        if KV_TRANSFER_PARAMS_KEY in transfer.params:
+            transfer.params[KV_TRANSFER_PARAMS_KEY] = base64.b64encode(
+                malformed
+            ).decode()
+        else:
+            transfer.sent = malformed
 
     request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
     engine_outputs = _load(
-        producer, consumer, request, transfer, corrupt=fault == "corrupt"
+        producer,
+        consumer,
+        request,
+        transfer,
+        corrupt="kv" if fault == "corrupt" else None,
     )
     if fault == "corrupt":
         assert "KV checksum mismatch" in caplog_vllm.text
@@ -448,3 +614,46 @@ def test_connector_without_carrier_is_refused(fail_closed):
         assert (
             KVChecksumScheduler.create(vllm_config, kv_cache_config, connector) is None
         )
+
+
+@CONNECTORS
+@pytest.mark.parametrize("corrupt", [None, "state"])
+def test_hybrid_model_verifies_mamba_state(connector, corrupt):
+    """With a Mamba group, the request's running state is checksummed too: a
+    correct load verifies, a flipped state bit is a mismatch."""
+    producer = _Engine("kv_producer", connector, mamba=True)
+    consumer = _Engine("kv_consumer", connector, fail_closed=True, mamba=True)
+    transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
+    errors = _error_ids(_load(producer, consumer, request, transfer, corrupt))
+    assert errors == (set() if corrupt is None else {request.request_id})
+
+
+@CONNECTORS
+@pytest.mark.parametrize("corrupt", [None, "last-replica"])
+@pytest.mark.parametrize("producer_tp, consumer_tp", [(1, 2), (2, 1)])
+def test_split_mamba_state_compared_across_tp_sizes(
+    connector, producer_tp, consumer_tp, corrupt
+):
+    """With its TP split known, Mamba state is compared between producers and
+    consumers of different TP sizes: a correct load verifies, and a corrupted
+    copy of a replicated sub-projection is a mismatch."""
+    producer = _Engine("kv_producer", connector, tp_size=producer_tp, mamba="split")
+    consumer = _Engine(
+        "kv_consumer", connector, tp_size=consumer_tp, fail_closed=True, mamba="split"
+    )
+    transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
+    errors = _error_ids(_load(producer, consumer, request, transfer, corrupt))
+    assert errors == (set() if corrupt is None else {request.request_id})
+
+
+def test_mamba_state_not_compared_across_tp_sizes():
+    """TP-sharded Mamba state is laid out per TP size, so between TP 1 and
+    TP 2 it is left out like a group neither side checksums: the attention
+    groups still verify the load, even fail-closed."""
+    producer = _Engine("kv_producer", mamba=True)
+    consumer = _Engine("kv_consumer", tp_size=2, fail_closed=True, mamba=True)
+    transfer = _prefill(producer, create_request(1, NUM_TOKENS, do_remote_decode=True))
+    request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
+    assert not _error_ids(_load(producer, consumer, request, transfer))

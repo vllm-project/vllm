@@ -14,7 +14,7 @@ _CHUNK = 16 * 1024
 # One variant per layer shape; the output column may be any strided view.
 @triton.jit(do_not_specialize=["first_slice", "out_ptr", "out_stride"])
 def _layer_checksum_kernel(
-    pieces_ptr,  # int64 [num_blocks, kernel_blocks, heads, tokens, pieces]
+    pieces_ptr,  # int [num_blocks, kernel_blocks, heads, tokens, pieces]
     stride_block,
     stride_kernel_block,
     stride_head,
@@ -30,6 +30,7 @@ def _layer_checksum_kernel(
     heads: tl.constexpr,
     tokens: tl.constexpr,
     num_pieces: tl.constexpr,
+    PIECE_BITS: tl.constexpr,
     CHUNK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -68,7 +69,12 @@ def _layer_checksum_kernel(
         position = (first_token + token_index.to(tl.uint64)) * num_pieces + piece.to(
             tl.uint64
         )
-        acc += x.to(tl.uint64, bitcast=True) * (slice_weight * (2 * position + 1))
+        # Pieces narrower than 64 bits count as unsigned.
+        x = x.to(tl.int64)
+        if PIECE_BITS < 64:
+            x = x & ((1 << PIECE_BITS) - 1)
+        x = x.to(tl.uint64, bitcast=True)
+        acc += x * (slice_weight * (2 * position + 1))
     # Chunks of a row add up in any order: integer addition is exact.
     tl.atomic_add(out_ptr + row * out_stride, tl.sum(acc).to(tl.int64, bitcast=True))
 
@@ -84,8 +90,9 @@ def layer_checksum(
     """Add one layer's weighted piece sum of each block row into ``out``.
 
     Args:
-        pieces: The layer's cache as int64
-            ``[num_blocks, kernel_blocks, heads, tokens, pieces]``.
+        pieces: The layer's cache as integer pieces
+            ``[num_blocks, kernel_blocks, heads, tokens, pieces]``, read as
+            unsigned.
         first_slice: ``layer * H + head`` of the first head in ``pieces``.
         block_ids: ``[n]`` int64 logical block ids.
         first_tokens: ``[n]`` int64 position in the request of each block's
@@ -110,6 +117,7 @@ def layer_checksum(
         heads,
         tokens,
         num_pieces,
+        PIECE_BITS=8 * pieces.element_size(),
         CHUNK=_CHUNK,
         BLOCK=min(triton.next_power_of_2(num_pieces_in_block), 1024),
     )
