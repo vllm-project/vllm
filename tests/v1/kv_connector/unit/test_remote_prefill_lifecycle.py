@@ -770,7 +770,11 @@ def test_async_loads_both_admitted_when_pool_fits():
 def test_async_load_reserves_blocks_for_promotion_margin(
     swa_enabled, block_size, num_spec_tokens, num_blocks
 ):
-    """Async loads leave enough blocks for promotion in every cache group."""
+    """Async loads must leave enough blocks for promotion in every cache group.
+
+    Otherwise two loads can fill the pool and prevent the head from being
+    promoted, with nothing running to free blocks and break the deadlock.
+    """
     vllm_config = create_vllm_config(
         block_size=block_size,
         num_speculative_tokens=num_spec_tokens,
@@ -832,6 +836,74 @@ def test_async_load_reserves_blocks_for_promotion_margin(
     scheduler_output = scheduler.schedule()
     assert req_a.status == RequestStatus.RUNNING
     assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+@pytest.mark.parametrize(
+    ("mamba_cache_mode", "mamba_block_size", "num_blocks"),
+    [("none", 128, 18), ("align", 16, 18)],
+)
+def test_async_load_does_not_double_reserve_mamba_spec_blocks(
+    mamba_cache_mode, mamba_block_size, num_blocks
+):
+    """Two hybrid loads fit when Mamba's speculative states are counted once."""
+    block_size = 16
+    num_spec_tokens = 3
+    vllm_config = create_vllm_config(
+        block_size=mamba_block_size,
+        max_model_len=128,
+        num_speculative_tokens=num_spec_tokens,
+        disable_hybrid_kv_cache_manager=False,
+    )
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    kv_cache_config = make_kv_cache_config(
+        block_size,
+        mamba_enabled=True,
+        mamba_cache_mode=mamba_cache_mode,
+        num_blocks=num_blocks,
+    )
+    mamba_group = kv_cache_config.kv_cache_groups[-1]
+    mamba_group.kv_cache_spec = replace(
+        mamba_group.kv_cache_spec,
+        block_size=mamba_block_size,
+        num_speculative_blocks=num_spec_tokens,
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=num_blocks,
+        kv_cache_config=kv_cache_config,
+        hash_block_size=block_size,
+    )
+    reqs = [
+        create_request(
+            request_id=i,
+            block_size=block_size,
+            num_tokens=num_tokens,
+            do_remote_prefill=True,
+            max_tokens=1,
+        )
+        for i, num_tokens in enumerate((64, 48), 1)
+    ]
+    for req in reqs:
+        scheduler.add_request(req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(req.num_tokens, True) for req in reqs],
+    ):
+        scheduler.schedule()
+
+    assert all(req.status == RequestStatus.WAITING_FOR_REMOTE_KVS for req in reqs)
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output(
+            [], finished_recving={req.request_id for req in reqs}
+        ),
+    )
+    output = scheduler.schedule()
+    for req in reqs:
+        assert req.status == RequestStatus.RUNNING
+        assert output.num_scheduled_tokens[req.request_id] > 0
 
 
 def test_deferred_lookup_does_not_block_parked_load():

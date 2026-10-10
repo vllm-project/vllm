@@ -5,7 +5,6 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from functools import cached_property
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -344,6 +343,17 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+        )
+        # Mamba managers already account for their speculative state blocks.
+        num_spec_decode_tokens = (
+            1 + self.num_spec_tokens + self.num_lookahead_tokens
+            if self.num_spec_tokens
+            else 0
+        )
+        self._spec_decode_step_blocks = sum(
+            cdiv(num_spec_decode_tokens, manager.block_size)
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
+            if not isinstance(manager.kv_cache_spec, MambaSpec)
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -3060,9 +3070,12 @@ class Scheduler(SchedulerInterface):
     def _request_remaining_blocks(self, request: Request) -> int:
         """Blocks `request` still needs to hold its full sequence and be promoted."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        num_blocks = self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        num_tokens = full_num_tokens
+        if self.num_spec_tokens:
+            num_tokens += 1 + self.num_spec_tokens + self.num_lookahead_tokens
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
-            num_tokens=full_num_tokens,
+            num_tokens=num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
             num_encoder_tokens=0,
             total_computed_tokens=request.num_computed_tokens,
@@ -3070,23 +3083,6 @@ class Scheduler(SchedulerInterface):
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
             prefill_end=max(request.num_prompt_tokens, request.num_tokens - 1),
-        )
-        return num_blocks + self._spec_decode_step_blocks
-
-    @cached_property
-    def _spec_decode_step_blocks(self) -> int:
-        """Return the block reservation for a speculative decode step.
-
-        Async KV loads must leave enough free blocks to start decoding.
-        The token limits and allocation block sizes are fixed at initialization.
-        """
-        if not self.num_spec_tokens:
-            return 0
-        num_tokens = 1 + self.num_spec_tokens + self.num_lookahead_tokens
-        # Each cache group allocates from the shared pool in its own block size.
-        return sum(
-            cdiv(num_tokens, manager.block_size)
-            for manager in self.kv_cache_manager.coordinator.single_type_managers
         )
 
     def _set_kv_fetch_stage(self, request: Request, stage: str | None) -> None:
