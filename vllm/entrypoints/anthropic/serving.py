@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any, Literal, get_args
+from typing import Any, get_args
 
 import jinja2
 from fastapi import Request
@@ -29,6 +29,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
+    AnthropicStopReason,
     AnthropicStreamEvent,
     AnthropicThinkingConfig,
     AnthropicTool,
@@ -99,24 +100,33 @@ def _build_anthropic_usage(
     return AnthropicUsage(**kwargs)
 
 
+def _hit_context_window(usage: UsageInfo | None, max_model_len: int | None) -> bool:
+    """Whether the prompt plus the generated tokens filled the context window."""
+    if usage is None or max_model_len is None:
+        return False
+    return usage.prompt_tokens + (usage.completion_tokens or 0) >= max_model_len
+
+
 def _to_anthropic_stop_reason(
     finish_reason: str | None,
     stop_reason: int | str | None,
     tool_used: bool,
     tool_complete: bool,
-) -> tuple[
-    Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
-    str | None,
-]:
+    context_window_exceeded: bool = False,
+) -> tuple[AnthropicStopReason | None, str | None]:
     """Map an OpenAI finish reason to Anthropic ``(stop_reason, stop_sequence)``.
 
     Anthropic reports ``tool_use`` whenever the model invoked a tool. The chat
     layer reports ``finish_reason="stop"`` for a named (forced) tool call, so
     ``tool_used`` records whether a ``tool_use`` block was produced.
-    ``max_tokens`` always wins. A matched stop string wins unless the tool
-    calls are complete (``tool_complete``): a call it cut short must not run.
+    A length stop always wins. It is ``model_context_window_exceeded`` when
+    generation ran into the context window rather than the requested
+    ``max_tokens``. A matched stop string wins unless the tool calls are
+    complete (``tool_complete``): a call it cut short must not run.
     """
     if finish_reason == "length":
+        if context_window_exceeded:
+            return "model_context_window_exceeded", None
         return "max_tokens", None
     if finish_reason not in ("stop", "tool_calls"):
         return None, None
@@ -813,14 +823,16 @@ class AnthropicServingMessages(OpenAIServingChat):
         if isinstance(generator, ErrorResponse):
             return generator
 
-        elif isinstance(generator, ChatCompletionResponse):
-            return self.messages_full_converter(generator)
+        max_model_len = self.model_config.max_model_len
+        if isinstance(generator, ChatCompletionResponse):
+            return self.messages_full_converter(generator, max_model_len)
 
-        return self.message_stream_converter(generator)
+        return self.message_stream_converter(generator, max_model_len)
 
     def messages_full_converter(
         self,
         generator: ChatCompletionResponse,
+        max_model_len: int | None = None,
     ) -> AnthropicMessagesResponse:
         result = AnthropicMessagesResponse(
             id=generator.id,
@@ -837,6 +849,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             tool_used=bool(choice.message.tool_calls),
             # Their arguments are json-decoded below, so parsed calls are complete.
             tool_complete=bool(choice.message.tool_calls),
+            context_window_exceeded=_hit_context_window(generator.usage, max_model_len),
         )
 
         content: list[AnthropicContentBlock] = []
@@ -878,6 +891,7 @@ class AnthropicServingMessages(OpenAIServingChat):
     async def message_stream_converter(
         self,
         generator: AsyncGenerator[str, None],
+        max_model_len: int | None = None,
     ) -> AsyncGenerator[str, None]:
         try:
 
@@ -1040,6 +1054,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     tool_used=tool_used,
                                     tool_complete=(
                                         tool_used and _is_json("".join(last_tool_args))
+                                    ),
+                                    context_window_exceeded=_hit_context_window(
+                                        origin_chunk.usage, max_model_len
                                     ),
                                 )
                             )
