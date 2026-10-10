@@ -2046,7 +2046,6 @@ steps:
   - vllm/model_executor/model_loader/
   optional: true
   commands:
-  - unset VLLM_USE_V2_MODEL_RUNNER
   - pytest -v -s models/quantization
 
 #--------------------------------------------------  mi300 · models / transformers  ---------------------------------------------------#
@@ -2353,7 +2352,6 @@ steps:
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
   # TODO(jerryzh168): resolve the above comment
-  - unset VLLM_USE_V2_MODEL_RUNNER
   - uv pip install --system torchao==0.18.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -5163,7 +5161,6 @@ steps:
   - vllm/model_executor/model_loader/
   optional: true
   commands:
-  - unset VLLM_USE_V2_MODEL_RUNNER
   - pytest -v -s models/quantization
 
 #-------------------------------------------------------  mi355 · quantization  --------------------------------------------------------#
@@ -5186,7 +5183,6 @@ steps:
   - tests/rocm/test_moe_weight_replay.py
   optional: true
   commands:
-  - unset VLLM_USE_V2_MODEL_RUNNER
   - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --ignore quantization/test_gfx950_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT

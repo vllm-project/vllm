@@ -7,8 +7,6 @@ steps:
   key: quantization
   timeout_in_minutes: 40
   parallelism: 4
-  env:
-    VLLM_USE_V2_MODEL_RUNNER: "0"
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -41,8 +39,6 @@ steps:
       - tests/rocm/test_moe_weight_replay.py
       - tests/rocm/test_moe_padding.py
       commands:
-      # Use the ROCm default instead of the NVIDIA runner override.
-      - unset VLLM_USE_V2_MODEL_RUNNER
       - uv pip install --system torchao==0.17.0
       - uv pip install --system conch-triton-kernels
       - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --ignore quantization/test_rocm_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -130,8 +126,6 @@ steps:
   key: quantized-models-test
   automatic_shard: true
   timeout_in_minutes: 65
-  env:
-    VLLM_USE_V2_MODEL_RUNNER: "0"
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
@@ -153,6 +147,4 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
       commands:
-      # Use the ROCm default instead of the NVIDIA runner override.
-      - unset VLLM_USE_V2_MODEL_RUNNER
       - pytest -v -s models/quantization
