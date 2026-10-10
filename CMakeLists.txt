@@ -470,7 +470,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_per_token_group_quant.cu"
       "csrc/libtorch_stable/hisparse_kernels.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_kv_gather.cu"
