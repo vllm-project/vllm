@@ -31,7 +31,10 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         return "ROCM_AITER_FA"
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
         if not current_platform.is_rocm():
             return False
         from vllm.platforms.rocm import on_mi3xx

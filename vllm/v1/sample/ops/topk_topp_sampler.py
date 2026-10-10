@@ -319,11 +319,11 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Fused Gumbel-max sampling for CPU.
+        """CPU Gumbel-max sampling with per-token SplitMix64 noise.
 
-        Uses a precomputed Gumbel table + single-pass argmax over logits,
-        skipping softmax and intermediate allocations entirely.
-        Falls back to the native path when fp64 Gumbel noise is requested.
+        Independent (seed, token) streams avoid the wrapping-window bias
+        (#59786). Falls back to native sampling when fp64 Gumbel noise
+        is requested.
         """
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
