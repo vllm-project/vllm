@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 from typing_extensions import override
@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
     Medium,
@@ -23,6 +24,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.common import (
     CPULoadStoreSpec,
+    CPUOffloadingInfo,
     CPUOffloadingMetrics,
 )
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
@@ -66,6 +68,9 @@ class CPUOffloadingManager(OffloadingManager):
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
+        self._config_info: ConfigInfoMapping = CPUOffloadingInfo(
+            cpu_num_chunks=num_chunks
+        ).as_config_info()
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -445,6 +450,11 @@ class CPUOffloadingManager(OffloadingManager):
         if self.events is not None:
             yield from self.events
             self.events.clear()
+
+    @override
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
+        """Report the CPU cache facts of the one cache this manager holds."""
+        return [self._config_info]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()

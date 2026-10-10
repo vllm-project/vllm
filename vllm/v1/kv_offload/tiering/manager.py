@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
     OffloadingEvent,
@@ -47,6 +48,7 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
+    TIER_LABEL,
     JobId,
     JobResult,
     ParentManager,
@@ -1006,6 +1008,26 @@ class TieringOffloadingManager(OffloadingManager):
                 stats.aggregate(tier_stats)
 
         return stats
+
+    @override
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
+        """Return one mapping for each tier, primary tier first, with TIER_LABEL.
+
+        Raises:
+            ValueError: If the primary tier returns more than one mapping.
+
+        """
+        (primary_info,) = self.primary_tier.config_info()
+        primary_tier_info = dict(primary_info)
+        primary_tier_info[TIER_LABEL] = self._metrics.primary_tier_label[0]
+        tier_infos = [primary_tier_info]
+
+        for tier in self.secondary_tiers:
+            tier_info = dict(tier.config_info())
+            tier_info[TIER_LABEL] = self._metrics.tier_label(self._tier_index[tier])[0]
+            tier_infos.append(tier_info)
+
+        return tier_infos
 
     @override
     def shutdown(self) -> None:
