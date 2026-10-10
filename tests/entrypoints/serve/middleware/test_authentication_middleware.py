@@ -40,9 +40,11 @@ def generate_test_path(path_template: str) -> str:
     return re.sub(r"\{[^}]+\}", "test", path_template)
 
 
-def _create_app_with_mock_routes(routes: list[tuple[str, list[str]]]) -> FastAPI:
+def _create_app_with_mock_routes(
+    routes: list[tuple[str, list[str]]], root_path: str = ""
+) -> FastAPI:
     """Create a FastAPI app with AuthenticationMiddleware and mock endpoints."""
-    app = FastAPI()
+    app = FastAPI(root_path=root_path)
     app.add_middleware(AuthenticationMiddleware, tokens=["valid-token"])
 
     async def mock_endpoint():
@@ -151,3 +153,38 @@ def test_auto_discovered_unprotected_routes_no_auth(task_routes):
         assert resp.status_code == 200, (
             f"[{task}] {test_method} {test_path} should be accessible without token"
         )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/messages",
+        "/v1/messages/",
+        "/v1/messages/count_tokens",
+        "/v1/messages/count_tokens/",
+    ],
+)
+@pytest.mark.parametrize("root_path", ["", "/proxy"])
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-token"])
+def test_anthropic_authentication_error_envelope(path, root_path, authorization):
+    """Rejected Anthropic requests retain a machine-readable error type."""
+    app = _create_app_with_mock_routes([(path, ["POST"])], root_path=root_path)
+    headers = {} if authorization is None else {"Authorization": authorization}
+    with TestClient(app) as client:
+        response = client.post(root_path + path, headers=headers)
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "type": "error",
+        "error": {"type": "authentication_error", "message": "Unauthorized"},
+    }
+
+
+def test_openai_authentication_error_envelope():
+    """Anthropic formatting must not change OpenAI authentication errors."""
+    app = _create_app_with_mock_routes([("/v1/chat/completions", ["POST"])])
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions")
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "Unauthorized"}
