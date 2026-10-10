@@ -53,7 +53,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     HeartbeatInfo,
     RemoteMeta,
     ReqMeta,
+    compute_nixl_compatibility_factors,
     compute_nixl_compatibility_hash,
+    diff_nixl_compatibility_factors,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_shutdown,
@@ -4137,6 +4139,85 @@ def test_transfer_mode_changes_compatibility_hash():
         config, "FLASH_ATTN", transfer_mode="pull"
     )
     assert compute_nixl_compatibility_hash(config, "FLASH_ATTN") == pull_hash
+
+
+@pytest.mark.skip_global_cleanup
+def test_compatibility_factor_diff_names_the_changed_field():
+    # A MultiConnector prefill silently turns the hybrid KV cache manager off
+    # while a plain NixlConnector decode keeps it on (#60124); the mismatch
+    # error must name is_hma_enabled instead of leaving two bare hashes.
+    local_config = create_vllm_config()
+    remote_config = create_vllm_config(disable_hybrid_kv_cache_manager=True)
+
+    local_factors = compute_nixl_compatibility_factors(local_config, "FLASH_ATTN")
+    remote_factors = compute_nixl_compatibility_factors(remote_config, "FLASH_ATTN")
+
+    assert diff_nixl_compatibility_factors(local_factors, local_factors) == []
+    differing = diff_nixl_compatibility_factors(local_factors, remote_factors)
+    assert differing == [f"is_hma_enabled: local={True!r}, remote={False!r}"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_compatibility_factor_diff_descends_into_speculative_config():
+    local_config = create_vllm_config()
+    remote_config = create_vllm_config()
+    _set_test_speculative_config(local_config)
+    _set_test_speculative_config(remote_config, method="mtp")
+
+    local_factors = compute_nixl_compatibility_factors(local_config, "FLASH_ATTN")
+    remote_factors = compute_nixl_compatibility_factors(remote_config, "FLASH_ATTN")
+
+    differing = diff_nixl_compatibility_factors(local_factors, remote_factors)
+    assert differing == ["speculative_config.method: local='eagle3', remote='mtp'"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_compatibility_factors_survive_msgpack_roundtrip():
+    # Factors travel in the handshake payload; tuples canonicalize to lists
+    # over msgpack, so the wire form must diff clean against the local form.
+    config = create_vllm_config()
+    _set_test_speculative_config(config)
+    factors = compute_nixl_compatibility_factors(config, "FLASH_ATTN")
+
+    wire_form = msgspec.msgpack.decode(msgspec.msgpack.encode(factors))
+
+    assert diff_nixl_compatibility_factors(factors, wire_form) == []
+
+
+@pytest.mark.skip_global_cleanup
+def test_handshake_payload_factors_wire_compatible_both_directions():
+    from dataclasses import dataclass
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata,
+    )
+
+    payload = NixlHandshakePayload(
+        compatibility_hash="hash",
+        agent_metadata_bytes=b"meta",
+        compatibility_factors={"is_hma_enabled": True},
+    )
+    encoded = msgspec.msgpack.encode(payload)
+
+    # A peer on the new code reads the factors back.
+    decoded = msgspec.msgpack.Decoder(NixlHandshakePayload).decode(encoded)
+    assert decoded.compatibility_factors == {"is_hma_enabled": True}
+
+    # A peer on older code (no factors field) ignores the extra key.
+    @dataclass
+    class LegacyHandshakePayload(KVConnectorHandshakeMetadata):
+        compatibility_hash: str
+        agent_metadata_bytes: bytes
+
+    legacy_view = msgspec.msgpack.Decoder(LegacyHandshakePayload).decode(encoded)
+    assert legacy_view.compatibility_hash == "hash"
+
+    # And the new code defaults the field when an older peer sends none.
+    legacy_encoded = msgspec.msgpack.encode(
+        LegacyHandshakePayload(compatibility_hash="hash", agent_metadata_bytes=b"m")
+    )
+    new_view = msgspec.msgpack.Decoder(NixlHandshakePayload).decode(legacy_encoded)
+    assert new_view.compatibility_factors is None
 
 
 @pytest.mark.skip_global_cleanup

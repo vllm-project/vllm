@@ -45,7 +45,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     ReqId,
     ReqMeta,
     TransferHandle,
-    compute_nixl_compatibility_hash,
+    compute_nixl_compatibility_factors,
+    diff_nixl_compatibility_factors,
+    hash_nixl_compatibility_factors,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
@@ -866,6 +868,7 @@ class NixlBaseConnectorWorker:
 
         # lazy initialized in register_kv_caches
         self.compat_hash: str | None = None
+        self.compat_factors: dict[str, Any] | None = None
         self.transfer_topo: TransferTopology | None = None
 
         # With heterogeneous TP (or DCP), P must wait for all assigned D
@@ -1077,10 +1080,24 @@ class NixlBaseConnectorWorker:
                     self.enforce_compat_hash
                     and handshake_payload.compatibility_hash != self.compat_hash
                 ):
+                    factor_diff = ""
+                    if handshake_payload.compatibility_factors is not None:
+                        assert self.compat_factors is not None
+                        differing = diff_nixl_compatibility_factors(
+                            self.compat_factors,
+                            handshake_payload.compatibility_factors,
+                        )
+                        if differing:
+                            factor_diff = (
+                                " Differing factors (local vs remote): "
+                                + "; ".join(differing)
+                                + "."
+                            )
                     raise RuntimeError(
                         f"NIXL compatibility hash mismatch. "
                         f"Local: {self.compat_hash}, "
-                        f"Remote: {handshake_payload.compatibility_hash}. "
+                        f"Remote: {handshake_payload.compatibility_hash}."
+                        f"{factor_diff} "
                         f"Prefill and decode instances have incompatible "
                         f"configurations. This may be due to: different vLLM versions,"
                         f" models, dtypes, KV cache layouts, attention backends, etc. "
@@ -1388,11 +1405,12 @@ class NixlBaseConnectorWorker:
             backend_name = ",".join(
                 sorted({backend.get_name() for backend in self.attn_backends})
             )
-        self.compat_hash = compute_nixl_compatibility_hash(
+        self.compat_factors = compute_nixl_compatibility_factors(
             self.vllm_config,
             backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
+        self.compat_hash = hash_nixl_compatibility_factors(self.compat_factors)
 
         if self._is_csa_linear and self.use_host_buffer:
             raise NotImplementedError(
@@ -1810,6 +1828,7 @@ class NixlBaseConnectorWorker:
         self.xfer_handshake_metadata = NixlHandshakePayload(
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
+            compatibility_factors=self.compat_factors,
         )
 
     def _ple_page_len(self) -> int:

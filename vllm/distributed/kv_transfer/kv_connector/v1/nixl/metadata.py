@@ -97,6 +97,9 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
     compatibility_hash: str
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
+    # The hashed factors, so a mismatching peer can name the fields that
+    # disagree. Optional: peers older than its introduction send none.
+    compatibility_factors: dict[str, Any] | None = None
 
 
 def _get_speculative_compatibility_factors(
@@ -137,20 +140,17 @@ def _get_speculative_compatibility_factors(
         "parallel_drafting": speculative_config.parallel_drafting,
         "kv_cache_dtype": str(kv_cache_dtype),
         "auxiliary_layer_ids": (
-            tuple(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
+            list(auxiliary_layer_ids) if auxiliary_layer_ids is not None else None
         ),
     }
 
 
-def compute_nixl_compatibility_hash(
+def compute_nixl_compatibility_factors(
     vllm_config: VllmConfig,
     attn_backend_name: str,
     transfer_mode: str = "pull",
-) -> str:
-    """Compute compatibility hash for NIXL KV transfer.
-
-    Hash only the factors that affect whether two NIXL instances can
-    successfully transfer KV cache data.
+) -> dict[str, Any]:
+    """Compute the compatibility factors two NIXL peers must agree on.
 
     Factors included:
     - vLLM version and NIXL connector version
@@ -171,18 +171,16 @@ def compute_nixl_compatibility_hash(
     Note - the set of factors are likely to evolve significantly over
     time to be more or less permissive.
 
-    Returns:
-        SHA-256 hex digest
-
+    The returned dict is JSON/msgpack-safe (tuples canonicalized to lists),
+    so it can travel in the handshake payload and be diffed key by key.
     """
     from vllm import __version__ as vllm_version
-    from vllm.config.utils import hash_factors
 
     model_config = vllm_config.model_config
     cache_config = vllm_config.cache_config
     is_hma_enabled = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
 
-    factors = {
+    return {
         # Version compatibility
         "vllm_version": vllm_version,
         "nixl_connector_version": NIXL_CONNECTOR_VERSION,
@@ -201,6 +199,12 @@ def compute_nixl_compatibility_hash(
         "transfer_mode": transfer_mode,
     }
 
+
+def hash_nixl_compatibility_factors(factors: dict[str, Any]) -> str:
+    """Hash compatibility factors, as produced by
+    compute_nixl_compatibility_factors, into a SHA-256 hex digest."""
+    from vllm.config.utils import hash_factors
+
     compat_hash = hash_factors(factors)
     logger.debug(
         "NIXL compatibility hash: %s (model=%s, dtype=%s, num_kv_heads=%d, "
@@ -210,9 +214,66 @@ def compute_nixl_compatibility_hash(
         factors["dtype"],
         factors["num_kv_heads"],
         factors["cache_dtype"],
-        attn_backend_name,
+        factors["attn_backend_name"],
     )
     return compat_hash
+
+
+def compute_nixl_compatibility_hash(
+    vllm_config: VllmConfig,
+    attn_backend_name: str,
+    transfer_mode: str = "pull",
+) -> str:
+    """Compute compatibility hash for NIXL KV transfer.
+
+    Hash only the factors that affect whether two NIXL instances can
+    successfully transfer KV cache data; see
+    compute_nixl_compatibility_factors for the full list.
+
+    Returns:
+        SHA-256 hex digest
+
+    """
+    return hash_nixl_compatibility_factors(
+        compute_nixl_compatibility_factors(
+            vllm_config, attn_backend_name, transfer_mode
+        )
+    )
+
+
+def diff_nixl_compatibility_factors(
+    local: dict[str, Any], remote: dict[str, Any]
+) -> list[str]:
+    """Per-key differences between two compatibility factor dicts.
+
+    Returns entries like "is_hma_enabled: local=True, remote=False", so a
+    handshake mismatch can name the exact configuration that disagrees
+    instead of leaving operators to guess from two bare hashes.
+    """
+    diffs: list[str] = []
+    for key in sorted(set(local) | set(remote)):
+        local_val = local.get(key)
+        remote_val = remote.get(key)
+        if (
+            key == "speculative_config"
+            and isinstance(local_val, dict)
+            and isinstance(remote_val, dict)
+        ):
+            for sub in sorted(set(local_val) | set(remote_val)):
+                if local_val.get(sub) != remote_val.get(sub):
+                    diffs.append(
+                        f"speculative_config.{sub}: "
+                        f"local={local_val.get(sub)!r}, "
+                        f"remote={remote_val.get(sub)!r}"
+                    )
+            continue
+        if key not in local:
+            diffs.append(f"{key}: local=<absent>, remote={remote_val!r}")
+        elif key not in remote:
+            diffs.append(f"{key}: local={local_val!r}, remote=<absent>")
+        elif local_val != remote_val:
+            diffs.append(f"{key}: local={local_val!r}, remote={remote_val!r}")
+    return diffs
 
 
 @dataclass
