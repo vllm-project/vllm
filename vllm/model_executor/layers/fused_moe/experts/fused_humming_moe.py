@@ -214,12 +214,20 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if scatter_idx is not None:
             layout = "scatter"
 
+        hadamard_block_size = getattr(quant_config, f"{prefix}_hadamard_block_size")
+        has_input_processing = (
+            mode.should_quantize
+            or (hadamard_block_size is not None and hadamard_block_size > 1)
+            or activation is not None
+            or scatter_idx is not None
+            or num_valid_tokens is not None
+        )
         inputs, group_scales, token_scales = may_process_input(
             config,
             inputs=inputs,
-            outputs=quanted_input,
+            outputs=quanted_input if has_input_processing else None,
             token_scales=scale2 if mode.has_secondary_scale else scale,
-            hadamard_block_size=getattr(quant_config, f"{prefix}_hadamard_block_size"),
+            hadamard_block_size=hadamard_block_size,
             layout=layout,
             expert_tokens=expert_tokens if layout == "grouped_mask" else None,
             scatter_idx=scatter_idx,
