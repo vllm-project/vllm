@@ -36,6 +36,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+    push_worker as push_worker_mod,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -46,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
+    _LayerPushPlan,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
@@ -399,6 +403,29 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._engine_ttl = 0.0
         w._engine_last_active = {}
         w._engine_by_address = {}
+
+        # Layer-wise overlapped WRITE-push state (opt-in; disabled here so the
+        # default monolithic push path is exercised). Set by
+        # NixlPushConnectorWorker.__init__, which ``fresh`` bypasses. Some are
+        # read eagerly as ``logger.debug`` args (e.g. len(_lw_deferred)) even
+        # when the feature is off, so they must exist.
+        w._layerwise = False
+        w._lw_defer_timeout = 60.0
+        w._lw_layer_names = []
+        w._lw_layer_index = {}
+        w._lw_task_q = queue.Queue()
+        w._lw_deferred = []
+        w._lw_reg = {}
+        w._lw_plan = {}
+        w._lw_lock = threading.Lock()
+        w._lw_local_blocks = {}
+        w._lw_scheduled_layers = defaultdict(set)
+        w._lw_handles = defaultdict(list)
+        w._lw_done = defaultdict(int)
+        w._lw_expected = {}
+        w._lw_sealed = set()
+        w._lw_notified = set()
+        w._lw_failed = set()
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []
@@ -2159,3 +2186,194 @@ def test_layer_handshake_rejects_unsupported_geometry(
     assert not worker.kv_caches_base_addr
     with pytest.raises(KeyError):
         worker.transfer_topo.get_engine_info(metadata.engine_id)
+
+
+class TestPushLayerwiseCompletenessSweep:
+    """Layer-wise push (opt-in) must guarantee byte-complete KV even when some
+    regions are never covered by a matching ``save_kv_layer`` call.
+
+    Model-agnostic: the per-layer producer hook only fires for attention layers
+    whose ``layer_name`` claims regions in ``_lw_layer_index``. Any region not
+    claimed during the forward would otherwise never be written, leaving stale
+    KV on D. ``seal_layer_writes_push`` runs a completeness sweep that enqueues
+    the missing region indices, fenced on a CUDA event recorded at seal (the
+    GPU may still be running the forward), and freezes the expected WRITE
+    count so completion can be detected.
+    """
+
+    @staticmethod
+    def _layerwise_worker(num_layers: int):
+        w = _StubWriterWorker.fresh()
+        w._layerwise = True
+        w._lw_layer_names = [f"layer.{i}" for i in range(num_layers)]
+        w._lw_layer_index = {n: [i] for i, n in enumerate(w._lw_layer_names)}
+        return w
+
+    @staticmethod
+    def _meta_with_save(req_id: str):
+        meta = NixlConnectorMetadata()
+        meta.add_new_req_to_save(req_id, ([0, 1],), {})
+        return meta
+
+    def test_sweep_enqueues_uncovered_regions(self, monkeypatch):
+        """Only regions {0, 2} were claimed during the forward; the sweep must
+        enqueue the missing {1, 3}, all fenced on one seal event."""
+        monkeypatch.setattr(push_worker_mod.torch.cuda, "Event", _FakeCudaEvent)
+        num_layers = 4
+        w = self._layerwise_worker(num_layers)
+        req_id = "req-sweep"
+        # Forward covered a strict subset (the synthetic "uncovered region"
+        # is layers 1 and 3, e.g. caches whose layer_name was never hooked).
+        w._lw_scheduled_layers[req_id] = {0, 2}
+
+        NixlPushConnectorWorker.seal_layer_writes_push(w, self._meta_with_save(req_id))
+
+        # Every region is now scheduled, expected count sealed at N.
+        assert w._lw_scheduled_layers[req_id] == {0, 1, 2, 3}
+        assert w._lw_expected[req_id] == num_layers
+        assert req_id in w._lw_sealed
+
+        # The sweep enqueued exactly the missing regions, all fenced on the
+        # same event recorded at seal.
+        swept = []
+        events = set()
+        while not w._lw_task_q.empty():
+            rid, region_idx, event, _ = w._lw_task_q.get_nowait()
+            assert rid == req_id
+            assert isinstance(event, _FakeCudaEvent) and event.recorded
+            events.add(id(event))
+            swept.append(region_idx)
+        assert sorted(swept) == [1, 3]
+        assert len(events) == 1
+
+    def test_full_coverage_sweeps_nothing(self, monkeypatch):
+        """All layers visited during the forward => sweep is a no-op, but the
+        expected count is still frozen so completion can fire."""
+        monkeypatch.setattr(push_worker_mod.torch.cuda, "Event", _FakeCudaEvent)
+        _FakeCudaEvent.created = 0
+        num_layers = 3
+        w = self._layerwise_worker(num_layers)
+        req_id = "req-full-cov"
+        w._lw_scheduled_layers[req_id] = {0, 1, 2}
+
+        NixlPushConnectorWorker.seal_layer_writes_push(w, self._meta_with_save(req_id))
+
+        assert w._lw_expected[req_id] == num_layers
+        assert req_id in w._lw_sealed
+        assert w._lw_task_q.empty()
+        assert _FakeCudaEvent.created == 0
+
+    def test_sweep_skips_failed_request(self):
+        """A request already marked failed is not swept or sealed."""
+        w = self._layerwise_worker(4)
+        req_id = "req-failed"
+        w._lw_failed.add(req_id)
+
+        NixlPushConnectorWorker.seal_layer_writes_push(w, self._meta_with_save(req_id))
+
+        assert req_id not in w._lw_expected
+        assert req_id not in w._lw_sealed
+        assert w._lw_task_q.empty()
+
+
+class _FakeCudaEvent:
+    created = 0
+
+    def __init__(self):
+        type(self).created += 1
+        self.recorded = False
+        self.synced = False
+
+    def record(self):
+        self.recorded = True
+
+    def synchronize(self):
+        self.synced = True
+
+
+# DSA-style layout: ``kv_caches`` order groups the indexer caches first, while
+# the NIXL region list (transfer-plan order) is natural-sorted per layer.
+_DSA_REGIONS = [
+    "model.layers.0.self_attn.attn",
+    "model.layers.0.self_attn.indexer.k_cache",
+    "model.layers.1.self_attn.attn",
+    "model.layers.2.self_attn.attn",
+    "model.layers.2.self_attn.indexer.k_cache",
+    "model.layers.10.self_attn.attn",
+]
+_DSA_ATTN = {n for n in _DSA_REGIONS if n.endswith(".attn")}
+
+
+class TestPushLayerwiseRegionOrder:
+    """Layer-wise tasks must be indexed in region (transfer-plan) order and
+    fenced on the event of the hook that produced each region."""
+
+    def test_hook_index_maps_to_own_and_orphan_regions(self):
+        index = NixlPushConnectorWorker._lw_build_hook_index(_DSA_REGIONS, _DSA_ATTN)
+        # Attention hook claims its own region plus the same layer's indexer.
+        assert index["model.layers.0.self_attn.attn"] == [0, 1]
+        assert index["model.layers.1.self_attn.attn"] == [2]
+        assert index["model.layers.2.self_attn.attn"] == [3, 4]
+        assert index["model.layers.10.self_attn.attn"] == [5]
+        # Every region is claimed by exactly one attention hook.
+        claimed = sorted(i for n in _DSA_ATTN for i in index[n])
+        assert claimed == list(range(len(_DSA_REGIONS)))
+
+    def test_ambiguous_owner_left_to_sweep(self):
+        regions = ["m.layers.0.a.attn", "m.layers.0.b.attn", "m.layers.0.c.cache"]
+        index = NixlPushConnectorWorker._lw_build_hook_index(
+            regions, {"m.layers.0.a.attn", "m.layers.0.b.attn"}
+        )
+        assert index["m.layers.0.a.attn"] == [0]
+        assert index["m.layers.0.b.attn"] == [1]
+        assert index["m.layers.0.c.cache"] == [2]
+
+    def test_save_kv_layer_push_enqueues_region_indices(self, monkeypatch):
+        monkeypatch.setattr(push_worker_mod.torch.cuda, "Event", _FakeCudaEvent)
+        w = _StubWriterWorker.fresh()
+        w._layerwise = True
+        w._lw_layer_names = list(_DSA_REGIONS)
+        w._lw_layer_index = NixlPushConnectorWorker._lw_build_hook_index(
+            _DSA_REGIONS, _DSA_ATTN
+        )
+        meta = NixlConnectorMetadata()
+        meta.add_new_req_to_save("r", ([0, 1],), {})
+
+        for name in ("model.layers.2.self_attn.attn", "model.layers.0.self_attn.attn"):
+            NixlPushConnectorWorker.save_kv_layer_push(w, meta, name, None, None)
+        # A repeated hook does not re-enqueue claimed regions.
+        NixlPushConnectorWorker.save_kv_layer_push(
+            w, meta, "model.layers.0.self_attn.attn", None, None
+        )
+
+        tasks = []
+        while not w._lw_task_q.empty():
+            tasks.append(w._lw_task_q.get_nowait())
+        assert [t[1] for t in tasks] == [3, 4, 0, 1]
+        # Regions of one hook share that hook's event; different hooks differ.
+        assert tasks[0][2] is tasks[1][2]
+        assert tasks[2][2] is tasks[3][2]
+        assert tasks[0][2] is not tasks[2][2]
+        assert w._lw_scheduled_layers["r"] == {0, 1, 3, 4}
+
+    def test_write_slices_region_major_descs(self):
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.make_prepped_xfer.return_value = 7
+        num_blocks = 3
+        plan = _LayerPushPlan(
+            local_xfer_handle=1,
+            remote_xfer_handle=2,
+            local_descs=list(range(100, 100 + 4 * num_blocks)),
+            remote_descs=list(range(200, 200 + 4 * num_blocks)),
+            num_blocks=num_blocks,
+            decode_engine_id="d",
+            notif_id=b"x",
+        )
+        ev = _FakeCudaEvent()
+        NixlPushConnectorWorker._lw_write_layer(w, "r", plan, 2, ev)
+        assert ev.synced
+        args = w.nixl_wrapper.make_prepped_xfer.call_args.args
+        assert args[2] == [106, 107, 108]
+        assert args[4] == [206, 207, 208]
+        assert w._lw_handles["r"] == [7]
