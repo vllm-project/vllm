@@ -13,15 +13,12 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import MultipleOf
-from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-    FlashInferMLASparseTRTLLMBackend,
-)
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.sparse_utils import (
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
     flat_kv_row_view,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
@@ -49,17 +46,27 @@ pytestmark = pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "backend,cache_dtype,sm100,stride_alignment",
     [
-        (FlashInferMLASparseTRTLLMBackend, "auto", True, 32 * 1152),
-        (FlashInferMLASparseTRTLLMBackend, "fp8", True, 32 * 576),
-        (FlashMLASparseBackend, "auto", True, 1152),
-        (FlashMLASparseBackend, "fp8_ds_mla", False, MultipleOf(64)),
-        (FlashMLASparseBackend, "fp8_ds_mla", True, 656),
-        (FlashMLASparseBackend, "nvfp4_ds_mla", True, 352),
+        (AttentionBackendEnum.FLASHINFER_MLA_SPARSE, "auto", True, 32 * 1152),
+        (AttentionBackendEnum.FLASHINFER_MLA_SPARSE, "fp8", True, 32 * 576),
+        pytest.param(
+            AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE_FA4,
+            "auto",
+            True,
+            64 * 1152,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
+        ),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "auto", True, 1152),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "fp8_ds_mla", False, MultipleOf(64)),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "fp8_ds_mla", True, 656),
+        (AttentionBackendEnum.FLASHMLA_SPARSE, "nvfp4_ds_mla", True, 352),
     ],
 )
 def test_allocation_and_warmup_follow_addressing_mode(
     monkeypatch, layout, backend, cache_dtype, sm100, stride_alignment, device
 ):
+    backend = backend.get_class()
     monkeypatch.setattr(
         current_platform, "is_device_capability_family", lambda family: sm100
     )
