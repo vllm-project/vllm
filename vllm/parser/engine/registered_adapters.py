@@ -7,6 +7,7 @@ names so that :class:`ReasoningParserManager` and
 :class:`ToolParserManager` can load them lazily.
 """
 
+from vllm.parser.berrylm import BerryLMParser
 from vllm.parser.deepseek_v4 import DeepSeekV4Parser
 from vllm.parser.deepseek_v32 import DeepSeekV32Parser
 from vllm.parser.deepseek_v41 import DeepSeekV41Parser
@@ -26,6 +27,11 @@ from vllm.parser.plamo3 import Plamo3Parser
 from vllm.parser.qwen3 import Qwen3Parser
 from vllm.parser.seed_oss import SeedOssParser
 from vllm.parser.step3p5 import Step3p5Parser
+
+(
+    BerryLMParserReasoningAdapter,
+    BerryLMParserToolAdapter,
+) = make_adapters(BerryLMParser)
 
 (
     DeepSeekV32ParserReasoningAdapter,

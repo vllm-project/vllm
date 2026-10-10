@@ -15,6 +15,7 @@ import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
+    "BerryLMConfig": "vllm.transformers_utils.configs.berrylm",
     "BailingMoeV3TextConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VLConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
@@ -90,6 +91,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 
 __all__ = [
     "BagelConfig",
+    "BerryLMConfig",
     "BailingMoeV3TextConfig",
     "BailingMoeV3VisionConfig",
     "BailingMoeV3VLConfig",
