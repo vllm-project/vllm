@@ -10,6 +10,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -169,10 +170,20 @@ class TestFullCUDAGraph:
             temperature=0.0, max_tokens=max_tokens, top_p=1.0
         )
 
-        piecewise_responses = piecewise_llm.generate(prompts, sampling_params)
-        full_responses = full_cudagraph_llm.generate(prompts, sampling_params)
+        responses = []
+        for llm in (piecewise_llm, full_cudagraph_llm):
+            # Queue the whole batch before scheduling so both engines exercise
+            # the requested batch size instead of timing-dependent sub-batches.
+            llm.sleep(level=0, mode="keep")
+            try:
+                llm.enqueue(prompts, sampling_params)
+            finally:
+                llm.wake_up(tags=["scheduling"])
+            responses.append(llm.wait_for_completion(output_type=RequestOutput))
+        piecewise_responses, full_responses = responses
 
         # Check that all responses are the same
+        assert len(piecewise_responses) == len(full_responses) == batch_size
         for piecewise_res, full_res in zip(piecewise_responses, full_responses):
             assert (
                 piecewise_res.outputs[0].text.lower()

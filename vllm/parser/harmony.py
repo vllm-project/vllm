@@ -16,14 +16,11 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
     Format,
-    GrammarFormat,
     JSONSchemaFormat,
     OptionalFormat,
     OrFormat,
-    RegexFormat,
     SequenceFormat,
     TagFormat,
-    TriggeredTagsFormat,
 )
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -44,9 +41,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SimplifiedToolChoice,
@@ -339,7 +335,10 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
@@ -380,7 +379,10 @@ class HarmonyParser(DelegatingParser):
         parser = get_streamable_parser_for_assistant()
         count = 0
         for token_id in token_ids:
-            parser.process(token_id)
+            try:
+                parser.process(token_id)
+            except HarmonyError:
+                continue
             recipient = self._normalize_recipient(parser.current_recipient)
             if self._is_reasoning_token(token_id, parser.current_channel, recipient):
                 count += 1
@@ -428,7 +430,6 @@ _FUNCTION_CALL_BEGINS = [
     " to=functions.{name}{channel}{constrain}<|message|>",
     "{channel} to=functions.{name}{constrain}<|message|>",
 ]
-_JSON_CONTENT = JSONSchemaFormat(json_schema={"type": "object"})
 _ANY_CONTENT = AnyTextFormat()
 
 
@@ -471,7 +472,7 @@ def _assemble_tag(
     return StructuralTag(format=SequenceFormat(elements=tags))
 
 
-@register_vllm_structural_tag("harmony")
+@register_vllm_structural_tag("harmony", builtin_tools=True)
 def get_harmony_structural_tag(
     tools: list[FunctionToolParam],
     builtin_tools: list[BuiltinToolParam],
@@ -531,43 +532,6 @@ def get_harmony_structural_tag(
     )
 
 
-def _params_to_final_content(params: StructuredOutputsParams) -> Format | None:
-    """Map StructuredOutputsParams in a XGrammar Format."""
-    if params.json_object:
-        return _JSON_CONTENT
-    if params.json is not None:
-        schema = params.json
-        if isinstance(schema, str):
-            schema = json.loads(schema)
-        return JSONSchemaFormat(json_schema=schema)
-    if params.regex is not None:
-        return RegexFormat(pattern=params.regex)
-    if params.choice is not None:
-        return OrFormat(
-            elements=[ConstStringFormat(value=choice) for choice in params.choice]
-        )
-    if params.grammar is not None:
-        return GrammarFormat(grammar=params.grammar)
-    if params.structural_tag is not None:
-        s_tag = json.loads(params.structural_tag)
-        if "structures" in s_tag:
-            # LegacyStructuralTagResponseFormat
-            return TriggeredTagsFormat(
-                triggers=s_tag["triggers"],
-                tags=[
-                    TagFormat(
-                        begin=structure["begin"],
-                        content=JSONSchemaFormat(json_schema=structure["schema"]),
-                        end=structure["end"],
-                    )
-                    for structure in s_tag["structures"]
-                ],
-            )
-        # StructuralTagResponseFormat
-        return StructuralTag.model_validate(s_tag).format
-    return None
-
-
 def _adjust_output_format(
     request: ChatCompletionRequest | ResponsesRequest,
 ) -> ChatCompletionRequest | ResponsesRequest:
@@ -576,7 +540,7 @@ def _adjust_output_format(
     if params is None:
         return request
 
-    final_content = _params_to_final_content(params)
+    final_content = structured_outputs_to_format(params)
     if final_content is None:
         return request
 

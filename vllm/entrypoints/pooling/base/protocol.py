@@ -183,15 +183,15 @@ class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
             if pooler_config.enable_chunked_processing:
                 max_total_tokens = pooler_config.max_embed_len
             else:
-                max_embed_len = pooler_config.max_embed_len or default_max_total_tokens
-                max_output_tokens = default_max_total_tokens - max_embed_len
+                max_total_tokens = (
+                    pooler_config.max_embed_len or default_max_total_tokens
+                )
 
         tok_params = self._build_pooling_tok_params(
             model_config,
             add_special_tokens=self.add_special_tokens,
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
-            max_output_tokens_param="max_model_len - max_embed_len",
         )
 
         if (

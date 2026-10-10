@@ -449,12 +449,80 @@ def parse_chat_input_to_harmony_message(
 def render_for_completion(messages: list[Message]) -> list[int]:
     messages = auto_drop_analysis_messages(messages)
     conversation = Conversation.from_messages(messages)
-    token_ids = get_encoding().render_conversation_for_completion(
+    encoding = get_encoding()
+    token_ids = encoding.render_conversation_for_completion(
         conversation,
         Role.ASSISTANT,
         config=RenderConversationConfig(auto_drop_analysis=False),
     )
-    return token_ids
+    return _use_legacy_tool_call_headers(token_ids)
+
+
+def _use_legacy_tool_call_headers(token_ids: list[int]) -> list[int]:
+    """Keep prior assistant tool calls in the format expected by GPT-OSS.
+
+    oss-harmony 0.0.10 changed a rendered tool-call header from::
+
+        assistant to=python<|channel|>commentary code
+
+    to::
+
+        assistant<|channel|>commentary to=python <|constrain|>code
+
+    GPT-OSS can echo the latter as a malformed header with the recipient in
+    both positions. Rewrite only that unambiguous token-level header shape,
+    while retaining oss-harmony's embedded vocabulary and parser.
+    """
+    encoding = get_encoding()
+    start = encoding.encode("<|start|>", allowed_special="all")[0]
+    channel_token = encoding.encode("<|channel|>", allowed_special="all")[0]
+    constrain = encoding.encode("<|constrain|>", allowed_special="all")[0]
+    message = encoding.encode("<|message|>", allowed_special="all")[0]
+
+    result = token_ids.copy()
+    index = 0
+    while index < len(result):
+        if result[index] != start:
+            index += 1
+            continue
+
+        try:
+            header_end = result.index(message, index + 1)
+            channel_index = result.index(channel_token, index + 1, header_end)
+            constrain_index = result.index(constrain, channel_index + 1, header_end)
+        except ValueError:
+            index += 1
+            continue
+
+        author = encoding.decode(result[index + 1 : channel_index])
+        channel_and_recipient = encoding.decode(
+            result[channel_index + 1 : constrain_index]
+        )
+        content_type = encoding.decode(result[constrain_index + 1 : header_end])
+        if (
+            author != "assistant"
+            or " to=" not in channel_and_recipient
+            or not channel_and_recipient.endswith(" ")
+        ):
+            index = header_end + 1
+            continue
+
+        channel, recipient = channel_and_recipient[:-1].split(" to=", 1)
+        if not channel or not recipient or not content_type:
+            index = header_end + 1
+            continue
+
+        legacy_header = (
+            [start]
+            + encoding.encode(f"assistant to={recipient}")
+            + [channel_token]
+            + encoding.encode(f"{channel} {content_type}")
+            + [message]
+        )
+        result[index : header_end + 1] = legacy_header
+        index += len(legacy_header)
+
+    return result
 
 
 def get_streamable_parser_for_assistant() -> StreamableParser:

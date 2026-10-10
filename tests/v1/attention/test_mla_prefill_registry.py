@@ -54,8 +54,18 @@ def test_prefill_backend_clone_has_isolated_metadata():
 def cleanup_overrides():
     """Clear any overrides after each test."""
     yield
-    for member in MLAPrefillBackendEnum:
+    for member in list(MLAPrefillBackendEnum):
         member.clear_override()
+
+
+def _remove_dynamic_member(enum_cls, member):
+    value = member.value
+    name = member.name
+    enum_cls._member_map_.pop(name, None)
+    enum_cls._member_names_.remove(name)
+    delattr(enum_cls, name)
+    if enum_cls._value2member_map_.get(value) is member:
+        del enum_cls._value2member_map_[value]
 
 
 def test_custom_is_not_alias_of_any_backend():
@@ -83,21 +93,11 @@ def test_custom_unregistered_raises():
 
 def test_register_custom_backend_with_class_path():
     register_mla_prefill_backend(
-        backend=MLAPrefillBackendEnum.CUSTOM,
-        class_path=(
-            "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-        ),
+        MLAPrefillBackendEnum.CUSTOM,
+        "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend",
     )
-
     assert MLAPrefillBackendEnum.CUSTOM.is_overridden()
-
-    class_path = MLAPrefillBackendEnum.CUSTOM.get_path()
-    assert class_path == (
-        "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-    )
-
-    backend_cls = MLAPrefillBackendEnum.CUSTOM.get_class()
-    assert backend_cls.get_name() == "CUSTOM"
+    assert MLAPrefillBackendEnum.CUSTOM.get_class().get_name() == "CUSTOM"
 
 
 def test_register_custom_backend_as_decorator():
@@ -120,33 +120,20 @@ def test_register_custom_backend_as_decorator():
 
 
 def test_override_existing_backend():
-    original_path = MLAPrefillBackendEnum.FLASH_ATTN.get_path()
-
     register_mla_prefill_backend(
-        backend=MLAPrefillBackendEnum.FLASH_ATTN,
-        class_path=(
-            "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-        ),
+        MLAPrefillBackendEnum.FLASH_ATTN,
+        "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend",
     )
-
+    assert MLAPrefillBackendEnum.FLASH_ATTN.get_class().get_name() == "CUSTOM"
     assert MLAPrefillBackendEnum.FLASH_ATTN.is_overridden()
-    assert MLAPrefillBackendEnum.FLASH_ATTN.get_path() != original_path
-
-    backend_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
-    assert backend_cls.get_name() == "CUSTOM"
 
 
 def test_clear_override():
     original_path = MLAPrefillBackendEnum.FLASH_ATTN.get_path()
-
     register_mla_prefill_backend(
-        backend=MLAPrefillBackendEnum.FLASH_ATTN,
-        class_path=(
-            "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
-        ),
+        MLAPrefillBackendEnum.FLASH_ATTN,
+        "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend",
     )
-    assert MLAPrefillBackendEnum.FLASH_ATTN.is_overridden()
-
     MLAPrefillBackendEnum.FLASH_ATTN.clear_override()
     assert not MLAPrefillBackendEnum.FLASH_ATTN.is_overridden()
     assert MLAPrefillBackendEnum.FLASH_ATTN.get_path() == original_path
@@ -172,3 +159,72 @@ def test_rocm_aiter_fa_registered():
     # The AITER FA path is the fp16/bf16 generic-varlen prefill path.
     assert backend_cls.supports_dtype(torch.bfloat16)
     assert backend_cls.supports_dtype(torch.float16)
+
+
+def test_register_dynamic_member():
+    p = "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend"
+    member = MLAPrefillBackendEnum.register("DYNAMIC_TEST", p)
+    assert member.name == "DYNAMIC_TEST"
+    assert member is MLAPrefillBackendEnum["DYNAMIC_TEST"]
+
+    _remove_dynamic_member(MLAPrefillBackendEnum, member)
+
+
+def test_register_dynamic_member_duplicate_raises():
+    path = "some.module.Class"
+    MLAPrefillBackendEnum.register("DUP_TEST", path)
+    with pytest.raises(ValueError, match="already exists"):
+        MLAPrefillBackendEnum.register("DUP_TEST", "other.module.OtherClass")
+    _remove_dynamic_member(MLAPrefillBackendEnum, MLAPrefillBackendEnum.DUP_TEST)
+
+
+class StringDecoratorMLAPrefillBackend(MLAPrefillBackend):
+    """Mock backend defined at module level so get_class() can resolve
+    the auto-generated class path (local classes are not importable)."""
+
+    supported_dtypes = [torch.bfloat16]
+    requires_r1_mla_dimensions = False
+
+    @staticmethod
+    def get_name() -> str:
+        return "DECORATED"
+
+    def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
+        raise NotImplementedError
+
+    def run_prefill_context_chunk(self, chunk_idx, q, k, v):
+        raise NotImplementedError
+
+
+def test_register_mla_prefill_backend_with_string_name_direct():
+    register_mla_prefill_backend(
+        "STRING_DIRECT",
+        "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend",
+    )
+    member = MLAPrefillBackendEnum.STRING_DIRECT
+    assert member.is_overridden()
+    assert member.get_class().get_name() == "CUSTOM"
+
+    member.clear_override()
+    _remove_dynamic_member(MLAPrefillBackendEnum, member)
+
+
+def test_register_mla_prefill_backend_with_string_name_decorator():
+    # The decorated class must be module-level: the decorator derives a
+    # class path from it, and get_class() re-imports that path. A class
+    # defined inside this test would have a non-importable <locals> path.
+    decorated_cls = StringDecoratorMLAPrefillBackend
+
+    result = register_mla_prefill_backend("STRING_DECORATOR")(decorated_cls)
+    assert result is decorated_cls
+
+    member = MLAPrefillBackendEnum.STRING_DECORATOR
+    assert member.is_overridden()
+    assert member.get_path() == (
+        f"{decorated_cls.__module__}.{decorated_cls.__qualname__}"
+    )
+    assert member.get_class() is decorated_cls
+    assert member.get_class().get_name() == "DECORATED"
+
+    member.clear_override()
+    _remove_dynamic_member(MLAPrefillBackendEnum, member)

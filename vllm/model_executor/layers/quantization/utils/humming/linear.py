@@ -87,7 +87,7 @@ def prepare_humming_linear_layer_config(
     shape_n_stacks = layer.output_partition_sizes
 
     # Step 1: convert weight and input schemas to humming standard format
-    source_tensors = dict(layer.named_parameters())
+    source_tensors = dict(layer.named_parameters(recurse=False))
     weight_schema, tensors = weight_schema.convert_humming(
         tensors=source_tensors,
         shape_n_stacks=shape_n_stacks,
@@ -143,7 +143,7 @@ def prepare_humming_linear_layer_config(
     if "bias" in tensors:
         zero_bias = torch.zeros_like(tensors["bias"])
         layer.register_buffer("zero_bias", zero_bias)
-    for name, _ in list(layer.named_parameters()):
+    for name, _ in list(layer.named_parameters(recurse=False)):
         delattr(layer, name)
     for name, tensor in tensors.items():
         param = torch.nn.Parameter(tensor, requires_grad=False)

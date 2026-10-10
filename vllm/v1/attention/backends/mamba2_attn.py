@@ -7,6 +7,10 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -109,6 +113,11 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
 
+    # Internal prefill checkpoints, one entry per prefill row. The chunk
+    # index selects the varlen_states row holding the checkpoint state.
+    checkpoint_chunk_idx: torch.Tensor | None = None
+    checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -128,6 +137,9 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
 
     def build(
         self,
@@ -139,13 +151,14 @@ class Mamba2AttentionMetadataBuilder(
         common = self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=kwargs.get("num_accepted_tokens"),
-            prev_last_scheduled_idx=kwargs.get("prev_last_scheduled_idx"),
             num_decode_draft_tokens_cpu=kwargs.get("num_decode_draft_tokens_cpu"),
         )
 
         seq_idx_p = None
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
+        checkpoint_chunk_idx = None
+        checkpoint_meta = None
         prep_initial_states = False
 
         # Compute seq_idx for prefill only
@@ -163,12 +176,27 @@ class Mamba2AttentionMetadataBuilder(
                 )
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
-            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
-                self._build_chunk_metadata_tensors(
-                    self.chunk_size,
-                    common,
-                    common_attn_metadata,
-                )
+            checkpoint_offsets_p = None
+            first = common.num_reqs - common.num_prefills
+            checkpoint = self.checkpoint_builder.build(
+                common_attn_metadata,
+                list(range(first, common.num_reqs)),
+            )
+            if checkpoint is not None:
+                # The host offsets place a chunk boundary on the checkpoint.
+                checkpoint_offsets_p = checkpoint.offsets
+                checkpoint_meta = checkpoint
+
+            (
+                cu_chunk_seqlen_p,
+                seq_idx_p,
+                last_chunk_indices_p,
+                checkpoint_chunk_idx,
+            ) = self._build_chunk_metadata_tensors(
+                self.chunk_size,
+                common,
+                common_attn_metadata,
+                checkpoint_offsets_p,
             )
 
         return replace(
@@ -178,4 +206,22 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            checkpoint_chunk_idx=checkpoint_chunk_idx,
+            checkpoint_meta=checkpoint_meta,
+        )
+
+    def update_block_table(
+        self,
+        metadata: Mamba2AttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> Mamba2AttentionMetadata:
+        new_metadata = super().update_block_table(metadata, blk_table, slot_mapping)
+        if metadata.checkpoint_meta is None:
+            return new_metadata
+        # Checkpoint destinations are block-table entries, so each group
+        # re-gathers its own rather than writing into the source group's.
+        return replace(
+            new_metadata,
+            checkpoint_meta=metadata.checkpoint_meta.regather_state_indices(blk_table),
         )

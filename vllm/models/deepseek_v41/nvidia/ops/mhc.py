@@ -9,9 +9,14 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_fused_post_pre_delayed_tilelang,
     mhc_post_tilelang,
+)
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    MoEOutput,
+    UnfinalizedMoEOutput,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -24,8 +29,16 @@ from .mega_mhc import (
 if TYPE_CHECKING:
     from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 
+    from .cute_dsl import AllReduceMHC
+
+logger = init_logger(__name__)
+
 # GB200 TP4/FlashInfer improves through 16 tokens; larger screens tie or regress.
 MHC_OVERLAP_MAX_TOKENS = 16
+
+# The fused all-reduce + mHC kernel of the overlap path, built once by
+# init_mhc_all_reduce.
+_all_reduce_mhc: "AllReduceMHC | None" = None
 
 
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
@@ -53,8 +66,33 @@ def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
         or config.hc_mult != 4
     ):
         return False
+    # The custom all-reduce's MNNVL buffers succeed exactly when NVLink
+    # multicast does, which the fused kernel's own mailbox needs too.
     comm = cast("CudaCommunicator", get_tp_group().device_communicator).ca_comm
     return comm is not None and bool(comm.mnnvl_lamport_ag_multicast_ptr)
+
+
+def init_mhc_all_reduce(vllm_config: VllmConfig) -> None:
+    """Build the fused all-reduce + mHC kernel the overlap path reduces with.
+
+    Collective over the TP group, so every rank must call it, and only when
+    ``supports_mhc_all_reduce`` holds.
+    """
+    global _all_reduce_mhc
+    from .cute_dsl import AllReduceMHC
+
+    config = vllm_config.model_config.hf_config
+    _all_reduce_mhc = AllReduceMHC(
+        hidden_size=config.hidden_size,
+        hc_mult=config.hc_mult,
+        max_num_tokens=MHC_OVERLAP_MAX_TOKENS,
+        top_k=config.num_experts_per_tok,
+        device=current_platform.current_device(),
+    )
+    logger.info_once(
+        "DSV4.1 mHC: CuTe DSL Lamport all-reduce fused with mHC for up to %d tokens.",
+        MHC_OVERLAP_MAX_TOKENS,
+    )
 
 
 def mhc_pre_delayed_overlap(
@@ -151,7 +189,7 @@ def mhc_pre_delayed_overlap(
 
 
 def mhc_shifted_post_pre(
-    x: torch.Tensor,
+    x: torch.Tensor | MoEOutput,
     residual: torch.Tensor,
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
@@ -175,39 +213,55 @@ def mhc_shifted_post_pre(
 ]:
     """Dispatch shifted post/pre to overlap, Mega-mHC, or fused TileLang.
 
+    A MoE output left unfinalized is finalized inside the fused all-reduce.
     When stream is supplied, join it before consuming the returned coefficients.
     """
     layer_input = None
-    if reduce_results:
-        tp = get_tp_group()
+    if isinstance(x, MoEOutput):
+        assert _all_reduce_mhc is not None, "init_mhc_all_reduce was not called"
+        assert pre_mix is not None and norm_weight is not None
+        routed = x.routed
+        assert isinstance(routed, UnfinalizedMoEOutput)
+        assert x.shared_output is not None
+        residual, layer_input = _all_reduce_mhc.finalize(
+            routed.gemm2_permuted,
+            routed.expert_weights,
+            routed.expanded_idx_to_permuted_idx,
+            x.shared_output,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+            pre_mix,
+            norm_weight,
+            norm_eps,
+        )
+        if stream is None:
+            # Outside FULL graphs, compute the next mixes inline.
+            stream = torch.cuda.current_stream()
+    elif reduce_results:
         if stream is not None and 0 < x.shape[0] <= MHC_OVERLAP_MAX_TOKENS:
-            comm = cast("CudaCommunicator", tp.device_communicator).ca_comm
-            assert comm is not None and comm.mnnvl_lamport_epochs is not None
-            output = torch.empty_like(residual)
-            layer_input = torch.empty_like(x)
-            torch.ops._C_custom_ar.all_reduce_mhc(
+            assert _all_reduce_mhc is not None, "init_mhc_all_reduce was not called"
+            assert pre_mix is not None and norm_weight is not None
+            residual, layer_input = _all_reduce_mhc(
                 x,
                 residual,
                 post_layer_mix,
                 comb_res_mix,
                 pre_mix,
                 norm_weight,
-                output,
-                layer_input,
-                comm.mnnvl_lamport_ag_local_ptr,
-                comm.mnnvl_lamport_ag_multicast_ptr,
-                comm.mnnvl_lamport_epochs[0],
-                comm.rank,
-                comm.mnnvl_buffer_size,
                 norm_eps,
             )
-            residual = output
         else:
-            x = tp.all_reduce(x)
+            x = get_tp_group().all_reduce(x)
     if stream is not None:
         if layer_input is None:
+            assert isinstance(x, torch.Tensor)
             residual = mhc_post_tilelang(x, residual, post_layer_mix, comb_res_mix)
-        aux = residual.mean(dim=1) if capture_aux else x.new_empty(0, x.shape[1])
+        aux = (
+            residual.mean(dim=1)
+            if capture_aux
+            else residual.new_empty(0, residual.shape[-1])
+        )
         pre_outputs = mhc_pre_delayed_overlap(
             residual,
             fn,
@@ -226,6 +280,7 @@ def mhc_shifted_post_pre(
         )
         return residual, *pre_outputs, aux
 
+    assert isinstance(x, torch.Tensor)
     if can_use_mega_mhc(x, residual, pre_mix, norm_weight, capture_aux):
         assert pre_mix is not None and norm_weight is not None
         outputs = mhc_shifted_post_pre_deep_gemm(

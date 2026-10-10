@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     model_serializer,
 )
@@ -25,6 +26,12 @@ logger = init_logger(__name__)
 StopParam: TypeAlias = (
     str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
 )
+
+# `top_logprobs` is nullable in the OpenAI spec; null means the same as omitted.
+TopLogprobsParam: TypeAlias = Annotated[
+    int,
+    BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
+]
 
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
@@ -46,6 +53,34 @@ def validate_cache_salt(cache_salt: object) -> None:
             "Parameter 'cache_salt' must be at most 128 characters and must "
             "not contain '@', '/', '\\\\', or NUL.",
             parameter="cache_salt",
+        )
+
+
+def validate_request_mm_kwargs(
+    *,
+    mm_processor_kwargs: dict[str, Any] | None,
+    media_io_kwargs: dict[str, dict[str, Any]] | None,
+    trust_request_mm_kwargs: bool,
+) -> None:
+    """Reject untrusted per-request multimodal kwarg overrides."""
+    if trust_request_mm_kwargs:
+        return
+
+    if mm_processor_kwargs:
+        raise VLLMValidationError(
+            "Per-request mm_processor_kwargs are disabled by default because "
+            "they can change multimodal preprocessing resource usage. Start "
+            "the server with --trust-request-mm-kwargs only when clients "
+            "are trusted.",
+            parameter="mm_processor_kwargs",
+        )
+    if media_io_kwargs:
+        raise VLLMValidationError(
+            "Per-request media_io_kwargs are disabled by default because "
+            "they can change multimodal media loading resource usage. Start "
+            "the server with --trust-request-mm-kwargs only when clients "
+            "are trusted.",
+            parameter="media_io_kwargs",
         )
 
 
@@ -195,7 +230,11 @@ def validate_structural_tag_response_format(
 
 
 def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
-    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.sampling_params import (
+        SamplingParams,
+        StructuredOutputsParams,
+        check_json_nesting,
+    )
     from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
     if isinstance(payload, str) and not payload:
@@ -204,6 +243,9 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
             parameter=parameter,
         )
 
+    if isinstance(payload, str):
+        # Raised here so the error is not reported as a malformed tag below
+        check_json_nesting(payload, structural_tag=True)
     try:
         validate_xgrammar_grammar(
             SamplingParams(
