@@ -697,20 +697,6 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         )
         return self._o_proj(attn_out, positions)
 
-    def forward_kv(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> None:
-        """Write the KV ``forward`` writes. The query passed to the insert is discarded."""
-        attn_metadata = get_forward_context().attn_metadata
-        qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
-        _, _, kv = self._split_qkv_and_norm(qr_kv)
-        if isinstance(attn_metadata, dict):
-            dummy_q = kv.new_zeros((kv.shape[0], self.n_local_heads, self.head_dim))
-            self._fused_qnorm_rope_kv_insert(dummy_q, kv, positions, attn_metadata)
-        if self.compressor is not None:
-            latent = self.compressor(kv_score, positions)
-            self.compressor.insert_cache(latent, positions, self.rotary_emb)
-            if self.indexer is not None and self.indexer.owns_k:
-                self.indexer._produce_k(latent, positions, self.indexer_rotary_emb)
-
     def _forward_csa2_full(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> tuple[

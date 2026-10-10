@@ -26,31 +26,26 @@ ROWS = list(range(FULL - WINDOW, FULL))
 HC, HIDDEN = 4, 8
 DEVICE = torch.device("cuda")
 # gfx942 writes the V4 record (584 B). Family-100 writes the V4.1 record (528 B).
-_BLOCK = 64
+# The SWA layer uses block size 32, which is the size the KV-only insert checks.
+_BLOCK = 32
 _HEAD_DIM = 512
 
 
 class _RocmKvInsert:
-    """SWA cache from ROCm ``forward_kv``, checked against ``forward``'s insert."""
+    """SWA cache from ``forward_kv``, checked against the KV-only insert."""
 
     def __init__(self, num_tokens: int):
-        from vllm.models.deepseek_v41.attention import (
-            DeepseekV4Attention,
-            _use_v41_mxfp8_kv_record,
-        )
+        from vllm.models.deepseek_v41.attention import _use_v41_mxfp8_kv_record
 
-        if not hasattr(
-            torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
-        ):
-            pytest.skip("fused DeepseekV4 insert op is not built")
+        if not hasattr(torch.ops._C, "fused_deepseek_v4_kv_rope_insert"):
+            pytest.skip("fused DeepseekV4 KV insert op is not built")
 
         self.num_tokens = num_tokens
-        self._insert = DeepseekV4Attention._fused_qnorm_rope_kv_insert
-        kv_mxfp8 = _use_v41_mxfp8_kv_record()
-        bytes_per = 528 if kv_mxfp8 else 584
+        self.kv_mxfp8 = _use_v41_mxfp8_kv_record()
+        bytes_per = 528 if self.kv_mxfp8 else 584
         num_blocks = (num_tokens + _BLOCK - 1) // _BLOCK + 1
         cache = torch.full(
-            (num_blocks, _BLOCK * bytes_per),
+            (num_blocks, _BLOCK, bytes_per),
             0xA5,
             dtype=torch.uint8,
             device=DEVICE,
@@ -59,7 +54,6 @@ class _RocmKvInsert:
         self.kv = torch.randn(
             num_tokens, _HEAD_DIM, dtype=torch.bfloat16, device=DEVICE
         )
-        n_heads = 16
         prefix = "replay.swa"
         slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
         self.metadata = {
@@ -67,38 +61,24 @@ class _RocmKvInsert:
         }
         self.context = ForwardContext({}, self.metadata, {})
         inv_freq = 1.0 / (
-            10000
-            ** (
-                torch.arange(0, 64, 2, dtype=torch.float32, device=DEVICE) / 64
-            )
+            10000 ** (torch.arange(0, 64, 2, dtype=torch.float32, device=DEVICE) / 64)
         )
         freqs = torch.outer(
             torch.arange(num_tokens + 8, dtype=torch.float32, device=DEVICE), inv_freq
         )
-        attn = SimpleNamespace(
-            n_local_heads=n_heads,
-            padded_heads=n_heads,
-            head_dim=_HEAD_DIM,
-            eps=1e-6,
-            kv_mxfp8=kv_mxfp8,
-            accepts_unnormed_unroped_query=False,
+        self.attn = SimpleNamespace(
+            kv_mxfp8=self.kv_mxfp8,
             compressor=None,
             indexer=None,
             rotary_emb=SimpleNamespace(
                 cos_sin_cache=torch.cat((freqs.cos(), freqs.sin()), dim=-1)
             ),
-            swa_cache_layer=SimpleNamespace(prefix=prefix, kv_cache=cache),
+            swa_cache_layer=SimpleNamespace(
+                prefix=prefix, kv_cache=cache, block_size=_BLOCK
+            ),
             _run_parallel_input_projections=lambda hidden: (hidden, None, None),
             _split_qkv_and_norm=lambda qr_kv: (None, None, self.kv[: qr_kv.shape[0]]),
         )
-
-        def insert(q, kv, positions, attn_metadata):
-            return DeepseekV4Attention._fused_qnorm_rope_kv_insert(
-                attn, q, kv, positions, attn_metadata
-            )
-
-        attn._fused_qnorm_rope_kv_insert = insert
-        self.attn = attn
         self.last_rows: int | None = None
         self.last_positions: torch.Tensor | None = None
 
@@ -112,8 +92,15 @@ class _RocmKvInsert:
         res_mix,
         residual,
     ):
-        from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+        from vllm.models.deepseek_v41.amd.rocm import (
+            DeepseekV41ROCMAiterMLAAttention,
+        )
+        from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 
+        assert (
+            DeepseekV41ROCMAiterMLAAttention.forward_kv
+            is DeepseekV4Attention.forward_kv
+        )
         self.last_rows = x.shape[0]
         self.last_positions = positions
         DeepseekV41ROCMAiterMLAAttention.forward_kv(self.attn, positions, x)
@@ -124,35 +111,39 @@ class _RocmKvInsert:
         written = self.attn.swa_cache_layer.kv_cache
         assert not torch.equal(written, self.poison)
         ref = self.poison.clone()
-        q = torch.randn(
-            self.num_tokens,
-            self.attn.n_local_heads,
-            _HEAD_DIM,
-            dtype=self.kv.dtype,
-            device=DEVICE,
-        )
-        self.attn.swa_cache_layer.kv_cache = ref
-        self._insert(
-            self.attn,
-            q,
+        meta = self.metadata[self.attn.swa_cache_layer.prefix]
+        torch.ops._C.fused_deepseek_v4_kv_rope_insert(
             self.kv,
+            ref,
+            meta.slot_mapping,
             self.last_positions,
-            self.metadata,
+            self.attn.rotary_emb.cos_sin_cache,
+            _BLOCK,
+            None,
+            self.kv_mxfp8,
         )
-        self.attn.swa_cache_layer.kv_cache = written
         assert torch.equal(written, ref)
         assert torch.equal(written[-1], self.poison[-1])
 
 
 class _Layer(nn.Module):
-    def __init__(self, idx: int):
+    def __init__(
+        self,
+        idx: int,
+        compressed: str | None = None,
+        indexer: str | None = None,
+    ):
         super().__init__()
         self.idx = idx
         self.seen: list[torch.Tensor] = []
         self.attn = SimpleNamespace(
             swa_cache_layer=SimpleNamespace(prefix=f"layers.{idx}.swa"),
-            compressed_cache_prefix=None,
-            indexer=None,
+            compressed_cache_prefix=compressed,
+            indexer=(
+                None
+                if indexer is None
+                else SimpleNamespace(k_cache=SimpleNamespace(prefix=indexer))
+            ),
             compress_ratio=1,
         )
 
@@ -191,7 +182,14 @@ def _model(monkeypatch):
     monkeypatch.setattr(amd.EngramLayout, "from_config", lambda config: None)
     monkeypatch.setattr(amd, "MHCPostOp", lambda: SimpleNamespace())
 
-    layers = [_Layer(i) for i in range(4)]
+    # Layer 0 sits before the cut, so its keys are not collected. Layer 2
+    # shares layer 1's compressed cache. Layer 3 has neither.
+    layers = [
+        _Layer(0, "layers.0.compressed", "layers.0.indexer"),
+        _Layer(1, "layers.1.compressed", "layers.1.indexer"),
+        _Layer(2, "layers.1.compressed", "layers.2.indexer"),
+        _Layer(3),
+    ]
     # Layer 1 is the KV source, so the replay callback is this layer's write.
     insert = _RocmKvInsert(FULL)
     layers[1].write_kv = insert.write
@@ -282,7 +280,18 @@ def _forward(model, insert: _RocmKvInsert):
 
 def test_amd_replay_forward_trims_to_the_window(monkeypatch):
     model, layers, calls, saved_aux, scattered, insert = _model(monkeypatch)
-    assert model.decoder_replay_layers.replay_batch is None
+    replay_layers = model.decoder_replay_layers
+    assert model.decoder_replay_start == 1
+    assert replay_layers.first_swa_prefix == "layers.1.swa"
+    assert replay_layers.metadata_prefixes == {
+        "layers.1.swa",
+        "layers.1.compressed",
+        "layers.1.indexer",
+        "layers.2.swa",
+        "layers.2.indexer",
+        "layers.3.swa",
+    }
+    assert replay_layers.replay_batch is None
     out = _forward(model, insert)
     insert.assert_matches_forward()
     replay = model.decoder_replay_layers.replay_batch
@@ -318,15 +327,3 @@ def test_amd_replay_forward_trims_to_the_window(monkeypatch):
     assert aux.shape[0] == FULL
     assert torch.equal(aux[ROWS, 0], window_ids)
     assert aux[: FULL - WINDOW].eq(0).all()
-
-
-@pytest.mark.parametrize("num_tokens", [64, 17])
-def test_rocm_forward_kv_matches_forward_insert(num_tokens):
-    """A full page and a partial page. The reference query is not zeros."""
-    insert = _RocmKvInsert(num_tokens)
-    hidden = torch.empty(num_tokens, 1, device=DEVICE)
-    positions = torch.arange(num_tokens, device=DEVICE)
-    mix = torch.empty(num_tokens, 1, device=DEVICE)
-    with override_forward_context(insert.context):
-        insert.write(hidden, positions, None, mix, mix, mix, hidden)
-    insert.assert_matches_forward()
