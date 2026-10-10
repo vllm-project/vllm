@@ -6,11 +6,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.envs as envs
 from tests.v1.attention.utils import create_vllm_config
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
 )
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+from vllm.models.deepseek_v41.attention import _indexer_prefill_buffer_size
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
@@ -654,3 +656,23 @@ def test_indexer_prefill_budget_matches_compressed_workspace(compress_ratio):
     assert len(chunks) > 1
     for req_slice, _ in chunks:
         assert int(compressed_seq_lens[req_slice].sum()) <= workspace_rows
+
+
+@pytest.mark.parametrize("max_model_len", [1 << 17, 1 << 20])
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_dsv41_indexer_prefill_buffer_holds_every_chunk(max_model_len, compress_ratio):
+    """DeepSeek-V4.1 reserves only the K-gather rows a chunk can reach under the
+    builder's logits budget; the densest chunks the builder forms must fit, some
+    of them exactly."""
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=max_model_len)
+    )
+    reserved = _indexer_prefill_buffer_size(vllm_config, compress_ratio)
+    seq_lens = [max_model_len // compress_ratio] * 256
+    chunks = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
+        torch.tensor(seq_lens),
+        torch.ones(len(seq_lens), dtype=torch.int64),
+        get_max_prefill_buffer_size(vllm_config) // compress_ratio,
+        envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+    )
+    assert max(sum(seq_lens[reqs]) for reqs, _ in chunks) <= reserved
