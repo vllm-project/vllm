@@ -80,6 +80,7 @@ steps:
 
 - label: ":nvidia: (B200) Quantized MoE"
   key: quantized-moe-test-b200
+  automatic_shard: true
   timeout_in_minutes: 120
   working_dir: "/vllm-workspace/"
   device: b200-k8s
