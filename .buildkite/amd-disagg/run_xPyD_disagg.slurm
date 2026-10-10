@@ -24,6 +24,16 @@ RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"   # bench | accuracy
 DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -> decode reads KV (read_mode)
 
+# ---- ionic / AINIC RoCE userspace -------------------------------------------
+# The nightly images ship a provider that this cluster's ionic kernel module
+# rejects outright ("does not support the kernel ABI of 4"), which leaves MoRI
+# with zero devices, so default to the channel that matches the module. Set
+# AINIC_SWAP_CHANNEL=none to serve the image's own provider unchanged; an empty
+# value is treated as unset, so `none` is the way to opt out.
+SKIP_IONIC_MOUNTS="${SKIP_IONIC_MOUNTS:-0}"
+AINIC_SWAP_CHANNEL="${AINIC_SWAP_CHANNEL:-1.117.3-hydra}"
+[ "$AINIC_SWAP_CHANNEL" = "none" ] && AINIC_SWAP_CHANNEL=""
+
 # ---- router / gateway (host-side; also forwarded into the container) --------
 # vllm-router -> external `vllm/vllm-router` container started on the rank-0 node (default)
 # proxy       -> in-container MoRIIO proxy (no extra container)
@@ -385,15 +395,21 @@ run_node_container() {
     # container IF present: the image ships an ABI-incompatible copy and the NICs
     # are invisible without the host libs. Each entry is added only when the host
     # file exists, so this is a no-op on non-ionic (e.g. mlx5) clusters.
+    #
+    # SKIP_IONIC_MOUNTS=1 leaves the image's own ionic userspace in place
     local IONIC_MOUNTS=()
     local host_ionic
-    host_ionic=$(readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1 2>/dev/null || true)
-    [ -n "$host_ionic" ] && IONIC_MOUNTS+=(-v "$host_ionic:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
-    [ -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so ] && \
-        IONIC_MOUNTS+=(-v "/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:ro")
-    [ -f /etc/libibverbs.d/ionic.driver ] && \
-        IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
-    echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
+    if [ "$SKIP_IONIC_MOUNTS" = "1" ]; then
+        echo "Rank $rank ionic mounts: <skipped: SKIP_IONIC_MOUNTS=1>"
+    else
+        host_ionic=$(readlink -f /usr/lib/x86_64-linux-gnu/libionic.so.1 2>/dev/null || true)
+        [ -n "$host_ionic" ] && IONIC_MOUNTS+=(-v "$host_ionic:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
+        [ -f /usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so ] && \
+            IONIC_MOUNTS+=(-v "/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:/usr/lib/x86_64-linux-gnu/libibverbs/libionic-rdmav34.so:ro")
+        [ -f /etc/libibverbs.d/ionic.driver ] && \
+            IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
+        echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
+    fi
 
     # Pull latest container.
     if [ "$DRY_RUN" != "1" ]; then
@@ -403,6 +419,53 @@ run_node_container() {
             echo "Rank $rank pulling router image on $(hostname): $VLLM_ROUTER_IMAGE"
             docker pull "$VLLM_ROUTER_IMAGE" || echo "WARN: docker pull failed on $(hostname) for $VLLM_ROUTER_IMAGE (using local copy if present)"
         fi
+    fi
+
+    # Replace the image's ionic RoCE userspace with another repo.radeon.com
+    # channel. An image whose provider is rejected by libibverbs against the host
+    # kernel module ("Driver ionic does not support the kernel ABI of N") exposes
+    # no devices at all, so MoRI enumerates zero of them and every worker aborts on
+    # `availDevices.size() > 0' in RdmaManager. The swap needs apt as root, but the
+    # serving container runs as the calling user, so bake a committed image here
+    # and serve from that instead.
+    #
+    # This composes with the ionic mounts above: the bake deliberately runs without
+    # them so apt can write those paths, and they are layered back on at serve time
+    # unless SKIP_IONIC_MOUNTS=1.
+    RUN_IMAGE="$IMAGE"
+    if [ -n "$AINIC_SWAP_CHANNEL" ] && [ "$DRY_RUN" != "1" ]; then
+        local src_id ainic_tag build_cont swap_rc
+        src_id=$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null | cut -d: -f2 | cut -c1-12)
+        # Key the tag on the source image id so a moving tag (e.g. :nightly) cannot
+        # silently serve a swap baked on top of an older pull.
+        ainic_tag="vllm-disagg-ainic:${AINIC_SWAP_CHANNEL}-${src_id:-unknown}"
+        if docker image inspect "$ainic_tag" >/dev/null 2>&1; then
+            echo "Rank $rank ainic swap: reusing $ainic_tag"
+        else
+            echo "Rank $rank ainic swap: building $ainic_tag from $IMAGE"
+            build_cont="ainic-swap-${SLURM_JOB_ID:-0}-${rank}"
+            docker stop -t 30 "$build_cont" >/dev/null 2>&1 || true
+            docker rm "$build_cont" >/dev/null 2>&1 || true
+            if docker run --name "$build_cont" --user 0:0 --network host \
+                    -v "$DISAGG_SCRIPTS_DIR":"$CONTAINER_SCRIPTS":ro \
+                    --entrypoint /bin/bash "$IMAGE" \
+                    -c "bash $CONTAINER_SCRIPTS/swap_ainic_userspace.sh $AINIC_SWAP_CHANNEL" \
+               && docker commit "$build_cont" "$ainic_tag" >/dev/null; then
+                echo "Rank $rank ainic swap: committed $ainic_tag"
+                swap_rc=0
+            else
+                echo "ERROR: rank $rank ainic swap to $AINIC_SWAP_CHANNEL failed on $(hostname)" >&2
+                swap_rc=1
+            fi
+            # Reached on both paths so a failed bake cannot leave the name behind
+            # and block the next attempt. The container has already exited by now,
+            # so the stop is a no-op that keeps teardown uniform with the rest of
+            # the script.
+            docker stop -t 30 "$build_cont" >/dev/null 2>&1 || true
+            docker rm "$build_cont" >/dev/null 2>&1 || true
+            [ "$swap_rc" = "0" ] || return 1
+        fi
+        RUN_IMAGE="$ainic_tag"
     fi
 
     # Start the external vLLM router as a SEPARATE container on the rank-0 node.
@@ -478,7 +541,7 @@ run_node_container() {
         -e GATEWAY_PORT="$GATEWAY_PORT" \
         --name "$DOCKER_CONT_NAME" \
         --entrypoint /bin/bash \
-        "$IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
+        "$RUN_IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
       2>&1 | tee "$LOG_PATH/main_NODE${rank}.log"
     local node_rc=${PIPESTATUS[0]}   # docker run exit code (not tee), for rank-0 pass/fail
     # Stop the external router (rank-0 node) once the main container returns.
