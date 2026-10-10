@@ -201,6 +201,7 @@ class BertAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        alibi_slopes: list[float] | None = None,
     ):
         super().__init__()
 
@@ -210,6 +211,7 @@ class BertAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.output",
+            alibi_slopes=alibi_slopes,
         )
 
         self.output = BertSelfOutput(
@@ -235,6 +237,7 @@ class BertSelfAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        alibi_slopes: list[float] | None = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -271,6 +274,7 @@ class BertSelfAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            alibi_slopes=alibi_slopes,
         )
 
     def forward(
