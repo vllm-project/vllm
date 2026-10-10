@@ -36,7 +36,11 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.layout import get_hisparse_steady_state_concurrency
-from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
+from vllm.v1.hisparse.types import (
+    SparseKVOffloadCommand,
+    SparseKVResidencyUpdate,
+    SparseKVRowMirror,
+)
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -56,6 +60,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     source_block_ids: tuple[int, ...]
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
     all_context_pages_resident: bool
+    residency_updates: dict[str, SparseKVResidencyUpdate]
 
 
 @dataclass
@@ -143,16 +148,13 @@ class HiSparseConnectorScheduler:
                 scheduler_output.num_scheduled_tokens.items()
             )
         )
-        # Runs first: it plans this step's transfers and table updates.
+        # Runs first: it plans this step's transfers and residency changes.
         self.coordinator.advance_scheduled(
             (
                 request_id,
                 min(start + count, self.requests[request_id].num_tokens),
             )
             for request_id, start, count in scheduled_requests
-        )
-        scheduler_output.block_table_updates = (
-            self.coordinator.take_block_table_updates() or None
         )
         command = self.coordinator.build_offload_command()
         host_block_copies = self.coordinator.take_host_block_copies()
@@ -192,6 +194,9 @@ class HiSparseConnectorScheduler:
             tuple(source_block_ids),
             row_mirrors,
             self.coordinator.all_context_pages_resident(scheduled_requests),
+            self.coordinator.take_residency_updates(
+                scheduler_output.num_scheduled_tokens
+            ),
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
