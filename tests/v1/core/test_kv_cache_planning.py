@@ -39,6 +39,7 @@ from vllm.v1.core.kv_cache_planning import (
     can_share_block_table,
     check_enough_kv_cache_memory,
     estimate_max_model_len,
+    get_global_kv_cache_groups,
     get_kv_cache_groups,
     kv_cache_groups_tp_replicas,
 )
@@ -2256,6 +2257,35 @@ def test_dflash_drafter_sliding_window_layers_back_only_their_tail(
     assert params.num_speculative_tokens == 3
     assert params.max_in_flight_steps == config.max_concurrent_batches
     assert params.num_lookahead_tokens == num_lookahead_tokens
+
+
+def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
+    config = VllmConfig(model_config=ModelConfig(max_model_len=512))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.speculative_config = fake_speculative_config(
+        method="eagle",
+        use_eagle_block_drop=lambda: True,
+        use_multi_module_mtp=lambda: False,
+    )
+    draft = new_sliding_window_layer(block_size=16, sliding_window=64)
+    target = new_sliding_window_layer(block_size=16, sliding_window=128)
+
+    def retained(layers):
+        groups = get_global_kv_cache_groups(config, [layers])
+        return {
+            name: getattr(group.manager_config.params, "extra_retained_tokens", None)
+            for group in groups
+            for name in group.layer_names
+        }
+
+    assert retained({"target": new_kv_cache_layer(), "draft": draft}) == {
+        "target": None,
+        "draft": 17,
+    }
+    layers = {"target": target, "draft": _as_draft(draft)}
+    assert retained(layers) == {"target": 0, "draft": 17}
+    config.speculative_config = None
+    assert retained(layers) == {"target": 0, "draft": 0}
 
 
 _GQA_SPEC = AttentionSpec(

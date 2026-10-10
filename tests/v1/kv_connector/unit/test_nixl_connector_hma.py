@@ -404,18 +404,21 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "swa_enabled,expected_sw_sizes",
+    "swa_enabled,extra_retained_tokens,expected_sw_sizes",
     [
-        # SWA enabled: full attention (0) + sliding window (2048/16=128)
-        (True, [0, 128 + 1]),
-        # SWA disabled: only full attention (0)
-        (False, [0]),
+        # SWA enabled: FullAttentionSpec (0) + SlidingWindowSpec (2048/16=128)
+        (True, 0, [0, 128 + 1]),
+        # Tokens retained below the window are allocated and transferred too:
+        # (2048 + 17) / 16 -> 130 blocks
+        (True, 17, [0, 130 + 1]),
+        # SWA disabled: only FullAttentionSpec (0)
+        (False, 0, [0]),
     ],
 )
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
 )
-def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
+def test_sw_sizes(mock_platform, swa_enabled, extra_retained_tokens, expected_sw_sizes):
     """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
@@ -429,6 +432,11 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     kv_cache_config = make_kv_cache_config(
         block_size=block_size, swa_enabled=swa_enabled, sw_size=2048
     )
+    if extra_retained_tokens:
+        swa_group = kv_cache_config.kv_cache_groups[1]
+        swa_group.manager_config = swa_group.manager_config.replace_params(
+            extra_retained_tokens=extra_retained_tokens
+        )
 
     scheduler = NixlConnectorScheduler(
         vllm_config=vllm_config,

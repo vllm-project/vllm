@@ -1583,6 +1583,31 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
+def _retain_eagle_hit_blocks_below_window(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroup]
+) -> None:
+    """Retain the full sliding-window hit span when EAGLE drops a block."""
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle_block_drop():
+        return
+    annotated = any(group.is_eagle_group for group in kv_cache_groups)
+    for group in kv_cache_groups:
+        config = group.manager_config
+        params = config.params
+        if (
+            not isinstance(params, SlidingWindowManager.Params)
+            or not group.prefix_cacheable
+            or (annotated and not group.is_eagle_group)
+        ):
+            continue
+        window = params.sliding_window - 1
+        hit_blocks = cdiv(window, group.block_size) + 1
+        group.manager_config = config.replace_params(
+            extra_retained_tokens=params.extra_retained_tokens
+            + hit_blocks * group.block_size - window
+        )
+
+
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     layer_configs: list[dict[str, KVCacheLayerConfig]],
@@ -1631,6 +1656,7 @@ def get_global_kv_cache_groups(
         for group in global_kv_cache_groups:
             group.is_eagle_group = not draft_layer_names.isdisjoint(group.layer_names)
         _warn_if_unannotated_eagle_mamba(spec_config, global_kv_cache_groups)
+    _retain_eagle_hit_blocks_below_window(vllm_config, global_kv_cache_groups)
     return global_kv_cache_groups
 
 
