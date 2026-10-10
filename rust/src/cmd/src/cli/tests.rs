@@ -186,6 +186,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: Auto,
+                        always_constrain_output: false,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1056,6 +1057,7 @@ fn frontend_args_accept_json() {
                         tool_call_parser: None,
                         reasoning_parser: None,
                         tool_strict_level: Auto,
+                        always_constrain_output: false,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1239,7 +1241,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"always_constrain_output":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -1259,6 +1261,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     );
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert!(args.runtime.language_model_only);
+    assert!(args.runtime.always_constrain_output);
     assert_eq!(args.runtime.max_logprobs, Some(-1));
     assert_eq!(args.runtime.shutdown_timeout, 3);
 }
@@ -1729,6 +1732,7 @@ fn serve_args_accept_handshake_aliases() {
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         tool_strict_level: Auto,
+                        always_constrain_output: false,
                         renderer: Auto,
                         language_model_only: false,
                         max_logprobs: None,
@@ -1889,6 +1893,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: Auto,
+            always_constrain_output: false,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -1985,6 +1990,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             tool_call_parser: Auto,
             reasoning_parser: Auto,
             tool_strict_level: Auto,
+            always_constrain_output: false,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
@@ -2125,6 +2131,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             tool_call_parser: None,
             reasoning_parser: None,
             tool_strict_level: Auto,
+            always_constrain_output: false,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,

@@ -4,6 +4,7 @@
 //! Adapter that combines reasoning and tool parsers.
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::Format;
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
@@ -111,10 +112,12 @@ impl UnifiedParser for CombinedParser {
             Some(reasoning) => reasoning.wrap_visible_format(ctx, &visible)?,
             None => None,
         };
-        Ok(Some(match wrapped {
-            Some(full) => BuiltOutputGrammar::from_token_zero(full),
-            None => BuiltOutputGrammar::final_output_only(visible),
-        }))
+        Ok(match wrapped {
+            Some(full) => Some(BuiltOutputGrammar::from_token_zero(full)),
+            // A free answer alone constrains nothing after reasoning.
+            None if visible == Format::any_text() => None,
+            None => Some(BuiltOutputGrammar::final_output_only(visible)),
+        })
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
@@ -174,7 +177,7 @@ mod tests {
 
     use super::CombinedParser;
     use crate::output_grammar::{
-        BuiltOutputGrammar, GrammarCoverage, OutputGrammarContext,
+        BuiltOutputGrammar, GrammarCoverage, OutputGrammarContext, ToolStrictLevel,
         full_format_from_builder_for_test,
     };
     use crate::reasoning::{
@@ -757,5 +760,66 @@ mod tests {
         let composed = parser.build_output_grammar(&ctx).unwrap().unwrap();
         assert_eq!(composed.coverage, GrammarCoverage::FinalOutputOnly);
         assert!(matches!(composed.format, Format::Or(_)));
+    }
+
+    #[test]
+    fn free_answer_builds_the_unconstrained_grammar() {
+        let tools = test_tools();
+        let free = Format::any_text();
+        let function_level = |parser: &CombinedParser, tool_choice: &ToolChoice| {
+            parser.build_output_grammar(&OutputGrammarContext {
+                tool_strict_level: ToolStrictLevel::Function,
+                ..grammar_ctx(&tools, tool_choice, None)
+            })
+        };
+
+        // The calls keep the tool choice's own grammar, as under
+        // `--tool-strict-level function`; `auto` keeps free text around them.
+        let parser = qwen3_parser(&tools, true);
+        for tool_choice in [
+            ToolChoice::auto(),
+            ToolChoice::required(),
+            ToolChoice::function("get_weather"),
+        ] {
+            let ctx = grammar_ctx(&tools, &tool_choice, Some(&free));
+            assert_eq!(
+                parser.build_output_grammar(&ctx).unwrap(),
+                function_level(&parser, &tool_choice).unwrap(),
+                "{tool_choice:?}"
+            );
+        }
+
+        // No callable tool: free text after the reasoning phase.
+        for (tool_choice, with_tool) in [(ToolChoice::none(), true), (ToolChoice::auto(), false)] {
+            let parser = qwen3_parser(&tools, with_tool);
+            let ctx = grammar_ctx(&tools, &tool_choice, Some(&free));
+            let actual = parser.build_output_grammar(&ctx).unwrap().unwrap();
+            let expected = Format::sequence(vec![
+                Format::optional(Format::sequence(vec![
+                    Format::tag("<think>", Format::any_text(), "</think>"),
+                    Format::const_string("\n\n"),
+                ])),
+                Format::any_text(),
+            ]);
+            assert_eq!(
+                actual,
+                BuiltOutputGrammar::from_token_zero(expected),
+                "{tool_choice:?}"
+            );
+        }
+
+        // Without a reasoning phase, free text alone constrains nothing.
+        let parser = CombinedParser::new(None, Some(Qwen3XmlToolParser::create(&tools).unwrap()));
+        let none = ToolChoice::none();
+        assert!(
+            parser
+                .build_output_grammar(&grammar_ctx(&tools, &none, Some(&free)))
+                .unwrap()
+                .is_none()
+        );
+        let auto = ToolChoice::auto();
+        let built = parser.build_output_grammar(&grammar_ctx(&tools, &auto, Some(&free))).unwrap();
+        assert_eq!(built, function_level(&parser, &auto).unwrap());
+        assert_eq!(built.unwrap().coverage, GrammarCoverage::FinalOutputOnly);
     }
 }

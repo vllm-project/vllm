@@ -140,6 +140,10 @@ pub struct RenderArgs {
     /// `function`, or `parameter`.
     #[arg(long, default_value_t)]
     tool_strict_level: ToolStrictLevel,
+    /// Constrain the output of every request whose model has a reasoning or
+    /// tool parser, even without tools or a structured-output constraint.
+    #[arg(long)]
+    always_constrain_output: bool,
     /// Select the native chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
@@ -178,6 +182,7 @@ impl RenderArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            always_constrain_output: self.always_constrain_output,
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
@@ -256,6 +261,14 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub tool_strict_level: ToolStrictLevel,
+    /// Constrain the output of every request whose model has a reasoning or
+    /// tool parser, even without tools or a structured-output constraint:
+    /// the reasoning, the answer, and tool-call envelopes follow the model's
+    /// output grammar from the first generated token where the parser
+    /// supports it.
+    #[arg(long)]
+    #[serde(default)]
+    pub always_constrain_output: bool,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -547,6 +560,7 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            always_constrain_output: self.always_constrain_output,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
@@ -610,6 +624,7 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            always_constrain_output: self.always_constrain_output,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,

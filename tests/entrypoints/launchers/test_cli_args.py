@@ -242,6 +242,29 @@ def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
         validate_parsed_serve_args(args)
 
 
+@pytest.mark.parametrize("rust_enabled", [False, True])
+def test_always_constrain_output_requires_rust_frontend(
+    vllm_parser, monkeypatch, rust_enabled
+):
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1" if rust_enabled else "0")
+    args = vllm_parser.parse_args(["serve", "--always-constrain-output"])
+    if rust_enabled:
+        validate_parsed_serve_args(args)
+        assert args.always_constrain_output
+    else:
+        with pytest.raises(ValueError, match="--always-constrain-output requires"):
+            validate_parsed_serve_args(args)
+
+
+def test_always_constrain_output_requires_serve_subcommand(monkeypatch):
+    """Direct Python render/API entrypoints do not build output grammars."""
+    monkeypatch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+    parser = make_arg_parser(FlexibleArgumentParser())
+    args = parser.parse_args(["--always-constrain-output"])
+    with pytest.raises(ValueError, match="--always-constrain-output requires"):
+        validate_parsed_serve_args(args)
+
+
 def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):
     """Ensure validation fails if tool choice is enabled with no call parser."""
     # If we enable-auto-tool-choice, explode with no tool-call-parser
