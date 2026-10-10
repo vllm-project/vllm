@@ -26,6 +26,8 @@ from vllm.v1.structured_output.utils import (
 
 if TYPE_CHECKING:
     import xgrammar as xgr
+
+    from vllm.tokenizers import TokenizerLike
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -43,6 +45,7 @@ class XgrammarBackend(StructuredOutputBackend):
             model_config is not None and model_config.hf_config.model_type == "plamo3"
         )
 
+        full_vocab_tokenizer_info = None
         if is_mistral_tokenizer(self.tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
@@ -66,15 +69,20 @@ class XgrammarBackend(StructuredOutputBackend):
         ):
             tokenizer_info, _ = init_xgrammar()
         else:
-            tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+            # Structural tags and Lark grammars keep the special tokens, as
+            # they may name control tokens such as tool call markers.
+            full_vocab_tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 self.tokenizer,
                 vocab_size=self.vocab_size,
             )
-        self.compiler = xgr.GrammarCompiler(
-            tokenizer_info,
-            max_threads=8,
-            cache_enabled=True,
-            cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
+            tokenizer_info = _blank_special_tokens(
+                self.tokenizer, full_vocab_tokenizer_info
+            )
+        self.compiler = _create_compiler(tokenizer_info)
+        self.full_vocab_compiler = (
+            self.compiler
+            if full_vocab_tokenizer_info is None
+            else _create_compiler(full_vocab_tokenizer_info)
         )
 
         self.num_speculative_tokens = 0
@@ -122,7 +130,7 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             if grammar_is_likely_lark(grammar_spec):
-                ctx = self.compiler.compile_lark(grammar_spec)
+                ctx = self.full_vocab_compiler.compile_lark(grammar_spec)
             else:
                 ctx = self.compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
@@ -142,9 +150,11 @@ class XgrammarBackend(StructuredOutputBackend):
                     )
                     for s in s_tag["structures"]
                 ]
-                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+                ctx = self.full_vocab_compiler.compile_structural_tag(
+                    tags, s_tag["triggers"]
+                )
             else:
-                ctx = self.compiler.compile_structural_tag(grammar_spec)
+                ctx = self.full_vocab_compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -168,6 +178,39 @@ class XgrammarBackend(StructuredOutputBackend):
 
     def destroy(self):
         del self.compiler
+        del self.full_vocab_compiler
+
+
+def _create_compiler(tokenizer_info: "xgr.TokenizerInfo") -> "xgr.GrammarCompiler":
+    return xgr.GrammarCompiler(
+        tokenizer_info,
+        max_threads=8,
+        cache_enabled=True,
+        cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
+    )
+
+
+def _blank_special_tokens(
+    tokenizer: "TokenizerLike", tokenizer_info: "xgr.TokenizerInfo"
+) -> "xgr.TokenizerInfo":
+    """Return ``tokenizer_info`` with the special added tokens as empty strings.
+
+    xgrammar only treats tokens that decode to an empty string as special, so
+    control tokens such as ``<|im_start|>`` would otherwise match grammar text.
+    Stop tokens stay allowed where the grammar may end.
+    """
+    special_token_ids = {
+        token_id
+        for token_id, token in getattr(tokenizer, "added_tokens_decoder", {}).items()
+        if token.special
+    }
+    encoded_vocab = [""] * tokenizer_info.vocab_size
+    for token, token_id in tokenizer.get_vocab().items():
+        if token_id < len(encoded_vocab) and token_id not in special_token_ids:
+            encoded_vocab[token_id] = token
+    return xgr.TokenizerInfo.from_vocab_and_metadata(
+        encoded_vocab, tokenizer_info.dump_metadata()
+    )
 
 
 @dataclass
