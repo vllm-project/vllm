@@ -201,6 +201,43 @@ class TestGenerateBudgets:
 
 
 # ---------------------------------------------------------------------------
+# _replay_exceeds_capture
+# ---------------------------------------------------------------------------
+
+
+class TestReplayExceedsCapture:
+    """Replay tensors must fit the fixed capture-buffer leading dimension."""
+
+    def test_fits_when_src_shorter_or_equal(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(33, dtype=torch.int32)}
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_exceeds_when_src_longer(self):
+        input_buffers = {"cu_seqlens": torch.zeros(33, dtype=torch.int32)}
+        replay_values = {"cu_seqlens": torch.arange(67, dtype=torch.int32)}
+        assert EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+    def test_ignores_missing_and_scalar_buffers(self):
+        input_buffers = {
+            "cu_seqlens": torch.zeros(33, dtype=torch.int32),
+            "max_seqlen": torch.tensor(16),
+        }
+        replay_values = {
+            "cu_seqlens": None,
+            "max_seqlen": torch.tensor(8),
+            "other": torch.arange(100, dtype=torch.int32),
+        }
+        assert not EncoderCudaGraphManager._replay_exceeds_capture(
+            input_buffers, replay_values
+        )
+
+
+# ---------------------------------------------------------------------------
 # _find_smallest_fitting_budget_given_tokens
 # ---------------------------------------------------------------------------
 
@@ -722,6 +759,40 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == 1
         # Eager output: SimpleMockViTModel produces n_out = 81 tokens
         assert result[0].shape == (81, _HIDDEN)
+        assert self.mgr.graph_misses == 1
+
+    def test_eager_fallback_when_replay_buffer_exceeds_capture(self):
+        # Capture-sized inputs replay normally; force an oversized leading
+        # dimension on a captured buffer so replay must fall back to eager
+        # instead of raising in the padded copy.
+        grid_thw = [[1, 4, 4]]
+        mm_kwargs = _make_mm_kwargs(grid_thw, self.device, self.dtype)
+        real_prepare = self.model.prepare_encoder_cudagraph_replay_buffers
+
+        def oversized_prepare(*args, **kwargs):
+            replay = real_prepare(*args, **kwargs)
+            captured = next(iter(self.mgr.budget_graphs["default"].values()))
+            key = "pixel_values"
+            overflow = captured.input_buffers[key].shape[0] + 8
+            replay.values[key] = torch.randn(
+                overflow,
+                _FLAT,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            return replay
+
+        with patch.object(
+            self.model,
+            "prepare_encoder_cudagraph_replay_buffers",
+            side_effect=oversized_prepare,
+        ):
+            result = self.mgr.execute(mm_kwargs)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].shape == (4, _HIDDEN)
+        assert self.mgr.graph_hits == 0
         assert self.mgr.graph_misses == 1
 
     # --- counters ---
