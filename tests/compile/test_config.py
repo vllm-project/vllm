@@ -1189,6 +1189,25 @@ def test_get_inductor_factors_includes_configs():
     assert baseline != patched, "functorch config change was not reflected"
 
 
+def test_bic_compiler_mode_and_cache_key(monkeypatch):
+    """BIC must not reuse normally tuned reduction artifacts or allow an opt-out."""
+    from torch._inductor import config as inductor_config
+
+    from vllm import envs
+
+    if not hasattr(inductor_config, "batch_invariant"):
+        pytest.skip("This PyTorch does not provide compiled batch invariance")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    normal = CompilationConfig()
+    assert "batch_invariant" not in normal.inductor_compile_config
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    invariant = CompilationConfig()
+    assert invariant.inductor_compile_config["batch_invariant"] is True
+    assert invariant.compute_hash() != normal.compute_hash()
+    with pytest.raises(ValueError, match="requires Inductor batch_invariant=True"):
+        CompilationConfig(inductor_compile_config={"batch_invariant": False})
+
+
 def test_inductor_asserts_user_override(monkeypatch):
     """Test that explicit inductor_compile_config overrides the
     debug-logging default."""

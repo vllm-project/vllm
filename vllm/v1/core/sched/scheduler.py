@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -366,6 +367,40 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        self.needs_mamba_cache_alignment = self.need_mamba_block_aligned_split
+        chunk_sizes: set[int] = set()
+        if envs.VLLM_BATCH_INVARIANT:
+            for group in kv_cache_config.kv_cache_groups:
+                if isinstance(group.kv_cache_spec, MambaSpec):
+                    backend = group.kv_cache_spec.mamba_type.get_class()
+                    chunk_size = backend.get_batch_invariant_prefill_chunk_size()
+                    if chunk_size is not None:
+                        chunk_sizes.add(chunk_size)
+        if len(chunk_sizes) > 1:
+            raise ValueError("Recurrent backends must share a BIC prefill chunk size.")
+        self.mamba_prefill_alignment = next(iter(chunk_sizes), 1)
+        if self.mamba_prefill_alignment > 1:
+            threshold = self.scheduler_config.long_prefill_token_threshold
+            if self.max_num_scheduled_tokens < self.mamba_prefill_alignment or (
+                0 < threshold < self.mamba_prefill_alignment
+            ):
+                raise ValueError("BIC prefill budget must fit one arithmetic chunk.")
+            if (
+                self.cache_config.enable_prefix_caching
+                and not self.needs_mamba_cache_alignment
+            ):
+                raise NotImplementedError(
+                    "Qwen GDN BIC prefix caching requires Mamba align mode."
+                )
+            if self.needs_mamba_cache_alignment and (
+                self.cache_config.block_size % self.mamba_prefill_alignment
+                or self.hash_block_size % self.mamba_prefill_alignment
+            ):
+                raise ValueError(
+                    "GDN BIC cache blocks and prefix-match units must be multiples "
+                    "of the arithmetic chunk size; use --block-size 64."
+                )
+            self.need_mamba_block_aligned_split = True
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -384,7 +419,7 @@ class Scheduler(SchedulerInterface):
         # Fine-grained hits reuse the prompt's hash-aligned Mamba checkpoint.
         # Split there only if the backend cannot save it within the final chunk.
         self.mamba_partial_cache_hit = (
-            self.need_mamba_block_aligned_split
+            self.needs_mamba_cache_alignment
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
@@ -452,8 +487,34 @@ class Scheduler(SchedulerInterface):
         # Split only during prefill: `request.num_tokens - 1` extends this to
         # resumed requests replaying their output tokens.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if self.mamba_prefill_alignment > 1:
+            # Recomputing generated tokens as a chunk changes the recurrent
+            # arithmetic. Preserve the original prompt/decode boundary after
+            # preemption, then replay the already-generated tokens as decode.
+            prefill_end = request.num_prompt_tokens
+            if prefill_end <= start < request.num_tokens - 1:
+                return min(num_new_tokens, 1)
+            if start < prefill_end:
+                num_new_tokens = min(num_new_tokens, prefill_end - start)
+                # A one-token tail is routed through recurrent decode. Keep
+                # that route even when the budget could combine it with full
+                # prefill chunks (e.g. 513 = 512 + 1 versus 448 + 65).
+                tail_start = prefill_end - 1
+                if (
+                    prefill_end % self.mamba_prefill_alignment == 1
+                    and start < tail_start
+                ):
+                    num_new_tokens = min(num_new_tokens, tail_start - start)
         if start >= prefill_end:
             return num_new_tokens
+
+        if self.mamba_prefill_alignment > 1 and not self.needs_mamba_cache_alignment:
+            # Keep non-final calls on the kernel's arithmetic grid even when
+            # other requests consume part of this step's token budget.
+            end = start + num_new_tokens
+            if end < prefill_end:
+                end = end // self.mamba_prefill_alignment * self.mamba_prefill_alignment
+            return max(end - start, 0)
 
         block_size = self.cache_config.block_size
         # The last block-aligned position whose state can be cached. With
@@ -493,7 +554,14 @@ class Scheduler(SchedulerInterface):
         # aligned. Exempt: the prompt's last chunk, whose slot decode advances
         # to the boundary. A block too wide for one chunk advances sub-block
         # and re-aligns at the next boundary.
-        if end < prefill_end:
+        # A canonical one-token tail can require private running state even
+        # when the budget could fit a physical cache block. Rounding that
+        # deliberate stop down to a block boundary can otherwise make no progress.
+        if end < prefill_end and not (
+            self.mamba_prefill_alignment > 1
+            and prefill_end % self.mamba_prefill_alignment == 1
+            and end == prefill_end - 1
+        ):
             max_prefill_tokens = self.max_num_scheduled_tokens
             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
             if long_prefill_threshold > 0:
@@ -542,6 +610,8 @@ class Scheduler(SchedulerInterface):
         )
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
+        if self.mamba_prefill_alignment > 1 and end < prefill_end:
+            end = end // self.mamba_prefill_alignment * self.mamba_prefill_alignment
         return max(end - start, 0)
 
     def _get_local_prefix_cache_hit(
