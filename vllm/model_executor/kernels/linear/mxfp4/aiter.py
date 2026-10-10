@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
@@ -41,6 +42,17 @@ def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
 if is_aiter_found_and_supported():
     from vllm.utils.torch_utils import direct_register_custom_op
 
+    def _act_and_mul(x: torch.Tensor, activation: str) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        gate, up = x[..., :d], x[..., d:]
+        if activation == "silu":
+            return F.silu(gate) * up
+        if activation == "gelu":
+            return F.gelu(gate) * up
+        if activation == "gelu_tanh":
+            return F.gelu(gate, approximate="tanh") * up
+        raise ValueError(f"unsupported activation {activation!r}")
+
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -48,7 +60,15 @@ if is_aiter_found_and_supported():
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
+        activation: str | None = None,
     ) -> torch.Tensor:
+        """MXFP4 GEMM with dynamic activation quantization.
+
+        With ``activation`` set, ``x`` holds the concatenated gate and up
+        projections and the op computes ``act(gate) * up`` first. On the ASM
+        path that product is quantized by one fused aiter kernel instead of an
+        activation kernel plus a separate quant kernel.
+        """
         from aiter.ops.triton.gemm_afp4wfp4 import (
             gemm_afp4wfp4,
             gemm_afp4wfp4_preshuffle,
@@ -61,6 +81,19 @@ if is_aiter_found_and_supported():
         M = x.shape[0]
         N = weight.shape[0]
         K = weight.shape[1]
+        if activation is not None:
+            assert x_scales is None, "activation and x_scales are exclusive"
+            if rocm_use_aiter_fp4_asm_gemm and not (
+                M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+            ):
+                import aiter
+                from aiter.ops.triton.activation import act_mul_and_mxfp4_quant
+
+                x_q, x_s = act_mul_and_mxfp4_quant(x, activation, shuffle=True)
+                x = x_q.view(aiter.dtypes.fp4x2)
+                x_scales = x_s.view(aiter.dtypes.fp8_e8m0)
+            else:
+                x = _act_and_mul(x, activation)
         if rocm_use_aiter_fp4_asm_gemm:
             if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
                 if x_scales is None:
@@ -123,9 +156,10 @@ if is_aiter_found_and_supported():
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
+        activation: str | None = None,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device

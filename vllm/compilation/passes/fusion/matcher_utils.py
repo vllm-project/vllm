@@ -9,7 +9,7 @@ from torch._ops import OpOverload
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -522,6 +522,44 @@ class MatcherQuantFP8(MatcherCustomOp):
             return [input, self.empty_f32(1, 1)]
 
         return [input]
+
+
+class MatcherGeluAndMul(MatcherCustomOp):
+    """Matches GeluAndMul in either its custom-op or its native form."""
+
+    def __init__(self, approximate: str, enabled: bool | None = None) -> None:
+        if enabled is None:
+            enabled = GeluAndMul.enabled()
+        super().__init__(enabled)
+        self.gelu_and_mul = GeluAndMul(approximate)
+        self.custom_op = (
+            torch.ops._C.gelu_tanh_and_mul.default
+            if approximate == "tanh"
+            else torch.ops._C.gelu_and_mul.default
+        )
+
+    @property
+    def activation(self) -> str:
+        """The activation this matcher's graph computes, as aiter names it.
+
+        On ROCm the native form falls back from tanh to the exact GELU (see
+        GeluAndMul.forward_native), so a fused replacement must do the same.
+        """
+        approximate = self.gelu_and_mul.approximate
+        if not self.enabled and current_platform.is_rocm():
+            approximate = "none"
+        return "gelu_tanh" if approximate == "tanh" else "gelu"
+
+    def inputs(self) -> list[torch.Tensor]:
+        return [self.empty(5, 4)]
+
+    def forward_custom(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        out = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+        return auto_functionalized(self.custom_op, out=out, input=x)[1]
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return self.gelu_and_mul.forward_native(x)
 
 
 class MatcherSiluAndMul(MatcherCustomOp):
