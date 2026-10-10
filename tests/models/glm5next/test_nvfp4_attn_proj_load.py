@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Loading ModelOpt NVFP4 MLA projections into GLM-5.x's BF16 fused_qkv_a_proj."""
 
+import pytest
 import torch
 
 from vllm.models.glm5next.common.model import _try_load_nvfp4_attn_proj
@@ -38,9 +39,11 @@ def _nvfp4(out_dim: int, in_dim: int, seed: int):
 
 def _feed(proj, packed, scale, gscale, params, buf, loaded, pad=0):
     names = [
+        (f"{PREFIX}.{proj}.input_scale", torch.tensor(0.25)),
         (f"{PREFIX}.{proj}.weight_scale", scale),
         (f"{PREFIX}.{proj}.weight", packed),
         (f"{PREFIX}.{proj}.weight_scale_2", gscale),
+        (f"{PREFIX}.{proj}.input_scale", torch.tensor(0.25)),
     ]
     return [_try_load_nvfp4_attn_proj(n, t, buf, params, loaded, pad) for n, t in names]
 
@@ -68,6 +71,23 @@ def test_nvfp4_q_a_and_kv_a_dequantize_into_bf16_fused_shards():
     assert loaded == {f"{PREFIX}.fused_qkv_a_proj.weight"}
 
 
+@pytest.mark.parametrize("proj", ["q_b_proj", "o_proj"])
+def test_nvfp4_bf16_projection_ignores_input_scale(proj):
+    param = _RecordingParam()
+    target = f"{PREFIX}.{proj}.weight"
+    params = {target: param}
+    buf: dict = {}
+    loaded: set[str] = set()
+    packed, scale, gscale, ref = _nvfp4(64, 128, seed=3)
+
+    assert all(_feed(proj, packed, scale, gscale, params, buf, loaded))
+    ((weight, shard_id),) = param.calls
+    torch.testing.assert_close(weight, ref)
+    assert shard_id is None
+    assert loaded == {target}
+    assert not any(buf.values())
+
+
 def test_nvfp4_projection_with_quantized_target_uses_normal_path():
     params = {
         f"{PREFIX}.q_b_proj.weight": _RecordingParam(),
@@ -75,6 +95,15 @@ def test_nvfp4_projection_with_quantized_target_uses_normal_path():
     }
     packed, scale, gscale, _ = _nvfp4(64, 128, seed=2)
     assert not any(_feed("q_b_proj", packed, scale, gscale, params, {}, set()))
+
+
+def test_registered_input_scale_uses_normal_path():
+    name = f"{PREFIX}.q_b_proj.input_scale"
+    params = {
+        f"{PREFIX}.q_b_proj.weight": _RecordingParam(),
+        name: _RecordingParam(),
+    }
+    assert not _try_load_nvfp4_attn_proj(name, torch.tensor(0.25), {}, params, set(), 0)
 
 
 def test_fp8_and_bf16_tensors_are_left_alone():

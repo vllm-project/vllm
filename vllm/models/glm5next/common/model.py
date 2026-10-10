@@ -1407,6 +1407,7 @@ def _try_load_nvfp4_attn_proj(
     ``weight_scale_2``. ``fused_qkv_a_proj`` is always BF16, so when the target
     has no ``weight_scale`` param these are dequantized to BF16; otherwise we
     return False and the normal path loads the NVFP4 tensors as-is.
+    Activation ``input_scale`` tensors are unused by BF16 targets.
     """
     matched = None
     for suffix, info in _FP8_ATTN_PROJS.items():
@@ -1422,6 +1423,8 @@ def _try_load_nvfp4_attn_proj(
         part = "scale"
     elif name.endswith(".weight_scale_2"):
         part = "weight_scale_2"
+    elif name.endswith(".input_scale"):
+        part = "input_scale"
     else:
         return False
 
@@ -1431,6 +1434,8 @@ def _try_load_nvfp4_attn_proj(
         f"{layer_prefix}.{target_base}.weight_scale" in params_dict
     ):
         return False
+    if part == "input_scale":
+        return f"{layer_prefix}.{target_base}.input_scale" not in params_dict
     entry = buf.setdefault(layer_prefix, {}).setdefault(f"nvfp4_{key}", {})
     entry[part] = tensor
     if not all(p in entry for p in ("weight", "scale", "weight_scale_2")):
