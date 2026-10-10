@@ -3486,6 +3486,12 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_scheduler_config_rejects_zero_max_num_scheduled_tokens():
+    """A zero token budget never schedules anything, so generation would hang."""
+    with pytest.raises(ValidationError, match="max_num_scheduled_tokens"):
+        SchedulerConfig.default_factory(max_num_scheduled_tokens=0)
+
+
 @pytest.mark.parametrize(
     (
         "model_id",

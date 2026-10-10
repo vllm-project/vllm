@@ -7,6 +7,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import Qwen3NextConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -58,7 +59,6 @@ from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
