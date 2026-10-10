@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from vllm.benchmarks.sweep import serve as sweep_serve
 from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
@@ -12,6 +13,19 @@ from vllm.benchmarks.sweep.param_sweep import ParameterSweep, ParameterSweepItem
 
 class TestParameterSweepItem:
     """Test ParameterSweepItem functionality."""
+
+    @pytest.mark.parametrize(
+        "original", [[], ["--compilation-config.custom_ops", "[]"]]
+    )
+    def test_string_list_sweep_is_parseable(self, original):
+        custom_ops = ["+rms_norm", "+silu_and_mul"]
+        item = ParameterSweepItem({"compilation_config.custom_ops": custom_ops})
+        parser = FlexibleArgumentParser()
+        parser.add_argument("--compilation-config", type=json.loads)
+
+        args = parser.parse_args(item.apply_to_cmd(original))
+
+        assert args.compilation_config == {"custom_ops": custom_ops}
 
     @pytest.mark.parametrize(
         "input_dict,expected",
