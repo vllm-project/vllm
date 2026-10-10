@@ -1537,6 +1537,15 @@ class OffloadingConnectorScheduler:
                 ),
                 extra_retained_tokens=0,
             )
+        # reachable_block_mask scales the spec's block size by the DCP factor
+        # it is given, so pass the group's own factor: DCP-replicated groups
+        # (e.g. a non-DCP DSpark drafter under a DCP target) keep one token
+        # span per block. Scaling them by the global DCP size would place the
+        # retained SWA tail at the wrong block indices, so the stored window
+        # never matches a later lookup.
+        dcp_world_size = (
+            self.config.dcp_world_size if group_config.kv_cache_spec.dcp_sharded else 1
+        )
         return group_config.manager_cls.reachable_block_mask(
             start_block=start_chunk_idx * blocks_per_chunk,
             end_block=end_chunk_idx * blocks_per_chunk,
@@ -1545,7 +1554,7 @@ class OffloadingConnectorScheduler:
             use_eagle=group_config.is_eagle_group,
             retention_interval=self.config.retention_interval,
             reachable_boundaries=reachable_boundaries,
-            dcp_world_size=self.config.dcp_world_size,
+            dcp_world_size=dcp_world_size,
             final_segment_end_block=(
                 final_segment_end_chunk_idx * blocks_per_chunk
                 if final_segment_end_chunk_idx is not None

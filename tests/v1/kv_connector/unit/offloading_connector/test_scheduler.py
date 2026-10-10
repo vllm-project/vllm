@@ -69,6 +69,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -4174,6 +4175,135 @@ class TestEagle:
         assert store_job.src_spec.block_ids.tolist() == [swa_block_ids[123]]
         assert store_job.src_spec.group_sizes == [0, 1]
         assert store_job.src_spec.block_indices == [0, 123]
+
+    @pytest.mark.parametrize("swa_dcp_sharded", [False, True])
+    def test_dcp_replicated_swa_tail_store_then_lookup(self, swa_dcp_sharded: bool):
+        """A DCP-replicated SWA group keeps its own block span.
+
+        Mirrors a DCP target with a non-DCP (replicated) sliding-window
+        drafter, e.g. DSpark after #56723. With the default semantic-only
+        retention, only the SWA window ending at the aligned replay boundary
+        is stored. Its block indices must be computed with the group's own
+        token span, not the DCP-scaled one, or the stored window never
+        matches the lookup and the whole request misses.
+        """
+        dcp = 2
+        full_block_size = 8  # DCP-scaled to 16 tokens per block / chunk
+        swa_block_size = 8
+        sliding_window = 16
+        num_prompt_tokens = 100
+        swa_tokens_per_block = swa_block_size * (dcp if swa_dcp_sharded else 1)
+        # GCD of the DCP-resolved group block sizes (16 and 8 or 16).
+        tokens_per_hash = swa_tokens_per_block
+
+        vllm_config = _make_vllm_config(
+            tensor_parallel_size=dcp,
+            decode_context_parallel_size=dcp,
+        )
+        vllm_config.speculative_config = None
+        vllm_config.cache_config.prefix_cache_retention_interval = 0
+        kv_cache_config = KVCacheConfig(
+            num_blocks=0,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["full"],
+                    FullAttentionSpec(
+                        block_size=full_block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["swa"],
+                    SlidingWindowSpec(
+                        block_size=swa_block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        sliding_window=sliding_window,
+                        dcp_sharded=swa_dcp_sharded,
+                    ),
+                ),
+            ],
+        )
+        spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+        scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+        assert scheduler.config.tokens_per_hash == tokens_per_hash
+        assert scheduler.config.kv_group_configs[1].tokens_per_block == (
+            swa_tokens_per_block
+        )
+
+        stored_keys: set[OffloadKey] = set()
+
+        def prepare_store(keys, req_context):
+            stored_keys.update(keys)
+            return generate_store_output(keys)
+
+        scheduler.manager.prepare_store.side_effect = prepare_store
+        scheduler.manager.lookup.side_effect = lambda key, req_context: (
+            LookupResult.HIT if key in stored_keys else LookupResult.MISS
+        )
+
+        def make_request(req_id: str, num_tokens: int) -> MagicMock:
+            request = MagicMock()
+            request.request_id = req_id
+            request.kv_transfer_params = None
+            request.num_prompt_tokens = num_tokens
+            request.num_tokens = num_tokens
+            request.num_computed_tokens = 0
+            # Shared prefix: identical hashes for the first prompt's blocks.
+            request.block_hashes = [
+                BlockHash(f"h{i}".encode())
+                if i < num_prompt_tokens // tokens_per_hash
+                else BlockHash(f"{req_id}-h{i}".encode())
+                for i in range(num_tokens // tokens_per_hash)
+            ]
+            request.all_token_ids = list(range(num_tokens))
+            request.lora_request = None
+            request.shared_prefix_boundary = 0
+            request.skip_reading_prefix_cache = False
+            request.status = RequestStatus.RUNNING
+            request.is_finished.return_value = False
+            return request
+
+        request = make_request("req", num_prompt_tokens)
+        scheduler.on_new_request(request)
+        full_block_ids = list(range(1, 8))
+        swa_block_ids = list(
+            range(1001, 1001 + -(-num_prompt_tokens // swa_tokens_per_block))
+        )
+        output = SchedulerOutput.make_empty()
+        output.scheduled_new_reqs = [
+            SimpleNamespace(req_id="req", block_ids=(full_block_ids, swa_block_ids))
+        ]
+        output.num_scheduled_tokens = {"req": num_prompt_tokens}
+        output.total_num_scheduled_tokens = num_prompt_tokens
+        meta = scheduler.build_connector_meta(output)
+
+        # The replay boundary is num_prompt_tokens - 1, aligned down to the
+        # full-attention chunk (16 tokens): 96. The SWA hit needs
+        # cdiv(sliding_window - 1, swa_tokens_per_block) blocks ending there.
+        aligned_boundary = 96
+        need = -(-(sliding_window - 1) // swa_tokens_per_block)
+        end_block = aligned_boundary // swa_tokens_per_block
+        expected_swa_blocks = [
+            swa_block_ids[i] for i in range(end_block - need, end_block)
+        ]
+        [store_job] = meta.store_jobs.values()
+        assert isinstance(store_job.src_spec, GPULoadStoreSpec)
+        assert store_job.src_spec.block_ids.tolist() == (
+            full_block_ids[:6] + expected_swa_blocks
+        )
+
+        # A longer request sharing the first prompt must hit up to the
+        # aligned boundary in both groups.
+        follow_up = make_request("req2", 2 * num_prompt_tokens)
+        scheduler.on_new_request(follow_up)
+        num_hit_tokens, is_async = scheduler.get_num_new_matched_tokens(follow_up, 0)
+        assert num_hit_tokens == aligned_boundary
+        assert is_async
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_then_load(self, request_runner, async_scheduling: bool):
