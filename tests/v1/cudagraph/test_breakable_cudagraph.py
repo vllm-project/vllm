@@ -16,11 +16,10 @@ import torch
 def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
     """Enable breakable cudagraphs for this module's tests only.
 
-    eager_break_during_capture reads the env at decoration time, which
-    happens inside the test bodies, so a per-test fixture suffices.
-    monkeypatch restores the env so other test files running in the same
-    pytest process are unaffected (a module-level os.environ assignment
-    used to leak into test_cudagraph_dispatch.py and break it).
+    A per-test fixture suffices. monkeypatch restores the env so other
+    test files running in the same pytest process are unaffected (a
+    module-level os.environ assignment used to leak into
+    test_cudagraph_dispatch.py and break it).
     """
     import vllm.envs as envs
 
@@ -130,6 +129,99 @@ def test_decorator_passthrough_outside_capture():
 
     assert f(3) == 6
     assert calls == [3]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_decorator_passthrough_returns_fn_result(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+):
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    if not enabled:
+        monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
+    sentinel = object()
+
+    @eager_break_during_capture
+    def f():
+        return sentinel
+
+    assert f() is sentinel
+
+
+def test_decorator_breaks_when_enabled_after_decoration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VllmConfig can enable breakable cudagraphs after the decorated module
+    was imported (e.g. on a cold model-info cache); the op must still break."""
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
+
+    @eager_break_during_capture
+    def op(x):
+        return x + 1
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+
+    class _Capture:
+        _capturing = True
+
+        def __init__(self):
+            self.eager = []
+
+        def add_eager(self, fn):
+            self.eager.append(fn)
+            return fn()
+
+    capture = _Capture()
+    BreakableCUDAGraphCapture._tls.active = capture
+    assert op(1) == 2
+    assert len(capture.eager) == 1
+
+
+def test_attention_op_breaks_when_imported_before_enable(tmp_path):
+    """Importing the attention module before the flag is set must still yield
+    the breakable wrapper (functools.wraps copies __name__/__wrapped__, so
+    compare code objects)."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "VLLM_USE_BREAKABLE_CUDAGRAPH"}
+    env["VLLM_CACHE_ROOT"] = str(tmp_path)
+    code = (
+        "import vllm.model_executor.layers.attention.attention as a\n"
+        "import vllm.compilation.breakable_cudagraph as b\n"
+        "c = a.unified_attention_with_output.__code__\n"
+        "w = b.eager_break_during_capture(lambda: None).__code__\n"
+        "assert (c.co_filename, c.co_name) == (w.co_filename, w.co_name), c\n"
+    )
+    subprocess.run([sys.executable, "-c", code], env=env, check=True)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_decorated_op_traces_without_graph_break(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+):
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    if not enabled:
+        monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
+
+    @eager_break_during_capture
+    def op(x):
+        return x * 2 + 1
+
+    def f(x):
+        return op(x).sin()
+
+    torch._dynamo.reset()
+    x = torch.randn(4)
+    compiled = torch.compile(f, fullgraph=True, backend="eager")
+    torch.testing.assert_close(compiled(x), f(x))
 
 
 # ---------------------------------------------------------------------------
