@@ -2283,12 +2283,13 @@ class ModelConfig:
             return _modelopt_mixed_has_nvfp4(quant_config)
 
         # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
-        # in the quantization config
-        return (
-            self.quantization == "compressed-tensors"
-            and quant_config is not None
-            and "nvfp4" in quant_config.get("format", "").lower()
-        )
+        # in the quantization config. Mixed-scheme checkpoints declare a list
+        # of formats instead, e.g. ["nvfp4-pack-quantized", "float-quantized"].
+        if self.quantization != "compressed-tensors" or quant_config is None:
+            return False
+        fmt = quant_config.get("format", "")
+        formats = fmt if isinstance(fmt, list) else [fmt]
+        return any("nvfp4" in f.lower() for f in formats)
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
