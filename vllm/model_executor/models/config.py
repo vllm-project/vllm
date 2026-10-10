@@ -44,6 +44,7 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         cache_config = vllm_config.cache_config
         if (
@@ -64,7 +65,13 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
                 spec_config.kv_cache_dtype = "auto"
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
-        # in most cases.
+        # in most cases. FlashMLA sparse only accepts ag_rs under DCP, and on
+        # SM90 it is the only sparse MLA backend that supports DCP at all.
+        attn_backend = vllm_config.attention_config.backend
+        if attn_backend == AttentionBackendEnum.FLASHMLA_SPARSE or (
+            current_platform.is_cuda() and current_platform.is_device_capability(90)
+        ):
+            return
         vllm_config.parallel_config.set_dcp_defaults(
             comm_backend="a2a", q_replicate=True
         )
