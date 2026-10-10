@@ -40,6 +40,15 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
+        # V1 keys effective_drafter_max_model_len on draft_model_config, which
+        # is already the min of the draft config, the target, and
+        # speculative_config.max_model_len. self.max_model_len is the target's
+        # length and is not the draft's capacity.
+        draft_limit = self.draft_model_config.max_model_len
+        self.effective_drafter_max_model_len = (
+            self.max_model_len if draft_limit is None else draft_limit
+        )
+
         # draft_max_seq_len is read by the parent's attention metadata builder.
         # Standalone AR drafting doesn't do per-batch adjustment; cap at max.
         self.draft_max_seq_len = self.max_model_len
@@ -336,6 +345,44 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.draft_logits,
             )
 
+    def _input_fits_in_drafter(self, input_batch: InputBatch) -> bool:
+        """Whether the batch stays inside the independent draft's context.
+
+        Same window as ``GPUModelRunner._input_fits_in_drafter`` for a
+        non-DFlash drafter: batch max seq len plus ``num_speculative_tokens``
+        query positions. Past that, the draft forward would index its rotary
+        cache and KV with positions from the target's longer context.
+        """
+        num_reqs = input_batch.num_reqs
+        if num_reqs == 0:
+            return True
+        # CPU upper bound, the same quantity V1 reads as max_seq_len.
+        max_seq_len = int(input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item())
+        num_drafter_query_tokens = self.num_speculative_steps
+        return (
+            max_seq_len + num_drafter_query_tokens
+            <= self.effective_drafter_max_model_len
+        )
+
+    def _input_fits_in_drafter_across_dp(self, input_batch: InputBatch) -> bool:
+        fits = self._input_fits_in_drafter(input_batch)
+        if self.dp_size <= 1:
+            return fits
+        # A rank that skips while another runs the draft forward splits
+        # TP/EP collectives. If any rank does not fit, none of them draft.
+        from vllm.distributed.parallel_state import get_dp_group
+        from vllm.v1.worker.dp_utils import should_skip_dp_coordination
+
+        if should_skip_dp_coordination():
+            return fits
+        flag = torch.tensor([int(fits)], dtype=torch.int32)
+        torch.distributed.all_reduce(
+            flag,
+            op=torch.distributed.ReduceOp.MIN,
+            group=get_dp_group().cpu_group,
+        )
+        return bool(flag.item())
+
     @torch.inference_mode()
     def propose(
         self,
@@ -360,6 +407,19 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         assert self.model is not None
 
         num_reqs = input_batch.num_reqs
+        if not self._input_fits_in_drafter_across_dp(input_batch):
+            # Drop the previous step's draft ids so they are not verified
+            # as if this step had proposed them.
+            self.draft_tokens[:num_reqs].zero_()
+            logger.warning_once(
+                "Skipping draft_model speculation: the batch does not fit "
+                "in the draft model's max_model_len (%d). An independent "
+                "draft keeps its own context limit, so sequences past it "
+                "run without speculation.",
+                self.effective_drafter_max_model_len,
+            )
+            return self.draft_tokens[:num_reqs]
+
         skip_attn = dummy_run and skip_attn_for_dummy_run
         num_tokens_across_dp = (
             dp_sync_state.num_tokens_across_dp if dp_sync_state is not None else None
