@@ -274,8 +274,8 @@ def merge_ubatch_outputs(outputs: list[Any]) -> Any:
                 for key in first.tensors
             }
         )
-    if isinstance(first, tuple):
-        return tuple(torch.cat(parts, dim=0) for parts in zip(*outputs))
+    if isinstance(first, (tuple, list)):
+        return type(first)(merge_ubatch_outputs(list(parts)) for parts in zip(*outputs))
     return torch.cat(outputs, dim=0)
 
 
