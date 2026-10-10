@@ -1510,3 +1510,9 @@ class BeamSearchParams(
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+        if self.max_tokens < 1:
+            raise VLLMValidationError(
+                f"max_tokens must be at least 1, got {self.max_tokens}.",
+                parameter="max_tokens",
+                value=self.max_tokens,
+            )

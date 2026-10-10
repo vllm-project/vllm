@@ -280,3 +280,25 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def test_beam_search_params_rejects_non_positive_max_tokens():
+    """BeamSearchParams must reject max_tokens < 1, mirroring SamplingParams.
+
+    Regression test: previously BeamSearchParams(beam_width=2, max_tokens=0)
+    constructed successfully and beam_search() silently misbehaved
+    (offline path echoed the prompt back as generated text; online path
+    yielded an empty completion with finish_reason="length"), while
+    SamplingParams(max_tokens=0) raises VLLMValidationError.
+    """
+    from vllm.sampling_params import BeamSearchParams
+
+    for bad in (0, -1, -100):
+        with pytest.raises(VLLMValidationError, match="max_tokens must be at least 1"):
+            BeamSearchParams(beam_width=2, max_tokens=bad)
+
+    # Boundary and normal values keep working.
+    params = BeamSearchParams(beam_width=2, max_tokens=1)
+    assert params.max_tokens == 1
+    params = BeamSearchParams(beam_width=4, max_tokens=16)
+    assert params.max_tokens == 16
