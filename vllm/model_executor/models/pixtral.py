@@ -1323,15 +1323,14 @@ class PixtralHFAttention(nn.Module):
         qkv_states, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv_states.chunk(3, dim=-1)
 
-        # Transpose q and k to apply HF's Rotary Position Embedding.
-        q = q.view(batch, patches, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch, patches, self.n_heads, self.head_dim).transpose(1, 2)
+        q = q.view(batch, patches, self.n_heads, self.head_dim)
+        k = k.view(batch, patches, self.n_heads, self.head_dim)
         v = v.view(batch, patches, self.n_heads, self.head_dim)
         cos, sin = position_embeddings
-        q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=-2)
         out = self.attn(
-            q.transpose(1, 2).contiguous(),
-            k.transpose(1, 2).contiguous(),
+            q,
+            k,
             v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
