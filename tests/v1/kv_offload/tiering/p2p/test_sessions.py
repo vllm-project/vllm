@@ -1928,18 +1928,22 @@ class TestFinishRequestServerSide:
         assert StoreResult(job_id=7, success=True) in stores
         assert _srv_outbound(session, "req-1") is None
 
-    def test_write_blocks_failure_finalizes_with_failure(self):
-        """write_blocks returning None must not leave the request hanging.
-
-        The matched blocks are gone from req.demanded but no inflight
-        will satisfy them, so remaining > 0 forever. Setting finishing
-        and calling _finalize_outbound(success=False) immediately (no
-        other inflight) tells the peer + emits StoreResult(success=False)
-        without waiting on _STORE_TIMEOUT_S or _LOAD_TIMEOUT_S.
-        """
+    @pytest.mark.parametrize(
+        "store_first,finish_before_fetch",
+        [(False, False), (True, False), (True, True)],
+        ids=["fetch-first", "store-first", "finish-before-fetch"],
+    )
+    def test_write_blocks_failure_finalizes_with_failure(
+        self, store_first, finish_before_fetch
+    ):
+        """Submission failure finalizes once in either store/fetch ordering."""
         session, conn, transport = _make_session()
         _activate(session, conn)
-        # Decoder demands b"k1".
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
+        if store_first:
+            session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+            if finish_before_fetch:
+                session.finish_request("req-1")
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -1949,21 +1953,63 @@ class TestFinishRequestServerSide:
                 FetchMsg.BLOCK_INDEXES: [10],
             }
         )
-        session.poll()
-        # Force write_blocks to fail on the next call.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
-
-        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+        stores = session.poll().stores
+        if not store_first:
+            session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+        stores.extend(session.poll().stores)
 
         # Outbound was finalized immediately (no other inflight).
         assert _srv_outbound(session, "req-1") is None
+        assert session._dispatch_error_count == 0
+        assert stores == [StoreResult(job_id=42, success=False)]
+        assert session.poll().stores == []
         # Peer notified with success=False.
-        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(done) == 1
+        msg = done[0]
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
-        # Local store job surfaces on the next poll.
+        assert 42 not in session._server._store_jobs
+
+    def test_write_blocks_raising_finalizes_with_failure(self):
+        """A raise from write_blocks must not escape to the dispatcher.
+
+        The transport contract is to return None on submission failure,
+        but NIXL errors used to propagate out of _submit_transfer into
+        P2PSession._on_message, which only logs. The round was never
+        finalized, so the peer waited out its load timeout before
+        falling back to recompute. The raise must take the same fail-fast
+        path as a None return.
+        """
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("NIXL_ERR_REMOTE_DISCONNECT")
+
+        transport.write_blocks = _raise  # type: ignore[method-assign]
+
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
         stores = session.poll().stores
-        assert StoreResult(job_id=42, success=False) in stores
+
+        # Handled in _submit_transfer, not swallowed by the dispatcher.
+        assert session._dispatch_error_count == 0
+        # Round finalized immediately and the peer told it failed.
+        assert _srv_outbound(session, "req-1") is None
+        done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+        assert len(done) == 1
+        assert done[0][TransferDoneMsg.SUCCESS] is False
+        # Store job failed now rather than at _STORE_TIMEOUT_S.
+        assert stores == [StoreResult(job_id=42, success=False)]
         assert 42 not in session._server._store_jobs
 
     def test_partial_match_completes_in_two_rounds(self):

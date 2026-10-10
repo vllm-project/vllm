@@ -387,11 +387,14 @@ class ServerRole:
             self._finalize_outbound(kv_request_id, round_seq, success=False)
             return
         if result.local_idxs:
+            # _submit_transfer owns the round from here: on a failed
+            # submission it finalizes and prunes it itself, so the
+            # finishing check below must not also run.
             self._submit_transfer(kv_request_id, result, req, round_seq)
-        # Prefiller-first mode: finish_request may have run before
-        # fetch arrived. If so, finalize once we know what was
-        # demanded — fully satisfied → success, else early-fail.
-        if req.finishing and req.inflight == 0:
+        elif req.finishing and req.inflight == 0:
+            # Prefiller-first mode: finish_request may have run before
+            # fetch arrived. If so, finalize once we know what was
+            # demanded — fully satisfied → success, else early-fail.
             self._finalize_outbound(kv_request_id, round_seq)
 
     def on_abort_fetch(self, kv_request_id: str, round_seq: int = 0) -> None:
@@ -1069,9 +1072,23 @@ class ServerRole:
             len(result.local_idxs),
             len(result.remote_idxs),
         )
-        transfer_id = self._transport.write_blocks(
-            self._peer_id, result.local_idxs, result.remote_idxs
-        )
+        try:
+            transfer_id = self._transport.write_blocks(
+                self._peer_id, result.local_idxs, result.remote_idxs
+            )
+        except Exception:
+            # A transport is contracted to signal submission failure by
+            # returning None, but a raise must not reach the session's
+            # message dispatcher: that skips the fail-fast path below and
+            # leaves the round un-finalized, so the peer only gives up at
+            # its load timeout. Treat it as a failed submission instead.
+            logger.exception(
+                "P2PSession %s: write_blocks raised for %s (%d blocks)",
+                self._peer_id,
+                kv_request_id,
+                len(result.local_idxs),
+            )
+            transfer_id = None
         if transfer_id is not None:
             logger.debug(
                 "P2PSession %s: NIXL write_blocks SUBMITTED kv_request_id=%s "
