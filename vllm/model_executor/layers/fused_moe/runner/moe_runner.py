@@ -46,6 +46,10 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.model_loader.sharded_weight import (
+    ShardedWeightRequest,
+    ShardedWeightTarget,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -305,6 +309,17 @@ class MoERunner(MoERunnerInterface):
         # AutoWeightsLoader qualify what this returns with the runner's prefix.
         for name in self.routed_experts.load_weights(weights):
             yield f"routed_experts.{name}"
+
+    def resolve_sharded_weight_target(
+        self,
+        relative_name: str,
+        request: ShardedWeightRequest,
+    ) -> ShardedWeightTarget | None:
+        """Delegate logical fused expert tensors to ``RoutedExperts``."""
+        return self.routed_experts.resolve_sharded_weight_target(
+            relative_name,
+            request,
+        )
 
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu():

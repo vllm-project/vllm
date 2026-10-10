@@ -2,24 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Trainer-side weight sources for the NCCL M2N backend.
 
-m2n plans a transfer from both sides' layouts, so the trainer has to say how it
+M2N plans a transfer from both sides' layouts, so the trainer has to say how it
 holds each parameter — which the base `WeightSource` / `ParamMeta` pair does not
-express. This module supplies the m2n flavor of both, and the DTensor-backed
-implementation that covers the common trainer.
-
-A source declares its mesh once (`mesh()`) and a placement per parameter, since
-one topology describes every tensor on the side.
+express. Each parameter owns its source mesh and placements because dense and
+expert weights can use different factorizations over the same trainer ranks.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
+from vllm.distributed.weight_transfer.base import WeightSource
 from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATE,
     REPLICATED,
+    M2NLayout,
     M2NMesh,
     M2NParamMeta,
     Placements,
@@ -27,6 +26,8 @@ from vllm.distributed.weight_transfer.m2n_common import (
 
 __all__ = [
     "M2NWeightSource",
+    "M2NManifestEntry",
+    "ManifestM2NWeightSource",
     "DTensorModuleSource",
     "mesh_from_tensor",
     "placements_from_tensor",
@@ -40,17 +41,85 @@ class M2NWeightSource(WeightSource):
     materialized full tensor: gathering is exactly the cost m2n removes.
     """
 
-    def mesh(self) -> M2NMesh:
-        """The trainer's rank topology, shared by every parameter."""
-        raise NotImplementedError
-
-    def metadata(self) -> list[ParamMeta]:
-        """Name, dtype, full shape, and trainer placement for each parameter."""
+    def metadata(self) -> list[M2NParamMeta]:  # type: ignore[override]
+        """Name, dtype, full shape, and source layout for each parameter."""
         raise NotImplementedError
 
     def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """Yield `(name, local shard)` pairs in the same order as `metadata()`."""
+        """Yield `(name, local shard)` pairs in metadata order.
+
+        Providers must enqueue materialization on the caller's current CUDA
+        stream, or return a tensor whose writes are already visible to it.
+        """
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class M2NManifestEntry:
+    """One immutable source descriptor with a lazy rank-local tensor view."""
+
+    key: str
+    dtype: torch.dtype
+    global_shape: tuple[int, ...]
+    source_layout: M2NLayout
+    local_tensor: Callable[[], torch.Tensor]
+    allow_full_fallback: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "global_shape", tuple(self.global_shape))
+        if not self.key:
+            raise ValueError("M2N manifest key must not be empty")
+        if not isinstance(self.dtype, torch.dtype):
+            raise TypeError(
+                f"manifest entry '{self.key}' has invalid dtype {self.dtype!r}"
+            )
+        if not isinstance(self.source_layout, M2NLayout):
+            raise TypeError(
+                f"manifest entry '{self.key}' source_layout must be an M2NLayout"
+            )
+        if not callable(self.local_tensor):
+            raise TypeError(
+                f"manifest entry '{self.key}' local_tensor must be callable"
+            )
+        if not isinstance(self.allow_full_fallback, bool):
+            raise TypeError(
+                f"manifest entry '{self.key}' allow_full_fallback must be a bool"
+            )
+
+    @property
+    def metadata(self) -> M2NParamMeta:
+        """Return the serializable portion consumed during initialization."""
+        return M2NParamMeta(
+            self.key,
+            self.dtype,
+            self.global_shape,
+            self.source_layout,
+            self.allow_full_fallback,
+        )
+
+
+class ManifestM2NWeightSource(M2NWeightSource):
+    """An ordered M2N source backed by lazy, rank-local manifest entries.
+
+    The provider callable is invoked on every iteration, so it can return a
+    current parameter view or perform rank-local conversion and LoRA merging.
+    Callable identities and tensors remain local and never enter the wire plan.
+    Callbacks run synchronously and must honor `M2NWeightSource.__iter__`'s
+    current-stream readiness contract.
+    """
+
+    def __init__(self, entries: Sequence[M2NManifestEntry]) -> None:
+        self._entries = tuple(entries)
+        self._metadata = tuple(entry.metadata for entry in self._entries)
+
+    def metadata(self) -> list[M2NParamMeta]:  # type: ignore[override]
+        """Return a fresh list while preserving the immutable manifest order."""
+        return list(self._metadata)
+
+    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """Materialize one rank-local tensor at a time."""
+        for entry in self._entries:
+            yield entry.key, entry.local_tensor()
 
 
 def _placement_code(placement: Any) -> int:
@@ -69,7 +138,13 @@ def _placement_code(placement: Any) -> int:
 def mesh_from_tensor(tensor: torch.Tensor, num_trainer_ranks: int) -> M2NMesh:
     """The mesh a parameter lives on, as an `M2NMesh`.
 
-    A plain tensor is identical on every trainer rank, so it spans all of them.
+    This adapter treats tensors without DeviceMesh metadata as replicated.
+    Implicitly sharded tensors, such as Megatron parameters, require a custom
+    `M2NWeightSource` with an explicit source layout.
+
+    Megatron integrations must use `ManifestM2NWeightSource` or another custom
+    `M2NWeightSource` that explicitly supplies TP/EP layouts. Megatron parameters
+    must not be passed to `DTensorModuleSource`.
     """
     device_mesh = getattr(tensor, "device_mesh", None)
     if device_mesh is None:
@@ -122,29 +197,18 @@ class DTensorModuleSource(M2NWeightSource):
         self._module = module
         self._num_trainer_ranks = num_trainer_ranks
 
-    def mesh(self) -> M2NMesh:
-        """The mesh every sharded parameter agrees on.
-
-        Replicated parameters span the trainer without a device mesh of their
-        own, so they never decide this; a model whose *sharded* parameters
-        disagree cannot be described by one side mesh and is rejected.
-        """
-        meshes = {
-            mesh_from_tensor(p, self._num_trainer_ranks)
-            for _, p in self._module.named_parameters()
-            if placements_from_tensor(p) is not REPLICATED
-        }
-        if len(meshes) > 1:
-            raise ValueError(
-                "nccl_m2n needs one mesh per side, but this module's sharded "
-                f"parameters span several: {sorted(m.dims for m in meshes)}"
-            )
-        return meshes.pop() if meshes else M2NMesh((self._num_trainer_ranks, 1), 0)
-
-    def metadata(self) -> list[ParamMeta]:
-        """Read global shape/dtype and placements without gathering shards."""
+    def metadata(self) -> list[M2NParamMeta]:  # type: ignore[override]
+        """Read each global shape and source layout without gathering shards."""
         return [
-            M2NParamMeta(name, p.dtype, tuple(p.shape), placements_from_tensor(p))
+            M2NParamMeta(
+                name,
+                p.dtype,
+                tuple(p.shape),
+                M2NLayout(
+                    mesh_from_tensor(p, self._num_trainer_ranks),
+                    placements_from_tensor(p),
+                ),
+            )
             for name, p in self._module.named_parameters()
         ]
 
