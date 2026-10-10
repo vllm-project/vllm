@@ -211,6 +211,8 @@ steps:
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_prepare.py models/qwen4_exp/test_qsa_reference.py
+    # PLE and QSA import conflicting HC registrations in a shared process.
+    - pytest -v -s models/qwen4_exp/test_ple.py::test_registered_ple_table_is_exact_size_and_outlives_its_views models/qwen4_exp/test_ple.py::test_pinned_ple_table_falls_back_when_registration_fails
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Qwen4 Exp"
