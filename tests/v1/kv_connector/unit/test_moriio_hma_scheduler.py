@@ -23,8 +23,8 @@ from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheSpec,
     MLAAttentionSpec,
@@ -296,13 +296,13 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
             dtype=torch.uint8,
             tokens_per_state=kpool,
         )
-        specs[f"layers.{i}.tail"] = KpoolTailSpec(
+        specs[f"layers.{i}.tail"] = CircularBufferSpec(
             block_size=2 * kpool,
             num_kv_heads=2,
             head_size=128,
             head_size_v=0,
             dtype=torch.bfloat16,
-            sliding_window=2 * kpool,
+            dcp_sharded=False,
         )
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
@@ -337,7 +337,7 @@ def test_scheduler_accepts_glm5_next_groups_with_mtp():
     assert scheduler._attn_group_ids == [0, 1]
     assert scheduler._mamba_group_ids == [2, 3]
     assert scheduler._attn_group_is_state == [False, True]
-    assert scheduler.blocks_per_sw == [0, 2, 0, 0]
+    assert scheduler.blocks_per_sw == [0, 0, 0, 0]
     assert scheduler._num_ssm_scratch_blocks == 1
     # 1 recomputed token + 1 padded spec row + 1 drafter lookahead slot.
     assert scheduler._max_decode_tail_blocks == 1
