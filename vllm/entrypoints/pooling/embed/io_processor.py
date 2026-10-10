@@ -16,7 +16,7 @@ from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
-from vllm.renderers.chat_utils import (
+from vllm.renderers.chat_utils.types import (
     ChatCompletionContentPartParam,
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,

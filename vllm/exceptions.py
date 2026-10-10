@@ -62,6 +62,14 @@ class VLLMNotFoundError(VLLMClientError):
     pass
 
 
+class ChatTemplateResolutionError(VLLMServerError):
+    """Raised when chat template resolution fails.
+
+    This is a subclass of ValueError for backward compatibility with
+    existing exception handlers.
+    """
+
+
 class LoRAAdapterNotFoundError(VLLMNotFoundError):
     """Exception raised when a LoRA adapter is not found.
 
