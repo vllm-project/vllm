@@ -402,6 +402,81 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
     ) == ["quant_config_hash"]
 
 
+def test_hash_checkpoint_distinguishes_weight_values(tmp_path):
+    # Same layout, different values: a base checkpoint and its fine-tune must
+    # not share a key, or an ipc_cache engine silently maps the daemon's stale
+    # weights (#59647).
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        hash_checkpoint,
+    )
+
+    for name, value in (("base", 0.0), ("finetuned", 1.0)):
+        (tmp_path / name).mkdir()
+        save_file(
+            {"w": torch.full((4, 4), value)},
+            str(tmp_path / name / "model.safetensors"),
+        )
+    assert hash_checkpoint(str(tmp_path / "base")) != hash_checkpoint(
+        str(tmp_path / "finetuned")
+    )
+
+
+def test_hash_checkpoint_stable_across_directory_copies(tmp_path):
+    # The #54921 property: byte-identical checkpoints under different paths
+    # share a key, so a daemon preloaded from one directory can serve an
+    # engine started on the copy.
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        hash_checkpoint,
+    )
+
+    (tmp_path / "a").mkdir()
+    save_file(
+        {"w": torch.arange(4096, dtype=torch.float32).reshape(64, 64)},
+        str(tmp_path / "a" / "model.safetensors"),
+    )
+    shutil.copytree(tmp_path / "a", tmp_path / "b")
+    assert hash_checkpoint(str(tmp_path / "a")) == hash_checkpoint(str(tmp_path / "b"))
+
+
+def test_hash_checkpoint_catches_single_tensor_change_among_many(tmp_path):
+    # Every tensor's head contributes to the key, so changing one tensor out
+    # of 64 flips it. The sampled reads run through a thread pool, and 64
+    # tensors exceed the worker count, so this also pins down that the digest
+    # does not depend on read scheduling.
+    import torch
+    from safetensors.torch import save_file
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        hash_checkpoint,
+    )
+
+    tensors = {f"w{i:03d}": torch.full((8, 8), float(i)) for i in range(64)}
+    (tmp_path / "base").mkdir()
+    save_file(tensors, str(tmp_path / "base" / "model.safetensors"))
+    changed = dict(tensors)
+    changed["w037"] = torch.full((8, 8), -1.0)
+    (tmp_path / "changed").mkdir()
+    save_file(changed, str(tmp_path / "changed" / "model.safetensors"))
+    assert hash_checkpoint(str(tmp_path / "base")) != hash_checkpoint(
+        str(tmp_path / "changed")
+    )
+
+
+def test_hash_checkpoint_without_safetensors_returns_none(tmp_path):
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        hash_checkpoint,
+    )
+
+    assert hash_checkpoint(str(tmp_path)) is None
+    assert hash_checkpoint(str(tmp_path / "not-a-dir")) is None
+
+
 def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     """Copy mode clones the weights into the engine, so nothing is external
     (vllm_config is never touched)."""
