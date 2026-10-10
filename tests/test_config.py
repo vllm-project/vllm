@@ -656,6 +656,7 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     # The lookup is lru_cached against a fixed platform.
     default_breakable_cudagraph_architectures.cache_clear()
     try:
@@ -693,6 +694,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     default_breakable_cudagraph_architectures.cache_clear()
 
     model_config = SimpleNamespace(
@@ -731,30 +733,35 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
 
 
 @pytest.mark.parametrize(
-    ("architecture", "is_rocm", "expected"),
+    ("architecture", "platform", "expected"),
     [
-        ("DeepseekV32ForCausalLM", False, True),
-        ("DeepseekV32ForCausalLM", True, False),
-        ("DeepseekV32MTPModel", False, True),
-        ("DeepseekV32MTPModel", True, False),
-        ("GlmMoeDsaForCausalLM", False, True),
-        ("GlmMoeDsaForCausalLM", True, False),
-        ("Qwen4ExpForCausalLM", False, True),
-        ("Qwen4ExpForCausalLM", True, False),
-        ("Qwen4ExpForConditionalGeneration", False, True),
-        ("Qwen4ExpForConditionalGeneration", True, False),
-        ("Qwen4ExpMTP", False, True),
-        ("Qwen4ExpMTP", True, False),
+        ("DeepseekV32ForCausalLM", "cuda", True),
+        ("DeepseekV32ForCausalLM", "rocm", False),
+        ("DeepseekV32MTPModel", "cuda", True),
+        ("DeepseekV32MTPModel", "rocm", False),
+        ("GlmMoeDsaForCausalLM", "cuda", True),
+        ("GlmMoeDsaForCausalLM", "rocm", False),
+        ("DeepseekV32ForCausalLM", "cpu", True),
+        ("Qwen4ExpForCausalLM", "cuda", True),
+        ("Qwen4ExpForCausalLM", "rocm", False),
+        ("Qwen4ExpForCausalLM", "cpu", False),
+        ("Qwen4ExpForConditionalGeneration", "cuda", True),
+        ("Qwen4ExpForConditionalGeneration", "rocm", False),
+        ("Qwen4ExpForConditionalGeneration", "cpu", False),
+        ("Qwen4ExpMTP", "cuda", True),
+        ("Qwen4ExpMTP", "rocm", False),
+        ("Qwen4ExpMTP", "cpu", False),
     ],
 )
 def test_breakable_cudagraph_platform_default(
-    monkeypatch, architecture, is_rocm, expected
+    monkeypatch, architecture, platform, expected
 ):
     from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: platform == "rocm")
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: platform == "cpu")
     default_breakable_cudagraph_architectures.cache_clear()
     config = SimpleNamespace(
         model_config=SimpleNamespace(architectures=[architecture]),
@@ -770,6 +777,26 @@ def test_breakable_cudagraph_platform_default(
             assert config.compilation_config.mode == CompilationMode.NONE
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+def test_cpu_qwen4exp_breakable_cudagraph_can_be_forced(monkeypatch):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+    from vllm.platforms import current_platform
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    default_breakable_cudagraph_architectures.cache_clear()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=["Qwen4ExpForCausalLM"]),
+        compilation_config=CompilationConfig(),
+    )
+
+    try:
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
+        assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
         default_breakable_cudagraph_architectures.cache_clear()
 
 
