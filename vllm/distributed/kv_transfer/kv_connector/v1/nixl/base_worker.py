@@ -2135,6 +2135,31 @@ class NixlBaseConnectorWorker:
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
 
+    def _split_remote_blocks(self, meta: NixlAgentMetadata) -> None:
+        """View remote blocks as gcd-sized kernel blocks when the local block
+        size is not a multiple of the remote one.
+
+        Hybrid blocks are sized to cover the TP-sharded SSM page, so P and D
+        differ with TP. Backends that accept any kernel block size keep them
+        whole, and non-multiples cannot otherwise be paired.
+        """
+        if self.block_size % meta.block_size == 0:
+            return
+        split = meta.block_size // math.gcd(self.block_size, meta.block_size)
+        if (
+            meta.block_strides != meta.block_lens
+            or meta.ple_block_len is not None
+            or any(block_len % split for block_len in meta.block_lens)
+        ):
+            return
+        meta.block_size //= split
+        meta.physical_blocks_per_logical_kv_block *= split
+        meta.num_blocks *= split
+        meta.block_lens = [block_len // split for block_len in meta.block_lens]
+        meta.block_strides = list(meta.block_lens)
+        if meta.region_num_blocks is not None:
+            meta.region_num_blocks = [n * split for n in meta.region_num_blocks]
+
     def add_remote_agent(
         self,
         nixl_agent_meta: NixlAgentMetadata,
@@ -2239,6 +2264,8 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.region_mem_types = nixl_agent_meta.region_mem_types[
                     start:end
                 ]
+        if self._has_mamba and self.use_mla:
+            self._split_remote_blocks(nixl_agent_meta)
 
         ### Register remote engine in TransferTopology (idempotent).
         physical_blocks_per_logical = (

@@ -11,6 +11,7 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
+import math
 from collections import defaultdict
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -623,13 +624,15 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
             )
             for _ in range(2)
         ]
+        # MLA caches are [B, 1, N, C] on device, tokens on dim 2.
+        mla_views = [t.view(t.shape[0], 1, kernel_block_size, -1) for t in tensors]
         worker.register_kv_caches(
             {
                 "kda_a.0": tensors[0],
-                "mla.0": tensors[0],
+                "mla.0": mla_views[0],
                 "kda_b.0": tensors[0],
                 "kda_a.1": tensors[1],
-                "mla.1": tensors[1],
+                "mla.1": mla_views[1],
                 "kda_b.1": tensors[1],
             }
         )
@@ -692,11 +695,11 @@ def _make_remote_meta(
     )
 
     remote_ppl = remote_block_size // remote_kernel_block_size
-    # Kernel-granularity pages are TP-independent for MLA hybrids and must
-    # match the local ones for the handshake to pass, scaled down by the
-    # block-size ratio when the remote's kernel block is smaller.
-    block_size_ratio = worker.block_size // remote_kernel_block_size
-    kernel_page = worker.block_len_per_layer[0] // block_size_ratio
+    # Per-token page bytes are TP-independent for MLA hybrids and must match
+    # the local ones for the handshake to pass.
+    kernel_page = (
+        worker.block_len_per_layer[0] * remote_kernel_block_size // worker.block_size
+    )
     return NixlAgentMetadata(
         engine_id="remote-engine",
         agent_metadata=b"remote-agent-meta",
@@ -860,7 +863,8 @@ def _run_hetero_case(
     )
 
     remote_kernel = remote_kernel or kernel
-    block_size_ratio = kernel // remote_kernel
+    # Transfer unit: the remote kernel block when it divides the local one.
+    unit = math.gcd(kernel, remote_kernel)
     remote_ppl = remote_block // remote_kernel
     matched = num_tokens - 1  # mamba N-1 rule
     n_local = -(-num_tokens // local_block)
@@ -923,9 +927,8 @@ def _run_hetero_case(
     remote_bases = [0x10_000_000, 0x20_000_000]
     local_unified = worker._test_unified_page
     remote_unified = (local_unified // local_block) * remote_block
-    # With block_size_ratio > 1 the local page is split into ratio sub-descs,
-    # each the size of a whole remote kernel page.
-    desc_page = worker.block_len_per_layer[0] // block_size_ratio
+    # The local page is split into sub-descs of one transfer unit each.
+    desc_page = worker.block_len_per_layer[0] * unit // kernel
     meta_r_num_blocks_bytes = (meta_r.num_blocks // remote_ppl) * remote_unified
     covered_tokens = set()
     for op, lh, lids, rh, rids in nixl.xfers:
@@ -969,8 +972,8 @@ def _run_hetero_case(
                 covered_tokens.add(ltok)
 
     # Invariant 3: full coverage of the matched tokens, at the finest
-    # transfer granularity (the remote kernel block).
-    needed = {t for t in range(0, matched - matched % remote_kernel, remote_kernel)}
+    # transfer granularity.
+    needed = {t for t in range(0, matched - matched % unit, unit)}
     missing = needed - covered_tokens
     assert not missing, (
         f"tokens never transferred: {sorted(missing)[:8]} "
@@ -1028,6 +1031,24 @@ def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens)
     coverage of every transferred kernel block."""
     _run_hetero_case(
         local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("local_block,remote_block", [(36, 20), (20, 36)])
+@pytest.mark.parametrize(
+    "num_tokens", [2, 4, 5, 19, 20, 21, 36, 37, 40, 41, 72, 73, 80, 81]
+)
+def test_hetero_non_divisible_block_sizes(local_block, remote_block, num_tokens):
+    """Hybrid MLA blocks follow the TP-sharded SSM page, so on backends that
+    take any kernel block size P and D may have blocks neither of which
+    divides the other; they pair in gcd-sized units."""
+    _run_hetero_case(
+        local_block,
+        kernel=local_block,
+        remote_block=remote_block,
+        remote_kernel=remote_block,
+        num_tokens=num_tokens,
     )
 
 
