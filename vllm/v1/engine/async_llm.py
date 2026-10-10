@@ -44,7 +44,7 @@ from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
-from vllm.tracing import init_tracer
+from vllm.tracing import init_tracer, log_tracing_disabled_warning
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
@@ -402,6 +402,10 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
         if self.errored:
             raise EngineDeadError()
+
+        if trace_headers and self.observability_config.otlp_traces_endpoint is None:
+            log_tracing_disabled_warning()
+            trace_headers = None
 
         is_pooling = isinstance(params, PoolingParams)
 
