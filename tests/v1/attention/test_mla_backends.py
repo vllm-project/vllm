@@ -358,11 +358,15 @@ if current_platform.is_cuda():
     )
 elif current_platform.is_rocm():
     PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+elif current_platform.is_xpu():
+    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.FLASH_ATTN)
 
 MLA_DIMENSIONS_TO_TEST = [
     ("deepseek", 128, 128),
     ("glm", 192, 256),
 ]
+
+TENSOR_PARALLEL_SIZES_TO_TEST = [1, 4, 8, 16]
 
 
 def _prefill_backend_dimension_params():
@@ -370,25 +374,20 @@ def _prefill_backend_dimension_params():
     params = []
     for prefill_backend in PREFILL_BACKENDS_TO_TEST:
         for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-            if device_capability is None:
-                invalid_reasons = ["device capability unavailable"]
-            else:
-                try:
-                    invalid_reasons = (
-                        prefill_backend.get_class().validate_configuration(
-                            device_capability,
-                            MLAPrefillSelectorConfig(
-                                dtype=torch.bfloat16,
-                                mla_dimensions=MLADimensions(
-                                    qk_nope_head_dim=qk_nope_head_dim,
-                                    qk_rope_head_dim=64,
-                                    v_head_dim=v_head_dim,
-                                ),
-                            ),
-                        )
-                    )
-                except ImportError:
-                    invalid_reasons = ["ImportError"]
+            try:
+                invalid_reasons = prefill_backend.get_class().validate_configuration(
+                    device_capability,
+                    MLAPrefillSelectorConfig(
+                        dtype=torch.bfloat16,
+                        mla_dimensions=MLADimensions(
+                            qk_nope_head_dim=qk_nope_head_dim,
+                            qk_rope_head_dim=64,
+                            v_head_dim=v_head_dim,
+                        ),
+                    ),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
 
             marks = []
             if invalid_reasons:
@@ -1668,6 +1667,10 @@ def _run_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
+    if hf_config_override and current_platform.is_xpu():
+        vllm_config.model_config.model_arch_config.total_num_attention_heads = (
+            hf_config_override["num_attention_heads"]
+        )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
@@ -2068,7 +2071,7 @@ def _run_backend_correctness(
     ],
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
+@pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES_TO_TEST)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
