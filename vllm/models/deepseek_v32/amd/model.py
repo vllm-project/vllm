@@ -7,6 +7,7 @@ from itertools import islice
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
@@ -179,6 +180,9 @@ class DeepseekV32Model(torch.nn.Module):
         self.num_redundant_experts = (
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
+        # GLM-5.2 decode MonoKernel, set after weight loading (see
+        # DeepseekV32ForCausalLM.process_weights_after_loading)
+        self.mono = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -209,7 +213,12 @@ class DeepseekV32Model(torch.nn.Module):
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            if self.mono is not None and idx in self.mono.layers:
+                hidden_states, residual = self.mono.forward_layer(
+                    layer, positions, hidden_states, residual
+                )
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -372,6 +381,23 @@ class DeepseekV32Model(torch.nn.Module):
 
 class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     model_cls = DeepseekV32Model
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.vllm_config = vllm_config
+
+    def process_weights_after_loading(self) -> None:
+        # Before memory profiling, KV allocation and graph capture. The kernel keeps
+        # its own weight copy, so a second call (weight reload) raises.
+        if envs.VLLM_ROCM_USE_GLM5_MONOKERNEL:
+            from vllm.models.deepseek_v32.amd.mono.dispatch import Glm5MonoDecode
+
+            self.model.mono = Glm5MonoDecode.maybe_create(self.vllm_config, self)
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        if self.model.mono is not None:
+            self.model.mono.after_step()  # poll-error fail-stop, once per step
+        return super().compute_logits(hidden_states)
 
     def set_moe_parameters(self):
         self.num_expert_groups = getattr(self.config, "n_group", 1)
