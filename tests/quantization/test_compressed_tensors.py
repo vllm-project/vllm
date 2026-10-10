@@ -1020,3 +1020,110 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def _mxfp4_moe_layer(monkeypatch, input_activations):
+    from types import SimpleNamespace
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization import mxfp4
+
+    # Exercise scheme routing and allocation without selecting a GPU kernel.
+    monkeypatch.setattr(
+        mxfp4,
+        "select_deepseek_v4_mxfp4_moe_backend",
+        lambda moe: (Mxfp4MoeBackend.NONE, None),
+    )
+    weights = {
+        "num_bits": 4,
+        "type": "float",
+        "strategy": "group",
+        "group_size": 32,
+        "symmetric": True,
+        "dynamic": False,
+    }
+    quant_config = CompressedTensorsConfig.from_config(
+        {
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    # Name targets only match if the layer's own checkpoint
+                    # projection names are used for the lookup.
+                    "targets": [r"re:.*experts\.\d+\.w\d+$"],
+                    "weights": weights,
+                    "input_activations": input_activations,
+                }
+            },
+        }
+    )
+    return RoutedExperts(
+        "model.layers.0.ffn.experts",
+        torch.bfloat16,
+        make_dummy_moe_config(num_experts=2, hidden_dim=64, intermediate_size=32),
+        quant_config,
+        expert_map_manager=SimpleNamespace(
+            local_num_experts=2,
+            placement_strategy="linear",
+            expert_map=None,
+            expert_mask=None,
+            routing_tables=None,
+            map_global_to_local=lambda index: index,
+        ),
+        ckpt_gate_proj_name="w1",
+        ckpt_down_proj_name="w2",
+        ckpt_up_proj_name="w3",
+    )
+
+
+def test_mxfp4_moe_with_fp8_inputs_shares_native_mxfp4_method(monkeypatch):
+    """MXFP4 weights with dynamic FP8 inputs load compressed-tensors names but
+    otherwise behave as the native MXFP4 method, so its backends, padding and
+    monolithic support are not reimplemented."""
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
+
+    layer = _mxfp4_moe_layer(
+        monkeypatch,
+        {
+            "num_bits": 8,
+            "type": "float",
+            "strategy": "group",
+            "group_size": 128,
+            "symmetric": True,
+            "dynamic": True,
+        },
+    )
+
+    assert isinstance(layer.quant_method, Mxfp4MoEMethod)
+    assert not layer.quant_method.supports_pre_processed_weights
+    assert {"w13_weight_packed", "w2_weight_packed"} <= dict(
+        layer.named_parameters()
+    ).keys()
+    w13 = layer.w13_weight_packed
+
+    layer.quant_method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight is w13
+    assert not hasattr(layer, "w13_weight_packed")
+
+
+def test_mxfp4_moe_with_mxfp4_inputs_keeps_w4a4_method(monkeypatch):
+    """Only FP8 inputs take the shared path; W4A4 keeps its own kernels."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        CompressedTensorsW4A4Mxfp4MoEMethod,
+    )
+
+    layer = _mxfp4_moe_layer(
+        monkeypatch,
+        {
+            "num_bits": 4,
+            "type": "float",
+            "strategy": "group",
+            "group_size": 32,
+            "symmetric": True,
+            "dynamic": True,
+        },
+    )
+
+    assert isinstance(layer.quant_method, CompressedTensorsW4A4Mxfp4MoEMethod)
