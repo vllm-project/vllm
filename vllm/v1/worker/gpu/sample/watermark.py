@@ -800,3 +800,255 @@ def philox_gumbel_sample(
     )
     max_block_index = local_max.argmax(dim=-1, keepdim=True)
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
+
+
+@triton.jit
+def _philox_green_mask(
+    contexts_row_ptr,
+    block_index,
+    key_0_value,
+    key_1_value,
+    green_fraction,
+    CONTEXT_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Which tokens of one vocabulary block are on the context's green list."""
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
+    state_0, state_1, state_2, state_3 = _philox_context_state(
+        contexts_row_ptr, key_0, key_1, CONTEXT_WIDTH
+    )
+    groups = block_index * (BLOCK_SIZE // 4) + tl.arange(0, BLOCK_SIZE // 4)
+    output_0, output_1, output_2, output_3 = _philox_candidate_words(
+        groups, state_0, state_1, state_2, state_3, key_0, key_1
+    )
+    # Lay the per-group words out in token order: 4g+0, 4g+1, 4g+2, 4g+3.
+    words = tl.interleave(
+        tl.interleave(output_0, output_2),
+        tl.interleave(output_1, output_3),
+    )
+    return _uint32_to_uniform(words) < green_fraction
+
+
+@triton.jit(do_not_specialize=["key_0_value", "key_1_value"])
+def _philox_red_green_sample_kernel(
+    local_argmax_ptr,
+    local_argmax_stride,
+    local_max_ptr,
+    local_max_stride,
+    logits_ptr,
+    logits_stride,
+    contexts_ptr,
+    context_stride,
+    skip_mask_ptr,
+    expanded_idx_mapping_ptr,
+    seeds_ptr,
+    pos_ptr,
+    temp_ptr,
+    key_0_value,
+    key_1_value,
+    bias,
+    green_fraction,
+    vocab_size,
+    CONTEXT_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    block_index = tl.program_id(1)
+    candidate = block_index * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = candidate < vocab_size
+    logits = tl.load(
+        logits_ptr + row * logits_stride + candidate,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+
+    watermark = True
+    if skip_mask_ptr is not None:
+        watermark = tl.load(skip_mask_ptr + row) == 0
+    if watermark:
+        green = _philox_green_mask(
+            contexts_ptr + row * context_stride,
+            block_index,
+            key_0_value,
+            key_1_value,
+            green_fraction,
+            CONTEXT_WIDTH,
+            BLOCK_SIZE,
+        )
+        logits = tl.where(green, logits + bias, logits)
+
+    # The noise of ``gumbel_sample``, so the token is the one it would draw
+    # from the biased logits.
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + row).to(tl.int64)
+    valid_req = req_state_idx >= 0
+    temp = tl.load(temp_ptr + req_state_idx, mask=valid_req, other=0.0).to(tl.float32)
+    seed = tl.load(seeds_ptr + req_state_idx, mask=valid_req, other=0)
+    pos = tl.load(pos_ptr + row)
+    value, index = gumbel_noised_argmax(
+        logits,
+        candidate,
+        mask,
+        seed,
+        pos,
+        temp,
+        IS_DRAFTING=False,
+        USE_FP64=USE_FP64,
+        APPLY_TEMPERATURE=False,
+    )
+    token_id = block_index * BLOCK_SIZE + index
+    tl.store(local_argmax_ptr + row * local_argmax_stride + block_index, token_id)
+    tl.store(local_max_ptr + row * local_max_stride + block_index, value)
+
+
+def philox_red_green_sample(
+    logits: torch.Tensor,
+    contexts: torch.Tensor,
+    key: int,
+    bias: float,
+    green_fraction: float,
+    expanded_idx_mapping: torch.Tensor,
+    temperatures: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    skip_mask: torch.Tensor | None = None,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    """Sample each row with ``bias`` added to its green-list logits.
+
+    Draws the token ``gumbel_sample`` would draw from the output of
+    ``philox_green_bias``, without materializing those biased logits. Rows in
+    ``skip_mask`` are sampled without the bias.
+    """
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
+    if skip_mask is not None:
+        skip_mask = skip_mask.contiguous()
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    positions = positions.contiguous()
+    num_tokens, vocab_size = logits.shape
+    block_size = 1024
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
+    local_max = logits.new_empty(
+        num_tokens,
+        num_blocks,
+        dtype=torch.float64 if use_fp64 else torch.float32,
+    )
+    _philox_red_green_sample_kernel[(num_tokens, num_blocks)](
+        local_argmax,
+        local_argmax.stride(0),
+        local_max,
+        local_max.stride(0),
+        logits,
+        logits.stride(0),
+        contexts,
+        contexts.stride(0),
+        skip_mask,
+        expanded_idx_mapping,
+        seeds,
+        positions,
+        temperatures,
+        key & _UINT32_MASK_VALUE,
+        key >> 32,
+        bias,
+        green_fraction,
+        vocab_size,
+        CONTEXT_WIDTH=contexts.shape[-1],
+        BLOCK_SIZE=block_size,
+        USE_FP64=use_fp64,
+    )
+    max_block_index = local_max.argmax(dim=-1, keepdim=True)
+    return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
+
+
+@triton.jit(do_not_specialize=["key_0_value", "key_1_value"])
+def _philox_green_bias_kernel(
+    output_ptr,
+    output_stride,
+    logits_ptr,
+    logits_stride,
+    contexts_ptr,
+    context_stride,
+    skip_mask_ptr,
+    key_0_value,
+    key_1_value,
+    bias,
+    green_fraction,
+    vocab_size,
+    CONTEXT_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    block_index = tl.program_id(1)
+    candidate = block_index * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = candidate < vocab_size
+    logits = tl.load(
+        logits_ptr + row * logits_stride + candidate, mask=mask, other=0.0
+    ).to(tl.float32)
+
+    green = _philox_green_mask(
+        contexts_ptr + row * context_stride,
+        block_index,
+        key_0_value,
+        key_1_value,
+        green_fraction,
+        CONTEXT_WIDTH,
+        BLOCK_SIZE,
+    )
+    if skip_mask_ptr is not None:
+        green = green & (tl.load(skip_mask_ptr + row) == 0)
+    tl.store(
+        output_ptr + row * output_stride + candidate,
+        tl.where(green, logits + bias, logits),
+        mask=mask,
+    )
+
+
+def philox_green_bias(
+    logits: torch.Tensor,
+    contexts: torch.Tensor,
+    key: int,
+    bias: float,
+    green_fraction: float,
+    *,
+    skip_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Add ``bias`` to the green-list logits of every row.
+
+    A row's green list holds the tokens whose detector-compatible PRF value for
+    (key, context, token) is below ``green_fraction``. Returns float32 logits;
+    rows in ``skip_mask`` are returned unchanged.
+    """
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
+    if skip_mask is not None:
+        skip_mask = skip_mask.contiguous()
+    num_tokens, vocab_size = logits.shape
+    output = logits.new_empty(num_tokens, vocab_size, dtype=torch.float32)
+    if num_tokens == 0:
+        return output
+    block_size = 1024
+    _philox_green_bias_kernel[(num_tokens, triton.cdiv(vocab_size, block_size))](
+        output,
+        output.stride(0),
+        logits,
+        logits.stride(0),
+        contexts,
+        contexts.stride(0),
+        skip_mask,
+        key & _UINT32_MASK_VALUE,
+        key >> 32,
+        bias,
+        green_fraction,
+        vocab_size,
+        CONTEXT_WIDTH=contexts.shape[-1],
+        BLOCK_SIZE=block_size,
+    )
+    return output

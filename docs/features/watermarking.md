@@ -106,7 +106,8 @@ rejected before model loading. Set
 not watermarked, while target-side rejection recovery and bonus sampling remain
 watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
-because their recovery tokens are watermarked.
+because their recovery tokens are watermarked. The `red_green` is not diluted, as its
+verification uses the watermarked logits from the target model (see [Red-Green](#red-green-red-green-list)).
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -194,6 +195,49 @@ vllm serve MODEL \
   --speculative-config \
   '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
   --watermark-config '{"algorithm":"dual_key_gumbel","key":42,"alpha":0.1}'
+```
+
+### Red-Green (red-green list)
+
+The Red-Green watermark of
+[Kirchenbauer et al. (2023)](https://arxiv.org/abs/2301.10226) derives a green
+list from the key and the prior token context. The green list contains the tokens
+whose uniform PRF value is below `gamma`. Sampling adds bias `delta` to the green tokens' logits and samples from
+the result with the ordinary random sampler. The bias is added
+after temperature scaling and top-k/top-p filtering.
+The hardness parameter `delta` defaults to 2.0 and the green list size `gamma` to 0.25:
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"red_green","key":42,"delta":2.0,"gamma":0.25}'
+```
+
+Unlike Gumbel-max, the Red-Green watermark changes the output distribution; a
+larger `delta` makes the watermark easier to detect at a greater cost in text
+quality.
+
+With speculative decoding, the Red-Green watermark requires
+`"allow_target_only_watermarking": true`. Drafts are not watermarked, and
+verification uses the watermarked target logits, with contexts that include
+the preceding draft tokens. Standard rejection sampling makes every
+output token follow the watermarked distribution,
+so the watermark is unchanged, only the acceptance rate is reduced:
+
+```bash
+vllm serve MODEL \
+  --speculative-config \
+  '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}' \
+  --watermark-config \
+  '{"algorithm":"red_green","key":42,"allow_target_only_watermarking":true}'
+```
+
+The detector counts the scored tokens that fall in their context's green list and
+reports the binomial tail probability of at least that many green tokens:
+
+```python
+from vllm.v1.watermarking import RedGreenWatermarkDetector
+
+result = RedGreenWatermarkDetector(key=42, gamma=0.25).detect(token_ids)
 ```
 
 ### SynthID-Text
