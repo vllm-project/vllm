@@ -580,13 +580,8 @@ class DecodeBenchConnectorWorker:
 
             kv_cache = self.kv_caches[layer_name]
 
-            # Attention layers store KV as a single block-indexed tensor whose
-            # first dim is num_blocks; fill the requested block rows. Hybrid /
-            # linear-attention layers (e.g. Mamba, Kimi Delta Attention) store
-            # their state as a list/tuple of tensors that are NOT block-indexed
-            # — each tensor is a single state buffer with no num_blocks
-            # dimension — so fill each tensor in its entirety with the same
-            # dummy values.
+            # Attention caches and each tensor in a Mamba state list/tuple
+            # are block-indexed. Leave other requests' state untouched.
             if isinstance(kv_cache, torch.Tensor):
                 fill_dtype = self._fp8_dtypes.get(layer_name, kv_cache.dtype)
                 self._fill_block_tensor(
@@ -596,8 +591,8 @@ class DecodeBenchConnectorWorker:
                 isinstance(t, torch.Tensor) for t in kv_cache
             ):
                 for state_tensor in kv_cache:
-                    self._fill_tensor(
-                        state_tensor, fill_mean, fill_std, state_tensor.dtype
+                    self._fill_block_tensor(
+                        state_tensor, block_ids, fill_mean, fill_std, state_tensor.dtype
                     )
             else:
                 logger.warning_once(
@@ -638,17 +633,12 @@ class DecodeBenchConnectorWorker:
                 of a uint8 fp8 cache.
 
         """
-        # Convert block_ids to tensor on device
-        block_ids_tensor = torch.tensor(
-            block_ids, dtype=torch.long, device=kv_cache.device
-        )
-
-        # Filter invalid block IDs
-        valid_mask = block_ids_tensor < kv_cache.shape[0]
-        valid_block_ids = block_ids_tensor[valid_mask]
-
-        if len(valid_block_ids) == 0:
+        valid_block_ids = [i for i in block_ids if 0 <= i < kv_cache.shape[0]]
+        if not valid_block_ids:
             return
+        block_ids_tensor = torch.tensor(
+            valid_block_ids, dtype=torch.long, device=kv_cache.device
+        )
 
         fill_values = self._make_fill_values(
             (len(valid_block_ids),) + kv_cache.shape[1:],
@@ -659,7 +649,7 @@ class DecodeBenchConnectorWorker:
         )
 
         # Batch fill operation
-        kv_cache[valid_block_ids] = fill_values.view(kv_cache.dtype)
+        kv_cache[block_ids_tensor] = fill_values.view(kv_cache.dtype)
 
     def _make_fill_values(
         self,
@@ -703,10 +693,7 @@ class DecodeBenchConnectorWorker:
     ):
         """Fill an entire tensor in place with dummy values.
 
-        Used for startup fills, and for hybrid / linear-attention layers (e.g.
-        Mamba, Kimi Delta Attention) whose per-layer state tensors are filled
-        in their entirety with the same constant or random values used for
-        block fills, rather than selected block rows.
+        Used to initialize startup-filled cache groups before requests run.
 
         Args:
             kv_cache: A tensor to fill in its entirety.
