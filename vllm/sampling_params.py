@@ -356,7 +356,9 @@ class SamplingParams(
     Row i scores its IDs as predictions of prompt token
     prompt_logprob_start + i + 1, so the last prompt row is excluded."""
     prompt_logprob_start: int | None = None
-    """First causal prompt row to score; defaults to the first row."""
+    """First causal prompt row to score; defaults to the first row.
+    Set skip_reading_prefix_cache=False to reuse local cached rows before it
+    when prompt_logprobs is not requested."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.

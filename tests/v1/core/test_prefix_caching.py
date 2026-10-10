@@ -93,6 +93,7 @@ def make_request(
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
     session_id: str | None = None,
+    sampling_params: SamplingParams | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -106,7 +107,8 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
-    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    if sampling_params is None:
+        sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
 
     return Request(
@@ -3033,6 +3035,47 @@ def test_computed_blocks_not_evicted():
     )
     assert blocks is not None and len(blocks.blocks[0]) == 1
     assert blocks.blocks[0][0].block_id == 2
+
+
+@pytest.mark.parametrize(
+    "start,skip_reading_prefix_cache,prompt_logprobs,expected_hit",
+    [
+        (0, False, None, 0),
+        (4, False, None, 4),
+        (5, False, None, 4),
+        (5, None, None, 0),
+        (5, True, None, 0),
+        (5, False, 0, 0),
+    ],
+)
+def test_fixed_token_scores_reuse_only_unscored_prefix(
+    start, skip_reading_prefix_cache, prompt_logprobs, expected_hit
+):
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 8),
+        max_model_len=32,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    tokens = list(range(16))
+    warm = make_request("warm", tokens, block_size, sha256)
+    assert manager.allocate_slots(warm, len(tokens)) is not None
+    manager.free(warm)
+    scoring = make_request(
+        "scoring",
+        tokens,
+        block_size,
+        sha256,
+        sampling_params=SamplingParams(
+            prompt_logprob_token_ids=[[1]] * (len(tokens) - 1 - start),
+            prompt_logprob_start=start,
+            prompt_logprobs=prompt_logprobs,
+            skip_reading_prefix_cache=skip_reading_prefix_cache,
+        ),
+    )
+    _, hit, _ = manager.get_computed_blocks(scoring)
+    assert hit == expected_hit
 
 
 def test_basic_prefix_caching_disabled():
