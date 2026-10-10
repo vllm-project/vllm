@@ -25,8 +25,8 @@ from vllm.utils.flashinfer import has_flashinfer_cake_sampling
 
 # Width of Cake's per-row top-k slab.
 CAKE_MAX_TOP_K = 1024
-# Above this many rows the extra softmax and mask passes cost more than the
-# Triton top-k kernel saves; sampling has no such cutoff.
+# Keep large mask batches on Triton: the extra passes make Cake's crossover
+# depend on the input distribution. Direct sampling has no such cutoff.
 CAKE_MASK_MAX_ROWS = 64
 _MASK_BLOCK_SIZE = 4096
 
