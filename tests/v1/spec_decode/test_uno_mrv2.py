@@ -2160,8 +2160,13 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
     proposer.acceptance_estimator = None
 
     proposer._step = 7
+    propose_signature = inspect.signature(UnoSpeculator.propose)
 
     def propose(*args, **kwargs):
+        # The stand-in must accept exactly what the real method accepts, so a
+        # keyword the runner passes and Uno no longer takes (or never took)
+        # fails here rather than only on a GPU.
+        propose_signature.bind(proposer, *args, **kwargs)
         assert args[3] is target_hidden
         assert kwargs == {
             "num_speculative_tokens": 2,
@@ -2175,6 +2180,25 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
     proposer.propose = propose
     runner.speculator = proposer
     return runner, proposer, events, FakeAsyncOutput
+
+
+def test_uno_propose_signature_matches_base_speculator():
+    """Runner call sites are written against BaseSpeculator.propose.
+
+    The runner's proposal and DP dummy-run paths pass most arguments by
+    keyword, so Uno must keep the base method's parameter names, order, kinds
+    and defaults; an upstream rename (dp_sync -> dp_sync_state) has to be
+    followed here.
+    """
+    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+
+    def shape(method):
+        return [
+            (p.name, p.kind, p.default)
+            for p in inspect.signature(method).parameters.values()
+        ]
+
+    assert shape(UnoSpeculator.propose) == shape(BaseSpeculator.propose)
 
 
 @pytest.mark.parametrize("skip_proposal", [False, True])
