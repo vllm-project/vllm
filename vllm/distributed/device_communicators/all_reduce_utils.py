@@ -154,6 +154,24 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
     return world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
 
 
+def has_mnnvl_fabric_support(device_index: int) -> bool:
+    """Return whether this GPU is attached to a multi-node NVLink fabric.
+
+    Without fabric memory handles, torch symmetric memory exchanges buffers as
+    POSIX file descriptors over node-local Unix domain sockets, so it can only
+    rendezvous ranks that share a host. This probe is collective-free and
+    conservative: it reports ``False`` whenever FlashInfer's fabric probe
+    cannot run, which only disables a cross-node fast path.
+    """
+    try:
+        from flashinfer.comm.mnnvl import is_mnnvl_fabric_supported
+
+        return bool(is_mnnvl_fabric_supported(device_index))
+    except Exception as error:
+        logger.debug("MNNVL fabric probe failed: %s", error)
+        return False
+
+
 def should_nccl_symm_mem_ag_rs() -> bool:
     """Check whether NCCL symmetric memory should be used for
     AllGather / ReduceScatter collectives."""

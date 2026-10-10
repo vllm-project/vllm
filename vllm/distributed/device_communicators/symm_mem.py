@@ -8,7 +8,9 @@ from torch.distributed import ProcessGroup
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
+    has_mnnvl_fabric_support,
 )
+from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -77,6 +79,13 @@ class SymmMemCommunicator:
                 self.world_size,
             )
             return
+        if not self._group_can_rendezvous():
+            logger.info_once(
+                "SymmMemCommunicator: the process group spans nodes that are "
+                "not connected by a multi-node NVLink fabric, communicator is "
+                "not available."
+            )
+            return
         # Use override max_size if provided, otherwise use default
         if max_size_override is not None:
             self.max_size = max_size_override
@@ -113,6 +122,30 @@ class SymmMemCommunicator:
         self.disabled = False
         if envs.VLLM_BATCH_INVARIANT:
             self.disabled = True
+
+    def _group_can_rendezvous(self) -> bool:
+        """Return whether a symmetric-memory rendezvous on the group can finish.
+
+        Unless fabric memory handles are available, torch passes each rank's
+        buffer as a POSIX file descriptor to the next rank in a ring, over a
+        node-local Unix domain socket. On a group that spans nodes, a rank whose
+        successor is on another node fails to connect, while a rank whose
+        successor is local but whose predecessor is on another node waits for a
+        descriptor that never arrives. The rendezvous then hangs on some ranks
+        instead of failing on all of them, and the ranks that continue time out
+        in their next collective. Every rank of the group reaches this check,
+        so it decides collectively before allocating and all ranks take the
+        same branch.
+        """
+        if all(in_the_same_node_as(self.group, source_rank=0)):
+            return True
+        fabric_support = torch.tensor(
+            int(has_mnnvl_fabric_support(torch.accelerator.current_device_index())),
+            dtype=torch.int32,
+            device="cpu",
+        )
+        dist.all_reduce(fabric_support, op=dist.ReduceOp.MIN, group=self.group)
+        return bool(fabric_support.item())
 
     def should_use_symm_mem(self, inp: torch.Tensor):
         if self.disabled:

@@ -4,6 +4,8 @@
 import queue
 import random
 import typing
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -14,6 +16,7 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators import symm_mem
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import (
     get_tp_group,
@@ -29,6 +32,60 @@ torch.manual_seed(42)
 random.seed(44)
 
 test_size_elements = 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("same_node", "local_fabric", "peer_fabric", "enabled"),
+    [
+        (True, False, False, True),
+        (False, False, False, False),
+        (False, False, True, False),
+        (False, True, False, False),
+        (False, True, True, True),
+    ],
+)
+def test_symm_mem_skips_unsupported_cross_node_rendezvous(
+    monkeypatch, same_node, local_fabric, peer_fabric, enabled
+):
+    """Never enter potentially blocking rendezvous without support on all ranks."""
+    group = SimpleNamespace(group_name="test")
+    backend = SimpleNamespace(
+        empty=Mock(return_value=torch.empty(1)),
+        rendezvous=Mock(return_value=SimpleNamespace(multicast_ptr=1)),
+    )
+    fabric_probe = Mock(return_value=local_fabric)
+    monkeypatch.setattr(symm_mem, "symm_mem_available", True)
+    monkeypatch.setattr(symm_mem, "torch_symm_mem", backend, raising=False)
+    monkeypatch.setattr(symm_mem.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        symm_mem.current_platform,
+        "get_device_capability",
+        lambda: SimpleNamespace(as_version_str=lambda: "10.0"),
+    )
+    monkeypatch.setattr(torch.accelerator, "set_device_index", lambda _device: None)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(symm_mem.dist, "get_world_size", lambda _group: 4)
+    monkeypatch.setattr(
+        symm_mem, "in_the_same_node_as", lambda *_args, **_kwargs: [True, same_node]
+    )
+    monkeypatch.setattr(symm_mem, "has_mnnvl_fabric_support", fabric_probe)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+
+    def agree_on_fabric(support, *, op, group):
+        assert op == dist.ReduceOp.MIN
+        assert support.device.type == "cpu"
+        if not peer_fabric:
+            support.zero_()
+
+    agreement = Mock(side_effect=agree_on_fabric)
+    monkeypatch.setattr(symm_mem.dist, "all_reduce", agreement)
+    communicator = symm_mem.SymmMemCommunicator(group, "cuda:0", max_size_override=2)
+
+    assert communicator.disabled is not enabled
+    assert backend.empty.call_count == int(enabled)
+    assert backend.rendezvous.call_count == int(enabled)
+    assert fabric_probe.call_count == int(not same_node)
+    assert agreement.call_count == int(not same_node)
 
 
 def symm_mem_allreduce_worker(local_rank: int, world_size: int, q: mp.Queue):

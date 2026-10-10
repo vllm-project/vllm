@@ -13,6 +13,7 @@ from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
+    has_mnnvl_fabric_support,
 )
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
@@ -68,17 +69,17 @@ def _group_can_attempt_mnnvl(
 ) -> bool:
     """Return whether every rank can enter the cross-node MNNVL path.
 
-    MNNVL is available only on Blackwell-class GPUs. Local multicast support
-    is necessary but does not establish that the process group spans an MNNVL
-    domain; the symmetric-memory rendezvous below performs that group-level
-    check. The CPU all-reduce keeps every rank on the same control-flow path
-    when a heterogeneous or partially configured group is encountered.
+    Local multicast support does not imply an inter-node NVLink fabric.
+    Without fabric handles, a cross-node symmetric-memory rendezvous can hang
+    instead of failing on all ranks. Require fabric support on every rank
+    before attempting rendezvous, which still checks for a shared MNNVL domain.
     """
     device_index = device.index
     local_support = (
         device_index is not None
         and current_platform.has_device_capability(100, device_index)
         and _has_local_multicast_support(device)
+        and has_mnnvl_fabric_support(device_index)
     )
     return _all_ranks_true(group, local_support)
 
