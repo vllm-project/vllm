@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -231,9 +232,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
 
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
-    monkeypatch.setattr(
-        tiering_spec_module.torch.accelerator, "current_device_index", lambda: 5
-    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
 
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
@@ -244,12 +243,13 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     assert worker_calls[0]["mmap_region"] is region
 
 
-def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkeypatch):
+def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypatch):
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
         worker_kv_bytes_per_block=4096,
+        rank=1,
         world_size=4,
     )
     assert isinstance(spec, TieringOffloadingSpec)
@@ -263,9 +263,9 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())
     monkeypatch.setattr(
-        tiering_spec_module.torch.accelerator,
+        torch.accelerator,
         "current_device_index",
-        lambda: 5,
+        lambda: 6,
     )
 
     spec.create_worker(MagicMock())
@@ -386,9 +386,7 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
-    monkeypatch.setattr(
-        cpu_spec_module.torch.accelerator, "current_device_index", lambda: 5
-    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
 
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
@@ -464,16 +462,16 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "device_index", "world_size", "expected_rank"),
+    ("replicated_layout", "rank", "device_index", "world_size", "expected_rank"),
     [
-        (True, 5, 4, 0),  # replicated: always slot 0
-        (True, 0, 4, 0),  # replicated: slot 0 regardless of device
-        (False, 5, 4, 1),  # non-replicated: 5 % 4 == 1
-        (False, 7, 4, 3),  # non-replicated: 7 % 4 == 3
+        (True, 1, 5, 4, 0),
+        (True, 0, 0, 4, 0),
+        (False, 1, 5, 4, 1),
+        (False, 3, 6, 4, 3),
     ],
 )
 def test_cpu_spec_create_worker_rank_assignment(
-    monkeypatch, replicated_layout, device_index, world_size, expected_rank
+    monkeypatch, replicated_layout, rank, device_index, world_size, expected_rank
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -483,6 +481,7 @@ def test_cpu_spec_create_worker_rank_assignment(
     spec = _create_spec(
         cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        rank=rank,
         world_size=world_size,
         replicated_layout=replicated_layout,
     )
@@ -495,9 +494,7 @@ def test_cpu_spec_create_worker_rank_assignment(
 
     monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
-    monkeypatch.setattr(
-        cpu_spec_module.torch.accelerator, "current_device_index", lambda: device_index
-    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: device_index)
 
     spec.create_worker(MagicMock())
 
