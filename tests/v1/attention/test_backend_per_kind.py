@@ -6,15 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.v1.attention.utils import create_vllm_config
 from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.model_executor.layers.attention.attention import (
     _largest_kernel_block_within,
 )
 from vllm.v1.attention.backend import AttentionType, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
-from vllm.v1.kv_cache_interface import KVCacheSpecKind
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpecKind
 
 
 @pytest.mark.parametrize(
@@ -138,3 +140,29 @@ def test_hisparse_device_buffer_covers_speculative_window():
     )
     with pytest.raises(ValueError, match="expected at least 512"):
         ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+
+def test_resolve_kv_cache_layout_intersects_worker_preferences(monkeypatch):
+    config = create_vllm_config()
+    config.cache_config.kv_cache_layout = None
+    monkeypatch.setattr("vllm.envs.VLLM_KV_CACHE_LAYOUT", None)
+
+    layout = resolve_kv_cache_layout(
+        config,
+        [
+            ["LBNHC", "LBHNC", "BLNHC", "BLHNC"],
+            ["BLHNC", "BLNHC"],
+        ],
+    )
+
+    assert layout is KVCacheLayout.BLNHC
+    assert config.cache_config.kv_cache_layout == "BLNHC"
+
+
+def test_resolve_kv_cache_layout_rejects_disjoint_worker_preferences(monkeypatch):
+    config = create_vllm_config()
+    config.cache_config.kv_cache_layout = None
+    monkeypatch.setattr("vllm.envs.VLLM_KV_CACHE_LAYOUT", None)
+
+    with pytest.raises(ValueError, match="share no supported KV cache layout"):
+        resolve_kv_cache_layout(config, [["LBNHC"], ["BLHNC"]])
