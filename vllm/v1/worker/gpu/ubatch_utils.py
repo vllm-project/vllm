@@ -142,6 +142,10 @@ def _slice_input_batch(
     tokens_truncated = max(0, int(input_batch.query_start_loc_np[req_stop]) - tok_stop)
     if tokens_truncated:
         seq_lens_cpu_upper_bound[-1] -= tokens_truncated
+    seq_lens_cpu_lower_bound = input_batch.seq_lens_cpu_lower_bound
+    if seq_lens_cpu_lower_bound is not None:
+        seq_lens_cpu_lower_bound = seq_lens_cpu_lower_bound[req_start:req_stop].clone()
+        seq_lens_cpu_lower_bound[-1:].sub_(tokens_truncated).clamp_(min=0)
 
     # Query lengths of the truncated requests, so consumers that derive
     # max_query_len from this array see the microbatch's own lengths.
@@ -174,6 +178,7 @@ def _slice_input_batch(
         query_start_loc_np=query_start_loc_np,
         seq_lens=seq_lens,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+        seq_lens_cpu_lower_bound=seq_lens_cpu_lower_bound,
         dcp_local_seq_lens=dcp_local_seq_lens,
         num_computed_tokens_np=input_batch.num_computed_tokens_np[req_start:req_stop],
         prefill_len_np=input_batch.prefill_len_np[req_start:req_stop],
