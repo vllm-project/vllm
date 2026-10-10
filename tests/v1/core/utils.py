@@ -10,6 +10,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -84,6 +85,7 @@ def create_scheduler(
     scheduling_policy: SchedulerPolicy = "fcfs",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
+    lora_config: LoRAConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -210,6 +212,7 @@ def create_scheduler(
         speculative_config=speculative_config,
         diffusion_config=diffusion_config,
         ec_transfer_config=ec_transfer_config,
+        lora_config=lora_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
         ),

@@ -14,6 +14,7 @@ from vllm.config import (
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     SchedulerConfig,
     SpeculativeConfig,
@@ -30,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -356,6 +358,25 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     # scheduled again (multi-step in-flight).
     output = scheduler.schedule()
     assert req.request_id in output.num_scheduled_tokens
+
+
+def test_max_loras_counts_running_request_awaiting_output():
+    """PP: a running request with its prompt fully scheduled is skipped until
+    its output returns, but still holds its LoRA slot, so a request with
+    another adapter must not be admitted in the meantime."""
+    scheduler = create_scheduler(
+        pipeline_parallel_size=2, lora_config=LoRAConfig(max_loras=1)
+    )
+    req_a, req_b = create_requests(num_requests=2, num_tokens=8, req_ids=["a", "b"])
+    req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+
+    scheduler.add_request(req_a)
+    assert scheduler.schedule().num_scheduled_tokens == {"a": 8}
+
+    scheduler.add_request(req_b)
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert req_b.status == RequestStatus.WAITING
 
 
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
