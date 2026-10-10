@@ -160,6 +160,24 @@ When batch invariance is enabled, vLLM:
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
+### NVLS and fixed-batch reproducibility
+
+On Hopper NVSwitch nodes (H100, H20, H800), the dominant source of
+run-to-run non-determinism for a single request is NVLS all-reduce (in-switch
+reduction of large prefill all-reduces). This is fixed by `NCCL_NVLS_ENABLE=0`,
+which is one of the many NCCL settings applied by batch invariance.
+
+If you only need **fixed-batch reproducibility** (the same request always
+produces the same output) rather than full batch invariance (outputs
+independent of batch composition), setting `NCCL_NVLS_ENABLE=0` alone is
+sufficient and costs only ~1% latency — compared to ~76% for the full
+batch-invariance NCCL overrides. See
+[Reproducibility](../usage/reproducibility.md#nvswitch-nvls-non-determinism-on-hopper)
+for details.
+
+Note that the NVLS fix requires kernel driver / Fabric Manager ≥ 550.144.03 (or
+570+); upgrading CUDA/NCCL alone does not help.
+
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:
