@@ -25,7 +25,11 @@ class KVEventsConfig:
     """
 
     replay_endpoint: str | None = None
-    """The zmq endpoint to use for replaying kv events.
+    """The zmq endpoint to use for replaying KV events.
+
+    In addition to sequence-based replay, consumers can send ``b"snapshot"``
+    to stream the current KV cache state. Snapshot frames carry the next live
+    sequence number from which replay should resume.
     """
 
     buffer_steps: int = 10_000
