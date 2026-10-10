@@ -136,10 +136,6 @@ class GlmMono:
         prepared = [
             prepare_glm5_weights(w, AttentionWeight.FP8_BLOCK128) for w in weights
         ]
-        # Drop the unpacked attention copies; every op reads the packed ones.
-        for w, p in zip(weights, prepared):
-            for name in ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o"):
-                w.t[name] = p[name]
         self._weights, self._prepared = weights, prepared
         self._dense = dense
 
@@ -334,6 +330,11 @@ class GlmMono:
             self._ops[chunk] = ops
             self._runtimes[chunk] = [r for r in runtimes.values() if r is not None]
         assert len(self._ops[spec.width_for(1)]) == len(layers)
+        # Every op reads the packed attention weights; drop the unpacked copies,
+        # which the builds above needed for their scale geometry.
+        for w, p in zip(self._weights, self._prepared):
+            for name in ("w_qkv_a", "w_q_b", "w_uk", "w_uv", "w_o"):
+                w.t[name] = p[name]
         self._health = _HealthWatch(
             [r for chunk in sorted(self._runtimes) for r in self._runtimes[chunk]],
             self._rank,
