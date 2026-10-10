@@ -223,9 +223,11 @@ class NemotronHMoE(nn.Module):
                     self.fc2_latent_proj.quant_method, UnquantizedLinearMethod
                 )
             )
+            self._routed_scale_prefoldable = self.fc2_latent_proj.reduce_commutative
         else:
             self.fc1_latent_proj = None
             self.fc2_latent_proj = None
+            self._routed_scale_prefoldable = False
 
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
@@ -251,6 +253,9 @@ class NemotronHMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=True,
             router_logits_dtype=self.gate.out_dtype,
+            runner_args={
+                "routed_scale_prefolded": self._routed_scale_prefoldable,
+            },
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -917,4 +922,24 @@ class NemotronHForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        self._maybe_prefold_routed_scale()
+        return loaded
+
+    def _maybe_prefold_routed_scale(self) -> None:
+        if not self.model.has_moe:
+            return
+        for layer in self.model.layers:
+            if not isinstance(layer, NemotronHMoEDecoderLayer):
+                continue
+            moe = layer.mixer
+            if not getattr(moe, "_routed_scale_prefoldable", False):
+                continue
+            fc2 = moe.fc2_latent_proj
+            if fc2 is None or getattr(fc2, "_routed_scale_applied", False):
+                continue
+            with torch.no_grad():
+                fc2.weight.mul_(moe.routed_scaling_factor)
+                if getattr(fc2, "bias", None) is not None:
+                    fc2.bias.mul_(moe.routed_scaling_factor)
+            fc2._routed_scale_applied = True
