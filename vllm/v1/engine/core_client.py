@@ -1554,23 +1554,19 @@ class DPAsyncMPClient(AsyncMPClient):
                             dp_rank = parallel_config.data_parallel_rank
                             assert dp_rank == 0
                             assert dp_size == new_engine_count
-                            assert not (
-                                parallel_config.data_parallel_hybrid_lb
-                                or parallel_config.data_parallel_external_lb
-                            )
-                            num_ranks = dp_size
-                            self.engine_ranks_managed = list(
-                                range(dp_rank, dp_rank + num_ranks)
-                            )
-                            if len(self.lb_engines) < new_engine_count:
-                                self.lb_engines = self.lb_engines + [
-                                    [0, 0, 0.0]
-                                    for _ in range(
-                                        new_engine_count - len(self.lb_engines)
-                                    )
-                                ]
-                            else:
-                                self.lb_engines = self.lb_engines[:new_engine_count]
+                            assert not parallel_config.data_parallel_hybrid_lb
+                            # External LB clients continue to manage only local ranks.
+                            if not parallel_config.data_parallel_external_lb:
+                                self.engine_ranks_managed = list(range(dp_size))
+                                if len(self.lb_engines) < new_engine_count:
+                                    self.lb_engines += [
+                                        [0, 0, 0.0]
+                                        for _ in range(
+                                            new_engine_count - len(self.lb_engines)
+                                        )
+                                    ]
+                                else:
+                                    self.lb_engines = self.lb_engines[:new_engine_count]
                             # Send scale up notification to coordinator
                             scale_msg = msgspec.msgpack.encode(
                                 ("SCALE_ELASTIC_EP", new_engine_count)
@@ -1638,6 +1634,20 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
+
+    def _eep_commit_pause_mode(self) -> PauseMode:
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            can_reuse_fused_moe_kernel,
+        )
+
+        # MRV2 re-warms through the request pool, so running requests must
+        # finish first while new ones stay queued in the scheduler.
+        parallel_config = self.vllm_config.parallel_config
+        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
+            parallel_config
+        ):
+            return "wait"
+        return "keep"
 
     def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
         from vllm.distributed.utils import create_tcp_store
@@ -1971,28 +1981,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             new_engine_identities.discard(identity)
             self._apply_ready_response(payload)
 
-    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
-        from vllm.distributed.utils import create_tcp_store
-        from vllm.utils.network_utils import get_open_ports_list
-
-        parallel_config = self.vllm_config.parallel_config
-        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
-        parallel_config.data_parallel_master_port = (
-            parallel_config._data_parallel_master_port_list.pop()
-        )
-
-        ip = parallel_config.data_parallel_master_ip
-        store = create_tcp_store(
-            ip,
-            0,
-            is_master=True,
-            world_size=-1,
-            wait_for_workers=False,
-        )
-        parallel_config._coord_store_port = store.port
-        self._coord_store = store
-        return ip, store.port
-
     def _make_reconfig_request(
         self,
         new_data_parallel_size: int,
@@ -2046,20 +2034,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
         await asyncio.to_thread(self._coord_store.wait, ready_keys)
         logger.info("[Elastic EP] Successfully started new engines")
-
-    def _eep_commit_pause_mode(self) -> PauseMode:
-        from vllm.distributed.elastic_ep.elastic_execute import (
-            can_reuse_fused_moe_kernel,
-        )
-
-        # MRV2 re-warms through the request pool, so running requests must
-        # finish first while new ones stay queued in the scheduler.
-        parallel_config = self.vllm_config.parallel_config
-        if self.vllm_config.use_v2_model_runner and not can_reuse_fused_moe_kernel(
-            parallel_config
-        ):
-            return "wait"
-        return "keep"
 
     async def _commit_scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         new_core_engines = [

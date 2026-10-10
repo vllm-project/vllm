@@ -694,23 +694,8 @@ class ExternalElasticEPScaleCoordinator:
             )
 
             if scale_up or dp_rank < bootstrap.new_data_parallel_size:
-                reconfig_request = ReconfigureDistributedRequest(
-                    new_data_parallel_size=bootstrap.new_data_parallel_size,
-                    new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                    new_data_parallel_rank_local=(
-                        ReconfigureRankType.KEEP_CURRENT_RANK
-                    ),
-                    new_data_parallel_master_ip=(bootstrap.new_data_parallel_master_ip),
-                    new_data_parallel_master_port=(
-                        bootstrap.new_data_parallel_master_port
-                    ),
-                    new_data_parallel_master_port_list=(
-                        bootstrap.new_data_parallel_master_port_list
-                    ),
-                    coord_store_port=bootstrap.coord_store_port,
-                )
                 await self.client.call_utility_async(
-                    "reinitialize_distributed", reconfig_request
+                    "reinitialize_distributed", bootstrap
                 )
 
             await self._wait_for_ready_ranks(
@@ -771,26 +756,15 @@ class ExternalElasticEPScaleCoordinator:
                     store, prepared.epoch, ExternalElasticEPScalePhase.COMMITTING
                 )
             await self.client.pause_scheduler_async(
-                mode="keep" if remaining else "abort",
+                mode=self.client._eep_commit_pause_mode() if remaining else "abort",
                 clear_cache=False,
             )
             if remaining:
                 await self.client.call_utility_async("commit_prepared_elastic_ep")
             else:
-                reconfig_request = ReconfigureDistributedRequest(
-                    new_data_parallel_size=bootstrap.new_data_parallel_size,
-                    new_data_parallel_rank=(ReconfigureRankType.SHUTDOWN_CURRENT_RANK),
-                    new_data_parallel_rank_local=(
-                        ReconfigureRankType.KEEP_CURRENT_RANK
-                    ),
-                    new_data_parallel_master_ip=(bootstrap.new_data_parallel_master_ip),
-                    new_data_parallel_master_port=(
-                        bootstrap.new_data_parallel_master_port
-                    ),
-                    new_data_parallel_master_port_list=(
-                        bootstrap.new_data_parallel_master_port_list
-                    ),
-                    coord_store_port=bootstrap.coord_store_port,
+                reconfig_request = msgspec.structs.replace(
+                    bootstrap,
+                    new_data_parallel_rank=ReconfigureRankType.SHUTDOWN_CURRENT_RANK,
                 )
                 await self.client.call_utility_async(
                     "reinitialize_distributed", reconfig_request
@@ -816,6 +790,13 @@ class ExternalElasticEPScaleCoordinator:
 
             if remaining:
                 self._update_parallel_config(bootstrap, prepared.num_redundant_experts)
+                if prepared.dp_rank == 0:
+                    self.client._ensure_stats_update_task()
+                    await self.client.first_req_send_socket.send(
+                        msgspec.msgpack.encode(
+                            ("SCALE_ELASTIC_EP", bootstrap.new_data_parallel_size)
+                        )
+                    )
                 await self.client.resume_scheduler_async()
             self._stop_handshake_server(
                 prepared.handshake_server, suppress_errors=False

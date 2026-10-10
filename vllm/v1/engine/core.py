@@ -1321,6 +1321,9 @@ class EngineCoreProc(EngineCore):
                 ready_msg["coord_store_port"] = (
                     vllm_config.parallel_config._coord_store_port
                 )
+                ready_msg["elastic_ep_max_dp_size"] = (
+                    vllm_config.parallel_config.elastic_ep_max_dp_size
+                )
                 ready_msg["num_redundant_experts"] = (
                     vllm_config.parallel_config.eplb_config.num_redundant_experts
                 )

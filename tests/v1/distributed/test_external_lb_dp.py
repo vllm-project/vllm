@@ -351,6 +351,8 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
         "--attention-backend",
         "TRITON_MLA",
         "--enable-elastic-ep",
+        "--elastic-ep-max-dp-size",
+        "3",
         "--enable-eplb",
         "--eplb-config",
         '{"communicator":"pynccl","num_redundant_experts":0,"use_async":false}',

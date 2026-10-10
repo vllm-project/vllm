@@ -1315,7 +1315,9 @@ class AsyncLLM(EngineClient):
         finally:
             if rank_will_retire and not commit_succeeded:
                 set_elastic_ep_rank_retired(False)
-            set_scaling_elastic_ep(False)
+            # A failed commit may leave engines partially reconfigured or paused.
+            if commit_succeeded:
+                set_scaling_elastic_ep(False)
 
     async def get_external_elastic_ep_status(
         self,

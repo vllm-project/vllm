@@ -1554,6 +1554,9 @@ def wait_for_engine_startup(
                 parallel_config.eplb_config.num_redundant_experts = (
                     num_redundant_experts
                 )
+            elastic_ep_max_dp_size = msg.get("elastic_ep_max_dp_size")
+            if elastic_ep_max_dp_size is not None and local:
+                parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
 
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
