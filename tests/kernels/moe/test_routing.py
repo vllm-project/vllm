@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +9,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
@@ -44,6 +46,97 @@ def _is_aiter_capable() -> bool:
 MK_S = [(32, 256), (64, 512)]
 TOP_KS = [2, 4, 6]
 NUM_EXPERTS = [8, 16, 64]
+
+
+@pytest.mark.parametrize(
+    "pcp_size,use_all2all,routing",
+    [
+        (1, False, "vision"),
+        (2, True, "vision"),
+        (2, False, "vision"),
+        (4, False, "vision"),
+        (2, False, "hash"),
+        (2, False, "unused"),
+    ],
+)
+@pytest.mark.parametrize("deferred", [False, True])
+def test_dsv41_pcp_prepares_routing_ids_at_model_boundary(
+    pcp_size, use_all2all, routing, deferred, monkeypatch
+):
+    """Both MoE entries reuse aligned routing IDs without changing local inputs."""
+    from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+    from vllm.models.deepseek_v41.nvidia import model as model_module
+
+    gathered = []
+    seen = []
+    hidden = torch.tensor([[3.0], [7.0]])
+    pending = UnfinalizedMoEOutput(
+        hidden, torch.ones(2, 1), torch.zeros(2, 1, dtype=torch.int32)
+    )
+
+    def all_gather(tensor, dim):
+        gathered.append(tensor)
+        return torch.cat([tensor + rank * 100 for rank in range(pcp_size)], dim=dim)
+
+    monkeypatch.setattr(
+        model_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=all_gather)
+    )
+
+    class Experts:
+        moe_config = SimpleNamespace(
+            pcp_size=pcp_size,
+            has_hash_routing=routing == "hash",
+            moe_parallel_config=SimpleNamespace(use_all2all_kernels=use_all2all),
+        )
+        router = SimpleNamespace(
+            bias_vl=torch.zeros(1) if routing == "vision" else None
+        )
+
+        def __call__(self, hidden_states, router_logits, input_ids):
+            seen.append(input_ids)
+            return hidden_states
+
+        def _forward_impl(
+            self, hidden_states, router_logits, shared_experts_input, input_ids
+        ):
+            seen.append(input_ids)
+            return hidden_states, pending
+
+    model = model_module.DeepseekV4MoE.__new__(model_module.DeepseekV4MoE)
+    torch.nn.Module.__init__(model)
+    model.experts = Experts()
+    model.gate = SimpleNamespace(
+        tid2eid=torch.zeros(1) if routing == "hash" else None,
+        bias_vl=model.experts.router.bias_vl,
+    )
+    model.use_native_mega_moe = False
+    token_ids = torch.tensor([3, 7])
+    dispatched = pcp_size > 1 and not use_all2all
+    needs_gather = dispatched and routing != "unused"
+    for offset in (0, 10):
+        local_ids = token_ids + offset
+        with override_forward_context(ForwardContext({}, {}, {})):
+            for _ in range(2):
+                result = (
+                    model.forward_unfinalized(hidden, local_ids)
+                    if deferred
+                    else model(hidden, local_ids)
+                )
+                if deferred:
+                    assert result.routed is pending
+                else:
+                    torch.testing.assert_close(result, hidden)
+                if dispatched and routing == "unused":
+                    assert seen[-1] is None
+                else:
+                    expected = (
+                        torch.cat([local_ids + rank * 100 for rank in range(pcp_size)])
+                        if needs_gather
+                        else local_ids
+                    )
+                    torch.testing.assert_close(seen[-1], expected)
+        torch.testing.assert_close(local_ids, token_ids + offset)
+    assert len(gathered) == 2 * int(needs_gather)
 
 
 def test_degenerate_grouped_config_uses_standard_topk() -> None:

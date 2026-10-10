@@ -209,6 +209,9 @@ class DeepseekSparseSWAMetadata:
     # window attention may read (SWA bounded replay);
     # zeros when nothing replays.
     replay_start: torch.Tensor | None = None
+    # PCP cache writes use the gathered slots; queries use rank-local slots.
+    cache_slot_mapping: torch.Tensor | None = None
+    cache_positions: torch.Tensor | None = None
 
     # Number of decode/prefill requests/tokens (batch is reordered: decodes first)
     num_decodes: int = 0
