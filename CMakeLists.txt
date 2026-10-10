@@ -1166,6 +1166,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building Kimi K3 AttnRes for archs: ${KIMI_K3_ATTN_RES_ARCHS}")
   endif()
 
+  # Qwen4Exp QSA sparse prefill attention (wgmma, SM90a only)
+  cuda_archs_loose_intersection(QSA_SM90_ARCHS "9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND QSA_SM90_ARCHS)
+    set(QSA_SM90_SRCS "csrc/libtorch_stable/attention/qsa/qsa_sm90.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${QSA_SM90_SRCS}"
+      CUDA_ARCHS "${QSA_SM90_ARCHS}")
+    set_property(SOURCE ${QSA_SM90_SRCS} APPEND PROPERTY
+      COMPILE_OPTIONS
+      "$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr;--use_fast_math>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${QSA_SM90_SRCS}")
+    message(STATUS "Building QSA SM90 sparse prefill for archs: ${QSA_SM90_ARCHS}")
+  else()
+    message(STATUS "Not building QSA SM90 sparse prefill as no compatible archs "
+                   "found in CUDA target architectures.")
+  endif()
+
   # Hadacore kernels
   cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)

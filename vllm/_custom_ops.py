@@ -2297,6 +2297,34 @@ def fp32_router_gemm(
     return output
 
 
+def qsa_sparse_prefill_sm90(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    logical_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    token_to_req: torch.Tensor,
+    output_gate: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    """Output-gated QSA sparse attention over paged BF16 K/V (SM90 prefill).
+
+    Same contract as ``qsa_sparse_paged_attention`` with one split: every
+    ``[rows, heads, 256]`` tensor keeps a unit innermost stride, and
+    ``logical_indices`` carries the trailing valid-count column.
+    """
+    torch.ops._C.qsa_sparse_prefill_sm90(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        output_gate,
+        out,
+    )
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,

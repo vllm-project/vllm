@@ -122,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
+    VLLM_QSA_SM90_NATIVE: bool = True
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
@@ -1185,6 +1186,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+    # Run large Qwen4Exp QSA sparse prefill launches over BF16 KV caches with
+    # the native SM90 CUDA kernel. Set to 0 to always use the Triton kernel.
+    "VLLM_QSA_SM90_NATIVE": lambda: bool(int(os.getenv("VLLM_QSA_SM90_NATIVE", "1"))),
     # If set, monkey-patch triton.runtime.autotuner.Autotuner.run to skip
     # benchmarking and select the first valid config (walking past invalid
     # ones). Used to eliminate autotuning variability when measuring kernel

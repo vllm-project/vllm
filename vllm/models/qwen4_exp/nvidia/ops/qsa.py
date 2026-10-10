@@ -8,12 +8,17 @@ from functools import lru_cache
 
 import torch
 
+import vllm.envs as envs
+from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
+
+logger = init_logger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -26,6 +31,56 @@ def _is_sm120() -> bool:
 def _is_sm90() -> bool:
     """True on sm_90 (H100/H200/H20): selects the sm_90 tuning table."""
     return current_platform.get_device_capability() == (9, 0)
+
+
+# Prefill launches with more (row, KV head) programs than this run the SM90
+# native kernel; it is the region the config table serves with one split.
+_SM90_NATIVE_MIN_PROGRAMS = 2048
+
+
+@lru_cache(maxsize=1)
+def _sm90_native_built() -> bool:
+    return hasattr(torch.ops._C, "qsa_sparse_prefill_sm90")
+
+
+def _sm90_native_unsupported_reason(
+    q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor
+) -> str | None:
+    """Layout limits of the native kernel: it moves 16-byte chunks and
+    addresses each K/V row by a 32-bit (byte offset / 16) from the base."""
+    group_size = q.shape[1] // k_cache.shape[2]
+    if q.shape[2] != 256:
+        return f"head_dim {q.shape[2]} is not 256"
+    if group_size > 16:
+        return f"GQA group size {group_size} exceeds 16"
+    if k_cache.stride() != v_cache.stride():
+        return "K and V views have different strides"
+    strides = (*q.stride()[:2], *k_cache.stride()[:3])
+    if any(s % 8 for s in strides) or any(
+        t.data_ptr() % 16 for t in (q, k_cache, v_cache)
+    ):
+        return "Q or K/V rows are not 16-byte aligned"
+    span = sum(
+        (size - 1) * stride
+        for size, stride in zip(k_cache.shape[:3], k_cache.stride()[:3])
+    )
+    if span >> 3 >= 0xFFFFFFFF:
+        return "K/V cache span exceeds 64 GiB"
+    return None
+
+
+def _use_sm90_native(
+    q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor
+) -> bool:
+    if not (envs.VLLM_QSA_SM90_NATIVE and _is_sm90() and _sm90_native_built()):
+        return False
+    reason = _sm90_native_unsupported_reason(q, k_cache, v_cache)
+    if reason is not None:
+        logger.warning_once(
+            "QSA sparse prefill falls back to Triton on SM90: %s", reason
+        )
+        return False
+    return True
 
 
 @triton.jit(do_not_specialize=["num_rows", "num_requests"])
@@ -617,6 +672,9 @@ def qsa_sparse_paged_attention(
     the expand kernel; never a token index). The kernel reads it as the
     tile-loop bound. use_prefill_config only steers the top of the config table; see
     _select_config.
+
+    On SM90, large prefill launches over BF16 caches run the native CUDA kernel
+    (same semantics as one split) unless VLLM_QSA_SM90_NATIVE=0.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -665,6 +723,24 @@ def qsa_sparse_paged_attention(
     assert output_gate.is_contiguous()
     output_gate_view = output_gate.view_as(q)
     if not q.shape[0]:
+        return out
+
+    if (
+        not is_fp8
+        and use_prefill_config
+        and q.shape[0] * k_cache.shape[2] > _SM90_NATIVE_MIN_PROGRAMS
+        and _use_sm90_native(q, k_cache, v_cache)
+    ):
+        ops.qsa_sparse_prefill_sm90(
+            q,
+            k_cache,
+            v_cache,
+            logical_indices,
+            block_table,
+            token_to_req,
+            output_gate_view,
+            out,
+        )
         return out
 
     group_size = q.shape[1] // k_cache.shape[2]
