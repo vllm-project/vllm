@@ -361,10 +361,14 @@ class ExpertMapManager:
 
     def get_local_expert_ids(self) -> list[int]:
         """Get list of global IDs for experts on this rank."""
-        if self._expert_map is None:
+        if self._expert_map_cpu is None:
             return list(range(self.global_num_experts))
 
-        return torch.where(self._expert_map != -1)[0].tolist()
+        return [
+            global_id
+            for global_id, local_id in enumerate(self._expert_map_cpu)
+            if local_id != -1
+        ]
 
     def update(
         self,
@@ -403,14 +407,13 @@ class ExpertMapManager:
 
         Returns string mapping local to global expert IDs.
         """
-        if self._expert_map is None:
+        if self._expert_map_cpu is None:
             return f"[0..{self.global_num_experts - 1}]"
 
-        global_indices = torch.where(self._expert_map != -1)[0]
-        local_indices = self._expert_map[global_indices]
         return ", ".join(
-            f"{local_index.item()}->{global_index.item()}"
-            for local_index, global_index in zip(local_indices, global_indices)
+            f"{local_id}->{global_id}"
+            for global_id, local_id in enumerate(self._expert_map_cpu)
+            if local_id != -1
         )
 
     # Private methods
@@ -454,6 +457,8 @@ class ExpertMapManager:
         )
 
         self._local_num_experts += self.num_fused_shared_experts
+        # Host-side copy for lookups during weight loading. Rebuild alongside
+        # _expert_map to keep both mappings in sync.
         if self._expert_map is not None:
             self._expert_map_cpu = self._expert_map.cpu().tolist()
         else:
