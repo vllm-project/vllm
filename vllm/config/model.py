@@ -142,6 +142,17 @@ def _modelopt_mixed_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
     )
 
 
+def _compressed_tensors_has_nvfp4(quant_config: dict[str, Any] | None) -> bool:
+    """Whether a compressed-tensors checkpoint packs any weights as NVFP4.
+
+    ``format`` is a string for a single-scheme checkpoint and a list when the
+    checkpoint mixes schemes, e.g. ``["nvfp4-pack-quantized", "float-quantized"]``.
+    """
+    fmt = (quant_config or {}).get("format")
+    formats = fmt if isinstance(fmt, list) else [fmt]
+    return any(isinstance(f, str) and "nvfp4" in f.lower() for f in formats)
+
+
 AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
 ]
@@ -2288,10 +2299,8 @@ class ModelConfig:
 
         # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
         # in the quantization config
-        return (
-            self.quantization == "compressed-tensors"
-            and quant_config is not None
-            and "nvfp4" in quant_config.get("format", "").lower()
+        return self.quantization == "compressed-tensors" and (
+            _compressed_tensors_has_nvfp4(quant_config)
         )
 
 
