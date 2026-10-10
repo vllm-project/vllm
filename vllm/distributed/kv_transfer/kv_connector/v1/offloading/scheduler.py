@@ -1904,8 +1904,14 @@ class OffloadingConnectorScheduler:
 
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
+        A flush set left by reset_cache() counts: it reaches the workers only
+        through build_connector_meta().
         """
-        return bool(self._jobs) or self.manager.has_pending_work()
+        return (
+            bool(self._jobs)
+            or bool(self._current_batch_jobs_to_flush)
+            or self.manager.has_pending_work()
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
@@ -2059,9 +2065,10 @@ class OffloadingConnectorScheduler:
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
-        # reset_cache cannot be called in the middle of a schedule step
+        # reset_cache cannot be called in the middle of a schedule step.
+        # _current_batch_jobs_to_flush may still hold a previous reset's flush
+        # set if no step ran since; the new ids are merged into it.
         assert not self._current_batch_load_jobs
-        assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
 
         # Flush all in-flight jobs
