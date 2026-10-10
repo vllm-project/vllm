@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for CPU unquantized GEMM dispatch behavior."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -163,3 +165,33 @@ def test_dispatch_cpu_unquantized_gemm_remove_weight_keeps_dtype(
     x = torch.randn(4, 16, dtype=weight_dtype)
     output = layer.cpu_linear(x, layer.weight, None)
     assert not output.isnan().any()
+
+
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU model adapter")
+def test_cpu_compressor_norm_cache_repeated_reload():
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        finalize_layerwise_processing,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.models.deepseek_v4.cpu.cpu_compressor import DeepseekV4CPUCompressor
+
+    compressor = object.__new__(DeepseekV4CPUCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.norm = torch.nn.Linear(2, 2, bias=False, dtype=torch.bfloat16)
+    record_metadata_for_reloading(compressor)
+    # The schema is declared after metadata capture by the class-swap adapter.
+    compressor.cache_norm_weight_fp32()
+    pointer = compressor._norm_weight_fp32.data_ptr()
+    for value in (1.0, 3.0, 1.0):
+        initialize_layerwise_reload(compressor)
+        compressor.norm.weight.weight_loader(
+            compressor.norm.weight, torch.full((2, 2), value, dtype=torch.bfloat16)
+        )
+        finalize_layerwise_processing(
+            compressor, model_config=SimpleNamespace(dtype=torch.bfloat16)
+        )
+        assert compressor._norm_weight_fp32.data_ptr() == pointer
+        torch.testing.assert_close(
+            compressor._norm_weight_fp32, torch.full((2, 2), value)
+        )

@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.utils import register_derived_buffer, set_derived_buffer
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -284,8 +285,13 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             self.indexer.k_cache.__class__ = DeepseekV4CPUIndexerCache
             self.indexer.compressor.__class__ = DeepseekV4CPUCompressor
 
-        self._wo_a_packed: torch.Tensor | None = None
+        register_derived_buffer(self.wo_a, "_cpu_wo_a_packed")
         self._wrap_wo_a_process_weights_after_loading()
+
+    @property
+    def _wo_a_packed(self) -> torch.Tensor | None:
+        # The child PWAL produces the packed value before releasing its sources.
+        return self.wo_a._cpu_wo_a_packed
 
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         """Cache fp32-contiguous copies of tensors CPU kernels want that way
@@ -319,7 +325,11 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         def _capture_and_pack(layer: torch.nn.Module) -> None:
             dequant = _dequant_linear_weight(layer).to(torch.bfloat16)
             dequant = dequant.view(self.n_local_groups, self.o_lora_rank, k_dim)
-            self._wo_a_packed = torch.ops._C.convert_weight_packed(dequant.contiguous())
+            set_derived_buffer(
+                layer,
+                "_cpu_wo_a_packed",
+                torch.ops._C.convert_weight_packed(dequant.contiguous()),
+            )
             orig_pwal(layer)
             # orig_pwal VNNI-repacks layer.weight/scale for ordinary-linear
             # use that _o_proj never needs -- free them, same pattern as
