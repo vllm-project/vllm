@@ -847,10 +847,16 @@ class Platform:
         To add a padded-spec type: append its per-token page to ``padded_pages``
         and set its ``*_page_size_padded`` hint below.
         """
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-        from vllm.v1.attention.backend import MultipleOf
+        from vllm.v1.attention.backend import AttentionType, MultipleOf
         from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
 
         cache_config = vllm_config.cache_config
@@ -859,12 +865,19 @@ class Platform:
         if not model_config:
             return
 
-        def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
+        def per_token_page_bytes(
+            dtype: "torch.dtype",
+            cache_dtype: str,
+            num_kv_heads: int,
+            head_size: int,
+            head_size_v: int,
+        ) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
             spec = FullAttentionSpec(
                 block_size=1,
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                head_size=model_config.get_head_size(),
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                head_size_v=head_size_v,
                 dtype=dtype,
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
@@ -876,12 +889,51 @@ class Platform:
             if cache_config.cache_dtype != "auto"
             else model_config.dtype
         )
-        primary_page = per_token_page_bytes(primary_dtype, cache_config.cache_dtype)
 
-        # Per-token page of every higher-precision padded spec sharing the pool.
+        primary_page = per_token_page_bytes(
+            primary_dtype,
+            cache_config.cache_dtype,
+            model_config.get_num_kv_heads(parallel_config),
+            model_config.get_head_size(),
+            None,
+        )
+        # Per-token page of every real decoder attention layer, split by
+        # whether it was reset to its native dtype by --kv-cache-dtype-skip-layers.
         padded_pages: list[int] = []
         if cache_config.kv_cache_dtype_skip_layers:
-            padded_pages.append(per_token_page_bytes(model_config.dtype, "auto"))
+            attn_layers = get_layers_from_vllm_config(
+                vllm_config,
+                AttentionLayerBase,  # type: ignore[type-abstract]
+            )
+            for layer in attn_layers.values():
+                num_kv_heads = getattr(layer, "num_kv_heads", None)
+                head_size = getattr(layer, "head_size", None)
+                head_size_v = getattr(layer, "head_size_v", head_size)
+                layer_kv_cache_dtype = getattr(layer, "kv_cache_dtype", None)
+                if (
+                    num_kv_heads is None
+                    or head_size is None
+                    or layer_kv_cache_dtype is None
+                ):
+                    continue
+                attn_type = getattr(layer, "attn_type", AttentionType.DECODER)
+                if attn_type != AttentionType.DECODER:
+                    # Encoder(-only) layers keep no autoregressive KV cache.
+                    continue
+                if layer.get_attn_backend().is_ssm():
+                    continue
+                if layer_kv_cache_dtype != cache_config.cache_dtype:
+                    # Skipped: kept at its own native (higher-precision) dtype.
+                    padded_pages.append(
+                        per_token_page_bytes(
+                            model_config.dtype,
+                            "auto",
+                            num_kv_heads,
+                            head_size,
+                            head_size_v,
+                        )
+                    )
+
         # To add the first/last-N sibling:
         #   padded_pages.append(per_token_page_bytes(<sibling_dtype>, "auto"))
         if not padded_pages:
