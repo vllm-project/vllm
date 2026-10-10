@@ -273,7 +273,7 @@ steps:
 #------------------------------------------------------------  mi250 · v1  -------------------------------------------------------------#
 
 - label: ":amd: (MI250) Batch Invariance" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   dind: false
   agent_pool: mi250_1
@@ -282,14 +282,18 @@ steps:
   source_file_dependencies:
   - vllm/v1/attention
   - vllm/model_executor/layers
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/determinism
   - tests/v1/determinism/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
+  - export VLLM_GPU_MEMORY_UTILIZATION=0.8
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pip install pytest-timeout pytest-forked
   - pytest -v -s v1/determinism/test_batch_invariance.py
-  - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
 
 - label: ":amd: (MI250) CUDAGraph" # TBD
   timeout_in_minutes: 55
@@ -2444,6 +2448,56 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
 
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
+
+- label: ":amd: (MI300) Batch Invariance" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention
+  - vllm/model_executor/layers
+  - vllm/lora/ops/triton_ops
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/determinism
+  - tests/v1/determinism/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pip install pytest-timeout pytest-forked
+  - pytest -v -s v1/determinism/test_batch_invariance.py
+  - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+  - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+  - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+
+- label: ":amd: (MI300) Batch Invariance (Distributed)" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/device_communicators/
+  - vllm/model_executor/determinism
+  - vllm/model_executor/layers
+  - vllm/v1/attention
+  - tests/v1/determinism/
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k "bs1_vs_bsN or without_batch_invariance_should_fail"
+  - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
+  - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+  - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
 
 - label: ":amd: (MI300) Spec Decode Speculators + MTP" # TBD
   timeout_in_minutes: 75
@@ -5215,6 +5269,37 @@ steps:
   - pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
 
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
+
+- label: ":amd: (MI355) Batch Invariance" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention
+  - vllm/model_executor/layers
+  - vllm/lora/ops/triton_ops
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/determinism
+  - tests/v1/determinism/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pip install pytest-timeout pytest-forked
+  - pytest -v -s v1/determinism/test_batch_invariance.py
+  - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+  - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+  - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
+  - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+  - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+  - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+  - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+  - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+  - pytest -v -s v1/determinism/test_online_batch_invariance.py
+  - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
 
 - label: ":amd: (MI355) Spec Decode AL DFlash2 Nightly"
   timeout_in_minutes: 60

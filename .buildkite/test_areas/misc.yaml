@@ -644,12 +644,33 @@ steps:
   source_file_dependencies:
     - vllm/v1/attention
     - vllm/model_executor/layers
+    - vllm/model_executor/kernels/linear
+    - vllm/model_executor/determinism
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pip install pytest-timeout pytest-forked
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+  mirror:
+    amd:
+      label: ":amd: (MI250) Batch Invariance"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 60
+      env:
+        VLLM_GPU_MEMORY_UTILIZATION: "0.8"
+        VLLM_TEST_CLEAN_GPU_MEMORY: "1"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention
+      - vllm/model_executor/layers
+      - vllm/model_executor/kernels/linear
+      - vllm/model_executor/determinism
+      - tests/v1/determinism/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) Batch Invariance"
   key: batch-invariance-h100
@@ -659,6 +680,8 @@ steps:
     - vllm/v1/attention
     - vllm/model_executor/layers
     - vllm/lora/ops/triton_ops
+    - vllm/model_executor/kernels/linear
+    - vllm/model_executor/determinism
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -670,15 +693,18 @@ steps:
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
     amd:
-      label: ":amd: (MI250) Batch Invariance"
+      label: ":amd: (MI300) Batch Invariance"
       dind: false
-      device: mi250_1
-      timeout_in_minutes: 35
+      device: mi300_1
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       source_file_dependencies:
       - vllm/v1/attention
       - vllm/model_executor/layers
+      - vllm/lora/ops/triton_ops
+      - vllm/model_executor/kernels/linear
+      - vllm/model_executor/determinism
       - tests/v1/determinism/
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
@@ -687,6 +713,11 @@ steps:
       - pip install pytest-timeout pytest-forked
       - pytest -v -s v1/determinism/test_batch_invariance.py
       - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+      - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+      - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+      - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+      - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+      - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
 
 - label: ":nvidia: (B200) Batch Invariance"
   key: batch-invariance-b200
@@ -696,6 +727,8 @@ steps:
     - vllm/v1/attention
     - vllm/model_executor/layers
     - vllm/lora/ops/triton_ops
+    - vllm/model_executor/kernels/linear
+    - vllm/model_executor/determinism
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -710,6 +743,79 @@ steps:
     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Batch Invariance"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention
+      - vllm/model_executor/layers
+      - vllm/lora/ops/triton_ops
+      - vllm/model_executor/kernels/linear
+      - vllm/model_executor/determinism
+      - tests/v1/determinism/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pip install pytest-timeout pytest-forked
+      - pytest -v -s v1/determinism/test_batch_invariance.py
+      - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+      - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+      - pytest -v -s v1/determinism/test_batch_invariance_vlm.py
+      - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
+      - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+      - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+      - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
+      - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
+      - pytest -v -s v1/determinism/test_online_batch_invariance.py
+      - pytest -v -s v1/determinism/test_mx_linear_batch_invariant.py
+
+- label: ":nvidia: (H100) Batch Invariance (Distributed)"
+  key: batch-invariance-distributed-4xh100
+  timeout_in_minutes: 45
+  device: h100
+  optional: true
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/device_communicators/
+    - vllm/model_executor/determinism
+    - vllm/model_executor/layers
+    - vllm/v1/attention
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    - VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k "bs1_vs_bsN or without_batch_invariance_should_fail"
+    - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
+    - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+    - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Batch Invariance (Distributed)"
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/device_communicators/
+      - vllm/model_executor/determinism
+      - vllm/model_executor/layers
+      - vllm/v1/attention
+      - tests/v1/determinism/
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+      - VLLM_TEST_TP_SIZE=4 pytest -v -s v1/determinism/test_batch_invariance.py -k "bs1_vs_bsN or without_batch_invariance_should_fail"
+      - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
+      - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
+      - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
 
 - label: ":nvidia: (H200 MIG 35GB) Acceptance Length (Large Models)"
   device: h200_35gb
