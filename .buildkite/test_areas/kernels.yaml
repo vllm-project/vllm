@@ -386,6 +386,8 @@ steps:
   - vllm/v1/attention/backends/mla/flashmla.py
   - vllm/v1/attention/backends/mla/flashmla_sparse.py
   - vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py
+  - vllm/models/deepseek_v41/nvidia/flashmla.py
+  - vllm/models/deepseek_v41/nvidia/ops/small_head_sparse_decode.py
   - vllm/utils/flashinfer.py
   - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_flashmla.py

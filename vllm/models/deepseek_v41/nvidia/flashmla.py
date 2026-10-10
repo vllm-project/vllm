@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -17,6 +18,12 @@ from vllm.models.deepseek_v41.nvidia.ops.o_proj import (
     dsv41_o_proj,
     register_dsv41_o_proj_warmup,
 )
+from vllm.models.deepseek_v41.nvidia.ops.small_head_sparse_decode import (
+    register_small_head_decode_warmup,
+    small_head_decode_enabled,
+    small_head_decode_supported,
+    small_head_sparse_decode,
+)
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
@@ -24,6 +31,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 )
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.mla.compressor_utils import get_dspark_swa_index_width
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
@@ -59,9 +67,35 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             self._o_proj_block_size
         )
         register_dsv41_o_proj_warmup(self)
+        # Prefill still runs FlashMLA at the padded head count; only decode
+        # reads the real heads, so Q/output buffers keep their padded shape.
+        self._use_small_head_decode = small_head_decode_enabled(self.n_local_heads)
+        vllm_config = get_current_vllm_config()
+        if self._use_small_head_decode and vllm_config.kernel_config.enable_jit_warmup:
+            self._register_small_head_decode_warmup(vllm_config)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
+
+    def _register_small_head_decode_warmup(self, vllm_config: VllmConfig) -> None:
+        swa_widths = [self.window_size]
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.use_dspark():
+            swa_widths.append(
+                get_dspark_swa_index_width(
+                    self.window_size, spec_config.num_speculative_tokens
+                )
+            )
+        swa_only = self.compress_ratio == 0
+        register_small_head_decode_warmup(
+            num_heads=self.n_local_heads,
+            has_extra=not swa_only,
+            swa_widths=tuple(swa_widths),
+            topk=0 if swa_only else vllm_config.model_config.hf_config.index_topk,
+            swa_page_size=self.swa_cache_layer.block_size,
+            extra_page_size=vllm_config.cache_config.block_size
+            // max(self.compress_ratio, 1),
+        )
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -196,6 +230,30 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
+
+        if self._use_small_head_decode:
+            assert swa_indices is not None
+            max_keys = swa_indices.shape[-1]
+            if topk_indices is not None:
+                max_keys += topk_indices.shape[-1]
+            use_small_head = small_head_decode_supported(num_decode_tokens, max_keys)
+        else:
+            use_small_head = False
+        if use_small_head:
+            small_head_sparse_decode(
+                q=q,
+                swa_cache=self.swa_cache_layer.kv_cache,
+                swa_indices=swa_indices,
+                swa_lens=swa_lens,
+                extra_cache=None if swa_only else kv_cache,
+                extra_indices=topk_indices,
+                extra_lens=topk_lens,
+                attn_sink=self.attn_sink,
+                sm_scale=self.scale,
+                out=output,
+                num_heads=self.n_local_heads,
+            )
+            return
 
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.

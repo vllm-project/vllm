@@ -840,3 +840,298 @@ def test_flashinfer_dspark_noncausal_block_sees_future_tokens(context_len):
             attention[token].float(), weights @ keys, atol=0.05, rtol=0.05
         )
     _assert_projects_alike(z_unfused, z_fused)
+
+
+@pytest.fixture
+def small_head_decode():
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_device_capability_family(90):
+        pytest.skip("Requires SM90")
+    from vllm.models.deepseek_v41.nvidia.ops.small_head_sparse_decode import (
+        small_head_sparse_decode,
+    )
+
+    return small_head_sparse_decode
+
+
+_SMALL_HEAD_PAGE_ALIGNMENT = 576
+
+
+def _small_head_quantize(kv: torch.Tensor, page_size: int) -> torch.Tensor:
+    from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
+
+    num_pages = kv.shape[0] // page_size
+    bytes_per_page = page_size * 584
+    padded = (
+        (bytes_per_page + _SMALL_HEAD_PAGE_ALIGNMENT - 1)
+        // _SMALL_HEAD_PAGE_ALIGNMENT
+        * _SMALL_HEAD_PAGE_ALIGNMENT
+    )
+    backing = torch.zeros(num_pages, padded, dtype=torch.uint8, device=kv.device)
+    slots = torch.arange(kv.shape[0], dtype=torch.int64, device=kv.device)
+    quantize_and_insert_k_cache(kv, backing, slots, block_size=page_size)
+    return backing[:, :bytes_per_page].view(num_pages, page_size, 584)
+
+
+def _small_head_dequant(cache: torch.Tensor) -> torch.Tensor:
+    num_pages, page_size, _ = cache.shape
+    flat = cache.reshape(num_pages, -1)
+    data = flat[:, : page_size * 576].reshape(num_pages, page_size, 576)
+    scales = flat[:, page_size * 576 : page_size * 584].reshape(num_pages, page_size, 8)
+    nope = (
+        data[..., :448]
+        .view(torch.float8_e4m3fn)
+        .float()
+        .view(num_pages, page_size, 7, 64)
+    )
+    nope = nope * torch.exp2(scales[..., :7].float() - 127).unsqueeze(-1)
+    rope = data[..., 448:].contiguous().view(torch.bfloat16).float()
+    return torch.cat([nope.view(num_pages, page_size, 448), rope], -1).view(
+        num_pages * page_size, 512
+    )
+
+
+def _small_head_reference(q, kv_list, sink, scale, num_heads):
+    out = torch.zeros(q.shape[0], num_heads, 512, device=q.device)
+    for t in range(q.shape[0]):
+        nonempty = [kvs[t] for kvs in kv_list if kvs[t].numel()]
+        if not nonempty:
+            continue
+        keys = torch.cat(nonempty, 0)
+        s = q[t, :num_heads].float() @ keys.T * scale
+        lse = torch.logsumexp(s, -1)
+        o = torch.softmax(s, -1) @ keys
+        out[t] = o / (1 + torch.exp(sink[:num_heads] - lse)).unsqueeze(-1)
+    return out
+
+
+def _small_head_case(num_tokens, num_heads, swa_w, topk, page_size, seed, invalid_frac):
+    torch.manual_seed(seed)
+    dev = "cuda"
+    num_pages = 64
+    swa_cache = _small_head_quantize(
+        torch.randn(num_pages * page_size, 512, device=dev, dtype=torch.bfloat16),
+        page_size,
+    )
+    extra_cache = _small_head_quantize(
+        torch.randn(num_pages * page_size, 512, device=dev, dtype=torch.bfloat16),
+        page_size,
+    )
+    slots = num_pages * page_size
+    swa_idx = torch.randint(0, slots, (num_tokens, 1, swa_w), device=dev).int()
+    swa_lens = torch.randint(0, swa_w + 1, (num_tokens,), device=dev).int()
+    ex_idx = torch.randint(0, slots, (num_tokens, 1, topk), device=dev).int()
+    ex_idx[torch.rand_like(ex_idx.float()) < invalid_frac] = -1
+    ex_lens = torch.randint(0, topk + 1, (num_tokens,), device=dev).int()
+    q = torch.randn(num_tokens, 64, 512, device=dev, dtype=torch.bfloat16)
+    sink = torch.randn(64, device=dev)
+    return swa_cache, extra_cache, swa_idx, swa_lens, ex_idx, ex_lens, q, sink
+
+
+@pytest.mark.parametrize("num_tokens", [1, 33, 129, 513])
+@pytest.mark.parametrize("page_size", [64, 128])
+@pytest.mark.parametrize("num_heads", [8, 16])
+@pytest.mark.parametrize("swa_only", [False, True])
+def test_small_head_sparse_decode_matches_reference(
+    small_head_decode, num_tokens, num_heads, swa_only, page_size
+):
+    small_head_sparse_decode = small_head_decode
+    scale = 512**-0.5
+    swa_c, ex_c, swa_i, swa_l, ex_i, ex_l, q, sink = _small_head_case(
+        num_tokens, num_heads, 128, 512, page_size, 0, 0.1
+    )
+    backing = torch.full(
+        (num_tokens + 2, 128, 512), float("nan"), dtype=q.dtype, device=q.device
+    )
+    backing[1 : num_tokens + 1, :64].copy_(q)
+    q = backing[1 : num_tokens + 1, :64]
+    out = torch.full_like(backing, 99)[1 : num_tokens + 1, :64]
+    small_head_sparse_decode(
+        q=q,
+        swa_cache=swa_c,
+        swa_indices=swa_i,
+        swa_lens=swa_l,
+        extra_cache=None if swa_only else ex_c,
+        extra_indices=None if swa_only else ex_i,
+        extra_lens=None if swa_only else ex_l,
+        attn_sink=sink,
+        sm_scale=scale,
+        out=out,
+        num_heads=num_heads,
+    )
+    swa_kv, ex_kv = _small_head_dequant(swa_c), _small_head_dequant(ex_c)
+
+    def gather(kv, idx, lens):
+        rows = []
+        for t in range(num_tokens):
+            ids = idx[t, 0, : lens[t]]
+            rows.append(kv[ids[ids >= 0].long()])
+        return rows
+
+    kv_list = [gather(swa_kv, swa_i, swa_l)]
+    if not swa_only:
+        kv_list.append(gather(ex_kv, ex_i, ex_l))
+    ref = _small_head_reference(q, kv_list, sink, scale, num_heads)
+    torch.testing.assert_close(out[:, :num_heads].float(), ref, atol=2e-2, rtol=2e-2)
+    assert (out[:, num_heads:] == 99).all()
+
+
+@pytest.mark.parametrize("num_tokens", [3, 384])
+def test_small_head_sparse_decode_matches_flashmla(small_head_decode, num_tokens):
+    small_head_sparse_decode = small_head_decode
+    from vllm.v1.attention.ops.flashmla import (
+        flash_mla_with_kvcache,
+        get_mla_metadata,
+    )
+
+    num_heads, scale = 8, 512**-0.5
+    swa_c, ex_c, swa_i, swa_l, ex_i, ex_l, q, sink = _small_head_case(
+        num_tokens, num_heads, 128, 512, 64, 1, 0.1
+    )
+    q[:, num_heads:] = 0
+    sink[num_heads:] = float("-inf")
+    ref, _ = flash_mla_with_kvcache(
+        q=q.unsqueeze(1),
+        k_cache=swa_c.unsqueeze(-2),
+        block_table=None,
+        head_dim_v=512,
+        tile_scheduler_metadata=get_mla_metadata()[0],
+        cache_seqlens=None,
+        is_fp8_kvcache=True,
+        indices=swa_i,
+        topk_length=swa_l,
+        softmax_scale=scale,
+        attn_sink=sink,
+        extra_k_cache=ex_c.unsqueeze(-2),
+        extra_indices_in_kvcache=ex_i,
+        extra_topk_length=ex_l,
+    )
+    out = torch.zeros_like(q)
+    small_head_sparse_decode(
+        q=q,
+        swa_cache=swa_c,
+        swa_indices=swa_i,
+        swa_lens=swa_l,
+        extra_cache=ex_c,
+        extra_indices=ex_i,
+        extra_lens=ex_l,
+        attn_sink=sink,
+        sm_scale=scale,
+        out=out,
+        num_heads=num_heads,
+    )
+    torch.testing.assert_close(
+        out[:, :num_heads].float(),
+        ref.squeeze(1)[:, :num_heads].float(),
+        atol=2e-2,
+        rtol=2e-2,
+    )
+
+
+def test_small_head_sparse_decode_graph_replay_empty_kv(small_head_decode):
+    """Padding and all-invalid sparse rows must produce finite zeros on replay."""
+    swa_c, ex_c, swa_i, swa_l, ex_i, ex_l, q, sink = _small_head_case(
+        3, 8, 128, 512, 64, 2, 0.1
+    )
+    out = torch.empty_like(q)
+
+    def decode():
+        small_head_decode(
+            q, swa_c, swa_i, swa_l, ex_c, ex_i, ex_l, sink, 512**-0.5, out, 8
+        )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        decode()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        decode()
+    swa_i.fill_(-1)
+    ex_i.fill_(-1)
+    sink.fill_(-float("inf"))
+    graph.replay()
+    torch.testing.assert_close(out[:, :8], torch.zeros_like(out[:, :8]), atol=0, rtol=0)
+    swa_i.fill_(0)
+    swa_l.zero_()
+    ex_i.fill_(0)
+    ex_l.zero_()
+    graph.replay()
+    torch.testing.assert_close(out[:, :8], torch.zeros_like(out[:, :8]), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("heads", [8, 16, 32])
+def test_small_head_sparse_decode_enabled(small_head_decode, monkeypatch, heads):
+    import sys
+
+    mod = sys.modules[small_head_decode.__module__]
+    assert mod.small_head_decode_enabled(heads) == (heads in (8, 16))
+    monkeypatch.setattr(
+        mod.current_platform, "is_device_capability_family", lambda family: False
+    )
+    assert not mod.small_head_decode_enabled(heads)
+
+
+@pytest.mark.parametrize("tokens", [1, 16, 17])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_small_head_sparse_decode_dispatch_and_fallback(
+    small_head_decode, monkeypatch, tokens, enabled
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.models.deepseek_v41.nvidia import flashmla as mod
+    from vllm.v1.attention.ops.flashmla import get_mla_metadata
+
+    swa_c, _, swa_i, swa_l, _, _, q, sink = _small_head_case(
+        tokens, 8, 128, 512, 64, 3, 0.1
+    )
+    sink[8:] = -float("inf")
+    q[:, 8:] = 0
+    out = torch.empty_like(q)
+    attn = SimpleNamespace(
+        _use_small_head_decode=enabled,
+        n_local_heads=8,
+        compress_ratio=0,
+        swa_cache_layer=SimpleNamespace(kv_cache=swa_c),
+        attn_sink=sink,
+        scale=512**-0.5,
+    )
+    metadata = SimpleNamespace(
+        num_decodes=tokens,
+        num_decode_tokens=tokens,
+        decode_swa_indices=swa_i,
+        decode_swa_lens=swa_l,
+        tile_sched_swaonly=get_mla_metadata()[0],
+        tile_sched_c1a=None,
+        tile_sched_c2a=None,
+    )
+    native = Mock(wraps=small_head_decode)
+    flashmla = mod.flash_mla_with_kvcache
+    fallback = Mock(wraps=flashmla)
+    monkeypatch.setattr(mod, "small_head_sparse_decode", native)
+    monkeypatch.setattr(mod, "flash_mla_with_kvcache", fallback)
+    mod.DeepseekV4FlashMLAAttention._forward_decode(
+        attn, q, None, metadata, None, True, out
+    )
+    use_native = enabled and mod.small_head_decode_supported(tokens, swa_i.shape[-1])
+    assert native.call_count == int(use_native)
+    assert fallback.call_count == int(not use_native)
+    expected, _ = flashmla(
+        q=q.unsqueeze(1),
+        k_cache=swa_c.unsqueeze(-2),
+        block_table=None,
+        head_dim_v=512,
+        tile_scheduler_metadata=get_mla_metadata()[0],
+        cache_seqlens=None,
+        is_fp8_kvcache=True,
+        indices=swa_i,
+        topk_length=swa_l,
+        softmax_scale=attn.scale,
+        attn_sink=sink,
+    )
+    torch.testing.assert_close(
+        out[:, :8], expected.squeeze(1)[:, :8], atol=2e-2, rtol=2e-2
+    )
