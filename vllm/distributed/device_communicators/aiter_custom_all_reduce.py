@@ -54,6 +54,9 @@ class AiterCustomAllreduce:
         return self._impl.disabled
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
+        # AITER's own check accepts any dtype, but its kernel then raises.
+        if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            return False
         return self._impl.should_custom_ar(inp)
 
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:

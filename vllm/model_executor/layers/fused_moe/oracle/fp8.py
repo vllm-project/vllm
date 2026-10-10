@@ -501,11 +501,13 @@ def select_fp8_moe_backend(
         if skip_aiter_moe:
             if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
-        else:
+        elif envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
             backend = Fp8MoeBackend.AITER
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
+        # VLLM_ROCM_USE_AITER alone is AITER's global switch, not a request for
+        # this kernel: AITER stays first below and falls through if unsupported.
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)

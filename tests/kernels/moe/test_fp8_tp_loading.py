@@ -309,3 +309,36 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
             f"unsharded_fi_vs_triton_l2={cross_backend_l2.item():.6f}"
         )
         assert relative_l2 < 0.01, relative_l2.item()
+
+
+@pytest.mark.parametrize("explicit_aiter_moe", [False, True])
+@pytest.mark.parametrize("tp_size,block", [(2, 64), (4, 32)])
+def test_fp8_aiter_falls_back_on_refined_blocks(
+    monkeypatch, default_vllm_config, tp_size, block, explicit_aiter_moe
+):
+    """A TP shard that is not 128-aligned refines the 128x128 checkpoint
+    blocks, which AITER's FP8 MoE does not support. VLLM_ROCM_USE_AITER alone
+    must fall back to another backend; only an explicit
+    VLLM_ROCM_USE_AITER_MOE may raise.
+    """
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.envs import disable_envs_cache
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("Requires ROCm with AITER")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    if explicit_aiter_moe:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    else:
+        monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE", raising=False)
+    disable_envs_cache()
+    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: True)
+
+    if explicit_aiter_moe:
+        with pytest.raises(ValueError, match="FP8 MoE backend AITER"):
+            _make_fp8_tp_experts(monkeypatch, tp_size, 0, "auto", mock_backend=False)
+        return
+    layer = _make_fp8_tp_experts(monkeypatch, tp_size, 0, "auto", mock_backend=False)
+    assert layer.quant_method.moe_block_shape == [block, block]
+    assert layer.quant_method.fp8_backend == Fp8MoeBackend.TRITON
