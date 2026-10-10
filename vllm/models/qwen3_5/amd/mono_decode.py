@@ -31,6 +31,7 @@ from vllm import envs
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.qwen3_5.amd.mono import layout as L
 from vllm.platforms import current_platform
@@ -38,39 +39,54 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+CDNA_VERSIONS = (4,)
+
+
 def enabled() -> bool:
-    if not envs.VLLM_ROCM_MONO_DECODE or not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx950
-
-    if not on_gfx950():
-        logger.warning_once("VLLM_ROCM_MONO_DECODE needs gfx950 (MI355X); ignored")
-        return False
-    from vllm.config import get_current_vllm_config
-
-    if get_current_vllm_config().kv_transfer_config is not None:
-        # the kernels spin-wait on every CTA being resident; a KV connector's
-        # copy kernels on another stream can hold the CUs and deadlock them
-        logger.warning_once("VLLM_ROCM_MONO_DECODE is off with a KV connector")
-        return False
-    return True
+    return envs.VLLM_ROCM_MONO_DECODE and current_platform.is_rocm()
 
 
 def _routed_experts(mlp):
     return getattr(mlp.experts, "routed_experts", mlp.experts)
 
 
-def _unsupported(model, vllm_config) -> str | None:
-    """Why the kernels cannot serve this model as built, else None."""
+def _refusals(vllm_config) -> list[str]:
+    """Every reason the kernels cannot run this deployment: an explicit opt-in
+    that cannot run is an error."""
+    from vllm.platforms.rocm import get_cdna_version
+
+    pc = vllm_config.parallel_config
+    why = []
+    if get_cdna_version() not in CDNA_VERSIONS:
+        why.append(f"needs CDNA{'/'.join(map(str, CDNA_VERSIONS))}")
+    if get_tp_group().world_size != L.TP:
+        why.append(f"needs tensor parallel size {L.TP}")
+    if get_pp_group().world_size != 1:
+        why.append("needs no pipeline parallelism")
+    if pc.enable_expert_parallel or pc.enable_eplb or pc.data_parallel_size > 1:
+        why.append("needs tensor parallelism only: no expert or data parallelism")
+    if pc.decode_context_parallel_size > 1 or pc.prefill_context_parallel_size > 1:
+        why.append("needs no context parallelism")
+    if vllm_config.lora_config is not None:
+        why.append("needs no LoRA")
+    if vllm_config.speculative_config is not None:
+        why.append("needs no speculative decoding")
+    if vllm_config.kv_transfer_config is not None:
+        # a KV connector's copies on another stream can hold CUs a resident
+        # grid spin-waits on
+        why.append("needs no KV connector")
+    cus = current_platform.num_compute_units(torch.accelerator.current_device_index())
+    if cus < L.BLOCKS:
+        # every CTA of a launch stays resident: a partitioned GPU deadlocks
+        why.append(f"needs {L.BLOCKS} compute units, the GPU has {cus}")
+    return why
+
+
+def _unsupported(model) -> str | None:
+    """Why the kernels cannot serve this model variant, else None."""
     from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 
     c = model.config
-    if get_tp_group().world_size != L.TP or get_pp_group().world_size != 1:
-        return "needs TP8 without PP"
-    if vllm_config.lora_config is not None:
-        return "LoRA"
-    if vllm_config.speculative_config is not None:
-        return "spec decode"
     shape = (
         c.hidden_size == L.HIDDEN
         and c.linear_num_key_heads == L.NK * L.TP
@@ -99,8 +115,6 @@ def _unsupported(model, vllm_config) -> str | None:
             return "dense MLP"
         if mlp.shared_expert is None or mlp.replicate_shared_expert:
             return "shared expert not TP sharded"
-        if mlp.enable_eplb or _routed_experts(mlp).use_ep:
-            return "expert parallel"
         if layer.layer_type == "linear_attention":
             a = layer.linear_attn
             gdn = (
@@ -119,6 +133,13 @@ def _unsupported(model, vllm_config) -> str | None:
             a = layer.self_attn
             if a.num_heads * a.head_dim != L.CORE:
                 return "attention width"
+            rope = a.rotary_emb
+            if not (
+                a.attn_output_gate
+                and getattr(rope, "is_neox_style", False)
+                and getattr(rope, "dtype", None) in (torch.float16, torch.bfloat16)
+            ):
+                return "attention without the gated NeoX RoPE front"
     return None
 
 
@@ -130,11 +151,14 @@ class MonoDecode:
         from vllm.models.qwen3_5.amd.mono import gdn, layer
 
         self.model = model
-        why = _unsupported(model, vllm_config)
+        refused = _refusals(vllm_config)
+        if refused:
+            raise ValueError(f"VLLM_ROCM_MONO_DECODE {'; '.join(refused)}.")
+        why = _unsupported(model)
         self.ok = why is None
-        self._weights_ok: bool | None = None
+        self._weights_checked = False
         if not self.ok:
-            logger.info_once("Qwen3.8 mono decode off: %s", why)
+            logger.info_once("Qwen3.8 mono decode off for this model: %s", why)
             return
         self._probe = next(
             ly.linear_attn.prefix
@@ -171,18 +195,26 @@ class MonoDecode:
             dev,
         )
         self.peers.bytes.zero_()
+        # compile the attention front's helpers here: a decode graph's first
+        # call can be its capture
+        with torch.inference_mode():
+            for s in (1, 2):
+                x = torch.zeros(s, L.HIDDEN, dtype=torch.bfloat16, device=dev)
+                o = torch.zeros(s, L.CORE, dtype=torch.bfloat16, device=dev)
+                _gemma_norm(model.norm, x, x)
+                _sigmoid_gate(o, o)
         logger.info_once(
             "Qwen3.8 mono decode on for decode steps of <= %d rows", L.MAX_TOKENS
         )
 
-    def weights_ok(self) -> bool:
-        """After loading: every weight in the dtype and layout the kernels read."""
-        if self._weights_ok is None:
+    def check_weights(self) -> None:
+        """At the first decode step, after loading: every weight in the dtype
+        and layout the kernels read, else an error."""
+        if not self._weights_checked:
             why = self._weights_unsupported()
             if why is not None:
-                logger.warning_once("Qwen3.8 mono decode off: %s", why)
-            self._weights_ok = why is None
-        return self._weights_ok
+                raise ValueError(f"VLLM_ROCM_MONO_DECODE {why}.")
+            self._weights_checked = True
 
     def _weights_unsupported(self) -> str | None:
         from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
@@ -251,7 +283,8 @@ class MonoDecode:
             return False
         if not idx.is_contiguous():
             return False
-        return self.weights_ok()
+        self.check_weights()
+        return True
 
     def forward(self, input_ids, positions) -> torch.Tensor:
         model = self.model
@@ -268,14 +301,10 @@ class MonoDecode:
                 res_attn = torch.empty_like(h)
                 self._k1(layer, md, h, residual, res_attn, core)
             else:
-                if residual is None:
-                    res_attn = h
-                    x = layer.input_layernorm(h)
-                else:
-                    x, res_attn = layer.input_layernorm(h, residual)
+                x, res_attn = _gemma_norm(layer.input_layernorm, h, residual)
                 core = _attention_core(layer.self_attn, x, positions)
             h, residual = self._k2(layer, core, res_attn)
-        h, _ = model.norm(h, residual)
+        h, _ = _gemma_norm(model.norm, h, residual)
         return h
 
     def _k1(self, layer, md, h, residual, res_out, core) -> None:
@@ -350,11 +379,50 @@ class MonoDecode:
         return out, res_out
 
 
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def _gemma_add_rms_norm(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``GemmaRMSNorm.forward_native(x, residual)`` in one launch: this forward
+    is not torch.compiled, so the CustomOp runs as ~10 eager kernels."""
+    t = x.float() + residual.float()
+    res = t.to(x.dtype)
+    t = t * torch.rsqrt(t.pow(2).mean(dim=-1, keepdim=True) + eps)
+    return (t * (weight.float() + 1.0)).to(x.dtype), res
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def _sigmoid_gate(o: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    return o * torch.sigmoid(gate)
+
+
+def _gemma_norm(norm, x, residual):
+    if residual is None:
+        return norm(x), x
+    return _gemma_add_rms_norm(x, residual, norm.weight, norm.variance_epsilon)
+
+
 def _attention_core(attn, x, positions) -> torch.Tensor:
-    """Qwen3NextAttention.forward up to o_proj's input."""
+    """Qwen3NextAttention.forward up to o_proj's input, with the split, q / k
+    norms, RoPE and gate copy in one launch as the model's CUDA path runs them."""
     qkv, _ = attn.qkv_proj(x)
-    q, k, v, gate = attn._project_qkv_gate(qkv, positions)
-    o = attn.attn(q, k, v)
-    if gate is not None:
-        o = o * torch.sigmoid(gate)
-    return o.contiguous()
+    q_gate, k, v = qkv.split([attn.q_size * 2, attn.kv_size, attn.kv_size], dim=-1)
+    rope = attn.rotary_emb
+    if positions.ndim == 2:
+        # a decode token is text: its M-RoPE positions are all equal
+        positions = positions[0]
+    q, k, gate = fused_qk_rmsnorm_rope_gate(
+        q_gate,
+        k,
+        attn.q_norm.weight,
+        attn.k_norm.weight,
+        rope.cos_sin_cache,
+        positions,
+        attn.q_norm.variance_epsilon,
+        attn.num_heads,
+        attn.num_kv_heads,
+        attn.head_dim,
+        rope.rotary_dim,
+        norm_beta=1.0,
+    )
+    return _sigmoid_gate(attn.attn(q, k, v), gate)

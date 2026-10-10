@@ -70,6 +70,7 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, publish, sreg
 from vllm.models.kimi_k3.amd.mono.stages import gemv
 from vllm.models.qwen3_5.amd.mono import layout as L
+from vllm.models.qwen3_5.amd.mono.layout import need
 from vllm.models.qwen3_5.amd.mono.sources import digest
 
 HIDDEN, ROWS, HD = L.HIDDEN, L.ROWS, L.HD
@@ -483,7 +484,7 @@ def build(key: K1Build):
     if key in _BUILDS:
         return _BUILDS[key]
     s = key.tokens
-    assert 1 <= s <= L.MAX_TOKENS
+    need(1 <= s <= L.MAX_TOKENS, f"{s} rows, the kernels take 1..{L.MAX_TOKENS}")
     lay = scratch_layout(key)
 
     @fx.struct
@@ -687,19 +688,36 @@ def gdn_pre(
     pad row; ``epoch`` a device int32 bumped once a step, ``layer`` this
     launch's slot below ``TAG_SLOTS``."""
     s = key.tokens
-    assert (residual is None) == key.first
-    assert hidden.shape == (s, HIDDEN) and res_out.shape == (s, HIDDEN)
-    assert core.shape == (s, L.CORE) and ln_w.shape == (HIDDEN,)
-    assert w_qkvz.shape == (L.QKVZ, HIDDEN) and w_ba.shape == (L.BA, HIDDEN)
-    assert conv_w.numel() == L.CONV * L.CONV_W and conv_w.dtype == torch.bfloat16
-    assert conv_state.dtype == torch.bfloat16 and conv_state.shape[1:] == (L.CONV, SL)
-    assert rstate.dtype == torch.float32 and rstate.shape[1:] == (NV, HD, HD)
-    assert rstate[0].is_contiguous(), "a slot's state must be dense"
-    assert a_log.dtype == torch.float32 and dt_bias.dtype == torch.bfloat16
-    assert norm_w.dtype == torch.bfloat16 and norm_w.numel() == HD
-    assert st_idx.dtype == torch.int32 and st_idx.numel() >= s
-    for t in (hidden, res_out, w_qkvz, w_ba, conv_w, core):
-        assert t.is_contiguous()
+    bf = torch.bfloat16
+    need((residual is None) == key.first, "residual given iff not the first layer")
+    need(
+        hidden.shape == (s, HIDDEN) and res_out.shape == (s, HIDDEN),
+        "hidden / res_out shape",
+    )
+    need(core.shape == (s, L.CORE) and ln_w.shape == (HIDDEN,), "core / ln_w shape")
+    need(
+        w_qkvz.shape == (L.QKVZ, HIDDEN) and w_ba.shape == (L.BA, HIDDEN),
+        "in_proj_qkvz / in_proj_ba shape",
+    )
+    need(conv_w.numel() == L.CONV * L.CONV_W and conv_w.dtype == bf, "conv1d weight")
+    need(
+        conv_state.dtype == bf and conv_state.shape[1:] == (L.CONV, SL),
+        "conv state: bf16 [slots, 2560, 3]",
+    )
+    need(
+        rstate.dtype == torch.float32 and rstate.shape[1:] == (NV, HD, HD),
+        "recurrent state: fp32 [slots, 16, 128, 128]",
+    )
+    need(rstate[0].is_contiguous(), "a recurrent state slot must be dense")
+    need(a_log.dtype == torch.float32 and dt_bias.dtype == bf, "A_log / dt_bias dtype")
+    need(norm_w.dtype == bf and norm_w.numel() == HD, "gated norm weight")
+    need(st_idx.dtype == torch.int32 and st_idx.numel() >= s, "state indices")
+    weights = (hidden, res_out, w_qkvz, w_ba, conv_w, core)
+    need(all(t.is_contiguous() for t in weights), "a non-contiguous input")
+    need(
+        all(t.dtype == bf for t in (hidden, res_out, ln_w, w_qkvz, w_ba, core)),
+        "activations and dense weights must be bf16",
+    )
     f = build(key)
     f(
         *ABI.pack(
