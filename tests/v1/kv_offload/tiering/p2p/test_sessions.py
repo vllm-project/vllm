@@ -2224,6 +2224,238 @@ class TestPendingSession:
 # ---------------------------------------------------------------------------
 
 
+class TestFailedRoundNotificationOrdering:
+    """Reviewer invariant for a failed P2P round (PR #60279):
+
+        detect failed transfer
+            ↓
+        cancel/drain every other transfer of the SAME round
+            ↓
+        only then remove the round and notify the peer
+        exactly once with TransferDoneMsg(success=False)
+
+    Failures are surfaced through the real FakeDataTransport ``poll()``
+    contract (``_poll_failed``) and sibling cancellation through the real
+    FakeDataTransport ``cancel()`` contract: ``_cancel_still_inflight``
+    models a transfer that ``NixlTransport.cancel(..., mode="wait")``
+    could not release yet, i.e. one that stays tracked until a later
+    ``poll()`` surfaces it.
+    """
+
+    def test_failed_transfer_cancels_sibling_before_notify(self) -> None:
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [10, 11],
+            }
+        )
+        session.poll()
+
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        assert len(transport._transfers) == 2
+
+        tid_k1, tid_k2 = sorted(transport._transfers)
+        assert transport._transfers[tid_k1][1] == [0]
+        assert transport._transfers[tid_k2][1] == [1]
+
+        events: list[str] = []
+        orig_cancel = transport.cancel
+
+        def cancel_and_record(ids, mode: str = "immediate") -> list[int]:
+            events.append("cancel")
+            return orig_cancel(ids, mode=mode)
+
+        transport.cancel = cancel_and_record
+
+        orig_send = conn.send
+
+        def send_and_record(msg: dict) -> None:
+            if (
+                msg.get(TYPE_KEY) == TransferDoneMsg.TYPE
+                and msg.get(TransferDoneMsg.SUCCESS) is False
+            ):
+                kv_request_id = msg.get(TransferDoneMsg.KV_REQUEST_ID)
+                # Any transfer of the failed request still inflight at the
+                # moment the terminal goes out means we lost the race.
+                if any(
+                    x.kv_request_id == kv_request_id
+                    for x in session._server._inflight.values()
+                ):
+                    events.append("notify_with_sibling_still_inflight")
+                events.append("notify")
+            orig_send(msg)
+
+        conn.send = send_and_record
+
+        # Transfer A fails; B belongs to the same round and is still inflight.
+        transport._poll_failed.append(tid_k1)
+        session.poll()
+
+        assert events == ["cancel", "notify"], (
+            f"expected cancel-before-notify, got {events!r}"
+        )
+        # The sibling was cancelled through the documented wait contract.
+        assert transport._cancel_calls == [([tid_k2], "wait")]
+        # Neither transfer is tracked any more when the terminal is sent.
+        assert tid_k1 not in session._server._inflight
+        assert tid_k2 not in session._server._inflight
+
+    def test_failed_transfer_with_no_sibling_still_notifies(self) -> None:
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
+        session.poll()
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        assert len(transport._transfers) == 1
+        (tid,) = transport._transfers
+
+        notifications: list[dict] = []
+
+        orig_send = conn.send
+
+        def conn_send_and_capture(msg: dict) -> None:
+            if msg.get(TYPE_KEY) == TransferDoneMsg.TYPE:
+                notifications.append(msg)
+            orig_send(msg)
+
+        conn.send = conn_send_and_capture
+
+        transport._poll_failed.append(tid)
+        session.poll()
+
+        # A lone failed transfer has no siblings to cancel, but still gets
+        # exactly one terminal notification.
+        assert len(notifications) == 1, (
+            f"expected exactly one terminal notification, got {notifications!r}"
+        )
+        msg = notifications[0]
+        assert msg[TYPE_KEY] == TransferDoneMsg.TYPE
+        assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
+        assert msg[TransferDoneMsg.SUCCESS] is False
+        assert msg[TransferDoneMsg.ROUND_SEQ] == 0
+        assert transport._cancel_calls == []
+
+        # Still exactly one on a later poll.
+        session.poll()
+        assert len(notifications) == 1
+
+    def test_failed_round_defers_transfer_done_until_cancel_wait_sibling_drains(
+        self,
+    ) -> None:
+        """``cancel(mode="wait")`` reports a sibling as still pending.
+
+        First poll: A fails, ``B.cancel(wait) -> [B]``. No
+        TransferDoneMsg(success=False) may go out; the round stays alive and
+        B stays tracked in both inflights.
+
+        Later poll: the transport finally drains B (``poll()`` surfaces it
+        and drops it), and only then is TransferDoneMsg(success=False)
+        emitted — exactly once.
+        """
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.ROUND_SEQ: 0,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.KEYS: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [10, 11],
+            }
+        )
+        session.poll()
+
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=2)
+        assert len(transport._transfers) == 2
+
+        tid_k1, tid_k2 = sorted(transport._transfers)
+        assert transport._transfers[tid_k1][1] == [0]
+        assert transport._transfers[tid_k2][1] == [1]
+
+        # B is the sibling the transport cannot release yet: cancel(wait)
+        # must leave it tracked and report it back as still pending.
+        transport._cancel_still_inflight = {tid_k2}
+
+        notifications: list[dict] = []
+
+        orig_send = conn.send
+
+        def conn_send_and_capture(msg: dict) -> None:
+            if msg.get(TYPE_KEY) == TransferDoneMsg.TYPE:
+                notifications.append(msg)
+            orig_send(msg)
+
+        conn.send = conn_send_and_capture
+
+        # --- First poll: A fails, B.cancel(wait) returns [B]. -----------
+        transport._poll_failed.append(tid_k1)
+        session.poll()
+
+        assert len(notifications) == 0, (
+            f"expected no terminal notification while sibling pending, "
+            f"got {notifications!r}"
+        )
+        assert transport._cancel_calls == [([tid_k2], "wait")]
+
+        st = session._server._requests.get("req-1")
+        assert st is not None, "failed round must stay alive while sibling pending"
+        assert st.outbound.get(0) is not None, (
+            "failed round must stay registered while sibling pending"
+        )
+        assert tid_k1 not in session._server._inflight, (
+            "the failed transfer itself must be popped"
+        )
+        assert tid_k2 in session._server._inflight, (
+            "sibling still pending must stay in session inflight"
+        )
+        assert tid_k2 in transport._transfers, (
+            "sibling still pending must stay in transport inflight"
+        )
+
+        # --- Later poll: the transport drains B. ------------------------
+        # As NixlTransport.poll does: the sibling surfaces and is dropped
+        # from the transport's inflight set.
+        transport._transfers.pop(tid_k2, None)
+        transport._poll_done.append(tid_k2)
+        session.poll()
+
+        assert len(notifications) == 1, (
+            f"expected exactly one terminal notification after drain, "
+            f"got {notifications!r}"
+        )
+        msg = notifications[0]
+        assert msg[TYPE_KEY] == TransferDoneMsg.TYPE
+        assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
+        assert msg[TransferDoneMsg.SUCCESS] is False
+        assert msg[TransferDoneMsg.ROUND_SEQ] == 0
+
+        assert tid_k2 not in session._server._inflight
+        assert st.outbound.get(0) is None, "failed round must be removed on notify"
+        assert session._server._pending_failed_rounds == {}
+
+        # No duplicate terminal on subsequent polls.
+        session.poll()
+        assert len(notifications) == 1
+
+
 class TestDisconnect:
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()

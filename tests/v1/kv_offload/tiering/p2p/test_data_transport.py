@@ -296,6 +296,131 @@ class TestNixlTransportWithMockedAgent:
         assert transport._inflight == {}
         assert transport._remote_dlists == {}
 
+    def test_remove_remote_peer_purges_inflight(self):
+        """remove_remote_peer fails and releases that peer's transfers.
+
+        Regression (#60205): a transfer left inflight for a removed peer
+        can never complete — its remote registration is gone — so poll()
+        used to re-check (and log) it forever. Removing the peer must
+        drain its transfers without touching sibling peers'.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        transport.add_remote_peer("peer:2", b"meta", 0x2000, 8, 1024)
+        tid1 = transport.write_blocks("peer:1", [0], [1])
+        tid2 = transport.write_blocks("peer:2", [2], [3])
+
+        transport.remove_remote_peer("peer:1")
+
+        assert tid1 not in transport._inflight
+        assert tid2 in transport._inflight
+        transport._agent.release_xfer_handle.assert_called_once()
+
+        # The removed peer's transfer must never be checked again. A
+        # scoped poll sees no transfers for it (the AssertionError would
+        # fire if check_xfer_state were called for the stale tid).
+        transport._agent.check_xfer_state.side_effect = AssertionError(
+            "stale transfer polled after remove_remote_peer"
+        )
+        result = transport.poll(peer_id="peer:1")
+        assert result == PollResult(done=(), failed=())
+        assert tid2 in transport._inflight
+
+    def test_remove_remote_peer_release_failure_still_removes_agent(self):
+        """A release_dlist_handle failure must not skip remove_remote_agent.
+
+        Regression (#60205): teardown ran release_dlist_handle() first
+        with no error handling; if it raised, remove_remote_agent() never
+        executed, orphaning the NIXL registration that a later reconnect
+        merged into (stale UCX endpoints → REMOTE_DISCONNECT forever).
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        transport._agent.release_dlist_handle.side_effect = RuntimeError(
+            "release failed"
+        )
+
+        with patch(
+            "vllm.v1.kv_offload.tiering.p2p.data.nixl.logger.warning"
+        ) as warning:
+            transport.remove_remote_peer("peer:1")  # must not raise
+
+        # Both teardown steps were attempted.
+        transport._agent.release_dlist_handle.assert_called_once()
+        transport._agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
+        # Python-side state was cleared despite the failure.
+        assert "peer:1" not in transport._remote_dlists
+        assert "peer:1" not in transport._peer_nixl_names
+        # The teardown failure was logged (existing warning style).
+        assert any(
+            "release_dlist_handle failed" in str(call)
+            for call in warning.call_args_list
+        ), "release_dlist_handle failure must be logged"
+
+    def test_add_remote_peer_removes_existing_registration(self):
+        """Re-adding a peer tears down the old registration first.
+
+        Regression (#60205): add_remote_peer() used to overwrite
+        _peer_nixl_names/_remote_dlists over a still-registered NIXL
+        peer, so NIXL merged into the stale registration instead of
+        creating fresh UCX endpoints. The removal must happen between
+        the old and the new registration.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        old_dlist = transport._remote_dlists["peer:1"]
+        transport._agent.reset_mock()
+
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        # Old registration removed before the new one was created.
+        called = [call[0] for call in transport._agent.mock_calls]
+        assert called.index("remove_remote_agent") < called.index("add_remote_agent"), (
+            f"unexpected call order: {called}"
+        )
+        assert called.index("remove_remote_agent") < called.index("prep_xfer_dlist"), (
+            f"unexpected call order: {called}"
+        )
+        transport._agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
+        transport._agent.release_dlist_handle.assert_called_once_with(old_dlist)
+        # Fresh registration installed: new name lookup and a new prep of
+        # the remote dlist after the teardown.
+        transport._agent.add_remote_agent.assert_called_once()
+        transport._agent.prep_xfer_dlist.assert_called_once()
+        assert transport._peer_nixl_names["peer:1"] == "nixl-peer-name"
+        assert "peer:1" in transport._remote_dlists
+
+    def test_poll_drains_transfer_when_check_raises(self):
+        """A transfer whose state check raises is failed and drained.
+
+        Regression (#60205): check_xfer_state() raising (e.g.
+        NIXL_ERR_REMOTE_DISCONNECT after the peer invalidated the
+        registration) used to `continue`, leaving the transfer in
+        _inflight forever — the round never settled, so every fetch
+        stalled to the load timeout and recomputed.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        tid = transport.write_blocks("peer:1", [0], [1])
+        handle = transport._agent.make_prepped_xfer.return_value
+
+        transport._agent.check_xfer_state.side_effect = RuntimeError(
+            "NIXL_ERR_REMOTE_DISCONNECT"
+        )
+        result = transport.poll()
+
+        assert result.done == ()
+        assert tid in result.failed
+        assert tid not in transport._inflight
+        transport._agent.release_xfer_handle.assert_called_once_with(handle)
+
+        # The dead transfer is not reprocessed on the next poll.
+        transport._agent.check_xfer_state.reset_mock()
+        transport._agent.check_xfer_state.side_effect = None
+        result2 = transport.poll()
+        assert result2 == PollResult(done=(), failed=())
+        transport._agent.check_xfer_state.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # NIXL agent-config selection
