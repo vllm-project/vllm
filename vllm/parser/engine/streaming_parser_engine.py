@@ -36,6 +36,20 @@ class _DropInfo:
     extra_token_ids: dict[int, str]
 
 
+def _special_terminal_ids(
+    resolved_token_ids: dict[int, str],
+    tokenizer,
+) -> frozenset[int]:
+    """Terminal ids the detokenizer drops under ``skip_special_tokens``."""
+    if tokenizer is None:
+        return frozenset()
+    try:
+        special_ids = frozenset(tokenizer.all_special_ids)
+    except (AttributeError, NotImplementedError, TypeError):
+        return frozenset()
+    return frozenset(tid for tid in resolved_token_ids if tid in special_ids)
+
+
 def _build_drop_info(
     config: ParserEngineConfig,
     tokenizer,
@@ -143,6 +157,7 @@ class StreamingParserEngine:
         self._scanner = TokenIDScanner(
             resolved_token_ids,
             tokenizer,
+            special_token_ids=_special_terminal_ids(resolved_token_ids, tokenizer),
         )
 
         self._token_id_terminal_names: frozenset[str] = frozenset(
@@ -175,6 +190,19 @@ class StreamingParserEngine:
     @property
     def reasoning_token_count(self) -> int:
         return self._reasoning_token_count
+
+    @property
+    def skip_special_tokens(self) -> bool:
+        """Whether the detokenizer strips special tokens from ``delta_text``.
+
+        Special-token ids then carry no text, so the scanner must not wait
+        for it (see :class:`TokenIDScanner`).
+        """
+        return self._scanner.skip_special_tokens
+
+    @skip_special_tokens.setter
+    def skip_special_tokens(self, value: bool) -> None:
+        self._scanner.skip_special_tokens = value
 
     def _record_reasoning_tokens(self, events: Sequence[SemanticEvent]) -> None:
         self._reasoning_token_count += sum(

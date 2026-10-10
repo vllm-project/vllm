@@ -175,9 +175,12 @@ def parser(mock_tokenizer):
 
 @pytest.fixture
 def request_obj():
+    # Streams below carry special-token text, which the serving layer only
+    # delivers after adjust_request() cleared skip_special_tokens.
     return ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "hi"}],
+        skip_special_tokens=False,
     )
 
 
@@ -1649,3 +1652,49 @@ class TestGemma4IsReasoningEnd:
     )
     def test_is_reasoning_end(self, ids, thinking, ended):
         assert self._parser(thinking).is_reasoning_end(ids) is ended
+
+
+class TestToolParserOnlyWithSkipSpecialTokens:
+    """gemma4 as tool parser with no reasoning parser and a request
+    without tools: adjust_request() never runs, so the detokenizer strips
+    ``<|channel>``/``<channel|>``. The parser must stream the remaining
+    text as it arrives and must not append the stripped markers at the
+    end (vllm-project/vllm#57232)."""
+
+    _THINKING = [
+        (CHANNEL_START_ID, "<|channel>"),
+        (3000, "thought"),
+        (3001, "\n"),
+        (3002, "work it out"),
+        (CHANNEL_END_ID, "<channel|>"),
+        (3003, "the answer"),
+    ]
+
+    def test_stripped_markers_do_not_resurface(self):
+        from vllm.parser.parser_manager import ParserManager
+
+        tokenizer = _make_tokenizer(self._THINKING)
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="gemma4", enable_auto_tools=True
+        )
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert request.skip_special_tokens
+        parser = parser_cls(tokenizer, request.tools)
+
+        contents = []
+        for i, (tid, _) in enumerate(self._THINKING):
+            delta = parser.parse_delta(
+                tokenizer.decode([tid], skip_special_tokens=True),
+                [tid],
+                request,
+                prompt_token_ids=[1],
+                finished=i == len(self._THINKING) - 1,
+            )
+            assert delta is None or delta.reasoning is None
+            if delta and delta.content:
+                contents.append(delta.content)
+
+        assert contents == ["thought", "\n", "work it out", "the answer"]
