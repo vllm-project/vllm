@@ -1833,6 +1833,35 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     assert reason is None or "AITER sparse PA attend" not in reason
 
 
+def test_aiter_indexer_rejects_unbuilt_index_heads(monkeypatch):
+    """AITER builds the MSA score kernels for 1 or 2 index heads only.
+
+    MiniMax-M3 has 4, so at attention TP=1 the indexer has to fall back at load
+    time rather than fail at the first forward.
+    """
+    import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
+
+    monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+    )
+
+    def unsupported_reason(num_index_heads: int) -> str | None:
+        return indexer_aiter_mod.aiter_indexer_unsupported_reason(
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=num_index_heads,
+            index_head_dim=HEAD_DIM,
+            indexer_kv_dtype="fp8",
+            max_model_len=8192,
+        )
+
+    if reason := unsupported_reason(2):
+        pytest.skip(f"AITER MSA indexer unavailable: {reason}")
+    reason = unsupported_reason(4)
+    assert reason is not None and "num_index_heads" in reason
+
+
 def test_aiter_consolidated_qknorm_enabled(monkeypatch):
     from vllm._aiter_ops import rocm_aiter_ops
 
