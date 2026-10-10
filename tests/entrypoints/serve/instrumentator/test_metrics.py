@@ -192,6 +192,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:generation_tokens_total",
     "vllm:iteration_tokens_total",
     "vllm:cache_config_info",
+    "vllm:model_config_info",
     "vllm:request_success_total",
     "vllm:request_prompt_tokens_sum",
     "vllm:request_prompt_tokens_bucket",
@@ -303,6 +304,20 @@ async def test_metrics_exist(
     for sample in cache_config_samples:
         assert sample.labels.get("kv_cache_size_tokens") not in (None, "None", "")
         assert sample.labels.get("kv_cache_max_concurrency") not in (None, "None", "")
+
+    model_config_samples = [
+        sample
+        for family in text_string_to_metric_families(response.text)
+        if family.name == "vllm:model_config_info"
+        for sample in family.samples
+    ]
+    assert model_config_samples
+    for sample in model_config_samples:
+        # max_model_len is resolved (possibly auto-configured) at engine init;
+        # it must be present and a positive integer once exposed.
+        assert sample.labels.get("max_model_len") not in (None, "None", "")
+        assert int(sample.labels["max_model_len"]) > 0
+        assert sample.labels.get("model") not in (None, "None", "")
 
 
 @pytest.mark.asyncio
