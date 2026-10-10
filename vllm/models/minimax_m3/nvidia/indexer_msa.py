@@ -12,6 +12,10 @@ tail of the buffer is pre-filled with ``-inf``.
 Prefill scores with ``fmha_sm100``'s score-only (``OnlyScore``) path (much faster
 than Triton for the wide prefill score, benchmarked ~3-5x), writing its
 ``max_score`` straight into the buffer's prefill region (stride-aware, no copy).
+The prefill plan is built from host lengths without blocking on the GPU. With
+``attention_config.minimax_m3_indexer_prefill_kv_split``, a long-context prefill
+that under-fills the GPU is cut into <=128-query segments whose KV walk is split
+across CTAs; the scores are bitwise identical to the unsplit plan.
 
 Decode scores with CuteDSL when the flattened query tile is supported and fall
 back to Triton otherwise, writing into the decode region. Only the top-k is
@@ -21,13 +25,17 @@ shared with prefill.
 AMD / non-SM100.
 """
 
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
     MiniMaxM3IndexerDecodeMetadata,
@@ -60,6 +68,145 @@ _SCORE_SENTINEL = float("-inf")
 # num_valid_pages bound each row to its causal range, so shorter replays reuse
 # the same buffer safely.
 MAX_K_TILES = 8192
+
+logger = init_logger(__name__)
+
+# Prefill split-KV score (attention_config.minimax_m3_indexer_prefill_kv_split).
+# fmha_sm100 splits the KV walk only on its 128-query tile, so a split plan cuts
+# each request into segments of at most this many queries.
+_PREFILL_SEG_LEN = 128
+_PREFILL_MAX_KV_SPLITS = 32
+# Below this context the serial KV walk is short; keep the unsplit plan.
+_PREFILL_SPLIT_MIN_KV = 2048
+# Bound on total_q * num_kv_splits * num_heads (rows of the split workspace).
+_PREFILL_SPLIT_MAX_WS_ROWS = 1 << 18
+
+
+def _plan_prefill_segments(
+    qo_lens: list[int],
+    kv_lens: list[int],
+    num_heads: int,
+    num_sms: int,
+    max_splits: int,
+) -> tuple[list[int], list[int], list[int], int]:
+    """Prefill score plan layout ``(seg_qo, seg_kv, seg_req, num_kv_splits)``.
+
+    Returns the unsplit layout (one segment per request, ``num_kv_splits=1``)
+    unless the unsplit plan under-fills the GPU on a long context. Then each
+    request is cut into <=128-query segments and the KV walk is split to fill
+    about one wave of CTAs.
+
+    This is exact for the score-only output: query rows are independent, and
+    segment ``[s, e)`` of a request with context ``c`` gets ``kv_len = c + e``
+    with bottom-right causal masking, i.e. the same keys its queries see in the
+    unsplit plan. Each 128-key score tile is written by exactly one split, so
+    there is no cross-split combine.
+    """
+    unsplit = (list(qo_lens), list(kv_lens), list(range(len(qo_lens))), 1)
+    if max_splits <= 1 or not qo_lens or max(kv_lens) < _PREFILL_SPLIT_MIN_KV:
+        return unsplit
+    unsplit_tile = 128 if max(qo_lens) <= 128 else 256
+    unsplit_ctas = sum(math.ceil(q / unsplit_tile) for q in qo_lens) * num_heads
+    if unsplit_ctas >= num_sms:
+        return unsplit
+    seg_qo: list[int] = []
+    seg_kv: list[int] = []
+    seg_req: list[int] = []
+    for req, (q, kv) in enumerate(zip(qo_lens, kv_lens)):
+        context = kv - q
+        for start in range(0, q, _PREFILL_SEG_LEN):
+            end = min(start + _PREFILL_SEG_LEN, q)
+            seg_qo.append(end - start)
+            seg_kv.append(context + end)
+            seg_req.append(req)
+    # Several index heads with <=32-query segments would select a pack-GQA
+    # split variant; keep those shapes on the unsplit plan.
+    if not seg_qo or (num_heads > 1 and max(seg_qo) <= 32):
+        return unsplit
+    splits = min(max_splits, math.ceil(num_sms / (len(seg_qo) * num_heads)))
+    # The fmha planner keeps >= 4 KV iterations (256-key tiles) per split.
+    splits = min(splits, max(1, math.ceil(max(seg_kv) / 256) // 4))
+    splits = min(
+        splits, max(1, _PREFILL_SPLIT_MAX_WS_ROWS // (sum(seg_qo) * num_heads))
+    )
+    # The planner cuts each segment's KV iterations into min(splits, iters // 4)
+    # pieces of ceil(iters / pieces); keep every piece non-empty.
+    iters = (np.asarray(seg_kv, dtype=np.int64) + 255) // 256
+    while splits > 1:
+        pieces = np.minimum(splits, np.maximum(1, iters // 4))
+        step = (iters + pieces - 1) // pieces
+        if np.array_equal((iters + step - 1) // step, pieces):
+            break
+        splits -= 1
+    if splits <= 1:
+        return unsplit
+    return seg_qo, seg_kv, seg_req, splits
+
+
+def _segment_page_index(
+    seg_req: list[int], seg_kv: list[int]
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(row, col)`` into the prefill block table for every segment's pages
+    ``0 .. cdiv(kv, PAGE_SIZE) - 1``, concatenated in segment order (the fmha
+    plan's ``kv_page_indptr`` order)."""
+    pages = np.asarray(
+        [(kv + PAGE_SIZE - 1) // PAGE_SIZE for kv in seg_kv], dtype=np.int64
+    )
+    rows = np.repeat(np.asarray(seg_req, dtype=np.int64), pages)
+    starts = np.cumsum(pages) - pages
+    cols = np.arange(int(pages.sum()), dtype=np.int64) - np.repeat(starts, pages)
+    return rows, cols
+
+
+def _host_prefill_kv_lens(
+    seq_lens_cpu_upper_bound: torch.Tensor | None,
+    qo_lens: torch.Tensor,
+    lo: int,
+    hi: int,
+    decode_threshold: int,
+) -> torch.Tensor | None:
+    """KV lengths of prefill rows ``[lo, hi)`` from host data, or None if the
+    host values cannot be trusted (the caller then reads them from the GPU).
+
+    ``seq_lens_cpu_upper_bound`` is exact on prefill rows and only optimistic
+    on async spec-decode rows, whose query length is <= ``decode_threshold``;
+    any such row on the prefill side falls back to the device lengths."""
+    if seq_lens_cpu_upper_bound is None or seq_lens_cpu_upper_bound.is_cuda:
+        return None
+    if qo_lens.numel() == 0 or seq_lens_cpu_upper_bound.shape[0] < hi:
+        return None
+    if int(qo_lens.min()) <= decode_threshold:
+        return None
+    kv_lens = seq_lens_cpu_upper_bound[lo:hi].to(torch.int32)
+    if bool((kv_lens < qo_lens).any()):
+        return None
+    return kv_lens
+
+
+def _prefill_score_variants(
+    num_heads: int, pack_factor_fn: Callable[[int, int, int], int]
+) -> list[tuple]:
+    """fmha_sm100 OnlyScore variants ``(qo_tile, single_wg, sparse_mode,
+    page_size, split_kv, pack_factor)`` the prefill score can select when the
+    split is enabled (unsplit and split plans).
+
+    Mirrors fmha_sm100's dispatch: qo_tile 256 above 128 (packed) queries,
+    else 128; single_wg at <= 64; pack-GQA (``pack_factor_fn`` is fmha_sm100's
+    ``_compute_pack_factor``) only at <= 32 queries, on the 128 tile. Split
+    plans use 128-query segments with pack factor 1 (see
+    ``_plan_prefill_segments``)."""
+    variants = {
+        (256, False, 2, PAGE_SIZE, False, 1),
+        (128, False, 2, PAGE_SIZE, False, 1),
+        (128, True, 2, PAGE_SIZE, False, 1),
+        (128, False, 2, PAGE_SIZE, True, 1),
+        (128, True, 2, PAGE_SIZE, True, 1),
+    }
+    for q in range(1, 33):
+        pack = pack_factor_fn(q, num_heads, 1)
+        if pack > 1:
+            variants.add((128, q * pack <= 64, 2, PAGE_SIZE, False, pack))
+    return sorted(variants)
 
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
@@ -136,6 +283,126 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             dtype=torch.float32,
             device=device,
         )
+        self.prefill_max_kv_splits = 1
+        self.num_sms = 0
+        if vllm_config.attention_config.minimax_m3_indexer_prefill_kv_split:
+            self._init_prefill_kv_split(kv_cache_spec, device)
+
+    def _init_prefill_kv_split(
+        self, kv_cache_spec: AttentionSpec, device: torch.device
+    ) -> None:
+        # fmha_sm100 JIT-compiles a variant on first use. With the split on,
+        # warmup's long prefills take the split plan and no longer reach some
+        # unsplit variants, which would then compile mid-serving; compile every
+        # variant either plan can select now.
+        try:
+            from vllm.third_party.fmha_sm100.api import _compute_pack_factor
+            from vllm.third_party.fmha_sm100.jit import (
+                _dlpack_dtype_code,
+                get_fmha_variant,
+            )
+
+            dtype_code = _dlpack_dtype_code(kv_cache_spec.dtype)
+            for variant in _prefill_score_variants(
+                self.num_index_heads, _compute_pack_factor
+            ):
+                get_fmha_variant(dtype_code, *variant)
+        except Exception as e:
+            logger.warning(
+                "MiniMax-M3 indexer prefill split-KV disabled: preparing the "
+                "fmha_sm100 score variants failed (%s).",
+                e,
+            )
+            return
+        self.prefill_max_kv_splits = _PREFILL_MAX_KV_SPLITS
+        self.num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+        logger.info_once(
+            "MiniMax-M3 indexer prefill split-KV enabled (max %d splits).",
+            self.prefill_max_kv_splits,
+        )
+
+    def _build_prefill(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        lo: int,
+        hi: int,
+        context_lens: torch.Tensor,
+        max_k_tiles: int,
+    ) -> MiniMaxM3IndexerMSAPrefillMetadata:
+        """Build the fmha score plan for prefill rows ``[lo, hi)`` without a
+        blocking device-to-host copy when host lengths are exact."""
+        from vllm.third_party.fmha_sm100.api import _fmha_sm100_plan
+
+        block_table = common_attn_metadata.block_table_tensor
+        query_start_loc = common_attn_metadata.query_start_loc
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
+        side_qo = (qsl_cpu[lo + 1 : hi + 1] - qsl_cpu[lo:hi]).to(torch.int32)
+        side_kv = _host_prefill_kv_lens(
+            common_attn_metadata.seq_lens_cpu_upper_bound,
+            side_qo,
+            lo,
+            hi,
+            self.reorder_batch_threshold,
+        )
+        if side_kv is None:
+            side_kv = common_attn_metadata.seq_lens[lo:hi].cpu().to(torch.int32)
+
+        # Split-KV sizes its per-split workspace by the planned query rows,
+        # while the score call covers every row from the first prefill token on;
+        # split only when the two agree (no padded tokens after the last request).
+        max_splits = self.prefill_max_kv_splits
+        num_rows = common_attn_metadata.num_actual_tokens - int(qsl_cpu[lo])
+        if num_rows != int(side_qo.sum()):
+            max_splits = 1
+        seg_qo, seg_kv, seg_req, num_kv_splits = _plan_prefill_segments(
+            side_qo.tolist(),
+            side_kv.tolist(),
+            self.num_index_heads,
+            self.num_sms,
+            max_splits,
+        )
+        seg_qo_t = torch.tensor(seg_qo, dtype=torch.int32)
+        seg_kv_t = torch.tensor(seg_kv, dtype=torch.int32)
+        plan = _fmha_sm100_plan(
+            seg_qo_t,
+            seg_kv_t,
+            self.num_index_heads,
+            num_kv_heads=1,
+            qo_offset=seg_kv_t - seg_qo_t,  # bottom-right causal per segment
+            page_size=PAGE_SIZE,
+            output_maxscore=True,
+            causal=True,
+            num_kv_splits=num_kv_splits,
+        )
+        # Force the plan's tile dim to the unified buffer's so prefill writes
+        # its max_score straight into unified[:, :, nd:] (the stride-aware
+        # binding shape-matches the tile dim exactly). max_k_tiles >= the
+        # plan's natural value, so the extra tiles are simply never written.
+        plan["max_k_tiles"] = max_k_tiles
+
+        # Page table via a host-built (row, col) gather; boolean-mask indexing
+        # would sync on the result size.
+        max_pages = (max(seg_kv) + PAGE_SIZE - 1) // PAGE_SIZE
+        assert max_pages <= block_table.shape[1], (
+            f"prefill kv_len {max(seg_kv)} exceeds the block table "
+            f"({block_table.shape[1]} pages)"
+        )
+        rows, cols = _segment_page_index(seg_req, seg_kv)
+        index_cpu = torch.empty((2, rows.shape[0]), dtype=torch.int64, pin_memory=True)
+        index_cpu[0].numpy()[:] = rows
+        index_cpu[1].numpy()[:] = cols
+        index = index_cpu.to(block_table.device, non_blocking=True)
+        page_table = block_table[lo:hi][index[0], index[1]].to(torch.int32)
+
+        return MiniMaxM3IndexerMSAPrefillMetadata(
+            plan=plan,
+            cu_seqlens_q=(query_start_loc[lo : hi + 1] - query_start_loc[lo]).to(
+                torch.int32
+            ),
+            prefix_lens=context_lens[lo:hi],
+            max_query_len=int(side_qo.max()),
+            page_table=page_table,
+        )
 
     def build(
         self,
@@ -197,43 +464,9 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
         prefill: MiniMaxM3IndexerMSAPrefillMetadata | None = None
         if num_prefills > 0:
-            # Prefill is eager (not captured); the host lengths it needs (and the
-            # _fmha_sm100_plan .tolist() inside) make the D->H sync acceptable.
-            from vllm.third_party.fmha_sm100.api import _fmha_sm100_plan
-
-            lo, hi = num_decodes, num_reqs
-            qsl_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
-            qo_lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
-            kv_lens_cpu = seq_lens[:num_reqs].cpu().to(torch.int32)
-            nvp = (kv_lens_cpu + PAGE_SIZE - 1) // PAGE_SIZE
-            side_qo = qo_lens_cpu[lo:hi]
-            side_kv = kv_lens_cpu[lo:hi]
-            plan = _fmha_sm100_plan(
-                side_qo,
-                side_kv,
-                self.num_index_heads,
-                num_kv_heads=1,
-                qo_offset=side_kv - side_qo,  # bottom-right causal
-                page_size=PAGE_SIZE,
-                output_maxscore=True,
-                causal=True,
-                num_kv_splits=1,
-            )
-            # Force the plan's tile dim to the unified buffer's so prefill writes
-            # its max_score straight into unified[:, :, nd:] (the stride-aware
-            # binding shape-matches the tile dim exactly). max_k_tiles >= the
-            # plan's natural value, so the extra tiles are simply never written.
-            plan["max_k_tiles"] = max_k_tiles
-            cols = torch.arange(block_table.shape[1], device=block_table.device)
-            valid = cols[None, :] < nvp[lo:hi].to(block_table.device)[:, None]
-            prefill = MiniMaxM3IndexerMSAPrefillMetadata(
-                plan=plan,
-                cu_seqlens_q=(query_start_loc[lo : hi + 1] - query_start_loc[lo]).to(
-                    torch.int32
-                ),
-                prefix_lens=context_lens[lo:hi],
-                max_query_len=int(side_qo.max()),
-                page_table=block_table[lo:hi][valid].to(torch.int32),
+            # Prefill is eager (not captured).
+            prefill = self._build_prefill(
+                common_attn_metadata, num_decodes, num_reqs, context_lens, max_k_tiles
             )
 
         return MiniMaxM3IndexerMSAMetadata(

@@ -43,6 +43,12 @@ class AttentionConfig:
     minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
     """Sparse decode kernel used by the MiniMax M3 MSA backend."""
 
+    minimax_m3_indexer_prefill_kv_split: bool = False
+    """Split the MiniMax M3 MSA (SM100) indexer's prefill score over KV chunks
+    when a long-context prefill under-fills the GPU. Scores are bitwise
+    identical to the unsplit path. Compiles the fmha_sm100 score variants at
+    startup."""
+
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
     `KVCacheSpecKind` (e.g. `{"mla_attention": "FLASHINFER_MLA",
