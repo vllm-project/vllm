@@ -2269,6 +2269,13 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if self.aux_output_connector is not None:
+                # For aux-replayed prompt logprobs the auxiliary output plane
+                # is authoritative: drop the runner's prompt_logprobs_dict
+                # fallback so the same rows cannot be delivered twice (the
+                # runner may surface its final-chunk tensor on a different
+                # step than the worker's aux artifact).
+                if self.aux_output_connector.replays_prompt_logprobs(request):
+                    prompt_logprobs_tensors = None
                 if new_token_ids:
                     replayed = self.aux_output_connector.take_logprobs(
                         request, model_runner_output.aux_output_connector_output

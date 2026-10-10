@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -73,6 +74,12 @@ class AuxOutputSchedulerConnector:
         ] = {}
         self._logprob_fingerprints: dict[str, str] = {}
         self._prompt_logprob_fingerprints: dict[str, str] = {}
+        # Delivered once per Request object. Weak values keep the latch alive
+        # across the request's final scheduler step without retaining finished
+        # requests or conflating reused request IDs.
+        self._prompt_logprobs_delivered: weakref.WeakValueDictionary[
+            int, Request
+        ] = weakref.WeakValueDictionary()
         self._generation = 0
         self._enable_logprobs = enable_logprobs
         self._enable_prompt_logprobs = enable_prompt_logprobs
@@ -290,14 +297,26 @@ class AuxOutputSchedulerConnector:
     ) -> LogprobsTensors | None:
         if not self._request_replays(request, prompt=True):
             return None
+        # The scheduler calls this on every should_emit_output step while the
+        # worker re-attaches the artifact each step. Without de-duplication
+        # the engine logprobs processor extends prompt_logprobs per step.
+        # "take" semantics: consume the artifact exactly once per request.
+        if self._prompt_logprobs_delivered.get(id(request)) is request:
+            return None
         assert output is not None and request.request_id in output, (
             f"auxiliary prompt logprobs output is missing {request.request_id}"
         )
-        value = output[request.request_id].prompt_logprobs
+        request_id = request.request_id
+        value = output[request_id].prompt_logprobs
         assert value is not None, (
-            f"auxiliary prompt logprobs artifact is missing {request.request_id}"
+            f"auxiliary prompt logprobs artifact is missing {request_id}"
         )
+        self._prompt_logprobs_delivered[id(request)] = request
         return value
+
+    def replays_prompt_logprobs(self, request: Request) -> bool:
+        """True when this request's prompt logprobs come from the aux plane."""
+        return self._request_replays(request, prompt=True)
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""

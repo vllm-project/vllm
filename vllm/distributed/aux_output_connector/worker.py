@@ -73,7 +73,7 @@ class _WorkerRequestState:
     )
     prompt_len: int = 0
     prompt_replay_prefix: int | None = None
-    prompt_logprobs_emitted: bool = False
+    prompt_logprobs_artifact: LogprobsTensors | None = None
 
 
 @dataclass
@@ -458,7 +458,6 @@ class AuxOutputWorkerConnector:
         # A consumer may reuse a block produced earlier in the same batch.
         if buffer is not None:
             self._publish_blocks(block_batches)
-        self._publish_logprob_blocks(pending.request_ids)
 
         for request_id, emit_start, token_end in materialize_outputs:
             state = self._requests[request_id]
@@ -524,10 +523,10 @@ class AuxOutputWorkerConnector:
                         rows.ranks[mask],
                     )
                 )
-            if (
-                request_id not in pending.replay_prompt_logprobs
-                or state.prompt_logprobs_emitted
-            ):
+            if request_id not in pending.replay_prompt_logprobs:
+                continue
+            if state.prompt_logprobs_artifact is not None:
+                output.prompt_logprobs = state.prompt_logprobs_artifact
                 continue
             assert state.prompt_replay_prefix is not None
             num_hit_blocks = state.prompt_replay_prefix // self._logprob_block_size
@@ -537,7 +536,13 @@ class AuxOutputWorkerConnector:
                     self._read_logprob_rows(state.prompt_logprob_keys[:num_hit_blocks])
                 )
             merged_prompt = concat_rows(prompt_chunks)
-            if int(num_sampled[index]) > 0:
+            step_tokens = int(pending.query_start_loc[index + 1]) - int(
+                pending.query_start_loc[index]
+            )
+            if (
+                state.prompt_len > 0
+                and int(pending.token_starts[index]) + step_tokens >= state.prompt_len
+            ):
                 expected = np.arange(1, state.prompt_len, dtype=np.int64)
                 if merged_prompt is not None:
                     mask = merged_prompt.positions < state.prompt_len
@@ -565,8 +570,15 @@ class AuxOutputWorkerConnector:
                     f"actual_positions="
                     f"{None if merged_prompt is None else merged_prompt.positions}"
                 )
-                output.prompt_logprobs = rows_to_tensors(merged_prompt)
-                state.prompt_logprobs_emitted = True
+                tensors = rows_to_tensors(merged_prompt)
+                output.prompt_logprobs = tensors
+                state.prompt_logprobs_artifact = tensors
+
+        # Publish captured prompt/generated logprob artifacts only after this
+        # step's outputs are materialized: a freshly-computed (non-cached)
+        # request emits its full prompt-logprobs rows from memory, while the
+        # store-backed rows serve later prefix-cache replays.
+        self._publish_logprob_blocks(pending.request_ids)
         return outputs
 
     def _read_logprob_rows(self, keys: Sequence[str]) -> LogprobRows:

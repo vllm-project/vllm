@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import io
 import threading
 from contextlib import nullcontext
@@ -1960,6 +1961,45 @@ def test_scheduler_rejects_missing_prompt_logprob_artifact():
         connector.take_prompt_logprobs(
             request, {request.request_id: AuxRequestOutput(0)}
         )
+
+
+def test_prompt_logprob_delivery_latch_follows_request_lifetime():
+    connector = AuxOutputSchedulerConnector(
+        enable_routed_experts=False,
+        enable_prompt_logprobs=True,
+    )
+
+    def make_request():
+        request = _scheduler_request("reused-id", [b"a" * 32])
+        request.sampling_params = SimpleNamespace(
+            routed_experts_prompt_start=0,
+            extra_args={"aux_output_replay": True},
+            num_logprobs=None,
+            prompt_logprobs=2,
+            logprob_token_ids=None,
+            prompt_logprob_token_ids=None,
+        )
+        return request
+
+    artifact = LogprobsTensors(
+        torch.empty((0, 2), dtype=torch.int32),
+        torch.empty((0, 2), dtype=torch.float32),
+        torch.empty(0, dtype=torch.int32),
+    )
+    first = make_request()
+    output = {first.request_id: AuxRequestOutput(0, prompt_logprobs=artifact)}
+
+    assert connector.take_prompt_logprobs(first, output) is artifact
+    assert connector.take_prompt_logprobs(first, None) is None
+
+    del first
+    gc.collect()
+
+    second = make_request()
+    assert connector.take_prompt_logprobs(
+        second,
+        {second.request_id: AuxRequestOutput(0, prompt_logprobs=artifact)},
+    ) is artifact
 
 
 def test_scheduler_takes_generated_logprobs_without_routed_experts():
