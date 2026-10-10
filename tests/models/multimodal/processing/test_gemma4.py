@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
+    _strip_trailing_padding,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
@@ -348,3 +350,104 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
         )
         == 1
     )
+
+
+def _padded_patches(
+    num_valid: int, num_padded: int, width: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Patches laid out like the HF processor output: valid rows first, then
+    zero pixels at position (-1, -1)."""
+    height = num_valid // width
+    pos = torch.stack(
+        torch.meshgrid(torch.arange(width), torch.arange(height), indexing="xy"), -1
+    ).reshape(-1, 2)
+    pixel_values = torch.zeros(num_padded, 3 * 16 * 16, dtype=torch.float64)
+    pixel_values[:num_valid] = torch.randn(num_valid, 3 * 16 * 16, dtype=torch.float64)
+    position_ids = torch.full((num_padded, 2), -1, dtype=torch.long)
+    position_ids[:num_valid] = pos
+    return pixel_values, position_ids
+
+
+@pytest.mark.parametrize("case", ["trailing", "none", "gap"])
+def test_strip_trailing_padding(case: str):
+    pixel_values, position_ids = _padded_patches(54, 81, width=9)
+    if case == "none":
+        pixel_values, position_ids = pixel_values[:54], position_ids[:54]
+    elif case == "gap":
+        position_ids[3] = -1  # padding inside the valid block: leave untouched
+    out_pv, out_pp, padded_len = _strip_trailing_padding(pixel_values, position_ids)
+    if case == "trailing":
+        assert padded_len == 81
+        assert torch.equal(out_pv, pixel_values[:54])
+        assert torch.equal(out_pp, position_ids[:54])
+    else:
+        assert padded_len is None
+        assert out_pv is pixel_values and out_pp is position_ids
+
+
+@pytest.mark.parametrize(
+    ("num_valid", "free_bytes", "expected_lens"),
+    [
+        ((54, 81, 63), 0, {54, 81, 63}),
+        ((54, 81, 63), 1 << 34, {54, 81, 63}),
+        ((54, 54, 54), 1 << 34, {54}),
+    ],
+)
+@torch.inference_mode()
+def test_gemma4_image_unpadding_matches_padded_encoding(
+    monkeypatch, num_valid, free_bytes, expected_lens
+):
+    """Unpadding images (which lets SDPA pick FlashAttention) leaves the image
+    embeddings unchanged."""
+    from transformers import AutoModel
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
+
+    import vllm.model_executor.models.gemma4_mm as gemma4_mm
+
+    torch.manual_seed(0)
+    config = Gemma4VisionConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=16,
+        position_embedding_size=64,
+    )
+    config._attn_implementation = "sdpa"
+    tower = AutoModel.from_config(config).eval().double()
+    encoder_lens: list[int] = []
+    encoder_forward = tower.encoder.forward
+
+    def record_encoder(inputs_embeds, **kwargs):
+        encoder_lens.append(inputs_embeds.shape[1])
+        return encoder_forward(inputs_embeds=inputs_embeds, **kwargs)
+
+    monkeypatch.setattr(tower.encoder, "forward", record_encoder)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (free_bytes, 1 << 35)
+    )
+    model = SimpleNamespace(
+        vision_tower=tower,
+        config=SimpleNamespace(vision_config=config),
+        _enable_mm_lora=False,
+        _encoder_chunk=Gemma4ForConditionalGeneration._encoder_chunk,
+        model_dtype=torch.float64,
+        embed_vision=lambda inputs_embeds: inputs_embeds,
+    )
+    pixel_values, position_ids = zip(*(_padded_patches(n, 81, 9) for n in num_valid))
+    image_input = {
+        "pixel_values": torch.stack(pixel_values),
+        "pixel_position_ids": torch.stack(position_ids),
+    }
+    process = Gemma4ForConditionalGeneration._process_image_input
+
+    unpadded = process(model, image_input)
+    assert set(encoder_lens) == expected_lens
+    monkeypatch.setattr(
+        gemma4_mm, "_strip_trailing_padding", lambda pv, pp: (pv, pp, None)
+    )
+    padded = process(model, image_input)
+    assert [e.shape for e in unpadded] == [e.shape for e in padded]
+    for got, want in zip(unpadded, padded):
+        torch.testing.assert_close(got, want, rtol=1e-12, atol=1e-12)

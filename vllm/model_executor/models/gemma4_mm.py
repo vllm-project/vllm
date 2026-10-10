@@ -124,6 +124,25 @@ def _get_max_soft_tokens(
 # ---------------------------------------------------------------------------
 
 
+def _strip_trailing_padding(
+    pixel_values: torch.Tensor, pixel_position_ids: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, int | None]:
+    """Drop the trailing padding patches the HF processor adds to every image.
+
+    With padding present the vision encoder gets an attention mask, and SDPA
+    cannot use FlashAttention with an arbitrary mask. Returns the unpadded
+    tensors and the padded length, or the inputs and ``None`` when there is no
+    padding or it is not a trailing block.
+    """
+    valid = (pixel_position_ids != -1).any(dim=-1)
+    num_valid, num_leading = torch.stack(
+        (valid.sum(), valid.cumprod(dim=0).sum())
+    ).tolist()
+    if 0 < num_valid == num_leading < valid.shape[0]:
+        return pixel_values[:num_valid], pixel_position_ids[:num_valid], valid.shape[0]
+    return pixel_values, pixel_position_ids, None
+
+
 class Gemma4ImagePixelInputs(TensorSchema):
     """Pre-patchified image inputs from the Gemma4 image processor.
 
@@ -1316,6 +1335,7 @@ class Gemma4ForConditionalGeneration(
         # arrive as a list of per-image tensors, while same-resolution
         # batches may arrive as a stacked tensor.
         buckets: dict[int, list[tuple[int, torch.Tensor, torch.Tensor]]] = {}
+        padded_lens: dict[int, int] = {}
         total_images = (
             len(pixel_values)
             if isinstance(pixel_values, list)
@@ -1361,8 +1381,12 @@ class Gemma4ForConditionalGeneration(
             pool_position_ids = padded_position_ids
         else:
             for idx in range(total_images):
-                pv = pixel_values[idx]
-                pp = pixel_position_ids[idx]
+                with gpu_sync_allowed():
+                    pv, pp, padded_len = _strip_trailing_padding(
+                        pixel_values[idx], pixel_position_ids[idx]
+                    )
+                if padded_len is not None:
+                    padded_lens[idx] = padded_len
                 buckets.setdefault(pv.shape[0], []).append((idx, pv, pp))
 
         # Encode each resolution bucket in memory-safe chunks. Re-read
@@ -1408,7 +1432,15 @@ class Gemma4ForConditionalGeneration(
                 hidden_states = encoder_outputs.last_hidden_state
 
                 for i, (orig_idx, _, _) in enumerate(chunk_items):
-                    last_hidden_states_map[orig_idx] = hidden_states[i]
+                    hidden = hidden_states[i]
+                    if orig_idx in padded_lens:
+                        # Pad back so pooling sees the processor's layout; the
+                        # pooler masks these rows out.
+                        pad_rows = padded_lens[orig_idx] - hidden.shape[0]
+                        hidden = torch.cat(
+                            (hidden, hidden.new_zeros(pad_rows, hidden.shape[1]))
+                        )
+                    last_hidden_states_map[orig_idx] = hidden
 
         # Pool per image to strip padding and reduce spatial resolution.
         all_valid_states: list[torch.Tensor] = [None] * total_images  # type: ignore[list-item]
