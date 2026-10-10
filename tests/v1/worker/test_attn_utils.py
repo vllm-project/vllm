@@ -22,6 +22,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
+from vllm.v1.attention.backends.mla import indexer
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     SparseCacheRole,
     compute_layout_strides,
 )
+from vllm.v1.worker import utils
 from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
@@ -747,6 +749,342 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         backing.untyped_storage().data_ptr()
         == caches["indexer"].untyped_storage().data_ptr()
     )
+
+
+# Unprofiled attention metadata budgeting.
+
+
+class _IndexerReservationBackend:
+    @staticmethod
+    def full_cls_name():
+        return (__name__, "_IndexerReservationBackend")
+
+    @staticmethod
+    def get_name():
+        return "INDEXER_FIXTURE"
+
+    @staticmethod
+    def get_builder_cls():
+        return indexer.DeepseekV32IndexerMetadataBuilder
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        return [64]
+
+    @staticmethod
+    def supports_batch_invariance():
+        return True
+
+
+def _metadata_config(tokens=16, length=257, dcp=1):
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=tokens, max_num_seqs=2),
+        model_config=SimpleNamespace(max_model_len=length),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp,
+            prefill_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+        num_speculative_tokens=0,
+        cache_config=SimpleNamespace(
+            kv_sharing_fast_prefill=False,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
+        ),
+        attention_config=SimpleNamespace(
+            resolve_indexer_kv_dtype=lambda default: "fp8"
+        ),
+    )
+
+
+def _metadata_spec(block_size=128, **kwargs):
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **kwargs,
+    )
+
+
+def _metadata_layer(heads=8):
+    return SimpleNamespace(
+        num_heads=heads, get_attn_backend=lambda: _IndexerReservationBackend
+    )
+
+
+def _register_metadata_layers(monkeypatch, layers):
+    def get_layers(cfg, layer_type, names):
+        return {name: layers[name] for name in names}
+
+    monkeypatch.setattr(utils, "get_layers_from_vllm_config", get_layers)
+
+
+@pytest.mark.parametrize(
+    "batch_invariant,second_supported", [(True, False), (True, True), (False, False)]
+)
+def test_init_checks_batch_invariance_after_metadata_grouping(
+    monkeypatch, batch_invariant, second_supported
+):
+    class SecondBackend(_IndexerReservationBackend):
+        @staticmethod
+        def full_cls_name():
+            return (__name__, "SecondBackend")
+
+        @staticmethod
+        def supports_batch_invariance():
+            return second_supported
+
+    cfg = _metadata_config()
+    cfg.parallel_config.num_ubatches = 1
+    cfg.parallel_config.use_ubatching = False
+    groups = [KVCacheGroupSpec(["first", "second"], _metadata_spec())]
+    _register_metadata_layers(
+        monkeypatch,
+        {
+            "first": _metadata_layer(),
+            "second": SimpleNamespace(
+                num_heads=8, get_attn_backend=lambda: SecondBackend
+            ),
+        },
+    )
+    monkeypatch.setattr(attn_utils.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda _: {})
+    built = []
+
+    def build(group, **kwargs):
+        built.extend(group.layer_names)
+        group.metadata_builders = [_FakeMetadataBuilder(AttentionCGSupport.ALWAYS)]
+
+    monkeypatch.setattr(AttentionGroup, "create_metadata_builders", build)
+    config = KVCacheConfig(0, [], groups)
+    if batch_invariant and not second_supported:
+        with pytest.raises(RuntimeError, match="batch_invariant mode is not supported"):
+            attn_utils.init_attn_backend(config, cfg, torch.device("cpu"))
+        assert not built
+    else:
+        attn_utils.init_attn_backend(config, cfg, torch.device("cpu"))
+        assert built == ["first", "second"]
+
+
+@pytest.mark.parametrize("ubatches", [1, 2, 4])
+def test_counts_actual_groups_and_ubatches_instead_of_layers(monkeypatch, ubatches):
+    cfg = _metadata_config()
+    kv_spec = _metadata_spec()
+    groups = [KVCacheGroupSpec(["a", "b", "c"], kv_spec)]
+    _register_metadata_layers(
+        monkeypatch,
+        {"a": _metadata_layer(8), "b": _metadata_layer(8), "c": _metadata_layer(4)},
+    )
+    attn_groups = utils.get_attention_groups(cfg, groups)
+    assert [group.layer_names for group in attn_groups[0]] == [["a", "b"], ["c"]]
+    reservation, kernel_sizes = utils.get_metadata_memory_reservation(
+        cfg,
+        KVCacheConfig(0, [], groups),
+        attn_groups,
+        cfg.model_config.max_model_len,
+        num_metadata_builders=ubatches,
+    )
+    assert kernel_sizes == [64]
+    # Three 128-token manager blocks become six 64-token kernel columns.
+    assert reservation == ubatches * 2 * 16 * 6 * 4
+
+
+def test_empty_projected_group_does_not_invent_a_builder(monkeypatch):
+    cfg = _metadata_config()
+    kv_spec = _metadata_spec()
+    groups = [KVCacheGroupSpec([], kv_spec), KVCacheGroupSpec(["local"], kv_spec)]
+    _register_metadata_layers(monkeypatch, {"local": _metadata_layer()})
+    attn_groups = utils.get_attention_groups(cfg, groups)
+    assert attn_groups[0] == []
+    reservation, _ = utils.get_metadata_memory_reservation(
+        cfg, KVCacheConfig(0, [], groups), attn_groups, 257, num_metadata_builders=1
+    )
+    assert reservation == 16 * 6 * 4
+
+
+@pytest.mark.parametrize(
+    "length,block_size,dcp,kernel_block_size,columns",
+    [
+        (1, 64, 1, 64, 2),
+        (129, 64, 1, 64, 4),
+        (257, 128, 1, 64, 6),
+        (257, 128, 2, 64, 4),
+        (257, 128, 1, 128, 6),
+        (1025, 1024, 1, 1024, 32),
+    ],
+)
+def test_estimate_matches_real_constructor_width(
+    monkeypatch, length, block_size, dcp, kernel_block_size, columns
+):
+    cfg = _metadata_config(length=length, dcp=dcp)
+    group = utils.AttentionGroup(
+        _IndexerReservationBackend, ["indexer"], _metadata_spec(block_size), 0
+    )
+    monkeypatch.setattr(indexer, "num_compute_units", lambda _: 1)
+    monkeypatch.setattr(
+        indexer, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0)
+    )
+    group.create_metadata_builders(
+        cfg, torch.device("cpu"), kernel_block_size=kernel_block_size
+    )
+    actual = group.get_metadata_builder().expanded_block_table_buffer
+    assert actual.shape == (16, columns)
+    assert group.get_memory_reservation_bytes(cfg, length, kernel_block_size) == (
+        actual.numel() * actual.element_size()
+    )
+
+
+def test_real_group_builders_keep_distinct_buffers_for_ubatches(monkeypatch):
+    cfg = _metadata_config()
+    group = utils.AttentionGroup(
+        _IndexerReservationBackend, ["indexer"], _metadata_spec(), 0
+    )
+    monkeypatch.setattr(indexer, "num_compute_units", lambda _: 1)
+    group.create_metadata_builders(
+        cfg, torch.device("cpu"), kernel_block_size=64, num_metadata_builders=2
+    )
+    first, second = [
+        builder.expanded_block_table_buffer for builder in group.metadata_builders
+    ]
+    assert first.data_ptr() != second.data_ptr()
+    first.fill_(17)
+    assert torch.count_nonzero(second) == 0
+    assert 2 * group.get_memory_reservation_bytes(cfg, 257, 64) == (
+        first.untyped_storage().nbytes() + second.untyped_storage().nbytes()
+    )
+
+
+def test_packed_metadata_reservation_matches_heterogeneous_backend_buffers(monkeypatch):
+    cfg = _metadata_config(length=1025)
+    cfg.cache_config.get_resolved_kv_cache_layout = lambda: KVCacheLayout.BLHNC
+    spec = _metadata_spec(1024, tokens_per_state=4)
+    groups = [
+        AttentionGroup(
+            SimpleNamespace(
+                get_builder_cls=lambda: indexer.DeepseekV32IndexerMetadataBuilder,
+                get_supported_kernel_block_sizes=lambda _=None, size=size: [size],
+                get_name=lambda: "INDEXER_FIXTURE",
+            ),
+            [name],
+            spec,
+            0,
+        )
+        for name, size in (("small", 64), ("large", 256))
+    ]
+    config = KVCacheConfig(0, [], [KVCacheGroupSpec(["small", "large"], spec)])
+    with monkeypatch.context() as allocation_guard:
+        allocation_guard.setattr(
+            torch, "zeros", lambda *a, **kw: pytest.fail("Estimator allocated a buffer")
+        )
+        reservation, sizes = utils.get_metadata_memory_reservation(
+            cfg, config, [groups], 1025, num_metadata_builders=2
+        )
+    assert sizes == [1024]
+    assert cfg.model_config.max_model_len == 1025
+    assert all(not g.metadata_builders and g.kernel_block_table is None for g in groups)
+    config.kv_cache_tensors = [
+        KVCacheTensor(
+            size=6 * spec.page_size_bytes,
+            layers=["small", "large"],
+            layer_stride=spec.page_size_bytes,
+            block_stride=2 * spec.page_size_bytes,
+        )
+    ]
+    assert utils.prepare_kernel_block_sizes(config, [groups]) == sizes
+    monkeypatch.setattr(indexer, "num_compute_units", lambda _: 1)
+    buffers: list[torch.Tensor] = []
+    for group in groups:
+        group.create_metadata_builders(cfg, "cpu", sizes[0], num_metadata_builders=2)
+        buffers.extend(b.expanded_block_table_buffer for b in group.metadata_builders)
+    assert [b.shape for b in buffers] == [(16, 32)] * 2 + [(16, 8)] * 2
+    assert all(b.dtype == torch.int32 for b in buffers)
+    assert reservation == sum(b.untyped_storage().nbytes() for b in buffers)
+
+
+def test_auto_fit_width_estimation_does_not_mutate_live_config():
+    cfg = _metadata_config(length=1024)
+    group = utils.AttentionGroup(
+        _IndexerReservationBackend, ["indexer"], _metadata_spec(), 0
+    )
+    large = group.get_memory_reservation_bytes(cfg, 1024, 64)
+    small = group.get_memory_reservation_bytes(cfg, 257, 64)
+    assert large == 16 * 16 * 4
+    assert small == 16 * 6 * 4
+    assert cfg.model_config.max_model_len == 1024
+
+
+def test_reported_shape_preserves_full_token_row_bound():
+    cfg = _metadata_config(tokens=16384, length=1048576)
+    reservation = (
+        indexer.DeepseekV32IndexerMetadataBuilder.get_memory_reservation_bytes(
+            cfg, block_table_width=16384
+        )
+    )
+    assert reservation == 1024**3
+    assert cfg.scheduler_config.max_num_seqs == 2
+
+
+@pytest.mark.parametrize("runner_version", [1, 2])
+@pytest.mark.parametrize("with_draft", [False, True])
+def test_runner_metadata_reservation_projects_pp_and_counts_draft(
+    monkeypatch, runner_version, with_draft
+):
+    from vllm.v1.spec_decode import llm_base_proposer
+    from vllm.v1.spec_decode.eagle import EagleProposer
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2Runner
+    from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner as V1Runner
+
+    cfg = _metadata_config()
+    cfg.parallel_config.use_ubatching = True
+    cfg.parallel_config.num_ubatches = 2
+    kv_spec = _metadata_spec()
+    local_names = {"target", "draft"} if with_draft else {"target"}
+    layers = {name: _metadata_layer() for name in local_names}
+    for layer in layers.values():
+        layer.kv_sharing_target_layer_name = None
+
+    def get_layers(config, layer_type, names=None):
+        return {name: layers[name] for name in names or layers}
+
+    monkeypatch.setattr(utils, "get_layers_from_vllm_config", get_layers)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", get_layers)
+    monkeypatch.setattr(llm_base_proposer, "get_layers_from_vllm_config", get_layers)
+    runner_cls = V1Runner if runner_version == 1 else V2Runner
+    runner = runner_cls.__new__(runner_cls)
+    runner.vllm_config = cfg
+    runner.parallel_config = cfg.parallel_config
+    runner.get_kv_cache_spec = lambda: {name: kv_spec for name in local_names}
+    extra_reservation = 0
+    if runner_version == 1:
+        runner.kv_sharing_fast_prefill_eligible_layers = set()
+        runner.shared_kv_cache_layers = {}
+        runner.speculative_config = (
+            SimpleNamespace(use_eagle=lambda: True) if with_draft else None
+        )
+        if with_draft:
+            runner.drafter = EagleProposer.__new__(EagleProposer)
+            runner.drafter.vllm_config = cfg
+            runner.drafter._draft_attn_layer_names = {"draft"}
+            extra_reservation = 16 * 6 * 4
+    else:
+        runner.speculator = None
+        if with_draft:
+            runner.speculator = EagleSpeculator.__new__(EagleSpeculator)
+            draft_cfg = _metadata_config(tokens=8)
+            draft_cfg.parallel_config.use_ubatching = True
+            draft_cfg.parallel_config.num_ubatches = 3
+            draft_cfg.cache_config = cfg.cache_config
+            runner.speculator.vllm_config = draft_cfg
+            runner.speculator.draft_attn_layer_names = {"draft"}
+            extra_reservation = 3 * 8 * 6 * 4
+    global_groups = [KVCacheGroupSpec(sorted(local_names | {"remote"}), kv_spec)]
+    original_names = list(global_groups[0].layer_names)
+    assert runner.estimate_metadata_memory(global_groups, 257) == (
+        2 * 16 * 6 * 4 + extra_reservation
+    )
+    assert global_groups[0].layer_names == original_names
 
 
 class _TableBuilder:

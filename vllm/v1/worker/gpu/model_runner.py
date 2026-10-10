@@ -66,6 +66,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
+    KVCacheGroupSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -594,6 +595,80 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for name in self.speculator.draft_attn_layer_names & kv_cache_spec.keys():
                 kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
         return kv_cache_spec
+
+    def estimate_metadata_memory(
+        self, global_groups: list[KVCacheGroupSpec], max_model_len: int
+    ) -> int:
+        from vllm.v1.core.kv_cache_utils import _project_kv_cache_groups_to_worker
+        from vllm.v1.worker.gpu.attn_utils import (
+            get_kv_sharing_fast_prefill_eligible_layers,
+            get_shared_kv_cache_layers,
+        )
+        from vllm.v1.worker.utils import (
+            add_kv_sharing_layers_to_kv_cache_groups,
+            get_attention_groups,
+            get_metadata_memory_reservation,
+        )
+
+        groups = _project_kv_cache_groups_to_worker(
+            global_groups, self.get_kv_cache_spec()
+        )
+        config = KVCacheConfig(
+            num_blocks=0, kv_cache_tensors=[], kv_cache_groups=deepcopy(groups)
+        )
+        add_kv_sharing_layers_to_kv_cache_groups(
+            get_shared_kv_cache_layers(self.vllm_config), config.kv_cache_groups
+        )
+        draft_names = (
+            self.speculator.draft_attn_layer_names
+            if isinstance(self.speculator, DraftModelSpeculator)
+            else None
+        )
+        attn_groups = get_attention_groups(
+            self.vllm_config,
+            config.kv_cache_groups,
+            fast_prefill_eligible_layers=get_kv_sharing_fast_prefill_eligible_layers(
+                self.vllm_config, draft_names
+            ),
+            skip_non_layer_views=True,
+        )
+        count = (
+            self.parallel_config.num_ubatches
+            if self.parallel_config.use_ubatching
+            else 1
+        )
+        reservation, _ = get_metadata_memory_reservation(
+            self.vllm_config,
+            config,
+            attn_groups,
+            max_model_len,
+            num_metadata_builders=count,
+        )
+        if isinstance(self.speculator, DraftModelSpeculator):
+            draft_config = self.speculator.attn_vllm_config
+            draft_groups = get_attention_groups(
+                draft_config,
+                config.kv_cache_groups,
+                active_layer_names=self.speculator.draft_attn_layer_names,
+                fast_prefill_eligible_layers=get_kv_sharing_fast_prefill_eligible_layers(
+                    draft_config
+                ),
+                skip_non_layer_views=True,
+            )
+            draft_count = (
+                draft_config.parallel_config.num_ubatches
+                if draft_config.parallel_config.use_ubatching
+                else 1
+            )
+            draft_reservation, _ = get_metadata_memory_reservation(
+                draft_config,
+                config,
+                draft_groups,
+                max_model_len,
+                num_metadata_builders=draft_count,
+            )
+            reservation += draft_reservation
+        return reservation
 
     def initialize_kv_cache(
         self,

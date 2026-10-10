@@ -926,6 +926,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     reorder_batch_threshold: int | None = None
     requires_block_table_width = True
 
+    @staticmethod
+    def _expanded_block_table_shape(
+        vllm_config: VllmConfig, block_table_width: int
+    ) -> tuple[int, int]:
+        return (
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            block_table_width,
+        )
+
+    @classmethod
+    def get_memory_reservation_bytes(
+        cls,
+        vllm_config: VllmConfig,
+        *,
+        block_table_width: int | None = None,
+    ) -> int:
+        assert block_table_width is not None
+        rows, columns = cls._expanded_block_table_shape(vllm_config, block_table_width)
+        return rows * columns * torch.int32.itemsize
+
     @classmethod
     def get_cudagraph_support(
         cls,
@@ -1027,7 +1047,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.dcp_rank, dtype=torch.int32, device=self.device
         )
         self.expanded_block_table_buffer = torch.zeros(
-            (scheduler_config.max_num_batched_tokens, block_table_width),
+            self._expanded_block_table_shape(self.vllm_config, block_table_width),
             dtype=torch.int32,
             device=self.device,
         )

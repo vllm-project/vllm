@@ -21,7 +21,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.hisparse.binding import (
     init_hisparse_kv_cache,
     resolve_hisparse_specs,
@@ -31,7 +30,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
@@ -41,6 +39,7 @@ from vllm.v1.worker.utils import (
     allocate_kv_cache,
     bind_kv_cache_to_layers,
     customize_attention_spec,
+    get_attention_groups,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
 )
@@ -196,68 +195,27 @@ def init_attn_backend(
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
-    # Phase 1: discover attention groups for each kv cache group.
-    attn_groups: list[list[AttentionGroup]] = []
-
-    # Add KV-sharing layers to their target's kv cache group so they are
-    # discovered alongside the target layer in Phase 1 below.
     add_kv_sharing_layers_to_kv_cache_groups(
         get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
     )
-    fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
-        vllm_config, draft_layer_names
+    attn_groups = get_attention_groups(
+        vllm_config,
+        kv_cache_config.kv_cache_groups,
+        active_layer_names=active_layer_names,
+        fast_prefill_eligible_layers=get_kv_sharing_fast_prefill_eligible_layers(
+            vllm_config, draft_layer_names
+        ),
+        skip_non_layer_views=True,
     )
 
-    # Phase 1: discover attention groups for each kv cache group.
-    for kv_cache_group_id, kv_cache_group_spec in enumerate(
-        kv_cache_config.kv_cache_groups
-    ):
-        layer_names = kv_cache_group_spec.layer_names
-        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
-            attn_groups.append([])
-            continue
-        if active_layer_names is not None:
-            layer_names = list(active_layer_names.intersection(layer_names))
-
-        layer_type = cast(type[Any], AttentionLayerBase)
-        attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
-
-        group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
-        group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
-
-        for layer_name in layer_names:
-            attn_backend = attn_layers[layer_name].get_attn_backend()
-            if (
-                envs.VLLM_BATCH_INVARIANT
-                and not attn_backend.supports_batch_invariance()
-            ):
-                raise RuntimeError(
-                    "VLLM batch_invariant mode is not supported for "
-                    f"{attn_backend.get_name()}."
-                )
-            if layer_name in fast_prefill_eligible_layers:
-                attn_backend = create_fast_prefill_custom_backend(
-                    "FastPrefill", attn_backend
-                )
-
-            layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-
-            # Split on per-rank num_heads_q so layers with different Q-head
-            # counts (e.g. a spec-decode draft head and its target) get separate
-            # metadata builders.
-            num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
-            key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
-            if key not in group_map:
-                group_map[key] = AttentionGroup(
-                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
-                )
-                group_order.append(key)
-            else:
-                group_map[key].layer_names.append(layer_name)
-
-        attn_groups.append([group_map[key] for key in group_order])
+    if envs.VLLM_BATCH_INVARIANT:
+        for groups in attn_groups:
+            for group in groups:
+                if not group.backend.supports_batch_invariance():
+                    raise RuntimeError(
+                        "VLLM batch_invariant mode is not supported for "
+                        f"{group.backend.get_name()}."
+                    )
 
     # Phase 2: pick a kernel block size per kv cache group that is supported
     # by all backends within that group.
