@@ -62,6 +62,33 @@ PYTHON_TAG_FUNCTION_OUTPUT = (
     "<|python_start|>[get_weather(city='LA', metric='C')]<|python_end|>"
 )
 
+# Some Llama-4 checkpoints emit JSON tool calls (e.g. when served with the
+# Llama-3.1 JSON chat template) instead of the pythonic form. See issue #46863.
+JSON_FUNCTION_OUTPUT = (
+    '{"type": "function", "name": "Bash", '
+    '"parameters": {"command": "echo hello", "timeout": 120000, '
+    '"run_in_background": false}}'
+)
+JSON_FUNCTION_CALL = FunctionCall(
+    name="Bash",
+    arguments='{"command": "echo hello", "timeout": 120000, '
+    '"run_in_background": false}',
+)
+JSON_ARGUMENTS_FUNCTION_OUTPUT = (
+    '{"name": "get_weather", "arguments": {"city": "LA", "metric": "C"}}'
+)
+JSON_PARALLEL_FUNCTION_OUTPUT = (
+    '{"name": "get_weather", "parameters": {"city": "LA", "metric": "C"}}, '
+    '{"name": "register_user", "parameters": {"name": "Doe", "age": 9}}'
+)
+JSON_ARRAY_FUNCTION_OUTPUT = (
+    '[{"name": "get_weather", "parameters": {"city": "LA", "metric": "C"}}, '
+    '{"name": "register_user", "parameters": {"name": "Doe", "age": 9}}]'
+)
+REGISTER_USER_FUNCTION_CALL = FunctionCall(
+    name="register_user", arguments='{"name": "Doe", "age": 9}'
+)
+
 
 @pytest.mark.parametrize("streaming", [True, False])
 def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
@@ -72,6 +99,39 @@ def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
 
     content, tool_calls = run_tool_extraction(
         tool_parser, model_output, streaming=streaming
+    )
+
+    assert content == model_output
+    assert len(tool_calls) == 0
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        # Plain JSON object that is not a tool call.
+        '{"answer": 42, "note": "not a tool call"}',
+        # A "name" field alone must not be mistaken for a tool call.
+        '{"name": "Alice", "age": 30}',
+        # Malformed / truncated trailing JSON must fall through as content
+        # rather than silently dropping the tail.
+        '{"name": "a", "parameters": {}}, {"name":',
+        '[{"name": "a", "parameters": {}}',
+        # A valid tool call followed by trailing prose is not a clean payload.
+        '{"name": "get_weather", "parameters": {"city": "LA"}} then text',
+        # Dangling / trailing commas are invalid JSON -> plain content.
+        '{"name": "a", "parameters": {}},',
+        '[{"name": "a", "parameters": {}},]',
+    ],
+)
+def test_json_non_tool_content(model_output: str, default_tokenizer: TokenizerLike):
+    """JSON that is not a clean tool-call payload must pass through as content,
+    not be misinterpreted as (or have part of it dropped into) a tool call."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("llama4_pythonic")(
+        default_tokenizer
+    )
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=False
     )
 
     assert content == model_output
@@ -199,6 +259,30 @@ TEST_CASES = [
             FunctionCall(name="register_user", arguments='{"name": "Doe", "age": 9}'),
         ],
         id="parallel_calls_nonstreaming",
+    ),
+    pytest.param(
+        False,
+        JSON_FUNCTION_OUTPUT,
+        [JSON_FUNCTION_CALL],
+        id="json_nonstreaming",
+    ),
+    pytest.param(
+        False,
+        JSON_ARGUMENTS_FUNCTION_OUTPUT,
+        [SIMPLE_FUNCTION_CALL],
+        id="json_arguments_key_nonstreaming",
+    ),
+    pytest.param(
+        False,
+        JSON_PARALLEL_FUNCTION_OUTPUT,
+        [SIMPLE_FUNCTION_CALL, REGISTER_USER_FUNCTION_CALL],
+        id="json_parallel_nonstreaming",
+    ),
+    pytest.param(
+        False,
+        JSON_ARRAY_FUNCTION_OUTPUT,
+        [SIMPLE_FUNCTION_CALL, REGISTER_USER_FUNCTION_CALL],
+        id="json_array_nonstreaming",
     ),
 ]
 
