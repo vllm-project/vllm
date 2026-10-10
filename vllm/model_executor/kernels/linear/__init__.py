@@ -486,6 +486,15 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
 }
 
+# On CUDA the model reads an is_bmm layer's weight directly in a grouped
+# fp8_einsum, in the layout only DeepGEMM prepares.
+_POSSIBLE_FP8_BLOCK_BMM_KERNELS: dict[
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
+] = {
+    **_POSSIBLE_FP8_BLOCK_KERNELS,
+    PlatformEnum.CUDA: [DeepGemmFp8BlockScaledMMKernel],
+}
+
 _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
         HummingFP8ScaledMMLinearKernel,
@@ -713,6 +722,7 @@ def init_fp8_linear_kernel(
     weight_shape: tuple[int, int],
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
+    is_bmm: bool = False,
 ) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
@@ -725,7 +735,11 @@ def init_fp8_linear_kernel(
     if activation_quant_key.scale.group_shape.is_per_group():
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+            possible_kernels=(  # type: ignore[misc]
+                _POSSIBLE_FP8_BLOCK_BMM_KERNELS
+                if is_bmm
+                else _POSSIBLE_FP8_BLOCK_KERNELS
+            ),
             quantization="fp8_block_w8a8",
             force_kernel=force_kernel,
         )
