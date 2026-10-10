@@ -637,3 +637,31 @@ def test_replayssm_physical_ring_shape(
         (8, expected_ring_len),
         (2, expected_ring_len, 16),
     )
+
+
+@pytest.mark.parametrize(
+    ("n_groups", "tp_world_size", "groups_per_rank"),
+    [(1, 2, 1), (3, 2, 2), (5, 2, 3), (5, 4, 2)],
+)
+def test_replayssm_physical_ring_extends_group_shards(
+    n_groups, tp_world_size, groups_per_rank
+):
+    base_shapes = MambaStateShapeCalculator.mamba2_state_shape(
+        tp_world_size=tp_world_size,
+        intermediate_size=256,
+        n_groups=n_groups,
+        num_heads=8,
+        head_dim=64,
+        state_size=128,
+        conv_kernel=4,
+    )
+
+    shapes = MambaStateShapeCalculator.append_replayssm_ring(
+        base_shapes,
+        n_groups=n_groups,
+        tp_world_size=tp_world_size,
+        logical_window=16,
+        backend=MambaBackendEnum.TRITON,
+    )
+
+    assert shapes[-1] == (groups_per_rank, 16, 128)
