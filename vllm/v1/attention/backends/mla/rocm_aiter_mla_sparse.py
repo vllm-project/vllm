@@ -783,6 +783,9 @@ class ROCMAiterMLASparseImpl(
     supports_dense_mha_prefill = False
     supports_dcp = False
     use_aiter_sparse_mla = False
+    # gfx942's aiter kernel takes no fp8 q. With an fp8 cache it gets q in the
+    # model dtype and quantizes it itself, under fp8 dots.
+    aiter_sparse_mla_quantizes_q = False
 
     def __init__(
         self,
@@ -834,10 +837,15 @@ class ROCMAiterMLASparseImpl(
         )
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
 
-        if rocm_aiter_ops.is_triton_sparse_mla_enabled():
+        if rocm_aiter_ops.is_triton_sparse_mla_enabled(gfx942_ok=True):
             reason = self._aiter_sparse_mla_unsupported_reason(vllm_config)
             if reason is None:
+                from vllm.platforms.rocm import on_gfx942
+
                 self.use_aiter_sparse_mla = True
+                self.aiter_sparse_mla_quantizes_q = (
+                    on_gfx942() and kv_cache_dtype.startswith("fp8")
+                )
             else:
                 logger.warning_once(
                     "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is set, but %s; "
@@ -857,6 +865,19 @@ class ROCMAiterMLASparseImpl(
         # Context parallelism merges each rank's partials with a per-token LSE.
         if self.dcp_world_size > 1 or self.pcp_world_size > 1:
             return "context parallelism is not supported"
+        from vllm.platforms.rocm import on_gfx942
+
+        if on_gfx942():
+            if self.qk_rope_head_dim != 0:
+                return "on gfx942 it covers rope-free sparse MLA only"
+            if (
+                cache_dtype.startswith("fp8")
+                and not rocm_aiter_ops.triton_sparse_mla_reads_fp8_on_gfx942()
+            ):
+                return (
+                    "the installed aiter cannot read an fp8 KV cache on gfx942 "
+                    "(ROCm/aiter#6199)"
+                )
         return None
 
     def record_logical_topk_ready(self) -> None:
@@ -1124,6 +1145,7 @@ class ROCMAiterMLASparseImpl(
             q_scale=layer._q_scale,
             kv_scale=layer._k_scale,
             attn_sink=self.sinks,
+            dot_precision="fp8" if self.aiter_sparse_mla_quantizes_q else None,
             # triton_convert_req_index_to_global_index writes 0, never -1,
             # for an invalid top-k entry, so no slot in the stream is negative.
             has_invalid=False,
@@ -1141,9 +1163,10 @@ class ROCMAiterMLASparseImpl(
         # MQA 576/512 approach for both prefill and decode
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        quantize_q = fp8_attention and not self.aiter_sparse_mla_quantizes_q
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            if fp8_attention:
+            if quantize_q:
                 q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
                     ql_nope, q_pe, layer._q_scale
                 )
@@ -1181,7 +1204,7 @@ class ROCMAiterMLASparseImpl(
         # write the latent and rope to kv cache
         if fp8_attention:
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
-            if q.dtype != current_platform.fp8_dtype():
+            if quantize_q and q.dtype != current_platform.fp8_dtype():
                 original_q_shape = q.shape
                 q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
                 q = q.view(original_q_shape)
