@@ -652,6 +652,8 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
         ((2560, 20), False),  # shared_expert down_proj (in=640 -> sn=20)
         ((2560, 10), False),  # down_proj under TP=2 (in 640->320 -> sn=10)
         ((30, 8), False),  # rows not a multiple of 32
+        ((96, 160), False),  # Qwen3.8 TP1 GDN in_proj_ba
+        ((128, 160), True),  # rows % 32 == 0 and rows != 96 still ASM
     ],
 )
 def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
@@ -700,3 +702,104 @@ def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale()
     # Triton path stores the transposed, contiguous scale.
     assert tuple(layer.weight_scale.shape) == (10, 2560)
     assert layer.weight_scale.is_contiguous()
+
+
+# Qwen3.8 TP1 GDN in_proj_ba: N=96, K=5120, scale (96, 160).
+_QWEN38_TP1_BA_N = 96
+_QWEN38_TP1_BA_K = 5120
+
+
+def _relative_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    if not torch.isfinite(actual).all():
+        return float("inf")
+    actual_f = actual.detach().float().flatten()
+    expected_f = expected.detach().float().flatten()
+    return (actual_f - expected_f).norm().item() / max(expected_f.norm().item(), 1e-6)
+
+
+def _dequant_reference(x: torch.Tensor, weight_bf16: torch.Tensor) -> torch.Tensor:
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        quant_dequant_mxfp4,
+    )
+
+    x_dq = quant_dequant_mxfp4(x)
+    weight_dq = quant_dequant_mxfp4(weight_bf16)
+    return torch.matmul(x_dq.float(), weight_dq.float().t()).to(torch.bfloat16)
+
+
+def _asm_a4w4(x: torch.Tensor, weight_fp4: torch.Tensor, weight_scale: torch.Tensor):
+    """Call the ASM kernel the 96-row guard exists to avoid."""
+    from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+    from aiter.ops.shuffle import shuffle_weight
+
+    sm, sn = weight_scale.shape
+    swizzled = weight_scale.view(sm // 32, 2, 16, sn // 8, 2, 4, 1)
+    swizzled = swizzled.permute(0, 3, 5, 2, 4, 1, 6).contiguous().view(sm, sn)
+    shuffled = shuffle_weight(weight_fp4, layout=(16, 16))
+    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=x.shape[0] >= 32)
+    return gemm_a4w4(
+        x_q,
+        shuffled.view(x_q.dtype),
+        x_s,
+        swizzled.view(x_s.dtype),
+        dtype=torch.bfloat16,
+        bpreshuffle=True,
+    )[: x.shape[0]]
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+@pytest.mark.parametrize("M", [8, 64])
+def test_qwen38_tp1_ba_96_row_scale_avoids_broken_asm(M):
+    """96-row scales are swizzle-legal, but ASM is numerically wrong at M<=64.
+
+    Qwen3.8 TP1 GDN in_proj_ba uses scale (96, 160). The default
+    ``gemm_a4w4`` BpreShuffle kernel returns non-finite values or a
+    relative L2 above 0.5 there, with a large zero fraction. The layer
+    must stay on Triton ``gemm_afp4wfp4`` and match the dequantized
+    reference. Removing the 96-row guard routes this shape back to ASM
+    and fails this test.
+    """
+    _assert_aiter_supported()
+    from torch.nn.parameter import Parameter
+
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+
+    torch.set_default_device("cuda")
+    torch.manual_seed(0)
+
+    weight_bf16 = torch.randn(_QWEN38_TP1_BA_N, _QWEN38_TP1_BA_K, dtype=torch.bfloat16)
+    weight_fp4, weight_scale = dynamic_mxfp4_quant(weight_bf16)
+    assert tuple(weight_scale.shape) == (96, 160)
+
+    x = torch.randn(M, _QWEN38_TP1_BA_K, dtype=torch.bfloat16)
+    reference = _dequant_reference(x, weight_bf16)
+
+    kernel = object.__new__(AiterMxfp4LinearKernel)
+    kernel.use_asm_gemm = True
+    kernel.out_dtype = torch.bfloat16
+    layer = torch.nn.Module()
+    layer.weight = Parameter(weight_fp4.detach().clone(), requires_grad=False)
+    layer.weight_scale = Parameter(weight_scale.detach().clone(), requires_grad=False)
+    kernel.process_weights_after_loading(layer)
+
+    assert kernel.use_asm_gemm is False
+    dispatched = kernel.apply_weights(layer, x)
+    assert torch.isfinite(dispatched).all()
+    _assert_accurate(
+        dispatched.float(),
+        reference.float(),
+        atol=GEMM_ATOL,
+        rtol=GEMM_RTOL,
+        pass_rate=0.99,
+        max_violation_factor=GEMM_MAX_VIOLATION_FACTOR,
+    )
+
+    asm_out = _asm_a4w4(x, weight_fp4, weight_scale)
+    asm_error = _relative_l2(asm_out, reference)
+    assert asm_error > 0.5, (
+        f"ASM gemm_a4w4 at M={M} relative L2 {asm_error:.3f} is no longer "
+        "broken. Drop the 96-row Triton override if this holds for every "
+        "M <= 64."
+    )

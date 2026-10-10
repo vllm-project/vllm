@@ -19,6 +19,9 @@ logger = init_logger(__name__)
 
 _ASM_FP4_SCALE_ROW_MULTIPLE = 32
 _ASM_FP4_SCALE_COL_MULTIPLE = 8
+# Workaround until AITER gemm_a4w4 is correct for this tile at M <= 64.
+# https://github.com/ROCm/aiter/issues/5931
+_ASM_FP4_FORCE_TRITON_SCALE_ROWS = {96}
 
 
 def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
@@ -28,7 +31,9 @@ def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
         return False
     sm, sn = weight_scale.shape
     return (
-        sm % _ASM_FP4_SCALE_ROW_MULTIPLE == 0 and sn % _ASM_FP4_SCALE_COL_MULTIPLE == 0
+        sm not in _ASM_FP4_FORCE_TRITON_SCALE_ROWS
+        and sm % _ASM_FP4_SCALE_ROW_MULTIPLE == 0
+        and sn % _ASM_FP4_SCALE_COL_MULTIPLE == 0
     )
 
 
