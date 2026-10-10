@@ -431,6 +431,36 @@ def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
         )
 
 
+def test_execute_in_parallel_falls_back_inside_breakable_capture(
+    cuda_capture_stream,
+):
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.utils.multi_stream_utils import execute_in_parallel
+
+    x = torch.ones(1024, 128, device="cuda", dtype=torch.bfloat16)
+    start_event = torch.cuda.Event()
+    done_event = torch.cuda.Event()
+    aux_stream = torch.cuda.Stream()
+
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        captured = execute_in_parallel(
+            lambda: x * 2.0,
+            [lambda: x * 3.0],
+            start_event,
+            [done_event],
+            [aux_stream],
+            enable=True,
+        )
+
+    assert cap.num_graphs == 1
+    assert cap.num_eager_breaks == 0
+    cap.replay()
+    cuda_capture_stream.synchronize()
+    torch.testing.assert_close(captured[0], x * 2.0, rtol=0, atol=0)
+    torch.testing.assert_close(captured[1][0], x * 3.0, rtol=0, atol=0)
+
+
 # ---------------------------------------------------------------------------
 # Replay ordering
 # ---------------------------------------------------------------------------
