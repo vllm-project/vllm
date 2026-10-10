@@ -362,7 +362,9 @@ class Worker(WorkerBase):
     def reset_weights(self) -> None:
         zero_weights(self.model_runner.get_model())
 
-    def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+    def _maybe_get_memory_pool_context(
+        self, tag: str, first_use: bool = False
+    ) -> AbstractContextManager:
         if (
             current_platform.is_cuda_alike()
             and not self.vllm_config.model_config.enable_cumem_allocator
@@ -379,7 +381,7 @@ class Worker(WorkerBase):
             return nullcontext()
 
         allocator = get_mem_allocator_instance()
-        if tag == "weights":
+        if first_use:
             assert allocator.get_current_usage() == 0, (
                 "CuMem allocator can only be used for one instance per process."
             )
@@ -536,7 +538,10 @@ class Worker(WorkerBase):
             # Scratch holds no state across steps: discard it on sleep.
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
-        self.model_runner: GPUModelRunner = self._make_model_runner()
+        # Buffers the runner allocates at construction (e.g. the MTP drafter's
+        # hidden states) are runtime state: offload them on sleep.
+        with self._maybe_get_memory_pool_context(tag="runtime", first_use=True):
+            self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)

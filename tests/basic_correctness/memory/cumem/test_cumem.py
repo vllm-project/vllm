@@ -481,3 +481,49 @@ def test_cudagraph_pool_sleep(level):
     weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
     held[0].replay()
     assert torch.equal(held[1], torch.full_like(x, 5.0))
+
+
+@pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Uses the CuMem allocator")
+def test_model_runner_buffers_survive_sleep(level):
+    """Buffers the model runner allocates while it is built (e.g. the MTP
+    drafter's hidden states) are runtime state: offloaded at both levels and
+    restored by any wake."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+    from vllm.v1.worker import gpu_worker
+
+    built = {}
+
+    def make_runner():
+        built["buffer"] = torch.arange(1 << 20, device=DEVICE_TYPE)
+        return SimpleNamespace()
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(enable_dbo=False),
+            model_config=SimpleNamespace(enable_cumem_allocator=True),
+            speculative_config=None,
+        ),
+        device=torch.device(DEVICE_TYPE, torch.accelerator.current_device_index()),
+        use_v2_model_runner=True,
+        rank=1,
+        _make_model_runner=make_runner,
+    )
+    worker._maybe_get_memory_pool_context = (
+        lambda tag, **kwargs: gpu_worker.Worker._maybe_get_memory_pool_context(
+            worker, tag, **kwargs
+        )
+    )
+    with patch.object(gpu_worker, "init_workspace_manager"):
+        gpu_worker.Worker._init_workspace_and_model_runner(worker)
+
+    allocator = get_mem_allocator_instance()
+    assert {d.tag for d in allocator.pointer_to_data.values()} == {"runtime"}
+    CuMemBackend().suspend(level=level)
+    assert mapped_usage(allocator) == 0
+    CuMemBackend().resume(tags=["kv_cache"])
+    assert torch.equal(built["buffer"], torch.arange(1 << 20, device=DEVICE_TYPE))
