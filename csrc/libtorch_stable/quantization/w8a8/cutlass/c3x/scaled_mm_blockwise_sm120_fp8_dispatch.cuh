@@ -172,6 +172,13 @@ struct sm120_blockwise_fp8_config_swapab {
       EpilogueSchedule, KernelSchedule, true>;
 };
 
+struct sm120_blockwise_fp8_config_n64 {
+  using Gemm = cutlass_3x_gemm_fp8_blockwise<
+      cutlass::bfloat16_t, 64, 1, 128, Shape<_64, _32, _128>,
+      Shape<_1, _1, _1>, cutlass::epilogue::collective::EpilogueScheduleAuto,
+      cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120, true>;
+};
+
 template <typename Gemm>
 void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Tensor const& a,
                                    torch::stable::Tensor const& b,

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -23,6 +24,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
+from .cutlass_sm120 import cutlass_block_fp8_sm120, prepare_scale64
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -309,6 +311,42 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "quantization with group_shape=(1,128).",
             )
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        params = self._get_layer_params(layer)
+        weight, scale = params.weight, params.block_scale
+        derived = None
+        if (
+            current_platform.is_cuda()
+            and current_platform.get_device_capability() == (12, 0)
+            and not envs.VLLM_BATCH_INVARIANT
+            and self.config.out_dtype == torch.bfloat16
+            and tuple(weight.shape) in ((2560, 4096), (2560, 9216))
+            and weight.dtype == torch.float8_e4m3fn
+            and weight.is_contiguous()
+            and weight.is_cuda
+            and scale.device == weight.device
+            and scale.dtype == torch.float32
+            and scale.shape == (20, weight.shape[1] // 128)
+            and scale.is_contiguous()
+        ):
+            derived = prepare_scale64(layer, scale)
+        layer.register_buffer("_cutlass_n64_scale", derived, persistent=False)
+
+    def apply_block_scaled_mm_with_layer(
+        self,
+        layer: torch.nn.Module,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        derived = getattr(layer, "_cutlass_n64_scale", None)
+        if derived is None:
+            return self.apply_block_scaled_mm(A=A, B=B, As=As, Bs=Bs)
+        return cutlass_block_fp8_sm120(A, B, As, Bs, derived)
 
     def apply_block_scaled_mm(
         self,
