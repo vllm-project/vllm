@@ -35,6 +35,12 @@ Forced alignment takes audio and reference text as input and produces word-level
 
 Offline: [examples/pooling/token_classify/forced_alignment_offline.py](../../../examples/pooling/token_classify/forced_alignment_offline.py)
 
+### Typed decisions (Laya)
+
+[Laya](https://github.com/NandhaKishorM/laya) answers `choice`, `score` and `noul` (yes/no) questions about a state in a single forward pass, without generating text. Each question is one prompt, and the output has one row per option: the calibrated option probability followed by the action head's distribution.
+
+Laya checkpoints must be converted before serving, see [examples/pooling/token_classify/laya/README.md](../../../examples/pooling/token_classify/laya/README.md). The [structured decisions server](../../../examples/features/structured_diffusion/README.md#laya) serves the `/v1/systemone` API in front of it.
+
 ### Sparse retrieval (lexical matching)
 
 The BAAI/bge-m3 model leverages token classification for sparse retrieval. For more information, see [this page](specific_models.md#baaibge-m3).
@@ -44,6 +50,7 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | | |
+| `LayaForDecision` | Laya typed decisions | `convaiinnovations/laya`, `convaiinnovations/laya-multilingual` (converted) | | |
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
 | `OpenAIPrivacyFilterForTokenClassification` | gpt-oss-based encoder | `openai/privacy-filter` | | |
 | `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |

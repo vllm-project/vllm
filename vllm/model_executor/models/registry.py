@@ -285,6 +285,7 @@ _REWARD_MODELS = {
 
 _TOKEN_CLASSIFICATION_MODELS = {
     "BertForTokenClassification": ("bert", "BertForTokenClassification"),
+    "LayaForDecision": ("laya", "LayaForDecision"),
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",
