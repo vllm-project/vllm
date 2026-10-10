@@ -566,12 +566,14 @@ class RayExecutorV2(MultiprocExecutor):
 
         self._join_monitor_thread()
 
-        for handle in getattr(self, "ray_worker_handles", []):
-            try:
-                ray.kill(handle.actor)
-                logger.debug("Killed actor rank=%d", handle.rank)
-            except Exception:
-                logger.exception("Failed to kill actor rank=%d", handle.rank)
+        if ray.is_initialized():
+            for handle in getattr(self, "ray_worker_handles", []):
+                try:
+                    ray.kill(handle.actor)
+                    logger.debug("Killed actor rank=%d", handle.rank)
+                except Exception:
+                    logger.exception("Failed to kill actor rank=%d", handle.rank)
+        self.ray_worker_handles = []
 
         if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
             rpc_broadcast_mq.shutdown()
