@@ -233,7 +233,10 @@ class ParallelConfig:
     parallel and large models."""
 
     disable_custom_all_reduce: bool = False
-    """Disable the custom all-reduce kernel and fall back to NCCL."""
+    """Disable the custom all-reduce kernel and fall back to NCCL. This also
+    disables the FlashInfer and symmetric-memory all-reduce for tensor
+    parallelism, and the all-reduce + RMSNorm fusion unless
+    `pass_config.fuse_allreduce_rms` is set explicitly."""
 
     enable_shm_tensor_arena: bool = False
     """Route large CPU tensors (e.g. multimodal ``pixel_values``) in the

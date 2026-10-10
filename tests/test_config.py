@@ -3135,6 +3135,30 @@ def test_vllm_config_defaults_are_none():
                 assert getattr(config.compilation_config, k) is None
 
 
+@pytest.mark.parametrize("disable_custom_all_reduce", [False, True])
+def test_allreduce_rms_fusion_default_follows_disable_custom_all_reduce(
+    monkeypatch, disable_custom_all_reduce
+):
+    """--disable-custom-all-reduce also turns off the FlashInfer all-reduce +
+    RMSNorm fusion by default, so TP all-reduce falls back to NCCL."""
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda capability: False
+    )
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda capability: capability == 90
+    )
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: True)
+    config = object.__new__(VllmConfig)
+    config.parallel_config = SimpleNamespace(
+        tensor_parallel_size=2, disable_custom_all_reduce=disable_custom_all_reduce
+    )
+
+    enabled = vllm_config_module.enable_allreduce_rms_fusion(config)
+    assert enabled is not disable_custom_all_reduce
+
+
 def test_validate_mamba_align_subblock_prefill():
     """Align mode permits configured prefill chunks smaller than a block."""
     config = SimpleNamespace(
