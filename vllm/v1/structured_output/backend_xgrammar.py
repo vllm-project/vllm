@@ -35,9 +35,9 @@ logger = init_logger(__name__)
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
-        self.disable_any_whitespace = (
-            self.vllm_config.structured_outputs_config.disable_any_whitespace
-        )
+        so_config = self.vllm_config.structured_outputs_config
+        self.disable_any_whitespace = so_config.disable_any_whitespace
+        self.max_whitespace_cnt = so_config.max_whitespace_cnt
         model_config = self.vllm_config.model_config
         is_plamo3 = (
             model_config is not None and model_config.hf_config.model_type == "plamo3"
@@ -83,12 +83,28 @@ class XgrammarBackend(StructuredOutputBackend):
                 self.vllm_config.speculative_config.num_speculative_tokens
             )
 
+    def _resolve_whitespace(self) -> tuple[bool, int | None]:
+        """Resolve whitespace parameters for xgrammar.
+
+        When whitespace is disabled, xgrammar already enforces that through
+        ``any_whitespace=False``. Its ``max_whitespace_cnt`` parameter must be
+        positive when set, so leave it unset in that case.
+
+        Returns:
+            (any_whitespace, max_whitespace_cnt)
+
+        """
+        if self.disable_any_whitespace:
+            return False, None
+        return True, self.max_whitespace_cnt
+
     def compile_grammar(
         self,
         request_type: StructuredOutputOptions,
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
+        any_whitespace, max_whitespace_cnt = self._resolve_whitespace()
         # Note(arpera):
         # Our flag disable_any_whitespace does NOT map directly to
         # xgrammar's flag any_whitespace
@@ -111,13 +127,15 @@ class XgrammarBackend(StructuredOutputBackend):
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
                 grammar_spec,
-                any_whitespace=not self.disable_any_whitespace,
+                any_whitespace=any_whitespace,
+                max_whitespace_cnt=max_whitespace_cnt,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_json_schema(
                 '{"type": "object"}',
-                any_whitespace=not self.disable_any_whitespace,
+                any_whitespace=any_whitespace,
+                max_whitespace_cnt=max_whitespace_cnt,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
