@@ -401,6 +401,53 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     assert worker_meta.completed_transfer_counts == {transfer_id: 1}
 
 
+@pytest.mark.parametrize("shared", [True, False])
+@pytest.mark.parametrize("num_tokens", [0, 4])
+def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
+    monkeypatch, shared, num_tokens
+):
+    """Steps without tokens hold every TP rank after its shared event wait."""
+    calls: list[tuple[str, object]] = []
+    compute_stream = MagicMock()
+    compute_stream.wait_event.side_effect = lambda event: calls.append(("wait", event))
+    tp_group = MagicMock()
+    tp_group.barrier.side_effect = lambda: calls.append(("barrier", None))
+    monkeypatch.setattr(worker_module, "current_stream", lambda: compute_stream)
+    monkeypatch.setattr(worker_module, "get_tp_group", lambda: tp_group)
+
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.shared_host_region = MagicMock() if shared else None
+    worker.host_write_events = (MagicMock(), MagicMock())
+    worker.host_write_event = worker.host_write_events[1]
+    worker._next_host_write_event = 0
+    worker._slot_mapping_staging = None
+    worker.cache_handles = []
+    worker._pending_invalid_block_ids = []
+    for name in (
+        "_stage_row_mirror_mapping",
+        "_finish_previous_step",
+        "_release_completed_dma_descriptors",
+        "_set_row_mirrors",
+        "_clear_forward_mirror_state",
+        "_copy_host_blocks",
+        "_restore_pages",
+        "_submit_transfers",
+    ):
+        setattr(worker, name, MagicMock())
+
+    worker.start_step(
+        HiSparseConnectorMetadata(None, (), (), {}, True),
+        None,
+        [],
+        num_tokens=num_tokens,
+    )
+
+    expected = [("wait", worker.host_write_events[1])]
+    if shared and not num_tokens:
+        expected.append(("barrier", None))
+    assert calls == expected
+
+
 def test_scheduled_prefix_hit_publishes_adopted_copies():
     """Copies adopted after scheduling reach the worker as a residency update,
     leaving the block-table row the scheduler output carries untouched."""
