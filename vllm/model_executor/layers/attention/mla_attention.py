@@ -295,6 +295,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.mla_v_up_proj_quant import v_up_proj_fp8_static_quant
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
@@ -1144,7 +1145,29 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 if self.use_pcp:
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
-            # v_up projection
+            # v_up projection. Fuse output quantization into this GEMM's
+            # call site (rather than the generic tail below) when the whole
+            # step is decode-only: a mixed prefill+decode step still falls
+            # back to the unfused path below, since the tail's quant_idx
+            # bookkeeping only tracks a single contiguous slice and can't yet
+            # express "mqa rows done, mha rows pending" at the same time.
+            mqa_use_quant_output = (
+                quant_key == kFp8StaticTensorSym
+                and num_mha_tokens == 0
+                and self.impl.fused_output_quant_supported(quant_key)
+            )
+            if mqa_use_quant_output:
+                assert output_scale is not None
+                x_t = attn_out.view(-1, self.num_heads, self.kv_lora_rank).transpose(
+                    0, 1
+                )
+                quant_out_view = quant_output[:num_mqa_tokens].view(
+                    num_mqa_tokens, self.num_heads, self.v_head_dim
+                )
+                v_up_proj_fp8_static_quant(
+                    x_t, self.W_UV, output_scale, out=quant_out_view
+                )
+                return quant_output
             self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
