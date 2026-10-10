@@ -214,7 +214,9 @@ class OffloadingCounterMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingGaugeMetadata(OffloadingMetricMetadata):
-    pass
+    """Optional startup value for gauges without connector-specific labels."""
+
+    initial_value: int | float | None = None
 
 
 @dataclass(frozen=True)
