@@ -2054,6 +2054,7 @@ class VllmConfig:
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
+        self._validate_cache_config()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -3178,6 +3179,27 @@ class VllmConfig:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _validate_cache_config(self) -> None:
+        if self.model_config is None or self.cache_config is None:
+            return
+        cache_dtype = self.cache_config.cache_dtype
+        model_dtype = getattr(self.model_config, "dtype", None)
+        is_bf16 = model_dtype in (torch.bfloat16, "bfloat16")
+        is_fp16 = model_dtype in (torch.float16, "float16", "half")
+        if cache_dtype in ("float16", "bfloat16"):
+            if is_bf16 and cache_dtype != "bfloat16":
+                raise ValueError(
+                    f"kv_cache_dtype '{cache_dtype}' is incompatible with model "
+                    f"dtype {model_dtype}. Unquantized 16-bit KV cache requires "
+                    "model dtype and kv_cache_dtype to match."
+                )
+            if is_fp16 and cache_dtype != "float16":
+                raise ValueError(
+                    f"kv_cache_dtype '{cache_dtype}' is incompatible with model "
+                    f"dtype {model_dtype}. Unquantized 16-bit KV cache requires "
+                    "model dtype and kv_cache_dtype to match."
+                )
 
     def _validate_profiler_config(self) -> None:
         if self.profiler_config.profiler != "proton":
