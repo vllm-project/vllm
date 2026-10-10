@@ -329,6 +329,12 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
     const int thread_row = warp_base_row + thread_row_in_warp;
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    // PDL permits early launch, but logits/metadata still depend on the producer.
+    cudaGridDependencySynchronize();
+    cudaTriggerProgrammaticLaunchCompletion();
+#endif
+
     // Threads with indices out of bounds should early exit here.
     if (thread_row >= num_rows)
     {
@@ -620,6 +626,26 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
+#if !defined(USE_ROCM)
+    if (get_device_prop()->major >= 9) {
+        cudaLaunchConfig_t config{};
+        config.gridDim = dim3(num_blocks);
+        config.blockDim = block_dim;
+        config.stream = stream;
+        cudaLaunchAttribute attr{};
+        attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attr.val.programmaticStreamSerializationAllowed = 1;
+        config.attrs = &attr;
+        config.numAttrs = 1;
+        auto err = cudaLaunchKernelEx(
+            &config,
+            topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF>,
+            input, finished, output, num_rows, indices, source_row, k, start_expert,
+            end_expert, renormalize, bias, routed_scaling_factor, is_padding);
+        STD_TORCH_CHECK(err == cudaSuccess, "PDL topkGating launch failed: ", cudaGetErrorString(err));
+        return;
+    }
+#endif
     topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF><<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize, bias, routed_scaling_factor, is_padding);
 }
