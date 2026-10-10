@@ -55,6 +55,12 @@ def _e4m3_bits_to_scaled_fp16(bits):
 
 
 @lru_cache(maxsize=1)
+def _is_sm80() -> bool:
+    """True on sm_80 (A100/A30): selects the wide FP8 byte-decode tiles."""
+    return current_platform.get_device_capability() == (8, 0)
+
+
+@lru_cache(maxsize=1)
 def _is_sm90() -> bool:
     """True on sm_90 (H100/H200/H20): selects the sm_90 tuning table."""
     return current_platform.get_device_capability() == (9, 0)
@@ -637,9 +643,10 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = 64, 4, 2
     else:
         BLOCK_N, target_splits, num_warps = 64, 1, 2
-    if is_fp8 and current_platform.get_device_capability() == (8, 0):
+    if is_fp8 and _is_sm80():
         # The byte-decode path is faster with wide tiles at every row count
-        # measured on A100 (8 to 2048 rows); keep the table's splits.
+        # measured on A100 (8 to 2048 rows); keep the table's splits. Not
+        # measured on sm_86, which keeps the table's tiles.
         BLOCK_N, num_warps = 128, 4
     num_tiles = triton.cdiv(num_columns, BLOCK_N)
     # Never more splits than tiles, never empty.

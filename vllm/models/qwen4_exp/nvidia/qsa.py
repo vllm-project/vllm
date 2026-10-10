@@ -491,16 +491,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
         # the main K/V cache write (see QSAIndexer.forward); otherwise all of
         # them take the separate kernels.
-        # Below SM89 with an FP8 main cache, use the separate indexer/main
-        # preparation and the native cache update: the combined writer receives
-        # an FP8 pointer that Triton cannot lower there. BF16 is unchanged.
+        # Where the FP8 main cache is read as raw bytes (_fp8_as_bits, below
+        # SM89), use the separate indexer/main preparation and the native cache
+        # update: the combined writer receives an FP8 pointer that Triton cannot
+        # lower there. BF16 is unchanged.
+        from .ops.qsa import _fp8_as_bits
+
         self.use_fused_qsa_prepare = (
             self.use_fused_qk_norm_rope_gate
             and self.indexer.use_fused_pre_indexer
-            and not (
-                not current_platform.has_device_capability(89)
-                and self.kv_cache_torch_dtype == torch.uint8
-            )
+            and not (_fp8_as_bits() and self.kv_cache_torch_dtype == torch.uint8)
         )
         self.fuse_indexer_projection = vllm_config.lora_config is None
         if self.fuse_indexer_projection:
