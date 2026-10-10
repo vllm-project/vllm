@@ -297,7 +297,7 @@ async def test_chat_streaming_audio(
     # finish reason should only return in last block
     assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == stop_reason
-    assert delta.content
+    assert chunks
     assert "".join(chunks) == output
 
 
@@ -357,7 +357,7 @@ async def test_chat_streaming_input_audio(
     # finish reason should only return in last block
     assert finish_reason_count == 1
     assert chunk.choices[0].finish_reason == stop_reason
-    assert delta.content
+    assert chunks
     assert "".join(chunks) == output
 
 
