@@ -261,13 +261,13 @@ def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
         max_tokens=10,
         stop_token_ids=[STOP_TOKEN_ID],
     )
+    # Priority order is fixed when a request enters the running queue.
+    worst, trigger, tail = requests
+    worst.priority, trigger.priority, tail.priority = 9, 0, 1
     for request in requests:
         scheduler.add_request(request)
     out0 = scheduler.schedule()
     out1 = scheduler.schedule()
-
-    worst, trigger, tail = requests
-    worst.priority, trigger.priority, tail.priority = 9, 0, 1
 
     with _fail_one_allocation(scheduler, failed_call) as allocate:
         blocked = scheduler.schedule()
