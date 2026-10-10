@@ -247,13 +247,11 @@ class WeightCacheDaemon:
             vllm_config.kernel_config.enable_flashinfer_autotune is False
             or not has_flashinfer()
             or not current_platform.has_device_capability(90)
-            or (
-                not self.is_draft
-                and is_draft_model_cacheable(vllm_config.speculative_config)
-            )
+            or is_draft_model_cacheable(vllm_config.speculative_config)
         ):
             return
         try:
+            current_platform.update_block_size_for_backend(vllm_config)
             runner = build_warmup_runner(
                 vllm_config,
                 self.local_rank,

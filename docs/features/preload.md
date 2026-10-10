@@ -188,9 +188,10 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   supported, including across nodes.
 - **Autotune preloading**: tuning runs across the daemon's world group,
   including across nodes and DP ranks. With model-based speculative decoding
-  the target daemons skip it (the draft model lives in the draft daemon
-  group), so those deployments' first engine tunes and fills the cache
-  instead.
+  both daemon groups skip it (the target cannot run the drafter's dummy
+  passes, and a table tuned on the draft model would key on the draft's
+  config, which no engine looks up), so those deployments' first engine
+  tunes and fills the cache instead.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise

@@ -19,16 +19,10 @@ if TYPE_CHECKING:
 
 def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
     """Normalize cache config for hashing"""
-    if (
-        cache_config.block_size == CacheConfig.DEFAULT_BLOCK_SIZE
-        and cache_config.mamba_block_size is None
-        and cache_config.kv_cache_layout is None
-    ):
+    if cache_config.mamba_block_size is None and cache_config.kv_cache_layout is None:
         return cache_config
-    # The validator re-resolves block_size to the default.
-    normalized = replace(cache_config, block_size=None, mamba_block_size=None)
-    # init=False field; replace() won't take it.
-    normalized.kv_cache_layout = None
+    normalized = replace(cache_config, mamba_block_size=None)
+    assert normalized.kv_cache_layout is None
     return normalized
 
 
