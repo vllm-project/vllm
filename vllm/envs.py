@@ -309,6 +309,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+    VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY: bool = False
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -2143,6 +2144,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+    ),
+    # Return the cached pinned host memory to the OS after wake_up, instead
+    # of leaving it in PyTorch's host allocator for the next sleep. Trades a
+    # slower wake-up and a slower next sleep for lower steady-state host
+    # memory, for example when several engines share one GPU and take turns
+    # sleeping. Drains the whole host cache, not only the weight backup.
+    "VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY": lambda: bool(
+        int(os.getenv("VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY", "0"))
     ),
     # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
     # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
