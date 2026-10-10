@@ -515,6 +515,19 @@ steps:
       - vllm/model_executor/kernels/linear/
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H100) Spec Decode AL XPress Nightly"
+  key: spec-decode-xpress-nightly
+  timeout_in_minutes: 30
+  device: h100
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/xpress/
+    - vllm/model_executor/models/qwen3_xpress.py
+    - tests/v1/e2e/spec_decode/acceptance_rates/xpress/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/xpress/
+
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly"
   key: spec-decode-dspark-nightly
   timeout_in_minutes: 60

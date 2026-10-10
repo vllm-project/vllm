@@ -3002,6 +3002,8 @@ class VllmConfig:
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
+            elif self.speculative_config.is_xpress():
+                unsupported.append("xpress speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
 
