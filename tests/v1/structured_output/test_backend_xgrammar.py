@@ -6,18 +6,19 @@ from typing import ClassVar
 
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from xgrammar import Grammar
-from xgrammar.testing import _is_grammar_accept_string
-
 from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+from vllm.v1.structured_output.utils import choice_as_grammar
+from xgrammar import Grammar
+from xgrammar.testing import _is_grammar_accept_string
+
 from vllm.v1.structured_output.backend_xgrammar import (
     XgrammarBackend,
+    _merge_allof,
     has_xgrammar_unsupported_json_features,
     validate_xgrammar_grammar,
 )
-from vllm.v1.structured_output.utils import choice_as_grammar
 
 pytestmark = pytest.mark.cpu_test
 
@@ -365,6 +366,160 @@ def supported_allof_anyof_and_oneof():
         # "allOf" is a property name, not allOf combinator keyword
         {"type": "object", "properties": {"allOf": {"type": "string"}}},
     ]
+
+
+# ================================================
+# allOf flattening
+# ================================================
+
+
+@pytest.fixture
+def object_composition_allof_schemas():
+    """Object-typed allOf branches: flattenable into the parent schema."""
+    return [
+        {
+            "type": "object",
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+                {
+                    "type": "object",
+                    "properties": {"age": {"type": "integer"}},
+                    "required": ["age"],
+                },
+            ],
+        },
+        # Nested (non-root) object-composition allOf
+        {
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "allOf": [
+                        {"type": "object", "properties": {"a": {"type": "string"}}},
+                        {"type": "object", "properties": {"b": {"type": "integer"}}},
+                    ]
+                }
+            },
+        },
+    ]
+
+
+@pytest.fixture
+def mixed_branch_allof_schemas():
+    """AllOf branches mixing non-object types must NOT be flattened."""
+    return [
+        {"allOf": [{"type": "string"}, {"enum": ["yes", "no"]}]},
+        {
+            "type": "object",
+            "properties": {
+                "is_this_sparta": {
+                    "allOf": [{"type": "string"}, {"enum": ["yes", "no"]}],
+                },
+            },
+        },
+    ]
+
+
+class TestMergeAllof:
+    def test_flattens_object_composition(self):
+        schema = {
+            "type": "object",
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+                {
+                    "type": "object",
+                    "properties": {"age": {"type": "integer"}},
+                    "required": ["age"],
+                },
+            ],
+        }
+        merged = _merge_allof(schema)
+        assert "allOf" not in merged
+        assert merged["type"] == "object"
+        assert merged["properties"] == {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+        }
+        assert merged["required"] == ["name", "age"]
+        # The input schema must not be mutated.
+        assert "allOf" in schema
+
+    def test_flattens_nested_allof(self, object_composition_allof_schemas):
+        merged = _merge_allof(object_composition_allof_schemas[1])
+        profile = merged["properties"]["profile"]
+        assert "allOf" not in profile
+        assert set(profile["properties"]) == {"a", "b"}
+
+    def test_mixed_branches_left_untouched(self, mixed_branch_allof_schemas):
+        for schema in mixed_branch_allof_schemas:
+            assert _merge_allof(schema) == schema
+
+    def test_single_branch_and_empty_allof_untouched(self):
+        assert _merge_allof({"allOf": [{"type": "string"}]}) == {
+            "allOf": [{"type": "string"}]
+        }
+        assert _merge_allof({"allOf": []}) == {"allOf": []}
+
+    def test_flattened_schemas_pass_unsupported_feature_check(
+        self, object_composition_allof_schemas
+    ):
+        for schema in object_composition_allof_schemas:
+            merged = _merge_allof(schema)
+            assert not has_xgrammar_unsupported_json_features(merged), merged
+
+    def test_validate_flattens_allof_in_params(self):
+        so_params = StructuredOutputsParams(
+            json={
+                "type": "object",
+                "allOf": [
+                    {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"age": {"type": "integer"}},
+                        "required": ["age"],
+                    },
+                ],
+            }
+        )
+        validate_xgrammar_grammar(SamplingParams(structured_outputs=so_params))
+        merged = so_params.json
+        assert isinstance(merged, dict)
+        assert "allOf" not in merged
+        assert set(merged["properties"]) == {"name", "age"}
+
+    def test_flattened_grammar_semantics(self):
+        merged = _merge_allof(
+            {
+                "type": "object",
+                "allOf": [
+                    {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"age": {"type": "integer"}},
+                        "required": ["age"],
+                    },
+                ],
+            }
+        )
+        assert grammar_accepts(merged, '{"name": "a", "age": 1}')
+        assert not grammar_accepts(merged, '"hello"')
+        assert not grammar_accepts(merged, '{"name": "a"}')
+        assert not grammar_accepts(merged, '{"name": "a", "age": "x"}')
 
 
 # ================================================
