@@ -57,7 +57,7 @@ pub fn calculate_metrics(
             };
 
             actual_output_lens.push(output_len);
-            total_input += input_requests[i].prompt_len;
+            total_input += output.prompt_len;
 
             if output_len > 1 {
                 let latency_minus_ttft = output.latency - output.ttft;
