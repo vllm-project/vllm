@@ -79,6 +79,11 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.kv_cache_layout = layout
     config.attention_config.hisparse_config = None
+    # The packed grouping sizes its blocks against what a request claims, so
+    # the config has to answer the memory questions those specs ask.
+    config.model_config.max_model_len = 16
+    config.parallel_config.decode_context_parallel_size = 1
+    config.max_in_flight_tokens = 0
     return config
 
 
@@ -189,7 +194,6 @@ def _shared_layout_config():
     config = _mock_vllm_config("BLNHC")
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.speculative_config = None
-    config.model_config.max_model_len = 16
     config.model_config.get_total_num_hidden_layers.return_value = 64
     config.model_config.get_total_num_kv_heads.return_value = 2
     config.model_config.get_num_kv_heads.return_value = 2
@@ -421,9 +425,10 @@ class TestCSALinearGrouping:
         assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == sum(
             specs[name].page_size_bytes for name in specs if name.startswith("wide.")
         )
-        # That block holds every GDN state at once, so the repeat pattern alone
-        # decides the split; the cap must not add groups on top of it.
-        assert len(gdn) == 10
+        # That block already holds every GDN state at once, so one group fills
+        # it: splitting them further would spend a pool block per extra group
+        # for no saving.
+        assert len(gdn) == 1
 
 
 class TestSlidingWindowBucketCap:
