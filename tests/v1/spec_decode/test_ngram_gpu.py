@@ -193,7 +193,7 @@ def test_picks_longest_match_among_2_3_4_grams():
 def test_picks_rightmost_when_multiple_matches(max_model_len):
     """Pick the last valid match across blocks, ignoring trailing tokens."""
     spec = _make_speculator(min_n=3, max_n=3, k=2, max_model_len=max_model_len)
-    padding = [0] * (spec.block_l - 5) if spec.n_blocks > 1 else []
+    padding = [0] * (spec.lookup.block_l - 5) if spec.lookup.n_blocks > 1 else []
     row = [1, 2, 3, 100] + padding + [1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]
     drafts = _propose(spec, [row + [1, 2, 3, 999, 1, 2, 3]], seq_lens=[len(row)])
     assert drafts == [[300, 1]]
@@ -277,3 +277,129 @@ def test_construction_validates_speculative_config():
     # No-op hooks must not raise.
     spec.init_cudagraph_manager(None)
     spec.capture()
+
+
+@pytest.mark.parametrize(
+    ("k", "expected"), [(2, [True, False, False]), (4, [False] * 3)]
+)
+def test_lookup_reports_full_length_matches(k, expected):
+    """has_match is set only where all k drafts were copied from the context."""
+    spec = _make_speculator(min_n=2, max_n=2, k=k)
+    rows = [[1, 2, 3, 1, 2], [4, 5, 6], [1, 2, 3, 1, 2]]
+    _propose(spec, rows, num_sampled=[1, 1, 0])
+    assert spec.lookup.has_match[:3].tolist() == expected
+
+
+class _FakeMTPPropose:
+    """Stands in for the MTP chain: records the draft steps it would run."""
+
+    def __init__(self, fill: int):
+        self.fill = fill
+        self.draft_steps: list[int] = []
+
+    def install(self, monkeypatch) -> None:
+        from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+            TargetDependentARSpeculator,
+        )
+
+        def propose(speculator, input_batch, *args, **kwargs):
+            k = speculator.num_speculative_steps
+            self.draft_steps.append(speculator.num_draft_steps(k))
+            drafts = speculator.draft_tokens[: input_batch.num_reqs]
+            drafts.fill_(self.fill)
+            return drafts
+
+        monkeypatch.setattr(TargetDependentARSpeculator, "propose", propose)
+
+
+def _make_ngram_mtp(min_n: int, max_n: int, k: int):
+    from vllm.v1.worker.gpu.spec_decode.mtp.speculator import NgramMTPSpeculator
+    from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramLookup
+
+    ngram = _make_speculator(min_n=min_n, max_n=max_n, k=k)
+    speculator = object.__new__(NgramMTPSpeculator)
+    speculator.num_speculative_steps = k
+    speculator.req_states = ngram.req_states
+    speculator.max_num_reqs = ngram.max_num_reqs
+    speculator.draft_tokens = torch.zeros(
+        (ngram.max_num_reqs, k), dtype=torch.int64, device=DEVICE
+    )
+    speculator.ngram = NgramLookup(
+        min_n, max_n, k, ngram.max_num_reqs, ngram.max_model_len, DEVICE
+    )
+    speculator.matched_cpu = torch.zeros(1, dtype=torch.bool, pin_memory=True)
+    speculator.matched_event = torch.cuda.Event()
+    speculator.wait_for_lookup = False
+    speculator.draft_logits = None
+    return speculator
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected_drafts", "expected_steps"),
+    [
+        # A full match: copied drafts, only the MTP draft prefill runs.
+        ([[1, 2, 3, 1, 2, 3, 1, 2]], [[3, 1, 2]], [1]),
+        # No match: the MTP chain runs in full.
+        ([[4, 5, 6]], [[9, 9, 9]], [3]),
+        # A partial copy (2 of 3 tokens) falls back to MTP.
+        ([[1, 2, 1, 2]], [[9, 9, 9]], [3]),
+        # More than one request: MTP alone, no lookup.
+        ([[1, 2, 3, 1, 2]] * 2, [[9, 9, 9]] * 2, [3]),
+    ],
+)
+def test_ngram_mtp_copies_and_skips_for_a_single_request(
+    monkeypatch, rows, expected_drafts, expected_steps
+):
+    fake = _FakeMTPPropose(fill=9)
+    fake.install(monkeypatch)
+    speculator = _make_ngram_mtp(min_n=2, max_n=2, k=3)
+    drafts = _propose(speculator, rows, last_sampled=[9] * len(rows))
+    assert drafts == expected_drafts
+    assert fake.draft_steps == expected_steps
+
+
+def test_copied_drafts_stay_exact_under_probabilistic_verification():
+    """One-hot draft logits for copies: accepted with p(token), output ~ p."""
+    from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
+        write_one_hot_draft_logits,
+    )
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+        rejection_sample,
+    )
+
+    torch.manual_seed(0)
+    vocab, trials, copied = 16, 200_000, 3
+    target = torch.randn(vocab, device=DEVICE)
+    stale = torch.randn(trials, 1, vocab, device=DEVICE)
+    draft_logits = stale.clone()
+    has_match = torch.arange(trials, device=DEVICE) % 2 == 0
+    idx = torch.arange(trials, dtype=torch.int32, device=DEVICE)
+    drafts = torch.full((trials, 1), copied, dtype=torch.int64, device=DEVICE)
+    write_one_hot_draft_logits(draft_logits, idx, has_match, drafts)
+    assert torch.equal(draft_logits[~has_match], stale[~has_match])
+
+    rows = has_match.nonzero().squeeze(1)
+    n = rows.numel()
+    draft_sampled = torch.zeros(n, 2, dtype=torch.int64, device=DEVICE)
+    draft_sampled[:, 1] = copied
+    sampled, num_sampled = rejection_sample(
+        target.expand(2 * n, -1).contiguous(),
+        draft_logits,
+        draft_sampled.view(-1),
+        torch.arange(n + 1, dtype=torch.int32, device=DEVICE) * 2,
+        torch.arange(2 * n, dtype=torch.int32, device=DEVICE),
+        rows.int(),
+        rows.int().repeat_interleave(2),
+        torch.arange(2, dtype=torch.int32, device=DEVICE).repeat(n),
+        torch.ones(trials, device=DEVICE),
+        torch.arange(trials, dtype=torch.int64, device=DEVICE),
+        1,
+    )
+    p = torch.softmax(target, dim=0)
+    accept_rate = (num_sampled == 2).float().mean().item()
+    sigma = (p[copied].item() * (1 - p[copied].item()) / n) ** 0.5
+    assert abs(accept_rate - p[copied].item()) < 6 * sigma
+    counts = torch.bincount(sampled[:, 0], minlength=vocab).float()
+    expected = p * n
+    chi2 = ((counts - expected) ** 2 / expected).sum().item()
+    assert chi2 < (vocab - 1) + 10 * (2 * (vocab - 1)) ** 0.5

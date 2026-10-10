@@ -473,6 +473,12 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+    ngram_lookup: bool = False
+    """With method='mtp' and a single running request, draft by copying the
+    tokens that followed the last `prompt_lookup_min` to `prompt_lookup_max`
+    tokens (default 12 to 16) where they occur earlier in the context, and
+    skip the MTP decode steps; without a match, or with more requests, draft
+    with MTP alone. Requires Model Runner V2."""
 
     # Alternative drafting strategies
     parallel_drafting: bool = False
@@ -1186,32 +1192,7 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         if self.method in ("ngram", "ngram_gpu"):
-            # Set default values if not provided
-            if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
-                # TODO(woosuk): Tune these values. They are arbitrarily chosen.
-                self.prompt_lookup_min = 5
-                self.prompt_lookup_max = 5
-            elif self.prompt_lookup_min is None:
-                if self.prompt_lookup_max is None:
-                    raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be "
-                        "provided when using the ngram method."
-                    )
-                self.prompt_lookup_min = self.prompt_lookup_max
-            elif self.prompt_lookup_max is None:
-                if self.prompt_lookup_min is None:
-                    raise ValueError(
-                        "Either prompt_lookup_max or prompt_lookup_min must be "
-                        "provided when using the ngram method."
-                    )
-                self.prompt_lookup_max = self.prompt_lookup_min
-
-            # Validate values
-            if self.prompt_lookup_min > self.prompt_lookup_max:
-                raise ValueError(
-                    f"prompt_lookup_min={self.prompt_lookup_min} must "
-                    f"be <= prompt_lookup_max={self.prompt_lookup_max}"
-                )
+            self._resolve_prompt_lookup_window()
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -1261,8 +1242,16 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
 
         else:
-            self.prompt_lookup_max = 0
-            self.prompt_lookup_min = 0
+            if self.ngram_lookup:
+                if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
+                    # Best of 5, 8 and 12 to 16 on SPEED-Bench, Blazedit and a
+                    # copy-heavy probe (#60615): a longer match replaces fewer
+                    # good MTP drafts with wrong copies.
+                    self.prompt_lookup_min, self.prompt_lookup_max = 12, 16
+                self._resolve_prompt_lookup_window()
+            else:
+                self.prompt_lookup_max = 0
+                self.prompt_lookup_min = 0
 
             if self.model is not None:
                 # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
@@ -1586,6 +1575,22 @@ class SpeculativeConfig:
 
         return self
 
+    def _resolve_prompt_lookup_window(self) -> None:
+        if self.prompt_lookup_min is None and self.prompt_lookup_max is None:
+            # TODO(woosuk): Tune these values. They are arbitrarily chosen.
+            self.prompt_lookup_min = self.prompt_lookup_max = 5
+        elif self.prompt_lookup_min is None:
+            self.prompt_lookup_min = self.prompt_lookup_max
+        elif self.prompt_lookup_max is None:
+            self.prompt_lookup_max = self.prompt_lookup_min
+        assert self.prompt_lookup_min is not None
+        assert self.prompt_lookup_max is not None
+        if self.prompt_lookup_min > self.prompt_lookup_max:
+            raise ValueError(
+                f"prompt_lookup_min={self.prompt_lookup_min} must "
+                f"be <= prompt_lookup_max={self.prompt_lookup_max}"
+            )
+
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
             raise ImportError(
@@ -1843,6 +1848,27 @@ class SpeculativeConfig:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config
             )
+
+        if self.ngram_lookup:
+            if (
+                self.method != "mtp"
+                or self.use_gemma4_mtp()
+                or self.use_multi_module_mtp()
+            ):
+                raise ValueError(
+                    "ngram_lookup is only supported with method='mtp' and a "
+                    "single-module MTP drafter."
+                )
+            if self.enable_adaptive_verification:
+                raise ValueError(
+                    "ngram_lookup is incompatible with enable_adaptive_verification."
+                )
+            if (
+                self.target_parallel_config is not None
+                and self.target_parallel_config.data_parallel_size > 1
+            ):
+                # Skipping draft forwards on one rank would desync the others.
+                raise ValueError("ngram_lookup does not support data parallelism.")
 
         if self.use_heterogeneous_vocab and not self.uses_draft_model():
             raise ValueError(

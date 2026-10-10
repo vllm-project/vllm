@@ -3004,6 +3004,8 @@ class VllmConfig:
                 unsupported.append("dspark speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
+            if self.speculative_config.ngram_lookup:
+                unsupported.append("n-gram lookup with MTP drafting")
 
         # Mixed sliding/full DFlash drafts need multiple KV groups (V2 only).
         if self._dflash_needs_multi_kv_group():

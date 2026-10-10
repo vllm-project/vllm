@@ -74,6 +74,14 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
     def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
 
+    def num_draft_steps(self, num_speculative_tokens: int) -> int:
+        """Draft steps to run this round, called after the draft prefill.
+
+        Returning 1 skips the multi-step decode; later draft slots are then
+        left stale and must be overwritten by the caller.
+        """
+        return num_speculative_tokens
+
     @property
     def advance_draft_positions(self) -> bool:
         """Whether to increment positions and seq_lens between draft steps.
@@ -333,6 +341,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             if num_speculative_tokens == 0:
                 self.draft_tokens[:num_reqs].fill_(-1)
             return self.draft_tokens[:num_reqs]
+        num_draft_steps = self.num_draft_steps(num_speculative_tokens)
+        if num_draft_steps <= 1:
+            return self.draft_tokens[:num_reqs]
 
         if self.pcp_manager is not None and not dummy_run:
             self.block_tables.gather_block_tables(
@@ -372,7 +383,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
         if self.decode_cudagraph_manager is not None:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
-                decode_batch_desc, num_speculative_tokens
+                decode_batch_desc, num_draft_steps
             )
         num_tokens_across_dp = (
             decode_batch_sync.num_tokens_across_dp
@@ -393,7 +404,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             decode_batch_desc,
             num_tokens_across_dp,
             input_batch.seq_lens_cpu_upper_bound,
-            num_speculative_tokens,
+            num_draft_steps,
         )
         self.on_multi_step_decode_end(num_reqs)
 
