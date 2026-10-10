@@ -28,12 +28,15 @@ class AuthenticationMiddleware:
         self.api_tokens = [hashlib.sha256(t.encode("utf-8")).digest() for t in tokens]
 
     def verify_token(self, headers: Headers) -> bool:
+        param = None
         authorization_header_value = headers.get("Authorization")
-        if not authorization_header_value:
-            return False
-
-        scheme, _, param = authorization_header_value.partition(" ")
-        if scheme.lower() != "bearer":
+        if authorization_header_value:
+            scheme, _, bearer_param = authorization_header_value.partition(" ")
+            if scheme.lower() == "bearer":
+                param = bearer_param
+        if param is None:
+            param = headers.get("x-api-key")
+        if not param:
             return False
 
         param_hash = hashlib.sha256(param.encode("utf-8")).digest()
@@ -43,6 +46,7 @@ class AuthenticationMiddleware:
             token_match |= secrets.compare_digest(param_hash, token_hash)
 
         return token_match
+    
 
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
         if (
