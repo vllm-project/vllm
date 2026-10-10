@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools as _;
 use vllm_text::{
@@ -262,6 +262,7 @@ fn position_to_chat_logprobs_content(
         logprob: clamp_logprob(chosen.logprob),
         bytes: Some(token_bytes(&token_str)),
         top_logprobs: chat_top_logprob_entries(position, top_logprobs)
+            .into_iter()
             .map(|entry| {
                 let t = format_token(entry, return_tokens_as_token_ids);
                 TopLogProb {
@@ -277,14 +278,24 @@ fn position_to_chat_logprobs_content(
 fn chat_top_logprob_entries(
     position: &DecodedPositionLogprobs,
     top_logprobs: i32,
-) -> impl Iterator<Item = &DecodedTokenLogprob> {
+) -> Vec<&DecodedTokenLogprob> {
+    // Engine rows are [sampled token, top-k]. Python stores them in a token-id
+    // dict, so a sampled token already in the top-k is kept once and the
+    // requested count is filled with distinct alternatives.
     let limit = if top_logprobs == -1 {
         position.entries.len()
     } else {
         usize::try_from(top_logprobs).unwrap_or(0)
     };
-
-    position.entries.iter().take(limit)
+    let mut seen = HashSet::with_capacity(limit);
+    let mut selected = Vec::with_capacity(limit);
+    for entry in &position.entries {
+        if selected.len() == limit || !seen.insert(entry.token_id) {
+            continue;
+        }
+        selected.push(entry);
+    }
+    selected
 }
 
 fn token_bytes(token: &str) -> Vec<u8> {
@@ -368,6 +379,19 @@ mod tests {
         assert_eq!(chat_top_logprobs_len(0), 0);
         assert_eq!(chat_top_logprobs_len(1), 1);
         assert_eq!(chat_top_logprobs_len(-1), 3);
+    }
+
+    #[test]
+    fn chat_logprobs_drop_duplicate_sampled_token_and_keep_distinct_alternatives() {
+        let mut logprobs = sample_logprobs();
+        let sampled = logprobs.positions[0].entries[0].clone();
+        logprobs.positions[0].entries.insert(0, sampled);
+
+        let response = decoded_logprobs_to_openai_chat(&logprobs, 3, false).expect("chat logprobs");
+        let content = response.content.expect("content");
+        let tokens: Vec<_> =
+            content[0].top_logprobs.iter().map(|entry| entry.token.as_str()).collect();
+        assert_eq!(tokens, ["A", "B", "C"]);
     }
 
     #[test]
