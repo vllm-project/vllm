@@ -398,11 +398,9 @@ class Qwen4ExpModel(nn.Module):
             Qwen4ExpSparseMoeBlock,
             "mlp",
         )
-        intermediate_size = config.hidden_size * config.hc_count
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], intermediate_size
+        self._empty_hidden_states = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size * config.hc_count
         )
-
         self.hyper_connection_mixer: GatedResidual | None
         if get_pp_group().is_last_rank:
             hc_config = HyperConnectionConfig(
@@ -443,6 +441,21 @@ class Qwen4ExpModel(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        tensors = self._empty_hidden_states(batch_size, dtype, device)
+        if self.config.ple_layer_ids:
+            tensors["input_ids"] = torch.zeros(
+                batch_size,
+                dtype=torch.int32,
+                device=device,
+            )
+        return tensors
 
     @staticmethod
     def _start_layer_ple_prefetch(
@@ -487,6 +500,8 @@ class Qwen4ExpModel(nn.Module):
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
             hidden_states = intermediate_tensors["hidden_states"]
+            if self.config.ple_layer_ids:
+                input_ids = intermediate_tensors["input_ids"]
 
         block_output = None
         injection = None
@@ -551,7 +566,11 @@ class Qwen4ExpModel(nn.Module):
                 hidden_states = last_layer.mlp_hyper_connection.combine(
                     hidden_states, block_output, injection
                 )
-            return IntermediateTensors({"hidden_states": hidden_states})
+            intermediate = {"hidden_states": hidden_states}
+            if self.config.ple_layer_ids:
+                assert input_ids is not None
+                intermediate["input_ids"] = input_ids
+            return IntermediateTensors(intermediate)
 
         # The final mixer consumes the last pending combine and returns both
         # the sampled single stream and the materialized multi-stream state.
