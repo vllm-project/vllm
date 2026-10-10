@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
         OffloadingConnectorStats,
     )
+    from vllm.v1.request import Request
 
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.config import OffloadingConfig
@@ -89,10 +90,13 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 @dataclass
 class ReqContext:
+    """Offloading state with live token counts, or None for synthetic contexts."""
+
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
     load_tier_filter: TierFilter = TierFilter.ALL
+    _request: "Request | None" = field(default=None, repr=False, compare=False)
     # Per-request scratch space keyed by value type, so a tier can parse
     # kv_transfer_params and kv_hints once (in on_new_request) and read the
     # result back on later calls for the same request.
@@ -103,6 +107,26 @@ class ReqContext:
     _offload_key_positions: dict[OffloadKey, int] = field(
         default_factory=dict, repr=False, init=False
     )
+
+    @property
+    def num_computed_tokens(self) -> int | None:
+        """Scheduler's computed token count, including in-flight work."""
+        return self._request.num_computed_tokens if self._request is not None else None
+
+    @property
+    def num_in_flight_tokens(self) -> int | None:
+        """Scheduled tokens whose output has not yet been processed."""
+        return self._request.num_in_flight_tokens if self._request is not None else None
+
+    @property
+    def num_prompt_tokens(self) -> int | None:
+        """Number of prompt tokens."""
+        return self._request.num_prompt_tokens if self._request is not None else None
+
+    @property
+    def num_tokens(self) -> int | None:
+        """Number of prompt and output tokens, excluding speculative tokens."""
+        return self._request.num_tokens if self._request is not None else None
 
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
