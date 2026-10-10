@@ -11,6 +11,7 @@ import sys
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+import psutil
 import torch
 
 from vllm.logger import init_logger
@@ -1231,6 +1232,20 @@ class Platform:
         """Whether the current platform should enable multi-stream overlap
         for the given aux streams and attention metadata."""
         return False
+
+    @classmethod
+    def get_integrated_gpu_memory_info(
+        cls, device_id: int | None, free_memory: int, total_memory: int
+    ) -> tuple[int, int]:
+        """Returns the (free, total) memory of an integrated (UMA) GPU, given
+        what the device runtime reported for it. ``device_id`` is the torch
+        device index (a visible device ordinal), or None for the current one.
+
+        By default free memory comes from psutil, because cudaMemGetInfo does
+        not account for reclaimable OS memory on UMA systems.
+        https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+        """
+        return psutil.virtual_memory().available, total_memory
 
     @classmethod
     def supports_mx(cls) -> bool:
