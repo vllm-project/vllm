@@ -71,6 +71,15 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_scheduler
 
     @property
+    def supports_lookahead_block_hashes(self) -> bool:
+        return True
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        super().set_lookahead_block_hashes(enabled)
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.use_lookahead_block_hashes = enabled
+
+    @property
     def requires_kv_delivery(self) -> bool:
         # Runs as kv_both, but is a best-effort cache: a dropped save is just a
         # future cache miss, so opt out of the producer-role default.

@@ -6,10 +6,13 @@ from unittest.mock import Mock
 
 import pytest
 
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
@@ -20,16 +23,28 @@ pytestmark = pytest.mark.cpu_test
 
 def _make_model_runner_output(
     scheduler_output: SchedulerOutput,
+    sampled_token_ids: list[list[int]] | None = None,
 ) -> ModelRunnerOutput:
     req_ids = list(scheduler_output.num_scheduled_tokens.keys())
     return ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
-        sampled_token_ids=[[i] for i in range(len(req_ids))],
+        sampled_token_ids=(
+            sampled_token_ids
+            if sampled_token_ids is not None
+            else [[i] for i in range(len(req_ids))]
+        ),
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
     )
+
+
+def _enable_eagle_prefix_hashing(scheduler: AsyncScheduler) -> None:
+    scheduler.use_lookahead_block_hashes = True
+    manager = scheduler.kv_cache_manager
+    manager.coordinator.use_lookahead_block_hashes = True
+    manager.block_pool.use_lookahead_block_hashes = True
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
@@ -323,6 +338,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.use_lookahead_block_hashes = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -669,6 +685,56 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
         _assert_positions_consistent(req, engine)
         # All stale shares fully drained by the end.
         assert getattr(req, "num_stale_output_tokens", 0) == 0
+
+
+def test_stale_output_does_not_republish_preempted_lookahead_blocks():
+    """The return of an in-flight step must not cache a preempted request."""
+    block_size = 4
+    init_none_hash(sha256)
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=32,
+    )
+    assert isinstance(scheduler, AsyncScheduler)
+    _enable_eagle_prefix_hashing(scheduler)
+    request = Request(
+        request_id="eagle",
+        prompt_token_ids=list(range(9)),
+        sampling_params=SamplingParams(max_tokens=4, ignore_eos=True),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
+    )
+    scheduler.add_request(request)
+
+    first_step = scheduler.schedule()
+    scheduler.update_from_output(
+        first_step,
+        _make_model_runner_output(first_step),
+    )
+
+    in_flight_step = scheduler.schedule()
+    assert in_flight_step.scheduled_cached_reqs is not None
+    assert in_flight_step.scheduled_cached_reqs.num_computed_tokens == [9]
+
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert request.num_stale_output_tokens > 0
+
+    scheduler.update_from_output(
+        in_flight_step,
+        _make_model_runner_output(in_flight_step),
+    )
+
+    assert request.num_stale_output_tokens == 0
+    probe = Request(
+        request_id="probe",
+        prompt_token_ids=list(range(9)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256, True),
+    )
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 0
 
 
 def test_requires_kv_delivery_defaults_to_producer_role():

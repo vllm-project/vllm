@@ -27,6 +27,9 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_lookahead_block_hashing_enabled,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import configure_logging, init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -231,7 +234,9 @@ class EngineCore:
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
-                hash_block_size, caching_hash_fn
+                hash_block_size,
+                caching_hash_fn,
+                is_lookahead_block_hashing_enabled(vllm_config, kv_connector),
             )
 
         self.step_fn = (

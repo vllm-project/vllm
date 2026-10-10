@@ -26,6 +26,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.prefix_cache import (
+    is_lookahead_block_hashing_enabled,
+)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -321,6 +324,13 @@ class Scheduler(SchedulerInterface):
                     "acceptance rates."
                 )
 
+        self.use_lookahead_block_hashes = is_lookahead_block_hashing_enabled(
+            vllm_config, self.connector
+        )
+        if self.use_lookahead_block_hashes:
+            # Lookahead hashes prove the boundary token, so EAGLE needs no drop.
+            self.use_eagle_block_drop = False
+
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
@@ -331,6 +341,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle_block_drop,
+            use_lookahead_block_hashes=self.use_lookahead_block_hashes,
             num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -1661,7 +1672,9 @@ class Scheduler(SchedulerInterface):
             session.num_prompt_tokens : num_computed_tokens
         ]
         del session._all_token_ids[num_computed_tokens:]
-        del session.block_hashes[num_computed_tokens // self.hash_block_size :]
+        # A lookahead hash also covers the token after its block.
+        num_hashed_tokens = num_computed_tokens - int(self.use_lookahead_block_hashes)
+        del session.block_hashes[max(num_hashed_tokens, 0) // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -2181,6 +2194,19 @@ class Scheduler(SchedulerInterface):
                 # a consumed prompt also means every item in it was encoded.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
+
+            if (
+                self.use_lookahead_block_hashes
+                and stopped
+                and status_before_stop == RequestStatus.RUNNING
+                and not output_is_stale
+            ):
+                # The last sampled token is the lookahead token of the block
+                # before it, which no later allocation will publish.
+                self.kv_cache_manager.cache_blocks(
+                    request,
+                    request.num_computed_tokens - request.num_in_flight_tokens,
+                )
 
             if new_token_ids and not self.structured_output_manager.accept_tokens(
                 request, new_token_ids
@@ -3029,6 +3055,8 @@ class Scheduler(SchedulerInterface):
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
+        # Direct-transfer connectors need the partial physical tail. Store-style
+        # connectors save only blocks covered by ``request.block_hashes``.
         block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
             request_id=request.request_id,
             num_computed_tokens=request.num_computed_tokens,

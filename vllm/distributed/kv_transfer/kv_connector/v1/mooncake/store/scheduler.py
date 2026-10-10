@@ -153,6 +153,7 @@ class MooncakeStoreScheduler:
             kv_event_config and kv_event_config.enable_kv_cache_events
         )
         self.client = LookupKeyClient(vllm_config)
+        self.use_lookahead_block_hashes = False
         self.kv_cache_config = kv_cache_config
         self._store_group_ids = kv_cache_config.prefix_cacheable_group_ids
         # Map scheduler group IDs to store group indices. Groups outside the
@@ -194,9 +195,25 @@ class MooncakeStoreScheduler:
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
+        # The final lookahead hash exists only after the request's last sampled
+        # token, so its save is pinned at finish and emitted in the next step.
+        self._finished_lookahead_save_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
+
+    def _max_save_tokens(
+        self,
+        request: Request,
+        load_spec: LoadSpec | None = None,
+    ) -> int | None:
+        if (
+            not self.use_lookahead_block_hashes
+            or load_spec is not None
+            and load_spec.can_load
+        ):
+            return None
+        return len(request.block_hashes) * self._hash_block_size
 
     def get_num_new_matched_tokens(
         self,
@@ -317,7 +334,6 @@ class MooncakeStoreScheduler:
             self._unfinished_request_ids,
             preempted_ids,
         )
-
         # Handle new requests
         for request in scheduler_output.scheduled_new_reqs:
             load_spec = self.load_specs.pop(request.req_id, None)
@@ -356,6 +372,7 @@ class MooncakeStoreScheduler:
                 # producer. Loads are still carried by the same metadata.
                 skip_save=is_consumer,
                 block_hashes=request_real.block_hashes,
+                max_save_tokens=self._max_save_tokens(request_real, load_spec),
                 num_prompt_tokens=request_real.num_prompt_tokens,
                 save_partial_tail=self.enable_partial_hash_hits,
             )
@@ -366,6 +383,9 @@ class MooncakeStoreScheduler:
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if can_process_cached:
             for i, req_id in enumerate(cached_reqs.req_ids):
+                req_tuple = self._unfinished_requests.get(req_id)
+                if req_tuple is None:
+                    raise ValueError(f"Request {req_id} is not in _unfinished_requests")
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if new_block_ids:
                     new_block_ids = tuple(
@@ -379,8 +399,7 @@ class MooncakeStoreScheduler:
                         continue
                     new_block_ids = tuple(b.copy() for b in new_block_ids)
                     load_spec = self.load_specs.pop(req_id, None)
-                    request_tuple = self._unfinished_requests.get(req_id)
-                    request_real = request_tuple[0]  # type: ignore[index]
+                    request_real = req_tuple[0]
                     num_tokens_to_compute = (
                         request_real.num_computed_tokens
                         + scheduler_output.num_scheduled_tokens[req_id]
@@ -408,6 +427,10 @@ class MooncakeStoreScheduler:
                         load_spec=load_spec,
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
+                        max_save_tokens=self._max_save_tokens(
+                            request_real,
+                            load_spec,
+                        ),
                         num_prompt_tokens=request_real.num_prompt_tokens,
                         save_partial_tail=self.enable_partial_hash_hits,
                     )
@@ -423,20 +446,14 @@ class MooncakeStoreScheduler:
                         continue
 
                     num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-                    req_tuple = self._unfinished_requests.get(req_id)
-                    if req_tuple:
-                        unfinished_req = req_tuple[0]
-                        num_current_tokens = request_tracker.token_len
-                        new_token_ids = unfinished_req.all_token_ids[
-                            num_current_tokens : num_current_tokens + num_new_tokens
-                        ]
-                        request_tracker.token_len += len(new_token_ids)
-                        if request_tracker.token_ids is not None:
-                            request_tracker.token_ids.extend(new_token_ids)
-                    else:
-                        raise ValueError(
-                            f"Request {req_id} is not in _unfinished_requests"
-                        )
+                    unfinished_req = req_tuple[0]
+                    num_current_tokens = request_tracker.token_len
+                    new_token_ids = unfinished_req.all_token_ids[
+                        num_current_tokens : num_current_tokens + num_new_tokens
+                    ]
+                    request_tracker.token_len += len(new_token_ids)
+                    if request_tracker.token_ids is not None:
+                        request_tracker.token_ids.extend(new_token_ids)
                     # A block is usually allocated before the step that fills
                     # it, so reaching a save boundary does not imply that this
                     # step has new block ids.
@@ -451,6 +468,7 @@ class MooncakeStoreScheduler:
                         load_spec=None,
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
+                        max_save_tokens=self._max_save_tokens(unfinished_req),
                         num_prompt_tokens=unfinished_req.num_prompt_tokens,
                         save_partial_tail=self.enable_partial_hash_hits,
                     )
@@ -510,6 +528,9 @@ class MooncakeStoreScheduler:
         for req_meta in self._finished_partial_tail_metas.values():
             meta.add_request(req_meta)
         self._finished_partial_tail_metas.clear()
+        for req_meta in self._finished_lookahead_save_metas.values():
+            meta.add_request(req_meta)
+        self._finished_lookahead_save_metas.clear()
 
         self._reference_save_blocks(meta)
         return meta
@@ -544,47 +565,86 @@ class MooncakeStoreScheduler:
         so a reference keeps them out of the free queue even once the request
         itself is freed, until every rank reports the job done.
         """
-        pool = self._gpu_block_pool
-        coord = self._store_coord
-        block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
         for req_meta in meta.requests:
             if not req_meta.can_save:
                 continue
-            assert pool is not None, (
-                "GPU block pool must be bound before any store job is emitted"
-            )
             if req_meta.store_job_id is not None:
                 assert req_meta.store_job_id in self._pinned_saves
                 continue
-            if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
-                req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
-            req_meta.store_job_id = store_job_id = self._next_store_job_id
-            self._next_store_job_id += 1
-            block_ids = [put.block_id for put in req_meta.boundary_puts or []]
-            assert NULL_BLOCK_ID not in block_ids, (
-                "A null block cannot back a boundary put"
+            self._pin_store_job(req_meta)
+
+    def _pin_store_job(self, req_meta: ReqMeta) -> bool:
+        """Assign a store job id and reference its blocks.
+
+        Returns whether any block was referenced.
+        """
+        pool = self._gpu_block_pool
+        assert pool is not None, (
+            "GPU block pool must be bound before any store job is emitted"
+        )
+        coord = self._store_coord
+        block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
+        if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
+            req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+        req_meta.store_job_id = store_job_id = self._next_store_job_id
+        self._next_store_job_id += 1
+        block_ids = [put.block_id for put in req_meta.boundary_puts or []]
+        assert NULL_BLOCK_ID not in block_ids, "A null block cannot back a boundary put"
+        if req_meta.token_len_chunk:
+            # Normal prefix save: pin all non-Mamba sources for retries.
+            # Every allocated block is referenced, not just the ones covering
+            # this job's token range: a rank resumes from its own last
+            # successful offset, which lags the scheduler's whenever a save was
+            # skipped or failed, so it may read anywhere below the range.
+            block_ids.extend(
+                block_id
+                for group_id, group in enumerate(req_meta.block_ids)
+                if group_id not in self._boundary_state_group_ids
+                for block_id in group
+                if block_id != NULL_BLOCK_ID
             )
-            if req_meta.token_len_chunk:
-                # Normal prefix save: pin all non-Mamba sources for retries.
-                # Every allocated block is referenced, not just the ones covering
-                # this job's token range: a rank resumes from its own last
-                # successful offset, which lags the scheduler's whenever a save was
-                # skipped or failed, so it may read anywhere below the range.
-                block_ids.extend(
-                    block_id
-                    for group_id, group in enumerate(req_meta.block_ids)
-                    if group_id not in self._boundary_state_group_ids
-                    for block_id in group
-                    if block_id != NULL_BLOCK_ID
-                )
-            # An aligned boundary block may also be present in the request's
-            # block table. Take and release exactly one reference per block.
-            block_ids = list(dict.fromkeys(block_ids))
-            assert NULL_BLOCK_ID not in block_ids
-            if not block_ids:
-                continue
-            self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
-            pool.touch([pool.blocks[block_id] for block_id in block_ids])
+        # An aligned boundary block may also be present in the request's
+        # block table. Take and release exactly one reference per block.
+        block_ids = list(dict.fromkeys(block_ids))
+        assert NULL_BLOCK_ID not in block_ids
+        if not block_ids:
+            return False
+        self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
+        pool.touch([pool.blocks[block_id] for block_id in block_ids])
+        return True
+
+    def register_finished_lookahead_save(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> None:
+        """Pin and queue the save of lookahead hashes published at finish."""
+        if not self.use_lookahead_block_hashes:
+            return
+        if self.kv_role == "kv_consumer" and not self.save_decode_cache:
+            return
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return
+        # Decode KV is saved only with save_decode_cache, as in running steps.
+        tracker.token_len = (
+            request.num_tokens if self.save_decode_cache else tracker.prefill_end_tokens
+        )
+        if tracker.token_ids is not None:
+            tracker.token_ids = list(request.all_token_ids[: tracker.token_len])
+        tracker.allocated_block_ids = tuple(
+            block_ids[group_id].copy() for group_id in self._store_group_ids
+        )
+        req_meta = ReqMeta.from_request_tracker(
+            tracker,
+            self._block_size,
+            block_hashes=request.block_hashes,
+            max_save_tokens=self._max_save_tokens(request),
+            num_prompt_tokens=request.num_prompt_tokens,
+        )
+        if req_meta is None or not self._pin_store_job(req_meta):
+            return
+        self._finished_lookahead_save_metas[request.request_id] = req_meta
 
     def register_finished_partial_tail(
         self,

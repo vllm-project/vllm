@@ -242,7 +242,10 @@ class MooncakeStoreCoordinator:
         leave the trailing block unloaded.
         """
         blocks_per_group, hit_length = self._find_hit_blocks(
-            block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
+            block_hashes,
+            max_length,
+            cached_block_pool,
+            apply_eagle=apply_eagle,
         )
         masks = tuple(
             [blk is not cached_block_pool.null_block for blk in blocks]
@@ -278,6 +281,7 @@ class MooncakeStoreCoordinator:
         aligned_token_len: int,
         start_token: int = 0,
         num_prompt_tokens: int | None = None,
+        apply_eagle: bool = True,
     ) -> tuple[list[bool] | None, ...]:
         """Per-group store masks for the suffix starting at ``start_token``.
 
@@ -303,12 +307,14 @@ class MooncakeStoreCoordinator:
             start_token,
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
+            apply_eagle=apply_eagle,
             exclude_mamba=True,
         )
 
     def lookup_mask(
         self,
         aligned_token_len: int,
+        apply_eagle: bool = True,
     ) -> tuple[list[bool] | None, ...]:
         """Per-group lookup masks.
 
@@ -321,6 +327,7 @@ class MooncakeStoreCoordinator:
             0,
             retention_interval=None,
             num_prompt_tokens=None,
+            apply_eagle=apply_eagle,
         )
 
     def _reachable_masks(
@@ -330,6 +337,7 @@ class MooncakeStoreCoordinator:
         *,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
+        apply_eagle: bool,
         exclude_mamba: bool = False,
     ) -> tuple[list[bool] | None, ...]:
         mask_alignment = (
@@ -351,7 +359,7 @@ class MooncakeStoreCoordinator:
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
-            use_eagle = g_idx in self.eagle_group_ids
+            use_eagle = apply_eagle and g_idx in self.eagle_group_ids
             reachable_boundaries = (
                 () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
             )

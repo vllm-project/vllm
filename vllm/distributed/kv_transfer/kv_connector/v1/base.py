@@ -114,7 +114,12 @@ class SupportsHMA(ABC):
 
         NOTE(Kuntai): This function is only supported by connectors that support HMA.
 
-        The connector may assumes responsibility for freeing the blocks
+        ``block_ids`` contains every resident block covering the request's
+        computed prefix, including a partial physical tail. Content-addressed
+        connectors must store only blocks covered by ``request.block_hashes``;
+        lookahead hashes lag the computed tokens by up to one block.
+
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
@@ -194,6 +199,17 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def supports_lookahead_block_hashes(self) -> bool:
+        """Whether the connector stays correct with lookahead block hashes.
+
+        True when it either transfers a request's own blocks (P/D) or keys
+        stored KV by ``request.block_hashes``, so a hit carries the same
+        lookahead-token proof as a local prefix-cache hit. Engines sharing a
+        content-addressed cache must make the same choice.
+        """
+        return False
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 
@@ -224,6 +240,11 @@ class KVConnectorBase_V1(ABC):
         self._kv_cache_config = kv_cache_config
         self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
+        self.use_lookahead_block_hashes = False
+
+    def set_lookahead_block_hashes(self, enabled: bool) -> None:
+        """Configure the engine-wide prefix-cache hash protocol."""
+        self.use_lookahead_block_hashes = enabled
 
     @property
     def role(self) -> KVConnectorRole:
@@ -621,7 +642,12 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        ``block_ids`` contains every resident block covering the request's
+        computed prefix, including a partial physical tail. Content-addressed
+        connectors must store only blocks covered by ``request.block_hashes``;
+        lookahead hashes lag the computed tokens by up to one block.
+
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:

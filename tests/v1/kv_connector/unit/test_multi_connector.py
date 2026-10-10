@@ -4,6 +4,7 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -138,6 +139,39 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         return (False, None)
 
 
+class PrefixHashingTestConnector(KVConnectorBase_V1):
+    """Minimal real connector for prefix-hash protocol tests."""
+
+    @property
+    def supports_lookahead_block_hashes(self) -> bool:
+        return bool(
+            self._kv_transfer_config.kv_connector_extra_config.get(
+                "supports_lookahead_block_hashes", False
+            )
+        )
+
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+    def build_connector_meta(self, scheduler_output):
+        return None
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        return (0, False)
+
+    def update_state_after_alloc(self, request, blocks, num_tokens) -> None:
+        pass
+
+
 class MockDivergentHMAConnector(MockHMAConnector):
     _supports_divergent_local_hybrid_hits = True
 
@@ -148,10 +182,32 @@ KVConnectorFactory.register_connector(
     "MockHMAConnector", __name__, MockHMAConnector.__name__
 )
 KVConnectorFactory.register_connector(
+    "PrefixHashingTestConnector", __name__, PrefixHashingTestConnector.__name__
+)
+KVConnectorFactory.register_connector(
     "MockDivergentHMAConnector",
     __name__,
     MockDivergentHMAConnector.__name__,
 )
+
+
+def _prefix_hashing_connector_config(supported: bool) -> dict[str, Any]:
+    return {
+        "kv_connector": "PrefixHashingTestConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": __name__,
+        "kv_connector_extra_config": {
+            "supports_lookahead_block_hashes": supported,
+        },
+    }
+
+
+def _enable_eagle(vllm_config) -> None:
+    vllm_config.speculative_config = SimpleNamespace(
+        use_eagle=lambda: True,
+        use_eagle_block_drop=lambda: True,
+        use_multi_module_mtp=lambda: False,
+    )
 
 
 def test_register_finished_partial_tail_notifies_every_connector():
@@ -364,9 +420,11 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # Initial events bind the cache manager, query completion counts, and exchange
-    # handshake metadata before the request is enqueued.
-    assert storage1_scheduler_events[:7] == [
+    # Prefix-hash mode is propagated first; then the cache manager is bound,
+    # completion counts queried, and handshake metadata exchanged before the
+    # request is enqueued.
+    assert storage1_scheduler_events[:8] == [
+        "set_lookahead_block_hashes False",
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
@@ -375,9 +433,10 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization. Layer hooks run before the
-    # deferred load starts after the forward pass.
+    # Prefix-hash mode is propagated before the connector is initialized. Layer
+    # hooks run before the deferred load starts after the forward pass.
     expected_worker_prefix = [
+        "set_lookahead_block_hashes False",
         "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
@@ -393,7 +452,8 @@ def test_multi_example_connector_consistency():
         assert worker_events.index("start_load_kv") > worker_events.index(
             "save_kv_layer"
         )
-    assert storage2_scheduler_events[:7] == [
+    assert storage2_scheduler_events[:8] == [
+        "set_lookahead_block_hashes False",
         "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
@@ -1020,6 +1080,39 @@ Options:
   1. Add delegation in MultiConnector (preferred)
   2. Add to INHERITED_OK if the base implementation works correctly
 """)
+
+
+@pytest.mark.parametrize(
+    ("child_support", "expected"),
+    [([True, True], True), ([True, False], False)],
+)
+def test_factory_configures_multi_connector_eagle_prefix_hashing(
+    child_support: list[bool], expected: bool
+):
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [
+                _prefix_hashing_connector_config(supported)
+                for supported in child_support
+            ],
+        },
+        kv_role="kv_both",
+        disable_hybrid_kv_cache_manager=True,
+    )
+    _enable_eagle(vllm_config)
+
+    connector = KVConnectorFactory.create_connector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+    )
+
+    assert isinstance(connector, MultiConnector)
+    assert connector.use_lookahead_block_hashes is expected
+    assert all(
+        child.use_lookahead_block_hashes is expected for child in connector._connectors
+    )
 
 
 def test_multi_connector_worker_metadata(mc):

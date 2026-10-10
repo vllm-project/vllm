@@ -15,6 +15,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.mamba import checkpoint as mamba_checkpoint
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -358,22 +359,37 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 
 
 @pytest.mark.parametrize(
-    ("seq_len", "disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
+    (
+        "seq_len",
+        "disable_eagle_block_drop",
+        "successor_hashing",
+        "prefix_match_unit",
+        "expected_offset",
+    ),
     [
-        (100, False, 16, 80),
-        (100, True, 16, 96),
-        (100, False, 8, None),
-        (96, False, 16, 80),
-        (96, True, 16, 80),
+        (100, False, False, 16, 80),
+        (100, True, False, 16, 96),
+        (100, False, True, 16, 96),
+        (100, False, False, 8, None),
+        (96, False, False, 16, 80),
+        (96, True, False, 16, 80),
     ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
+    monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
     disable_eagle_block_drop: bool,
+    successor_hashing: bool,
     prefix_match_unit: int,
     expected_offset: int | None,
 ) -> None:
+    """Successor-aware hashes need no back-off from the replay boundary."""
+    monkeypatch.setattr(
+        mamba_checkpoint,
+        "is_lookahead_block_hashing_enabled",
+        lambda *_: successor_hashing,
+    )
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(

@@ -498,7 +498,12 @@ class SingleTypeKVCacheManager(ABC):
         if not self.kv_cache_spec.prefix_cacheable:
             return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        num_full_blocks = num_tokens // self.block_size
+        resolved_block_hashes = resolve_block_hashes(
+            request.block_hashes,
+            self.block_pool.hash_block_size,
+            self.block_size,
+        )
+        num_full_blocks = min(num_tokens // self.block_size, len(resolved_block_hashes))
 
         if num_cached_blocks >= num_full_blocks:
             return
@@ -515,7 +520,9 @@ class SingleTypeKVCacheManager(ABC):
             end_block=num_full_blocks,
             alignment_tokens=self.cache_hit_alignment_tokens,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
+            use_eagle=(
+                self.use_eagle and not self.block_pool.use_lookahead_block_hashes
+            ),
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
@@ -877,7 +884,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         # read the whole prompt before dropping a hash unit.
         token_limit = (
             request.num_prompt_tokens
-            if self.use_eagle
+            if self.use_eagle and not self.block_pool.use_lookahead_block_hashes
             else request.num_prompt_tokens - 1
         )
         boundary_tokens = token_limit // hash_block_size * hash_block_size
