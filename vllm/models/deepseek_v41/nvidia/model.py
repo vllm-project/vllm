@@ -104,6 +104,7 @@ from ..common.engram import (
     EngramLayout,
     NgramHashState,
     can_share_engram_tables,
+    engram_table_bytes,
     gather_engram_hashes,
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
@@ -742,12 +743,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             and engram_config.cpu_offload
             else None
         )
-        if (
-            self.engram_layout is not None
-            and engram_config is not None
-            and engram_config.dp_shared_memory
-        ):
-            engram_config.dp_shared_memory = can_share_engram_tables(self.engram_layout)
+        if self.engram_layout is not None and engram_config is not None:
+            if engram_config.dp_shared_memory:
+                engram_config.dp_shared_memory = can_share_engram_tables(
+                    self.engram_layout
+                )
+            # After the shared-memory decision on purpose: falling back from
+            # /dev/shm is exactly what puts the tables on the per-rank pinned path.
+            engram_config.verify_host_memory(
+                engram_table_bytes(self.engram_layout), vllm_config.parallel_config
+            )
 
         if self.engram_layout is not None and engram_config and engram_config.use_thp:
             # Release old checkpoint cache before allocating the Engram host tables.
