@@ -22,10 +22,12 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
+    from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950, _ON_GFX1151, _ON_RDNA
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+    _ON_GFX1151 = False
+    _ON_RDNA = False
 
 logger = init_logger(__name__)
 
@@ -774,7 +776,7 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        if _ON_GFX942 or _ON_GFX950:
+        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
@@ -791,7 +793,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size > 1,
+                Preshuffle=block_size > 1 and not _ON_RDNA,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
@@ -1151,7 +1153,7 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
-        if _ON_GFX942 or _ON_GFX950:
+        if _ON_GFX942 or _ON_GFX950 or _ON_RDNA:
             workspace_manager.get_simultaneous(
                 ((decode_rows, max_model_len), torch.float32),
             )
