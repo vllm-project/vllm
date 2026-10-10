@@ -1,0 +1,25 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "chart.service-name" . | quote }}
+  namespace: {{ .Release.Namespace }}
+  {{- with .Values.serviceMonitor.additionalLabels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  endpoints:
+    - port: {{ .Values.serviceMonitor.port | quote }}
+      path: {{ .Values.serviceMonitor.path | quote }}
+      interval: {{ .Values.serviceMonitor.interval | quote }}
+      {{- with .Values.serviceMonitor.metricFilter.regex }}
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          action: {{ $.Values.serviceMonitor.metricFilter.action | quote }}
+          regex: {{ . | quote }}
+      {{- end }}
+{{- end }}
