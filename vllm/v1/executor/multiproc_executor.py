@@ -863,6 +863,11 @@ class WorkerProc:
         if logging_config := getattr(kwargs["vllm_config"], "logging_config", None):
             configure_logging(logging_config)
 
+        # Re-evaluate logging configuration for this subprocess,
+        # respecting VLLM_CONFIGURE_LOGGING env var.
+        from vllm.logger import _configure_vllm_root_logger
+        _configure_vllm_root_logger()
+
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error

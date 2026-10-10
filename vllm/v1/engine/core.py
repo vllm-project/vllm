@@ -1382,6 +1382,11 @@ class EngineCoreProc(EngineCore):
         if logging_config := getattr(vllm_config, "logging_config", None):
             configure_logging(logging_config)
 
+        # Re-evaluate logging configuration for this subprocess,
+        # respecting VLLM_CONFIGURE_LOGGING env var.
+        from vllm.logger import _configure_vllm_root_logger
+        _configure_vllm_root_logger()
+
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
