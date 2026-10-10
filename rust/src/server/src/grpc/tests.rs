@@ -1829,6 +1829,70 @@ async fn grpc_without_keepalive_keeps_unresponsive_connection_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn dropping_generate_stream_aborts_before_engine_output() {
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-cancel-pending-output".to_vec(),
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            None,
+            move |dealer, _push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    submitted_tx.send(()).expect("signal submitted request");
+
+                    // A queued request produces no output before cancellation.
+                    let abort = recv_engine_message(dealer).await;
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let request_ids: Vec<String> =
+                        rmp_serde::from_slice(&abort[1]).expect("decode abort request IDs");
+                    assert_eq!(request_ids, vec![request.request_id]);
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+    let stream = client
+        .generate_stream(pb::GenerateRequest {
+            request_id: "test-cancel-pending-output".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("start generation")
+        .into_inner();
+    tokio::time::timeout(Duration::from_secs(5), submitted_rx)
+        .await
+        .expect("timed out waiting for engine submission")
+        .expect("engine submission signal");
+
+    drop(stream);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), engine_task).await;
+    server_task.abort();
+    result
+        .expect("disconnect must abort without waiting for engine output")
+        .expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn control_abort_resolves_external_id_and_empty_is_noop() {
     let (inference_service, control_service, engine_health, engine_task) =
         setup_grpc_service(b"engine-grpc-abort-active", vec![(vec![b'h' as u32], None)]).await;

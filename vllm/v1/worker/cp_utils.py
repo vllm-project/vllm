@@ -95,11 +95,9 @@ def prepare_dcp_dummy_context_metadata(
     max_valid_block_id = kv_cache_config.num_blocks - 1
     assert max_valid_block_id > 0
     for blk_table in input_batch.block_table.block_tables:
-        max_row_blocks = (
-            blk_table.max_num_blocks_per_req // blk_table.blocks_per_kv_block
-        )
         block_ids = [
-            (block_idx % max_valid_block_id) + 1 for block_idx in range(max_row_blocks)
+            (block_idx % max_valid_block_id) + 1
+            for block_idx in range(blk_table.max_num_blocks_per_req)
         ]
         for req_idx in range(num_reqs):
             blk_table.add_row(block_ids, req_idx)

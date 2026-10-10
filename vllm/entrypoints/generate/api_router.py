@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
+
+logger = init_logger(__name__)
 
 
 def register_generate_api_routers(app: FastAPI):
@@ -69,7 +72,7 @@ async def init_generate_state(
     default_chat_template_kwargs: dict[str, Any],
 ):
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
-    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.renderers.chat_utils import load_chat_template
 
     # The Cohere serving handler depends on the optional `cohere` SDK for
     # its wire-format protocol models, and is additionally gated on the
@@ -243,7 +246,9 @@ async def init_generate_state(
                     default_chat_template_kwargs=default_chat_template_kwargs,
                 )
             )
-        except ValueError:
+        except ValueError as e:
+            # Info, since every model without a read strategy lands here.
+            logger.info("/v1/systemone is disabled: %s", e)
             strategy = None
     state.serving_structured_decisions = (
         ServingStructuredDecisions(
