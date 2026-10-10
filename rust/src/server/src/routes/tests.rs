@@ -6676,6 +6676,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
         ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/shutdown_weight_transfer_engine"),
         ("POST", "/start_weight_update"),
         ("POST", "/start_draft_weight_update"),
         ("POST", "/update_weights"),
@@ -6707,7 +6708,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let mut calls = Vec::new();
-            for _ in 0..10 {
+            for _ in 0..11 {
                 let utility = recv_engine_message(dealer).await;
                 assert_eq!(utility[0].as_ref(), &[0x03]);
                 let payload = decode_value(&utility[1]).expect("decode utility");
@@ -6737,6 +6738,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
                     "collective_rpc [\"finish_weight_update\",null,[],{}]",
                     "set_weight_version [\"step-2\"]",
                     "get_weight_version []",
+                    "collective_rpc [\"shutdown_weight_transfer_engine\",null,[],{}]",
                 ]
             "#]].assert_debug_eq(&calls);
         })
@@ -6785,6 +6787,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             Some(json!({"new_version": "step-2"})),
         ),
         ("GET", "/weight_info", None),
+        ("POST", "/shutdown_weight_transfer_engine", None),
     ] {
         let mut request = Request::builder().method(method).uri(path);
         let body = match body {
@@ -6806,7 +6809,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     }
     engine_task.await.expect("mock engine task");
     let metrics_after = METRICS.render().unwrap();
-    for operation in ["update", "finish"] {
+    for (operation, count) in [("update", 2.0), ("finish", 2.0), ("shutdown", 1.0)] {
         assert_eq!(
             metric_delta(
                 &metrics_before,
@@ -6814,7 +6817,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
                 "vllm:rl_weight_update_operation_duration_seconds_count",
                 Some(&format!("operation=\"{operation}\"")),
             ),
-            2.0
+            count
         );
         assert_eq!(
             metric_value(
@@ -6836,6 +6839,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             "{\"message\":\"Weight update finished\"}",
             "{\"success\":true,\"new_version\":\"step-2\"}",
             "{\"weight_version\":\"step-2\"}",
+            "{\"message\":\"Weight transfer shut down\"}",
         ]
     "#]]
     .assert_debug_eq(&responses);

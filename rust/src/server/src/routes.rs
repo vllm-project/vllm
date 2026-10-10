@@ -126,6 +126,10 @@ fn build_router_with_options(
                 post(weight_transfer::init_weight_transfer_engine),
             )
             .route(
+                "/shutdown_weight_transfer_engine",
+                post(weight_transfer::shutdown_weight_transfer_engine),
+            )
+            .route(
                 "/start_weight_update",
                 post(weight_transfer::start_weight_update),
             )
