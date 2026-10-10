@@ -1394,6 +1394,68 @@ def test_cooperative_topk_512_tie_workspace_is_per_row() -> None:
     )
 
 
+def _assert_cooperative_topk_exact(
+    logits: torch.Tensor, indices: torch.Tensor, seq_len: int, top_k: int
+) -> None:
+    assert torch.all((indices >= 0) & (indices < seq_len))
+    sorted_indices = indices.sort(dim=1).values
+    assert torch.all(sorted_indices[:, 1:] != sorted_indices[:, :-1])
+    actual = logits.gather(1, indices.long()).sort(dim=1).values
+    expected = logits[:, :seq_len].topk(top_k, dim=1).values.sort(dim=1).values
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize("seq_len", [8192, 32768, 131072, 262144, 524288])
+@torch.inference_mode()
+def test_cooperative_topk_candidate_overflow(seq_len: int, top_k: int) -> None:
+    row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
+    logits = row.unsqueeze(0).cuda()
+    lengths = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+    indices = torch.empty((1, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("num_rows", [9, 34, 64])
+@pytest.mark.parametrize("seq_len", [65535, 65536, 65537])
+@torch.inference_mode()
+def test_cooperative_topk_overflow_cluster_boundary(
+    num_rows: int, seq_len: int
+) -> None:
+    top_k = 2048
+    stride = (seq_len + 3) & ~3
+    row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
+    logits = torch.full((num_rows, stride), float("inf"), device="cuda")
+    logits[:, :seq_len] = row.cuda()
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
+@pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
+@pytest.mark.parametrize("num_rows", [1, 64])
+@pytest.mark.parametrize("top_k", [512, 2048])
+@torch.inference_mode()
+def test_cooperative_topk_16bit_grid_overflow(num_rows: int, top_k: int) -> None:
+    seq_len = 32768
+    row = (1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len))
+    logits = row.to(torch.bfloat16).float().cuda().repeat(num_rows, 1)
+    lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("cooperative_topk", logits, lengths, indices, top_k, seq_len)
+    torch.accelerator.synchronize()
+    _assert_cooperative_topk_exact(logits, indices, seq_len, top_k)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
     "test_config",
