@@ -566,6 +566,60 @@ class ResponseTemplateParser(Parser):
             or self._reasoning_parser.is_reasoning_end(input_ids)
         )
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count the generated tokens inside the template's thinking region.
+
+        Delimiters are not counted. A thinking region opened by the prompt
+        counts from the first generated token, and an unclosed one runs to the
+        end of the output.
+        """
+        if (
+            self._reasoning_parser is None
+            or THINKING_FIELD not in self.response_template.fields
+            or not token_ids
+        ):
+            return 0
+        token_ids = list(token_ids)
+        text = _decode(self.model_tokenizer, token_ids)
+        parser = ResponseParser(self.response_template, prefix=self._prefix)
+        generation_start = len(parser.input_text)
+        events = [*parser.initial_events, *parser.feed(text)]
+        events.extend(parser.finalize()[1])
+
+        # Spans of thinking content, as offsets into the generated text.
+        spans: list[tuple[int, int]] = []
+        span_start: int | None = None
+        for event in events:
+            if event.get("field") != THINKING_FIELD:
+                continue
+            if event["type"] == "region_open":
+                span_start = max(event["end"] - generation_start, 0)
+            elif (
+                event["type"] in ("region_close", "region_malformed")
+                and span_start is not None
+            ):
+                spans.append((span_start, max(event["start"] - generation_start, 0)))
+                span_start = None
+        if span_start is not None:
+            spans.append((span_start, len(text)))
+
+        def first_token_at(offset: int) -> int:
+            """Index of the first token whose text starts at or after `offset`."""
+            low, high = 0, len(token_ids)
+            while low < high:
+                mid = (low + high) // 2
+                if len(_decode(self.model_tokenizer, token_ids[:mid])) < offset:
+                    low = mid + 1
+                else:
+                    high = mid
+            return low
+
+        return sum(
+            first_token_at(end) - first_token_at(start)
+            for start, end in spans
+            if end > start
+        )
+
     def parse(
         self,
         model_output: str,
