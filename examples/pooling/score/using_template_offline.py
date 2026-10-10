@@ -53,6 +53,7 @@ def get_chat_template(model: str) -> str:
         "mixedbread-ai/mxbai-rerank-base-v2": "mxbai_rerank_v2.jinja",
         "mixedbread-ai/mxbai-rerank-large-v2": "mxbai_rerank_v2.jinja",
         "nvidia/llama-nemotron-rerank-1b-v2": "nemotron-rerank.jinja",
+        "polaria-tech/zerank-2-reranker-vllm": "zerank2.jinja",
     }
 
     # Get the template filename for the specified model
@@ -110,6 +111,7 @@ def get_hf_overrides(model: str) -> dict[str, Any]:
             "method": "from_2_way_softmax",
         },
         "nvidia/llama-nemotron-rerank-1b-v2": {},
+        "polaria-tech/zerank-2-reranker-vllm": {},
     }
 
     hf_overrides = model_name_to_hf_overrides_map.get(model)

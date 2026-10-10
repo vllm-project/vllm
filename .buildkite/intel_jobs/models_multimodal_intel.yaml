@@ -73,7 +73,8 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma" &&
-      pytest -v -s models/multimodal/generation/test_gemma_ragged_audio.py -m core_model'
+      pytest -v -s models/multimodal/generation/test_gemma_ragged_audio.py -m core_model
+      pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model'
 
 - label: "Multi-Modal Models (Standard) 4: other + whisper"
   key: multi-modal-models-standard-4-other-whisper
