@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import time
 from abc import ABC, abstractmethod
 
@@ -94,6 +95,7 @@ class BaseModelLoader(ABC):
                     "Peak GPU memory after loading weights: %s GiB",
                     format_gib(peak_memory),
                 )
+            self._release_cached_memory()
 
             # Process weights into kernel format. Note that when using online
             # quantization, weights are (typically) quantized as they are loaded.
@@ -101,9 +103,20 @@ class BaseModelLoader(ABC):
                 finalize_layerwise_processing(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
+            self._release_cached_memory()
             log_online_quantization_time(vllm_config)
 
         return model.eval()
+
+    @staticmethod
+    def _release_cached_memory() -> None:
+        """Return transient load/repack memory from the caching allocator to
+        the driver, so raw driver allocations made before KV cache profiling
+        (e.g. DeepEP buffers created while processing MoE weights, or loading
+        a draft model) can use it."""
+        if current_platform.is_cuda_alike():
+            gc.collect()
+            torch.accelerator.empty_cache()
 
 
 def log_model_inspection(model: nn.Module) -> None:
