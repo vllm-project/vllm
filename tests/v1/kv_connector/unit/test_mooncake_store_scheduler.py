@@ -552,6 +552,164 @@ def test_preemption_clears_stale_load_state():
     assert "req-0" not in scheduler._unfinished_requests
 
 
+def test_mixed_preempt_readmit_preserves_only_overlap():
+    scheduler = _make_bare_scheduler()
+    scheduler._unfinished_request_ids = {"req-A", "req-B"}
+
+    def _add_req(req_id: str):
+        request = SimpleNamespace(
+            all_token_ids=list(range(44)),
+            block_hashes=[b"h0", b"h1"],
+            num_output_placeholders=0,
+        )
+        scheduler._unfinished_requests[req_id] = (request, ([0, 1],))
+        scheduler._request_trackers[req_id] = RequestTracker(
+            req_id=req_id,
+            token_len=44,
+            allocated_block_ids=([0, 1],),
+            num_saved_tokens=32,
+            token_ids=list(range(44)),
+            prefill_end_tokens=48,
+        )
+
+    _add_req("req-A")
+    _add_req("req-B")
+
+    new_a = SimpleNamespace(
+        req_id="req-A",
+        num_computed_tokens=0,
+        prompt_token_ids=list(range(32)),
+        prefill_token_ids=None,
+        block_ids=([0, 1],),
+        block_hashes=[b"h0", b"h1"],
+    )
+
+    block_state = KVConnectorBlockState(
+        req_ids={"req-A"},
+        resolve_block_ids={"req-A": ([0, 1],)}.__getitem__,
+        boundary_state_offloads={},
+    )
+
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids={"req-A", "req-B"},
+        scheduled_new_reqs=[new_a],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-A": 32},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=block_state,
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert "req-A" in scheduler._unfinished_requests
+    assert "req-A" in scheduler._request_trackers
+    tracker_a = scheduler._request_trackers["req-A"]
+    assert tracker_a.token_len == 32
+    assert "req-B" not in scheduler._unfinished_requests
+    assert "req-B" in scheduler._request_trackers
+    tracker_b = scheduler._request_trackers["req-B"]
+    assert tracker_b.token_len == 0
+    assert tracker_b.allocated_block_ids == ()
+    assert "req-A" not in meta.preempted_req_ids
+    assert "req-B" in meta.preempted_req_ids
+    assert any(r.req_id == "req-A" for r in meta.requests)
+
+
+def test_preempt_readmit_preserves_load_spec():
+    scheduler = _make_bare_scheduler()
+    scheduler._unfinished_request_ids = {"req-0"}
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=True,
+    )
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(44)),
+        block_hashes=[b"h0", b"h1"],
+        prefill_end_tokens=48,
+    )
+
+    request = SimpleNamespace(
+        req_id="req-0",
+        num_computed_tokens=0,
+        prompt_token_ids=list(range(32)),
+        prefill_token_ids=None,
+        block_ids=([0, 1],),
+        block_hashes=[b"h0", b"h1"],
+    )
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids={"req-0"},
+        scheduled_new_reqs=[request],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 32},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1],)),
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert "req-0" not in scheduler.load_specs
+    assert "req-0" in scheduler._unfinished_requests
+    tracker = scheduler._request_trackers.get("req-0")
+    assert tracker is not None
+    assert tracker.token_len == 32
+    assert any(r.req_id == "req-0" for r in meta.requests)
+
+
+def test_preempt_readmit_via_resumed_req_ids():
+    scheduler = _make_bare_scheduler()
+    scheduler._unfinished_request_ids = {"req-0"}
+    request = SimpleNamespace(
+        all_token_ids=list(range(44)),
+        block_hashes=[b"h0", b"h1"],
+        num_output_placeholders=0,
+        num_computed_tokens=0,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=44,
+        allocated_block_ids=([0, 1],),
+        num_saved_tokens=32,
+        token_ids=list(range(44)),
+        prefill_end_tokens=48,
+    )
+
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids={"req-0"},
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[([0, 1, 2],)],
+            num_computed_tokens=[0],
+            resumed_req_ids={"req-0"},
+        ),
+        num_scheduled_tokens={"req-0": 48},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert "req-0" in scheduler._unfinished_requests
+    assert "req-0" in scheduler._request_trackers
+    assert "req-0" not in meta.preempted_req_ids
+
+
 def _make_pending_load_unfinished_request(
     scheduler: MooncakeStoreScheduler,
     *,

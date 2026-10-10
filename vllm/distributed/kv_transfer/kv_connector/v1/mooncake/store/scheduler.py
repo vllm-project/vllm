@@ -307,6 +307,19 @@ class MooncakeStoreScheduler:
             self._unfinished_request_ids.discard(finished_req_id)
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
+        # A request may appear in both preempted_req_ids and
+        # scheduled_new_reqs when the scheduler preempts and immediately
+        # re-admits the same request in a single step. In that case the
+        # preemption cleanup (below) would tear down the state that the
+        # new-request handling (below) just rebuilt, and the worker would
+        # delete the freshly created KV-store state.  Exclude the overlap
+        # so that the old cleanup is skipped for re-admitted requests.
+        # The same overlap can occur with scheduled_cached_reqs.resumed_req_ids
+        # in the v1 model-runner path.
+        scheduled_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
+        scheduled_req_ids.update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+        preempted_ids = preempted_ids - scheduled_req_ids
+
         for req_id in preempted_ids:
             self.load_specs.pop(req_id, None)
             if request_tracker := self._request_trackers.get(req_id):
