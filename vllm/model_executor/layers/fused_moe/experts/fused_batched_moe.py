@@ -477,7 +477,7 @@ def invoke_moe_batched_triton_kernel(
         else:
             stride_bse = B_scale.stride(0)
             stride_bsk = B_scale.stride(2)
-            stride_bsn = B_scale.stride(1)
+            stride_bsn = B_scale.stride(1) if B_scale.size(1) > 1 else 0
 
     else:
         stride_bse = 0
