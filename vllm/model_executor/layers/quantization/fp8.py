@@ -157,10 +157,28 @@ class Fp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_checkpoint_fp8_serialized = "fp8" in quant_method
-        activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        is_checkpoint_fp8_serialized = "fp8" in quant_method or quant_method == "quark"
+        activation_scheme = cls.get_from_keys_or(config, ["activation_scheme"], None)
+        if activation_scheme is None:
+            input_cfg = (config.get("global_quant_config") or {}).get(
+                "input_tensors"
+            ) or {}
+            activation_scheme = (
+                "dynamic" if input_cfg.get("is_dynamic", True) else "static"
+            )
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
+        if ignored_layers is None and "exclude" in config:
+            ignored_layers = [
+                name for name in config["exclude"] if isinstance(name, str)
+            ]
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
+        if weight_block_size is None:
+            lqc = config.get("layer_quant_config") or {}
+            for v in lqc.values():
+                bs = (v.get("weight") or {}).get("block_size")
+                if bs:
+                    weight_block_size = list(bs)
+                    break
         store_dtype = cls.get_from_keys_or(config, ["store_dtype"], None)
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
