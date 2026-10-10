@@ -6,11 +6,14 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
+import httpx
 import pytest
 from huggingface_hub import _CACHED_NO_EXIST
+from huggingface_hub.errors import RemoteEntryNotFoundError
 
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
+    file_or_path_exists,
     get_hf_file_to_dict,
     is_mistral_model_repo,
     list_filtered_repo_files,
@@ -143,6 +146,31 @@ def test_get_hf_file_to_dict_honors_no_exist_marker(
         result = get_hf_file_to_dict("processor_config.json", "some/repo")
     assert result is None
     assert mock_download.call_count == int(should_download)
+
+
+@pytest.mark.parametrize("on_hub", [True, False])
+def test_file_or_path_exists_probes_file_without_listing_repo(on_hub: bool):
+    """Uncached files are probed directly; listing the repo hits a far smaller
+    Hub rate limit."""
+    not_found = RemoteEntryNotFoundError(
+        "404",
+        response=httpx.Response(404, request=httpx.Request("GET", "https://hf.co")),
+    )
+    api = MagicMock()
+    api.hf_hub_download.side_effect = None if on_hub else not_found
+    with (
+        patch(
+            "vllm.transformers_utils.repo_utils.try_to_load_from_cache",
+            MagicMock(return_value=None),
+        ),
+        patch("vllm.transformers_utils.repo_utils.hf_api", return_value=api),
+        patch("vllm.transformers_utils.repo_utils.list_repo_files") as mock_list,
+    ):
+        assert file_or_path_exists("some/repo", "hf_quant_config.json", None) is on_hub
+    api.hf_hub_download.assert_called_once_with(
+        "some/repo", "hf_quant_config.json", revision=None
+    )
+    mock_list.assert_not_called()
 
 
 @pytest.mark.parametrize(
