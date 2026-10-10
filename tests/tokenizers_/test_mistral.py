@@ -16,6 +16,8 @@ from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.tokenizers.mistral import (
     MistralTokenizer,
     _validate_apply_chat_template_args,
+    maybe_serialize_tool_calls,
+    normalize_tool_call_ids,
     validate_request_params,
 )
 
@@ -2403,3 +2405,74 @@ def test_pre_v15_apply_chat_template_omits_reasoning_effort(
     )
 
     assert "reasoning_effort" not in captured_kwargs[-1]
+
+
+# ---------------------------------------------------------------------------
+# normalize_tool_call_ids
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_request(call_ids: list[str]) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="test",
+        messages=[
+            {"role": "user", "content": "Weather in Paris and Rome?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"},
+                    }
+                    for call_id in call_ids
+                ],
+            },
+            *(
+                {"role": "tool", "content": "sunny", "tool_call_id": call_id}
+                for call_id in call_ids
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "call_ids",
+    [
+        ["call_abc123def456ghi789jkl0"],
+        ["call_1"],
+        ["functions.get_weather:0", "functions.get_weather:1"],
+        ["call_A_000000001", "call_B_000000001"],
+    ],
+    ids=["long", "short", "non_alphanumeric", "shared_suffix"],
+)
+@pytest.mark.parametrize(
+    "mistral_tokenizer",
+    ["mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Magistral-Small-2509"],
+    indirect=True,
+)
+def test_normalize_tool_call_ids_renders(
+    mistral_tokenizer: MistralTokenizer, call_ids: list[str]
+) -> None:
+    """Any OpenAI-valid IDs must render, with calls and results still paired."""
+    request = _tool_call_request(call_ids)
+    maybe_serialize_tool_calls(request)
+    normalize_tool_call_ids(request)
+
+    new_call_ids = [tc["id"] for tc in request.messages[1]["tool_calls"]]
+    new_result_ids = [m["tool_call_id"] for m in request.messages[2:]]
+    assert new_call_ids == new_result_ids
+    assert len(set(new_call_ids)) == len(call_ids)
+    assert all(len(i) == 9 and i.isascii() and i.isalnum() for i in new_call_ids)
+
+    mistral_tokenizer.apply_chat_template(request.messages)
+
+
+def test_normalize_tool_call_ids_keeps_valid_ids() -> None:
+    request = _tool_call_request(["abcDEF123"])
+    maybe_serialize_tool_calls(request)
+    normalize_tool_call_ids(request)
+
+    assert request.messages[1]["tool_calls"][0]["id"] == "abcDEF123"
+    assert request.messages[2]["tool_call_id"] == "abcDEF123"

@@ -246,7 +246,7 @@ class OnlineRenderer:
             # because of issues with pydantic we need to potentially
             # re-serialize the tool_calls field of the request
             _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-            _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
+            _mt.normalize_tool_call_ids(request)  # type: ignore[arg-type]
             _mt.validate_request_params(request)
 
         # Check if tool parsing is unavailable (common condition)
