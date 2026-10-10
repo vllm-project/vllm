@@ -221,7 +221,10 @@ Supported models:
 
 Known issues:
 
-1. Mistral 7B struggles to generate parallel tool calls correctly.
+1. Mistral 7B struggles to generate parallel tool calls correctly with the default chat template.
+   In practice, the model often returns only the first tool call even when multiple tools are needed.
+   Using `examples/tool_chat_template_mistral_parallel.jinja` (see issue 2 below) improves parallel
+   tool call reliability compared to the default template.
 2. **For Transformers tokenization backend only**: Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is
    much shorter than what vLLM generates. Since an exception is thrown when this condition
    is not met, the following additional chat templates are provided:
