@@ -76,7 +76,7 @@ def test_query_capacity_rejected(args):
 def test_rejection_and_prefill_use_correct_seed_and_persistent_slot():
     buffers = InputBuffers(4, 16, torch.device("cpu"))
     slots = torch.full((16,), 99, dtype=torch.int64)
-    sample_slots = torch.full((16,), 99, dtype=torch.int32)
+    sample_slots = torch.full((16,), 99, dtype=torch.int64)
     batch = SimpleNamespace(
         num_reqs=2,
         idx_mapping=torch.tensor([3, 1]),
@@ -130,7 +130,7 @@ def test_draft_does_not_write_null_or_unallocated_or_out_of_context_slots(
 ):
     buffers = InputBuffers(2, 8, torch.device("cpu"))
     slots = torch.empty(8, dtype=torch.int64)
-    sample_slots = torch.empty(8, dtype=torch.int32)
+    sample_slots = torch.empty(8, dtype=torch.int64)
     batch = SimpleNamespace(
         num_reqs=1,
         idx_mapping=torch.tensor([1]),
