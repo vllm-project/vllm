@@ -230,8 +230,8 @@ def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
     # against the pod-wide limit here.
     cgroup_limit = get_cgroup_memory_limit()
     cgroup_usage = get_cgroup_memory_usage()
-    if cgroup_limit is not None and cgroup_limit < total_memory:
-        total_memory = cgroup_limit
+    if cgroup_limit is not None:
+        total_memory = min(total_memory, cgroup_limit)
         cgroup_available = cgroup_limit - (cgroup_usage or 0)
         available_memory = max(0, min(available_memory, cgroup_available))
 
