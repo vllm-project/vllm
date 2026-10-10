@@ -8,7 +8,6 @@ import math
 import os
 import platform
 import sys
-from abc import ABC, abstractmethod
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -23,12 +22,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
+    from vllm.model_executor.tpsp import TPSPBackend
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
-    from vllm.v1.worker.tpsp_utils import TPSPContext, TPSPOpsGroup, TPSPScanResult
 else:
     FlexibleArgumentParser = object
 
@@ -132,88 +131,6 @@ class DeviceCapability(NamedTuple):
         """
         assert 0 <= self.minor < 10
         return self.major * 10 + self.minor
-
-
-class TPSPBackend(ABC):
-    tpsp_chunk_granularity: int
-    tpsp_max_microchunk_tokens: int | None = None
-
-    def __init__(self, group_name: str, device: torch.device) -> None:
-        self.group_name = group_name
-        self.device = device
-        self._closed = False
-
-    @abstractmethod
-    def open(
-        self,
-        *,
-        dtype: torch.dtype,
-        tp_size: int,
-        hidden_size: int,
-        max_batched_tokens: int,
-        group_name: str,
-        device: torch.device,
-    ) -> Any | None: ...
-
-    def profile(
-        self,
-        ops_groups: list["TPSPOpsGroup"],
-        max_batched_tokens: int,
-    ) -> "TPSPContext | None":
-        """Select independent chunks and a shared threshold for ops groups."""
-        from vllm.v1.worker.tpsp_utils import profile_tpsp
-
-        return profile_tpsp(self, ops_groups, max_batched_tokens)
-
-    def profile_projection(
-        self,
-        handle: object,
-        *,
-        projection: torch.nn.Module,
-        norm: torch.nn.Module,
-        tp_size: int,
-        hidden_size: int,
-        input_width: int,
-        max_batched_tokens: int,
-        norm_eps: float,
-        time_budget_s: float,
-    ) -> "TPSPScanResult":
-        from vllm.v1.worker.tpsp_utils import scan_chunk
-
-        result = scan_chunk(
-            self,
-            handle,
-            projection=projection,
-            norm=norm,
-            tp_size=tp_size,
-            hidden_size=hidden_size,
-            input_width=input_width,
-            max_batched_tokens=max_batched_tokens,
-            time_budget_s=time_budget_s,
-            norm_eps=norm_eps,
-        )
-        if result.status == "candidate" and result.config is not None:
-            self.set_config(handle, result.config)
-        return result
-
-    @abstractmethod
-    def set_config(self, handle: object, config: object) -> None: ...
-
-    @abstractmethod
-    def fused_gemm_rs_norm_ag(
-        self,
-        projection_context: object,
-        x: torch.Tensor,
-        projection: torch.nn.Module,
-        residual: torch.Tensor,
-        norm: torch.nn.Module,
-        *,
-        config: object | None = None,
-        norm_type: str = "rms_norm",
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
-
-    @abstractmethod
-    def close(self, context: Any | None = None) -> None: ...
 
 
 class Platform:
@@ -338,7 +255,7 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
-    def get_tpsp_backend_cls(cls) -> type[TPSPBackend] | None:
+    def get_tpsp_backend_cls(cls) -> "type[TPSPBackend] | None":
         """Return the TPSP backend class, or None if unsupported."""
         return None
 

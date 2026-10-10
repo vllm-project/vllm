@@ -13,17 +13,16 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch import nn
 
+from vllm.model_executor import tpsp as tpsp_utils
 from vllm.model_executor.models import llama
-from vllm.platforms import current_platform
-from vllm.platforms.interface import TPSPBackend
-from vllm.v1.worker import tpsp_utils
-from vllm.v1.worker.tpsp_utils import (
+from vllm.model_executor.tpsp import (
+    TPSPBackend,
     TPSPContext,
     TPSPOpsGroup,
     TPSPProfile,
     TPSPScanResult,
-    scan_threshold,
 )
+from vllm.platforms import current_platform
 
 
 def test_projection_profile_restores_residual_between_baseline_trials():
@@ -49,6 +48,29 @@ def test_projection_profile_restores_residual_between_baseline_trials():
 
     torch.testing.assert_close(first, second)
     torch.testing.assert_close(inputs.residual, original_residual + first)
+
+
+def test_compiled_ops_group_passes_projection_output_to_norm():
+    class Projection(nn.Module):
+        input_size_per_partition = 2
+
+        def forward(self, x):
+            return x + 2, None
+
+    class Norm(nn.Module):
+        def forward(self, x, residual):
+            return x * residual, residual
+
+    norm = Norm()
+    norm.weight = nn.Parameter(torch.ones(2))
+    norm.variance_epsilon = 1e-5
+    compiled = tpsp_utils._compile_ops_groups(
+        [TPSPOpsGroup("pair", Projection(), norm)]
+    )[0]
+    inputs = SimpleNamespace(
+        hidden_states=torch.ones(1, 2), residual=torch.full((1, 2), 4.0)
+    )
+    torch.testing.assert_close(compiled.conventional(inputs), torch.full((1, 2), 12.0))
 
 
 def _check_tpsp_backend(
@@ -294,16 +316,13 @@ def _check_tpsp_backend(
 
         o_proj, down_proj = Projection(64), Projection(4096)
         o_norm, down_norm = Norm(), Norm()
-        profile = tpsp_utils.scan_chunk(
+        profile = tpsp_utils._scan_chunk(
             backend,
             context,
             projection=o_proj,
             norm=o_norm,
             tp_size=world_size,
-            hidden_size=4096,
-            input_width=64,
             max_batched_tokens=128,
-            norm_eps=1e-5,
             time_budget_s=60,
         )
         assert profile.tp_size == world_size
@@ -337,12 +356,14 @@ def _check_tpsp_backend(
                 assert handle is not None
                 backend.set_config(handle, 64)
                 handles.append(handle)
-            pair = scan_threshold(
+            pair = tpsp_utils._scan_threshold(
                 backend,
-                [
-                    TPSPOpsGroup("o_proj", o_proj, o_norm),
-                    TPSPOpsGroup("down_proj", down_proj, down_norm),
-                ],
+                tpsp_utils._compile_ops_groups(
+                    [
+                        TPSPOpsGroup("o_proj", o_proj, o_norm),
+                        TPSPOpsGroup("down_proj", down_proj, down_norm),
+                    ]
+                ),
                 {"o_proj": handles[0], "down_proj": handles[1]},
                 128,
             )
@@ -786,6 +807,8 @@ def test_tpsp_projection_profile_keeps_distinct_configs(monkeypatch):
     model.config = SimpleNamespace(hidden_size=2)
 
     class Backend(TPSPBackend):
+        tpsp_chunk_granularity = 64
+
         def __init__(self, group_name, device):
             super().__init__(group_name, device)
             self.closed = []
@@ -805,22 +828,22 @@ def test_tpsp_projection_profile_keeps_distinct_configs(monkeypatch):
     backend = Backend("test", torch.device("cpu"))
     monkeypatch.setattr(
         tpsp_utils,
-        "scan_chunk",
-        lambda selected_backend, handle, *, input_width, **kwargs: TPSPScanResult(
+        "_scan_chunk",
+        lambda selected_backend, handle, *, projection, **kwargs: TPSPScanResult(
             2,
             2,
             8,
             "candidate",
             "",
-            input_width=input_width,
-            config=input_width * 8,
+            input_width=projection.input_size_per_partition,
+            config=projection.input_size_per_partition * 8,
         ),
     )
 
     def enabled_threshold(*args):
         return TPSPScanResult(2, 2, 8, "enabled", "", threshold_tokens=3)
 
-    monkeypatch.setattr(tpsp_utils, "scan_threshold", enabled_threshold)
+    monkeypatch.setattr(tpsp_utils, "_scan_threshold", enabled_threshold)
     from vllm.distributed import parallel_state
 
     monkeypatch.setattr(
@@ -848,7 +871,7 @@ def test_tpsp_projection_profile_keeps_distinct_configs(monkeypatch):
 
     monkeypatch.setattr(
         tpsp_utils,
-        "scan_threshold",
+        "_scan_threshold",
         lambda *args: TPSPScanResult(2, 2, 8, "disabled", "no benefit"),
     )
     disabled = backend.profile(groups, 8)
@@ -872,20 +895,19 @@ def test_tpsp_profile_accepts_multiple_named_groups(monkeypatch):
     )
 
     class Backend(TPSPBackend):
+        tpsp_chunk_granularity = 64
+
         def __init__(self):
             super().__init__("test", torch.device("cpu"))
             self.closed = []
             self.profiled = []
+            self.configs = []
 
         def open(self, **kwargs):
             return object()
 
-        def profile_projection(self, handle, *, projection, **kwargs):
-            self.profiled.append(projection)
-            return TPSPScanResult(2, 2, 8, "candidate", "", config=1)
-
         def set_config(self, handle, config):
-            raise NotImplementedError
+            self.configs.append((handle, config))
 
         def fused_gemm_rs_norm_ag(self, *args, **kwargs):
             raise NotImplementedError
@@ -894,6 +916,13 @@ def test_tpsp_profile_accepts_multiple_named_groups(monkeypatch):
             self.closed.append(context)
 
     backend = Backend()
+
+    def scan_chunk(selected_backend, handle, *, projection, **kwargs):
+        assert selected_backend is backend
+        backend.profiled.append(projection)
+        return TPSPScanResult(2, 2, 8, "candidate", "", config=1)
+
+    monkeypatch.setattr(tpsp_utils, "_scan_chunk", scan_chunk)
     groups = []
     for name in ("first", "second", "third"):
         projection = nn.Module()
@@ -906,20 +935,27 @@ def test_tpsp_profile_accepts_multiple_named_groups(monkeypatch):
 
     def check_threshold(selected_backend, selected_groups, handles, max_tokens):
         assert selected_backend is backend
-        assert selected_groups is groups
+        assert [entry.ops for entry in selected_groups] == groups
         assert list(handles) == [group.name for group in groups]
         assert max_tokens == 8
         return TPSPScanResult(2, 2, 8, "enabled", "", threshold_tokens=3)
 
-    monkeypatch.setattr(tpsp_utils, "scan_threshold", check_threshold)
+    monkeypatch.setattr(tpsp_utils, "_scan_threshold", check_threshold)
     context = backend.profile(groups, 8)
     assert context is not None
     assert backend.profiled == [group.projection for group in groups]
     assert list(context.handles) == [group.name for group in groups]
     assert len({id(handle) for handle in context.handles.values()}) == 3
+    assert backend.configs == [(handle, 1) for handle in context.handles.values()]
 
     with pytest.raises(ValueError, match="unique"):
         backend.profile([groups[0], groups[0]], 8)
     with pytest.raises(ValueError, match="named ops groups"):
         backend.profile([], 8)
     assert not backend.closed
+
+    groups[2].norm.variance_epsilon = 0
+    with pytest.raises(ValueError, match="norm_eps"):
+        backend.profile(groups, 8)
+    assert not backend.closed
+    assert len(backend.configs) == 3

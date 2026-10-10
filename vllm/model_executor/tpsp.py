@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""BF16 TPSP execution contexts and shared profiling utilities."""
+"""BF16 TPSP backends, execution contexts, and profiling utilities."""
 
 from __future__ import annotations
 
@@ -8,8 +8,10 @@ import logging
 import math
 import statistics
 import time
-from collections.abc import Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import torch
@@ -18,9 +20,57 @@ from torch import nn
 from torch.distributed import distributed_c10d as c10d
 
 _LOG = logging.getLogger(__name__)
-_EPS = 1e-5
 _TRIALS = 5
 _SCREEN_TRIALS = 5
+
+
+class TPSPBackend(ABC):
+    tpsp_chunk_granularity: int
+    tpsp_max_microchunk_tokens: int | None = None
+
+    def __init__(self, group_name: str, device: torch.device) -> None:
+        self.group_name = group_name
+        self.device = device
+        self._closed = False
+
+    @abstractmethod
+    def open(
+        self,
+        *,
+        dtype: torch.dtype,
+        tp_size: int,
+        hidden_size: int,
+        max_batched_tokens: int,
+        group_name: str,
+        device: torch.device,
+    ) -> Any | None: ...
+
+    def profile(
+        self,
+        ops_groups: list[TPSPOpsGroup],
+        max_batched_tokens: int,
+    ) -> TPSPContext | None:
+        """Select independent chunks and a shared threshold for ops groups."""
+        return profile_tpsp(self, ops_groups, max_batched_tokens)
+
+    @abstractmethod
+    def set_config(self, handle: object, config: object) -> None: ...
+
+    @abstractmethod
+    def fused_gemm_rs_norm_ag(
+        self,
+        projection_context: object,
+        x: torch.Tensor,
+        projection: nn.Module,
+        residual: torch.Tensor,
+        norm: nn.Module,
+        *,
+        config: object | None = None,
+        norm_type: str = "rms_norm",
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    @abstractmethod
+    def close(self, context: Any | None = None) -> None: ...
 
 
 @dataclass
@@ -92,6 +142,12 @@ class TPSPOpsGroup:
 
 
 @dataclass(frozen=True)
+class _CompiledOpsGroup:
+    ops: TPSPOpsGroup
+    conventional: Callable[[_ProjectionInputs], torch.Tensor]
+
+
+@dataclass(frozen=True)
 class TPSPContext:
     """Shared backend and named per-group handles."""
 
@@ -115,6 +171,70 @@ def tpsp_shard_residual(residual: torch.Tensor) -> torch.Tensor:
     shard = residual.new_zeros((rows, residual.size(1)))
     shard[:count] = residual[start : start + count]
     return shard
+
+
+def profile_tpsp(
+    backend: Any,
+    ops_groups: Sequence[TPSPOpsGroup],
+    max_batched_tokens: int,
+) -> TPSPContext | None:
+    """Profile named ops groups in four steps.
+
+    1. Connect each group's projection and norm into a runnable path.
+    2. Open a handle and select a chunk independently for each group.
+    3. Find one threshold from the sum of separately timed group paths.
+    4. Return a shared profile with the named handles, or use regular forward
+       if any scan is inconclusive or finds no benefit.
+    """
+    if backend is None:
+        raise ValueError("TPSP profiling requires a backend")
+
+    # Step 1: assemble runnable ops groups.
+    compiled = _compile_ops_groups(ops_groups)
+
+    from vllm.distributed.parallel_state import get_tp_group
+
+    group = get_tp_group()
+
+    def disabled(reason: str) -> TPSPContext | None:
+        _LOG.warning("TPSP using regular forward: %s", reason)
+        return None
+
+    started = time.perf_counter()
+    enabled = False
+    threshold = None
+    handles: dict[str, object] = {}
+    try:
+        # Step 2: select a chunk for each group.
+        if reason := _scan_group_chunks(
+            backend, compiled, group, max_batched_tokens, handles
+        ):
+            return disabled(reason)
+
+        # Step 3: scan one threshold using the sum of per-group timings.
+        measurement = _scan_threshold(backend, compiled, handles, max_batched_tokens)
+        if not measurement.enabled:
+            return disabled(
+                f"projection profile {measurement.status}: {measurement.reason}"
+            )
+
+        # Step 4: return the shared profile and named handles.
+        threshold = measurement.threshold_tokens
+        context = _build_tpsp_context(backend, handles, measurement, max_batched_tokens)
+        enabled = True
+        return context
+    finally:
+        if group.rank_in_group == 0:
+            _LOG.info(
+                "TPSP projection scan: elapsed=%.2fs threshold=%s enabled=%s",
+                time.perf_counter() - started,
+                threshold,
+                enabled,
+            )
+        if not enabled:
+            for handle in handles.values():
+                backend.close(handle)
+            backend.close()
 
 
 def _projection_inputs(
@@ -141,9 +261,7 @@ def _projection_inputs(
         generator=torch.Generator(device=device).manual_seed(407),
     )
     rows = math.ceil(tokens / tp_size)
-    padded = torch.zeros(
-        tp_size * rows, hidden_size, dtype=torch.bfloat16, device=device
-    )
+    padded = residual.new_zeros((tp_size * rows, hidden_size))
     padded[:tokens].copy_(residual)
     return _ProjectionInputs(
         hidden_states=a,
@@ -181,131 +299,138 @@ def _run_fused_projection(
     )[0]
 
 
-def profile_tpsp(
-    backend: Any,
+def _compile_ops_groups(
     ops_groups: Sequence[TPSPOpsGroup],
-    max_batched_tokens: int,
-) -> TPSPContext | None:
-    """Choose a chunk for each group, then one shared token threshold.
-
-    Each group gets its own backend context and chunk scan. The threshold
-    scan compares the sum of the fused groups against their normal paths.
-    If any scan is inconclusive or finds no benefit, use the normal path.
-    """
-    if backend is None:
-        raise ValueError("TPSP profiling requires a backend")
+) -> tuple[_CompiledOpsGroup, ...]:
+    """Connect each group's projection output to its normalization input."""
     if not ops_groups or any(not entry.name for entry in ops_groups):
         raise ValueError("TPSP profiling requires named ops groups")
     if len({entry.name for entry in ops_groups}) != len(ops_groups):
         raise ValueError("TPSP ops group names must be unique")
-
-    from vllm.distributed.parallel_state import get_tp_group
-
-    group = get_tp_group()
     hidden_size = ops_groups[0].norm.weight.numel()
     if any(entry.norm.weight.numel() != hidden_size for entry in ops_groups):
         raise ValueError("TPSP ops groups require matching norm hidden sizes")
-
-    def disabled(reason: str) -> TPSPContext | None:
-        _LOG.warning("TPSP using regular forward: %s", reason)
-        return None
-
-    parameter = ops_groups[0].projection.weight
-    started = time.perf_counter()
-    enabled = False
-    threshold = None
-    handles: dict[str, object] = {}
-    try:
-        for entry in ops_groups:
-            handle = backend.open(
-                dtype=parameter.dtype,
-                tp_size=group.world_size,
-                hidden_size=hidden_size,
-                max_batched_tokens=max_batched_tokens,
-                group_name=group.device_group.group_name,
-                device=parameter.device,
-            )
-            if handle is None:
-                return disabled(f"fused backend unavailable for {entry.name}")
-            handles[entry.name] = handle
-            candidate = backend.profile_projection(
-                handle,
-                projection=entry.projection,
-                norm=entry.norm,
-                tp_size=group.world_size,
-                hidden_size=hidden_size,
-                input_width=entry.projection.input_size_per_partition,
-                max_batched_tokens=max_batched_tokens,
-                norm_eps=entry.norm.variance_epsilon,
-                time_budget_s=240.0,
-            )
-            if candidate.status != "candidate" or candidate.config is None:
-                return disabled(
-                    f"{entry.name} chunk selection "
-                    f"{candidate.status}: {candidate.reason}"
-                )
-
-        measurement = scan_threshold(backend, ops_groups, handles, max_batched_tokens)
-        if not measurement.enabled:
-            return disabled(
-                f"projection profile {measurement.status}: {measurement.reason}"
-            )
-        threshold = measurement.threshold_tokens
-        if threshold is None or not 1 <= threshold <= max_batched_tokens:
-            raise RuntimeError("TPSP has an invalid enabled profile")
-        enabled = True
-        return TPSPContext(
-            TPSPProfile(True, threshold, max_batched_tokens),
-            backend,
-            handles,
+    for entry in ops_groups:
+        if entry.projection.input_size_per_partition <= 0:
+            raise ValueError("input_width must be positive")
+        if entry.norm.variance_epsilon <= 0:
+            raise ValueError("norm_eps must be positive")
+    return tuple(
+        _CompiledOpsGroup(
+            entry,
+            partial(_run_conventional_projection, entry.projection, entry.norm),
         )
-    finally:
-        if group.rank_in_group == 0:
-            _LOG.info(
-                "TPSP projection scan: elapsed=%.2fs threshold=%s enabled=%s",
-                time.perf_counter() - started,
-                threshold,
-                enabled,
+        for entry in ops_groups
+    )
+
+
+def _scan_group_chunks(
+    backend: Any,
+    groups: tuple[_CompiledOpsGroup, ...],
+    tp_group: Any,
+    max_batched_tokens: int,
+    handles: dict[str, object],
+) -> str | None:
+    """Select an independent chunk per group, retaining opened handles."""
+    if backend._closed:
+        raise RuntimeError("TPSP backend is closed")
+    granularity = backend.tpsp_chunk_granularity
+    if type(granularity) is not int or granularity <= 0:
+        raise ValueError("TPSP chunk granularity must be a positive integer")
+    parameter = groups[0].ops.projection.weight
+    hidden_size = groups[0].ops.norm.weight.numel()
+    if (
+        tp_group.world_size < 2
+        or hidden_size <= 0
+        or hidden_size % tp_group.world_size
+        or max_batched_tokens < 1
+    ):
+        return (
+            "requires supported TP, divisible hidden size and positive "
+            "max_batched_tokens"
+        )
+    for compiled in groups:
+        entry = compiled.ops
+        handle = backend.open(
+            dtype=parameter.dtype,
+            tp_size=tp_group.world_size,
+            hidden_size=hidden_size,
+            max_batched_tokens=max_batched_tokens,
+            group_name=tp_group.device_group.group_name,
+            device=parameter.device,
+        )
+        if handle is None:
+            return f"fused backend unavailable for {entry.name}"
+        handles[entry.name] = handle
+        candidate = _scan_chunk(
+            backend,
+            handle,
+            projection=entry.projection,
+            norm=entry.norm,
+            tp_size=tp_group.world_size,
+            max_batched_tokens=max_batched_tokens,
+            time_budget_s=240.0,
+        )
+        if candidate.status != "candidate" or candidate.config is None:
+            return (
+                f"{entry.name} chunk selection {candidate.status}: {candidate.reason}"
             )
-        if not enabled:
-            for handle in handles.values():
-                backend.close(handle)
-            backend.close()
+        backend.set_config(handle, candidate.config)
+    return None
+
+
+def _build_tpsp_context(
+    backend: Any,
+    handles: dict[str, object],
+    measurement: TPSPScanResult,
+    max_batched_tokens: int,
+) -> TPSPContext:
+    """Build the shared profile and named handles after a successful scan."""
+    threshold = measurement.threshold_tokens
+    if (
+        not measurement.enabled
+        or threshold is None
+        or not 1 <= threshold <= max_batched_tokens
+    ):
+        raise RuntimeError("TPSP has an invalid enabled profile")
+    return TPSPContext(
+        TPSPProfile(True, threshold, max_batched_tokens), backend, handles
+    )
 
 
 def _beneficial(measurement: TPSPMeasurement) -> bool:
     return measurement.lower_benefit_ms > max(0.05, 0.02 * measurement.conventional_ms)
 
 
+def _deadline_expired(
+    deadline: float, group: dist.ProcessGroup, device: torch.device
+) -> bool:
+    flag = torch.tensor(
+        [time.monotonic() >= deadline], dtype=torch.int32, device=device
+    )
+    dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
+    return bool(flag.item())
+
+
 @torch.inference_mode()
-def scan_threshold(
+def _scan_threshold(
     backend: Any,
-    ops_groups: Sequence[TPSPOpsGroup],
+    ops_groups: Sequence[_CompiledOpsGroup],
     handles: dict[str, object],
     max_batched_tokens: int,
 ) -> TPSPScanResult:
     """Compare the sum of the group timings with their normal paths."""
     group = c10d._resolve_process_group(backend.group_name)
     tp_size = dist.get_world_size(group)
-    hidden_size = ops_groups[0].norm.weight.numel()
+    hidden_size = ops_groups[0].ops.norm.weight.numel()
     rank = dist.get_rank(group)
     device = backend.device
-    entries = tuple(
-        (handles[entry.name], entry.projection, entry.norm) for entry in ops_groups
-    )
+    entries = tuple((handles[entry.ops.name], entry) for entry in ops_groups)
     deadline = time.monotonic() + 240.0
-
-    def expired() -> bool:
-        flag = torch.tensor(
-            [time.monotonic() >= deadline], dtype=torch.int32, device=device
-        )
-        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
-        return bool(flag.item())
 
     def measure(
         handle: object,
-        projection: nn.Module,
-        norm: nn.Module,
+        compiled: _CompiledOpsGroup,
         inputs: _ProjectionInputs,
         fused: bool,
     ) -> float:
@@ -315,9 +440,11 @@ def scan_threshold(
         torch.accelerator.synchronize(device)
         start = time.perf_counter()
         if fused:
-            result = _run_fused_projection(backend, handle, projection, norm, inputs)
+            result = _run_fused_projection(
+                backend, handle, compiled.ops.projection, compiled.ops.norm, inputs
+            )
         else:
-            result = _run_conventional_projection(projection, norm, inputs)
+            result = compiled.conventional(inputs)
         torch.accelerator.synchronize(device)
         elapsed = torch.tensor(
             [(time.perf_counter() - start) * 1000], dtype=torch.float64, device=device
@@ -328,25 +455,25 @@ def scan_threshold(
 
     def measure_size(tokens: int) -> TPSPMeasurement | None:
         data = tuple(
-            _projection_inputs(tokens, projection, hidden_size, tp_size, rank, device)
-            for handle, projection, norm in entries
+            _projection_inputs(
+                tokens, compiled.ops.projection, hidden_size, tp_size, rank, device
+            )
+            for _, compiled in entries
         )
-        for (handle, projection, norm), inputs in zip(entries, data):
-            measure(handle, projection, norm, inputs, False)
-            measure(handle, projection, norm, inputs, True)
+        for (handle, compiled), inputs in zip(entries, data):
+            measure(handle, compiled, inputs, False)
+            measure(handle, compiled, inputs, True)
         conventional: list[float] = []
         fused: list[float] = []
         for trial in range(_TRIALS):
             order = (False, True) if trial % 2 == 0 else (True, False)
             timings = {False: 0.0, True: 0.0}
-            for (handle, projection, norm), inputs in zip(entries, data):
+            for (handle, compiled), inputs in zip(entries, data):
                 for enabled in order:
-                    timings[enabled] += measure(
-                        handle, projection, norm, inputs, enabled
-                    )
+                    timings[enabled] += measure(handle, compiled, inputs, enabled)
             conventional.append(timings[False])
             fused.append(timings[True])
-            if expired():
+            if _deadline_expired(deadline, group, device):
                 return None
         savings = [normal - sp for normal, sp in zip(conventional, fused)]
         lower = statistics.mean(savings) - 2.776 * statistics.stdev(
@@ -388,7 +515,7 @@ def scan_threshold(
         threshold = max_batched_tokens
     status = "enabled" if threshold is not None else "disabled"
     reason = "" if threshold is not None else "no sustained summed TPSP benefit"
-    if expired():
+    if _deadline_expired(deadline, group, device):
         status, reason, threshold = (
             "inconclusive",
             "projection profiling time budget exceeded",
@@ -408,68 +535,34 @@ def scan_threshold(
     return profile
 
 
-def scan_chunk(
+def _scan_chunk(
     backend: Any,
     projection_context: object,
     projection: nn.Module,
     norm: nn.Module,
     tp_size: int,
-    hidden_size: int,
-    input_width: int,
     max_batched_tokens: int,
     time_budget_s: float,
-    norm_eps: float = _EPS,
 ) -> TPSPScanResult:
     """Screen chunks, retest the finalists, and check numerical parity.
 
     Returns:
         TPSPScanResult with candidate timings and the selected chunk in ``config``.
-        The paired projection profile determines the token threshold.
+        The shared group profile determines the token threshold.
 
     """
-    if backend._closed:
-        raise RuntimeError("TPSP backend is closed")
-    if projection_context is None:
-        raise ValueError("TPSP requires a projection context")
     device = backend.device
-    group_name = backend.group_name
     chunk_granularity = backend.tpsp_chunk_granularity
-    if type(chunk_granularity) is not int or chunk_granularity <= 0:
-        raise ValueError("TPSP chunk granularity must be a positive integer")
+    hidden_size = norm.weight.numel()
+    input_width = projection.input_size_per_partition
     if time_budget_s <= 0:
         raise ValueError("time_budget_s must be positive")
-
-    if (
-        tp_size < 2
-        or hidden_size <= 0
-        or hidden_size % tp_size
-        or max_batched_tokens < 1
-    ):
-        return TPSPScanResult(
-            tp_size,
-            hidden_size,
-            max_batched_tokens,
-            "unsupported",
-            "requires supported TP, divisible hidden size and positive "
-            "max_batched_tokens",
-        )
-    if input_width <= 0:
-        raise ValueError("input_width must be positive")
-    if norm_eps <= 0:
-        raise ValueError("norm_eps must be positive")
-    group = c10d._resolve_process_group(group_name)
+    group = c10d._resolve_process_group(backend.group_name)
     if dist.get_world_size(group) != tp_size:
         raise ValueError("group_name and tp_size disagree")
     rank = dist.get_rank(group)
     shard_rows = math.ceil(max_batched_tokens / tp_size)
     deadline = time.monotonic() + time_budget_s
-
-    def expired() -> bool:
-        flag = torch.tensor(
-            [time.monotonic() >= deadline], dtype=torch.int32, device=device
-        )
-        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group)
-        return bool(flag.item())
 
     def make_inputs(tokens: int) -> _ProjectionInputs:
         return _projection_inputs(
@@ -514,12 +607,12 @@ def scan_chunk(
     def score_chunk_ms(chunk: int, inputs: _ProjectionInputs) -> float | None:
         """Warm up, then score the second-fastest of five slowest-rank trials."""
         time_chunk_ms(inputs, chunk)
-        if expired():
+        if _deadline_expired(deadline, group, device):
             return None
         timings = []
         for _ in range(_SCREEN_TRIALS):
             timings.append(time_chunk_ms(inputs, chunk))
-            if expired():
+            if _deadline_expired(deadline, group, device):
                 return None
         return sorted(timings)[1]
 
@@ -529,12 +622,12 @@ def scan_chunk(
     max_chunk_rows = math.ceil(shard_rows / chunk_granularity) * chunk_granularity
     if backend.tpsp_max_microchunk_tokens is not None:
         cap_rows = math.ceil(backend.tpsp_max_microchunk_tokens / tp_size)
-        max_chunk_rows = min(
-            max_chunk_rows,
+        cap_rows = (
             cap_rows // chunk_granularity * chunk_granularity
             if cap_rows >= chunk_granularity
-            else cap_rows,
+            else cap_rows
         )
+        max_chunk_rows = min(max_chunk_rows, cap_rows)
     for chunk in range(
         min(chunk_granularity, max_chunk_rows),
         max_chunk_rows + 1,

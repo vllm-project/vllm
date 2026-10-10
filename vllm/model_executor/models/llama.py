@@ -55,10 +55,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.tpsp import TPSPContext, TPSPOpsGroup, tpsp_shard_residual
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.worker.tpsp_utils import TPSPContext, TPSPOpsGroup, tpsp_shard_residual
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
