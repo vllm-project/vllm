@@ -30,6 +30,47 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 
+def _validate_decode_checkpoints(
+    retention_interval: int | None,
+    enable_caching: bool,
+    use_eagle: bool,
+    scheduler_block_size: int,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    if not enable_caching:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires prefix caching to be enabled."
+        )
+    if use_eagle:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint is not compatible with hidden-state "
+            "speculative decoding."
+        )
+    if retention_interval != 0:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires prefix_cache_retention_interval=0."
+        )
+    mamba_specs = [
+        group.kv_cache_spec
+        for group in kv_cache_config.kv_cache_groups
+        if isinstance(group.kv_cache_spec, MambaSpec)
+    ]
+    if not mamba_specs:
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires a Mamba KV cache group."
+        )
+    if any(spec.mamba_cache_mode != "align" for spec in mamba_specs):
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires all Mamba KV cache groups "
+            "to use mamba_cache_mode='align'."
+        )
+    if any(spec.block_size != scheduler_block_size for spec in mamba_specs):
+        raise ValueError(
+            "enable_mamba_decode_checkpoint requires every Mamba block size to "
+            "equal scheduler_block_size."
+        )
+
+
 def _validate_prefix_cache_retention_interval(
     retention_interval: int | None,
     scheduler_block_size: int,
@@ -162,6 +203,7 @@ class KVCacheCoordinator(ABC):
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
+        self.retain_decode_checkpoints = False
 
     def get_num_blocks_to_allocate(
         self,
@@ -389,6 +431,42 @@ class KVCacheCoordinator(ABC):
             manager.block_pool for manager in self.single_type_managers
         )
         return all([pool.reset_prefix_cache() for pool in pools])
+
+    def enable_decode_checkpoints(self) -> None:
+        """Enable ``CacheConfig.enable_mamba_decode_checkpoint``."""
+        _validate_decode_checkpoints(
+            self.retention_interval,
+            self.block_pool.enable_caching,
+            bool(self.eagle_group_ids),
+            self.scheduler_block_size,
+            self.kv_cache_config,
+        )
+        self.retain_decode_checkpoints = True
+
+    def update_decode_checkpoint_candidates(
+        self, request: Request, materialized_tokens: int
+    ) -> None:
+        """Privately retain newly materialized recurrent decode states."""
+        if not self.retain_decode_checkpoints:
+            return
+        for manager in self.single_type_managers:
+            manager.update_decode_checkpoint_candidate(request, materialized_tokens)
+
+    def finalize_decode_checkpoints(
+        self, request: Request, materialized_tokens: int, keep: bool
+    ) -> None:
+        """Publish stopped-finish candidates, or discard their private pins."""
+        managers = iter(self.single_type_managers)
+        try:
+            for manager in managers:
+                manager.finalize_decode_checkpoints(request, materialized_tokens, keep)
+        finally:
+            # A manager releases its own pins in a finally block. If promotion
+            # raises, discard candidates belonging to groups not yet visited.
+            for manager in managers:
+                manager.finalize_decode_checkpoints(
+                    request, materialized_tokens, keep=False
+                )
 
     def free(self, request_id: str) -> None:
         """Free the blocks for the request.

@@ -343,6 +343,9 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+            enable_mamba_decode_checkpoint=(
+                self.cache_config.enable_mamba_decode_checkpoint
+            ),
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
@@ -2195,6 +2198,9 @@ class Scheduler(SchedulerInterface):
                 request.resumable = False
                 stopped = True
 
+            if not output_is_stale:
+                self.kv_cache_manager.update_decode_checkpoint_candidates(request)
+
             routed_experts = None
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
@@ -2717,6 +2723,10 @@ class Scheduler(SchedulerInterface):
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
+        self.kv_cache_manager.finalize_decode_checkpoints(
+            request,
+            keep=request.status == RequestStatus.FINISHED_STOPPED,
+        )
         self._inflight_prefills.discard(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
