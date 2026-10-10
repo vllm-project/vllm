@@ -26,6 +26,7 @@ const OFFLOADED_PATHS: &[&str] = &[
     // HTTP routes:
     "/v1/chat/completions",
     "/v1/completions",
+    "/v1/responses",
     "/tokenize",
     "/detokenize",
     "/inference/v1/generate",
@@ -121,6 +122,7 @@ mod tests {
     fn offloads_generation_and_tokenization_paths() {
         assert!(should_offload("/v1/chat/completions"));
         assert!(should_offload("/v1/completions"));
+        assert!(should_offload("/v1/responses"));
         assert!(should_offload("/tokenize"));
         assert!(should_offload("/detokenize"));
         assert!(should_offload("/inference/v1/generate"));

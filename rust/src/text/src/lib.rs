@@ -78,6 +78,11 @@ impl TextRequestProcessor {
         self.backend.tokenizer()
     }
 
+    /// Return the model defaults used when lowering sampling parameters.
+    pub fn sampling_hints(&self) -> Result<SamplingHints> {
+        self.backend.sampling_hints()
+    }
+
     /// Return the effective model context length.
     pub fn max_model_len(&self) -> u32 {
         self.max_model_len
@@ -151,7 +156,7 @@ impl TextRequestProcessor {
             request.sampling_params.max_tokens,
         )?;
         let tokenizer = self.backend.tokenizer();
-        let sampling_hints = self.backend.sampling_hints()?;
+        let sampling_hints = self.sampling_hints()?;
         let sampling_limits = SamplingLimits {
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,

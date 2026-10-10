@@ -50,6 +50,8 @@ use crate::utils;
 pub struct Tool {
     pub name: String,
     pub description: Option<String>,
+    /// Function tools may omit a schema when they take no arguments.
+    #[serde(default)]
     pub parameters: Value,
     pub strict: Option<bool>,
     /// Whether the tool's schema is loaded on demand (tool search). Only chat
