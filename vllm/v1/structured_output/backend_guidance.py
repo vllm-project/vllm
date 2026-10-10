@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from transformers import TokenizersBackend
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -128,6 +130,37 @@ def process_for_additional_properties(
 
 @dataclass
 class GuidanceBackend(StructuredOutputBackend):
+    @staticmethod
+    def is_tokenizer_supported(tokenizer: TokenizerLike) -> bool:
+        """Check if tokenizer is supported by guidance backend.
+
+        TODO(arpera):
+        guidance backend does NOT support some types of tokenizers
+        so, we MUST verify tokenizer before using guidance
+        The problem is that guidance API does not provide
+        a way to validate tokenizer before building LLTokenizer
+        So, we have to do it manually here in vLLM.
+        This is ofcourse very bad, we duplicate complex logic
+        that can change arbitrary in future.
+        Our check here is based on guidance source code
+        on function `from_tokenizer` implementation:
+        https://github.com/guidance-ai/llguidance/blob/main/python/llguidance/hf.py#L29-L47
+        If you want to contribute to vLLM, please, add to llguidance
+        API function to implement this check there.
+        In that case we will remove this check from vLLM.
+        That kind of work is really appreciated!
+        """
+        if is_mistral_tokenizer(tokenizer):
+            return tokenizer.is_tekken
+        # PreTrainedTokenizerFast is the same as TokenizersBackend
+        return isinstance(tokenizer, TokenizersBackend)
+
+    @staticmethod
+    def _build_ll_tokenizer(tokenizer: TokenizerLike, vocab_size: int) -> Any:
+        if is_mistral_tokenizer(tokenizer):
+            return tokenizer.llg_tokenizer
+        return llguidance_hf.from_tokenizer(tokenizer, max(vocab_size, len(tokenizer)))
+
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
@@ -136,12 +169,13 @@ class GuidanceBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_additional_properties
         )
 
-        if is_mistral_tokenizer(self.tokenizer):
-            self.ll_tokenizer = self.tokenizer.llg_tokenizer
-        else:
-            self.ll_tokenizer = llguidance_hf.from_tokenizer(
-                self.tokenizer, max(self.vocab_size, len(self.tokenizer))
+        if not self.is_tokenizer_supported(self.tokenizer):
+            raise ValueError(
+                "Only fast tokenizers are supported."
+                "This error should NOT happen,"
+                "if you see this, please report an issue."
             )
+        self.ll_tokenizer = self._build_ll_tokenizer(self.tokenizer, self.vocab_size)
 
     def compile_grammar(
         self,

@@ -98,7 +98,7 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -145,9 +145,7 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             draft_attn_metadata,
             self.vllm_config,
             num_tokens=num_tokens,
-            num_tokens_across_dp=(
-                dp_sync.num_tokens_across_dp if dp_sync is not None else None
-            ),
+            num_tokens_across_dp=dp_sync_state and dp_sync_state.num_tokens_across_dp,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             slot_mapping=draft_slot_mappings,
             is_padding=input_batch.is_padding[:num_tokens],

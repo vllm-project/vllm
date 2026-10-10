@@ -1,0 +1,4 @@
+interface:
+  display_name: "Transformers Upgrade"
+  short_description: "Bump vLLM's Transformers version and delete vendored code upstream now provides."
+  default_prompt: "Use $transformers-upgrade to raise the minimum Transformers version and remove vendored configs, processors, and shims it makes redundant."

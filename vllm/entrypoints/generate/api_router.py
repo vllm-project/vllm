@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
+
+logger = init_logger(__name__)
 
 
 def register_generate_api_routers(app: FastAPI):
@@ -230,16 +233,11 @@ async def init_generate_state(
     from .structured_decisions.serving import ServingStructuredDecisions
     from .structured_decisions.strategies import ReadContext, select_read_strategy
 
-    strategy_cls = (
-        select_read_strategy(engine_client.model_config)
-        if "generate" in supported_tasks
-        and getattr(args, "enable_structured_decisions", False)
-        else None
-    )
-    state.serving_structured_decisions = (
-        ServingStructuredDecisions(
-            state.openai_serving_models,
-            strategy_cls(
+    strategy = None
+    if "generate" in supported_tasks:
+        try:
+            strategy_cls = select_read_strategy(engine_client.model_config)
+            strategy = strategy_cls(
                 ReadContext(
                     engine_client=engine_client,
                     online_renderer=state.online_renderer,
@@ -247,9 +245,17 @@ async def init_generate_state(
                     chat_template_content_format=args.chat_template_content_format,
                     default_chat_template_kwargs=default_chat_template_kwargs,
                 )
-            ),
+            )
+        except ValueError as e:
+            # Info, since every model without a read strategy lands here.
+            logger.info("/v1/systemone is disabled: %s", e)
+            strategy = None
+    state.serving_structured_decisions = (
+        ServingStructuredDecisions(
+            state.openai_serving_models,
+            strategy,
             request_logger=request_logger,
         )
-        if strategy_cls is not None
+        if strategy is not None
         else None
     )
