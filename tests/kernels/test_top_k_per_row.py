@@ -346,6 +346,26 @@ def _run_top_k_per_row_decode_test(
     ), "CUDA top_k_per_row_decode results don't match torch.topk"
 
 
+@pytest.mark.parametrize("top_k", [-1, 0, 8193, 12288, 2**32 + 2048])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
+)
+def test_top_k_per_row_decode_rejects_invalid_top_k(top_k: int) -> None:
+    """Reject unsupported widths before launching any decode kernel."""
+    vocab_size = 65536
+    logits = torch.zeros((1, vocab_size), dtype=torch.float32, device="cuda")
+    seq_lens = torch.full((1,), vocab_size, dtype=torch.int32, device="cuda")
+    indices = torch.full((1, 12288), -1, dtype=torch.int32, device="cuda")
+
+    with pytest.raises(RuntimeError, match="topK must be in \\[1, 8192\\]"):
+        _run_topk_backend(
+            "top_k_per_row_decode", logits, seq_lens, indices, top_k, vocab_size
+        )
+
+    torch.accelerator.synchronize()
+    assert torch.all(indices == -1)
+
+
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
 @pytest.mark.parametrize("next_n", NEXT_N)
