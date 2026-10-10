@@ -512,8 +512,10 @@ nixl_stats = {
     "bytes_transferred": [4096, 8192],
     "num_descriptors": [2, 4],
     "num_failed_transfers": [],
-    "num_failed_notifications": [],
+    "num_failed_notifications": [1],
+    "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
+    "num_notifications_after_expiry": [2],
 }
 mooncake_stats = {
     "load_get": [

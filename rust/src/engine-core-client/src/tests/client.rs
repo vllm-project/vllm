@@ -21,6 +21,7 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
+use crate::metrics::SchedulerStatsRecorder;
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
@@ -41,6 +42,7 @@ use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
+use crate::transport::ConnectedEngine;
 use crate::{
     CoordinatorMode, ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
     Error, TransportMode,
@@ -2721,7 +2723,7 @@ async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
 }
 
 #[test]
-fn python_msgpack_fixtures_match_rust_encoding() {
+fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     init_tracing();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/python_compat.py");
     let output = Command::new(&script)
@@ -2944,12 +2946,55 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
-    assert!(matches!(
-        multi_connector_stats,
-        KvConnectorStats::Multi(stats)
-            if stats.nixl.is_some()
-                && stats.mooncake.is_some()
-                && stats.other.contains_key("UnsupportedConnector")
+    let KvConnectorStats::Multi(multi_connector_stats) = multi_connector_stats else {
+        panic!("Python MultiConnector stats should decode as Multi");
+    };
+    assert!(multi_connector_stats.mooncake.is_some());
+    assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
+    let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
+    assert_eq!(nixl_stats.num_failed_handshakes, [1]);
+    assert_eq!(nixl_stats.num_notifications_after_expiry, [2]);
+
+    let metrics = vllm_metrics::Metrics::new();
+    let recorder = SchedulerStatsRecorder::new(
+        &metrics.scheduler,
+        "test-model",
+        &[ConnectedEngine {
+            engine_id: EngineId::from_engine_index(0),
+            ready_response: crate::mock_engine::default_ready_response(),
+        }],
+    );
+    recorder.record(
+        0,
+        &SchedulerStats {
+            kv_connector_stats: Some(KvConnectorStats::Multi(multi_connector_stats)),
+            ..Default::default()
+        },
+    );
+    let rendered_metrics = metrics.render().unwrap();
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_xfer_time_seconds_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_count{model_name=\"test-model\",engine=\"0\"} 2"
+        )
+    );
+    assert!(
+        rendered_metrics.contains(
+            "vllm:nixl_bytes_transferred_sum{model_name=\"test-model\",engine=\"0\"} 12288"
+        )
+    );
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_transfers_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_failed_notifications_total{model_name=\"test-model\",engine=\"0\"} 1"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
     ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {

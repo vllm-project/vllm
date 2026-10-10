@@ -97,6 +97,7 @@ struct SchedulerStatsHandles {
     nixl_num_failed_transfers: U64Counter,
     nixl_num_failed_notifications: U64Counter,
     nixl_num_kv_expired_reqs: U64Counter,
+    nixl_num_notifications_after_expiry: U64Counter,
 
     // Non-Prometheus interval accumulator for periodic text-log helpers.
     log_stats: SchedulerLogStatsAccumulator,
@@ -214,6 +215,9 @@ fn resolve_scheduler_stats_handles(
             .nixl_num_failed_notifications
             .get_or_create_owned(&labels),
         nixl_num_kv_expired_reqs: metrics.nixl_num_kv_expired_reqs.get_or_create_owned(&labels),
+        nixl_num_notifications_after_expiry: metrics
+            .nixl_num_notifications_after_expiry
+            .get_or_create_owned(&labels),
         labels,
     }
 }
@@ -372,13 +376,21 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
     for value in &stats.num_descriptors {
         handles.nixl_num_descriptors.observe(*value as f64);
     }
-    handles
-        .nixl_num_failed_transfers
-        .inc_by(stats.num_failed_transfers.iter().sum());
+    handles.nixl_num_failed_transfers.inc_by(
+        stats
+            .num_failed_transfers
+            .iter()
+            .chain(&stats.num_failed_handshakes)
+            .chain(&stats.num_failed_notifications)
+            .sum(),
+    );
     handles
         .nixl_num_failed_notifications
         .inc_by(stats.num_failed_notifications.iter().sum());
     handles.nixl_num_kv_expired_reqs.inc_by(stats.num_kv_expired_reqs.iter().sum());
+    handles
+        .nixl_num_notifications_after_expiry
+        .inc_by(stats.num_notifications_after_expiry.iter().sum());
 }
 
 /// Exports `vllm:lora_requests_info` as a single series covering all LoRA
@@ -500,8 +512,10 @@ mod tests {
             bytes_transferred: vec![4096, 8192],
             num_descriptors: vec![2, 4],
             num_failed_transfers: vec![],
-            num_failed_notifications: vec![],
+            num_failed_notifications: vec![1],
+            num_failed_handshakes: vec![1],
             num_kv_expired_reqs: vec![1],
+            num_notifications_after_expiry: vec![2],
         }
     }
 
@@ -553,6 +567,14 @@ mod tests {
                 "vllm:nixl_num_kv_expired_reqs_total{model_name=\"model\",engine=\"0\"} 1"
             )
         );
+        assert!(
+            rendered.contains(
+                "vllm:nixl_num_failed_transfers_total{model_name=\"model\",engine=\"0\"} 2"
+            )
+        );
+        assert!(rendered.contains(
+            "vllm:nixl_num_notifications_after_expiry_total{model_name=\"model\",engine=\"0\"} 2"
+        ));
         assert!(
             rendered
                 .contains("vllm:nixl_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 2")
