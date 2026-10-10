@@ -182,6 +182,12 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
                 ParserState.TOOL_ARGS,
                 (EventType.ARG_VALUE_CHUNK,),
             ),
+            # Stray opener recovery: close the phantom call, start fresh.
+            # TOOL_ARGS stays as-is so quoted tags in values round-trip.
+            (ParserState.TOOL_NAME, "TOOL_START"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
+            ),
             (ParserState.TOOL_NAME, "TOOL_END"): Transition(
                 ParserState.CONTENT,
                 (EventType.TOOL_CALL_END,),
