@@ -748,6 +748,53 @@ def test_fa4_hd256_mm_prefix_deselects_flash_attn():
         )
 
 
+def test_flash_attn_bf16_fp16_mismatch_deselects_flash_attn():
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    reason = FlashAttentionBackend.supports_combination(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="float16",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        device_capability=DeviceCapability(9, 0),
+    )
+    assert reason is not None
+    assert "same dtype" in reason
+
+    reason_fp16_bf16 = FlashAttentionBackend.supports_combination(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="bfloat16",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        device_capability=DeviceCapability(9, 0),
+    )
+    assert reason_fp16_bf16 is not None
+    assert "same dtype" in reason_fp16_bf16
+
+    assert (
+        FlashAttentionBackend.supports_combination(
+            head_size=128,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="bfloat16",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            device_capability=DeviceCapability(9, 0),
+        )
+        is None
+    )
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda()
     or not current_platform.is_device_capability_family(100),
