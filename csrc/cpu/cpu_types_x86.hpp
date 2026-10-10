@@ -738,6 +738,21 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
 
+  // de-pack 4 bit values: value holds 16 4-bit indices (LSB first) used to
+  // look up the corresponding entry in `lut`. AVX2 has no 16-lane permute, so
+  // gather the entries with a portable scalar loop.
+  explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
+    alignas(32) float lut_values[VEC_ELEM_NUM];
+    _mm256_store_ps(lut_values, lut.reg_low);
+    _mm256_store_ps(lut_values + 8, lut.reg_high);
+    alignas(32) float unpacked[VEC_ELEM_NUM];
+    for (int32_t i = 0; i < VEC_ELEM_NUM; ++i) {
+      unpacked[i] = lut_values[(value >> (4 * i)) & 0xF];
+    }
+    reg_low = _mm256_load_ps(unpacked);
+    reg_high = _mm256_load_ps(unpacked + 8);
+  }
+
   FP32Vec16 operator*(const FP32Vec16& b) const {
     return FP32Vec16(_mm256_mul_ps(reg_low, b.reg_low),
                      _mm256_mul_ps(reg_high, b.reg_high));
