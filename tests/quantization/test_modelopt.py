@@ -134,6 +134,100 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head(moe_activation):
     assert method.spec.activation is kNvfp4Dynamic
 
 
+def _nvfp4_linear_for_scale_check(monkeypatch, *, w4a16: bool):
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.select_linear_kernel",
+        lambda *args, **kwargs: kernel,
+    )
+    config = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4" if w4a16 else "NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+    )
+    layer = MergedColumnParallelLinear(
+        64,
+        [64, 64],
+        bias=False,
+        quant_config=config,
+        prefix="test.gate_up_proj",
+        disable_tp=True,
+    )
+    layer.weight_scale.data.fill_(1)
+    return layer
+
+
+def test_modelopt_nvfp4_rejects_missing_fused_global_scale(monkeypatch):
+    """Loading one fused shard must not mark the other shard as loaded."""
+    layer = _nvfp4_linear_for_scale_check(monkeypatch, w4a16=True)
+    scale = layer.weight_scale_2
+    scale.weight_loader(scale, torch.tensor(1.0), 0)
+
+    with pytest.raises(ValueError, match=r"weight_scale_2.*partitions \[1\]"):
+        layer.quant_method.process_weights_after_loading(layer)
+
+
+def test_modelopt_nvfp4_rejects_absent_global_scale(monkeypatch):
+    """An expected scale parameter may exist without any checkpoint key."""
+    layer = _nvfp4_linear_for_scale_check(monkeypatch, w4a16=True)
+
+    with pytest.raises(ValueError, match=r"weight_scale_2.*partitions \[0, 1\]"):
+        layer.quant_method.process_weights_after_loading(layer)
+
+
+def test_modelopt_nvfp4_rejects_missing_input_scale(monkeypatch):
+    """W4A4 requires its activation scale on every fused partition."""
+    layer = _nvfp4_linear_for_scale_check(monkeypatch, w4a16=False)
+    weight_scale = layer.weight_scale_2
+    input_scale = layer.input_scale
+    for shard_id in (0, 1):
+        weight_scale.weight_loader(weight_scale, torch.tensor(1.0), shard_id)
+    input_scale.weight_loader(input_scale, torch.tensor(1.0), 0)
+
+    with pytest.raises(ValueError, match=r"input_scale.*partitions \[1\]"):
+        layer.quant_method.process_weights_after_loading(layer)
+
+
+@pytest.mark.parametrize("w4a16", [False, True])
+def test_modelopt_nvfp4_accepts_loaded_global_scales(monkeypatch, w4a16):
+    """Complete W4A4 and W4A16 checkpoint scales pass validation."""
+    layer = _nvfp4_linear_for_scale_check(monkeypatch, w4a16=w4a16)
+    scale = layer.weight_scale_2
+    if w4a16:
+        scale.weight_loader(scale, torch.tensor(1.0))
+    else:
+        for shard_id in (0, 1):
+            scale.weight_loader(scale, torch.tensor(1.0), shard_id)
+        input_scale = layer.input_scale
+        for shard_id in (0, 1):
+            input_scale.weight_loader(input_scale, torch.tensor(1.0), shard_id)
+
+    layer.quant_method.process_weights_after_loading(layer)
+    layer.quant_method.kernel.process_weights_after_loading.assert_called_once_with(
+        layer
+    )
+
+
+def test_modelopt_nvfp4_rejects_invalid_loaded_scale(monkeypatch):
+    """A present checkpoint key must still contain a usable global scale."""
+    layer = _nvfp4_linear_for_scale_check(monkeypatch, w4a16=True)
+    scale = layer.weight_scale_2
+    scale.weight_loader(scale, torch.tensor(1.0), 0)
+    scale.weight_loader(scale, torch.tensor(0.0), 1)
+
+    with pytest.raises(ValueError, match=r"weight_scale_2.*partitions \[1\]"):
+        layer.quant_method.process_weights_after_loading(layer)
+
+
 def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
     """Standard MXFP8 checkpoints already have one scale row per weight row."""
     from vllm.model_executor.layers.linear import ReplicatedLinear

@@ -1951,6 +1951,51 @@ class QuantKeyScheme:
         layer.register_parameter(name, p)
 
 
+def _track_nvfp4_global_scale(layer, name: str) -> None:
+    """Record which partitions were populated by the checkpoint loader."""
+    param = getattr(layer, name)
+    original_loader = param.weight_loader
+    loaded: set[int] = set()
+    layer._modelopt_loaded_global_scales[name] = loaded
+
+    def tracked_loader(param, loaded_weight, *args, **kwargs):
+        result = original_loader(param, loaded_weight, *args, **kwargs)
+        if result is False:
+            return result
+        shard_id = (
+            args[0] if args else kwargs.get("loaded_shard_id", kwargs.get("shard_id"))
+        )
+        if shard_id is None:
+            loaded.update(range(param.shape[0]))
+        elif isinstance(shard_id, tuple):
+            loaded.update(shard_id)
+        else:
+            loaded.add(param._shard_id_as_int(shard_id))
+        return result
+
+    param.weight_loader = tracked_loader
+
+
+def _check_nvfp4_global_scale(layer, name: str) -> None:
+    """Reject missing checkpoint partitions and invalid loaded global scales."""
+    scale = getattr(layer, name)
+    loaded = getattr(layer, "_modelopt_loaded_global_scales", {}).get(name)
+    if loaded is not None:
+        missing = sorted(set(range(scale.shape[0])) - loaded)
+        if missing:
+            raise ValueError(
+                f"ModelOpt NVFP4 {name} was not loaded from the checkpoint "
+                f"for output partitions {missing} in layer "
+                f"{getattr(layer, 'prefix', repr(layer))!r}"
+            )
+    invalid = (~torch.isfinite(scale) | (scale <= 0)).nonzero(as_tuple=True)[0]
+    if invalid.numel():
+        raise ValueError(
+            f"ModelOpt NVFP4 {name} has invalid values in output partitions "
+            f"{invalid.tolist()} of layer {getattr(layer, 'prefix', repr(layer))!r}"
+        )
+
+
 class KNvfp4Static(QuantKeyScheme):
     """NVFP4 weight scheme (W4A4 and W4A16 share it). Weight-role only today."""
 
@@ -2004,6 +2049,7 @@ class KNvfp4Static(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
+        _check_nvfp4_global_scale(layer, "weight_scale_2")
         # Sanity-check: weight_scale must have been overwritten by the weight
         # loader. A value still equal to the NaN sentinel it was created with
         # means the FP4 weights were never actually loaded (e.g. the
@@ -2052,6 +2098,7 @@ class KNvfp4Dynamic(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is not ACT:
             self.reject(role)
+        _check_nvfp4_global_scale(layer, "input_scale")
         if torch.unique(layer.input_scale).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global input scale differs across "
@@ -2560,6 +2607,12 @@ class ModelOptLinearMethod(LinearMethodBase):
         if self.akey:
             self.akey.create_weights(layer, ACT, self.ctx, shapes, weight_loader)
         self.fmt.extra_weights(layer, shapes, self.ctx, weight_loader)
+
+        if self.spec.weight == kNvfp4Static:
+            layer._modelopt_loaded_global_scales = {}
+            _track_nvfp4_global_scale(layer, "weight_scale_2")
+            if self.akey is not None:
+                _track_nvfp4_global_scale(layer, "input_scale")
 
         rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
         self.kernel = select_linear_kernel(
