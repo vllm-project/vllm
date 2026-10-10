@@ -74,11 +74,14 @@ def inv_rope_bf16_o_proj(
     rope_pairs.copy_(torch.cat((x0 * cos + x1 * sin, x1 * cos - x0 * sin), dim=-1))
 
     wo_a_weight = getattr(wo_a, "weight", None)
-    wo_a_input_size = (
-        wo_a_weight.shape[-1]
-        if wo_a_weight is not None and wo_a_weight.ndim >= 2
-        else getattr(wo_a, "input_size", heads_per_group * head_dim)
-    )
+    # Packed Marlin weights have storage dimensions, not the logical input size.
+    wo_a_input_size = getattr(wo_a, "input_size", None)
+    if wo_a_input_size is None:
+        wo_a_input_size = (
+            wo_a_weight.shape[-1]
+            if wo_a_weight is not None and wo_a_weight.ndim >= 2
+            else heads_per_group * head_dim
+        )
     flattened_size = num_heads * head_dim
     if flattened_size % wo_a_input_size != 0:
         raise ValueError(
