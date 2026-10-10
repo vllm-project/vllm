@@ -202,7 +202,6 @@ def test_non_string_arg_still_deserialized() -> None:
 
 # ---------------------------------------------------------------------------
 # Bug 3: stray ``arg_key`` tags must not leak into the argument key
-# (same backtracking leak as vllm-project/vllm#54971 / #54678)
 # ---------------------------------------------------------------------------
 
 
@@ -224,13 +223,7 @@ def test_non_string_arg_still_deserialized() -> None:
     ],
 )
 def test_extract_tool_calls_ignores_stray_arg_key_tags(raw_args: str) -> None:
-    """A stray ``arg_key`` tag must not leak into the parsed key.
-
-    ``func_arg_regex``'s key group used to be a plain ``.*?``, which
-    backtracks past the first ``</arg_key>`` to reach the following
-    ``<arg_value>``, absorbing the stray tag into the key -- the same leak
-    fixed for GLM-4.7 in #54971.
-    """
+    """A stray ``arg_key`` tag must not leak into the parsed key."""
     request = _build_chat_request(tool_choice="auto")
     parser = _make_parser(request)
     model_output = f"<tool_call>write_file\n{raw_args}\n</tool_call>"
