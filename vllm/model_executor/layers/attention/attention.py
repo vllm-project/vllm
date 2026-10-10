@@ -12,6 +12,7 @@ from vllm.config import (
     CacheConfig,
     get_current_vllm_config,
 )
+from vllm.config.cache import CacheDType
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -56,6 +57,25 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
 
 logger = init_logger(__name__)
+
+
+def _resolve_kv_cache_dtype_from_quant_config(
+    kv_cache_dtype: CacheDType,
+    kv_cache_scheme: dict[str, Any] | None,
+) -> CacheDType:
+    if kv_cache_scheme is None or kv_cache_dtype != "auto":
+        return kv_cache_dtype
+
+    if current_platform.is_rocm() and not current_platform.supports_fp8():
+        logger.warning_once(
+            "The model's quantization config specifies an FP8 KV cache, but "
+            "the current ROCm platform does not advertise FP8 support. "
+            "Keeping --kv-cache-dtype auto (the model dtype). Use "
+            "--kv-cache-dtype fp8 to override."
+        )
+        return kv_cache_dtype
+
+    return "fp8"
 
 
 def validate_kv_sharing_target(
@@ -279,16 +299,17 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
 
         # llm-compressor models declare an FP8 KV-cache scheme in their
-        # checkpoint config. Honor it only when the user did not explicitly
-        # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
-        # The "auto" case is normally resolved upstream in
-        # resolve_kv_cache_dtype_string, but we re-apply here defensively in
-        # case anything bypassed that path.
+        # checkpoint config. Honor it unless the user explicitly picked a
+        # kv_cache_dtype or the current ROCm platform does not support FP8; an explicit
+        # choice (e.g. bfloat16 or fp8) must win.
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None and kv_cache_dtype == "auto":
-            kv_cache_dtype = "fp8"
+        resolved_kv_cache_dtype = _resolve_kv_cache_dtype_from_quant_config(
+            kv_cache_dtype, kv_cache_scheme
+        )
+        if resolved_kv_cache_dtype != kv_cache_dtype:
+            kv_cache_dtype = resolved_kv_cache_dtype
             if cache_config is not None:
-                cache_config.cache_dtype = "fp8"
+                cache_config.cache_dtype = kv_cache_dtype
 
         # Check if per-head quant scales are required based on kv_cache_scheme
         use_per_head_quant_scales = (
