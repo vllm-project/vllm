@@ -85,6 +85,18 @@ QWEN4_EXP_SM90_CASES = [
     for num_tokens, config in plans.items()
 ]
 
+QWEN4_EXP_SM100_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
+]
+
+QWEN4_EXP_SM121_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
+]
+
 EXPECTED_CUTE_CONFIGS = {
     (3072, 7168, 1): (224, 3, 4, 8),
     (3072, 7168, 2): (128, 3, 2, 8),
@@ -269,6 +281,73 @@ def test_kda_overlap_configs_match_measured_table() -> None:
     }
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="KDA CuTeDSL helper requires CUDA"
+)
+@pytest.mark.parametrize(
+    "compute_capability,supported",
+    [((9, 0), False), ((10, 0), True), ((10, 3), True), ((12, 0), True)],
+)
+def test_kda_mixed_precision_bf16_fma_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    compute_capability: tuple[int, int],
+    supported: bool,
+) -> None:
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl import kda_skinny_gemm
+
+    capability = compute_capability[0] * 10 + compute_capability[1]
+    monkeypatch.setattr(
+        kda_skinny_gemm.current_platform,
+        "has_device_capability",
+        lambda target, device_id=0: capability >= target,
+    )
+
+    assert kda_skinny_gemm._has_mixed_precision_bf16_fma() is supported
+
+
+@pytest.mark.parametrize("num_tokens", [2, 8, 14])
+def test_kda_skinny_gemms_sm90_cuda_graph(num_tokens: int) -> None:
+    """Hopper must compile and capture the pre-SM100 FMA specialization."""
+    _require_capability_and_cute((9, 0))
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.kda_skinny_gemm import (
+        KdaSkinnyGemm,
+    )
+
+    torch.manual_seed(43 + num_tokens)
+    hidden_states = torch.randn(num_tokens, 7168, dtype=torch.bfloat16, device="cuda")
+    f_ab_weight = torch.randn(144, 7168, dtype=torch.bfloat16, device="cuda")
+    f_b_weight = torch.randn(1536, 128, dtype=torch.bfloat16, device="cuda")
+    gemm = KdaSkinnyGemm()
+
+    gemm.run_k(gemm.run_n(hidden_states, f_ab_weight), f_b_weight)
+    torch.accelerator.synchronize()
+
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=capture_stream):
+        projected_fab = gemm.run_n(hidden_states, f_ab_weight)
+        projected_fb = gemm.run_k(projected_fab, f_b_weight)
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    expected_fab = torch.nn.functional.linear(
+        hidden_states.float(), f_ab_weight.float()
+    )
+    expected_fb = torch.nn.functional.linear(
+        expected_fab[:, :128].to(torch.bfloat16).float(), f_b_weight.float()
+    )
+    for actual, expected in (
+        (projected_fab, expected_fab),
+        (projected_fb, expected_fb),
+    ):
+        cosine = torch.nn.functional.cosine_similarity(
+            actual.float().flatten(), expected.flatten(), dim=0
+        ).item()
+        assert cosine > 0.999
+
+
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 16])
 def test_kda_projection_overlap_is_tp8_only(tp_size: int) -> None:
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
@@ -282,8 +361,34 @@ def test_kda_projection_overlap_is_tp8_only(tp_size: int) -> None:
     assert kda._projection_overlap_max_tokens == 0
 
 
+@pytest.mark.parametrize(
+    ("capability", "expected"),
+    [
+        ((9, 0), None),
+        ((10, 0), "cute-dsl"),
+        ((10, 3), "cute-dsl"),
+        ((10, 7), None),
+        ((12, 0), None),
+    ],
+)
+def test_kda_qkvg_flashinfer_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    expected: str | None,
+) -> None:
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda candidate: candidate == capability,
+    )
+
+    assert k3_gemm._kda_qkvg_flashinfer_backend() == expected
+
+
+@pytest.mark.parametrize("backend", ["cute-dsl", None])
 def test_kda_qkvg_autotune_enables_full_overlap(
     monkeypatch: pytest.MonkeyPatch,
+    backend: str | None,
 ) -> None:
     flashinfer_gemm = pytest.importorskip("flashinfer.gemm")
 
@@ -304,10 +409,20 @@ def test_kda_qkvg_autotune_enables_full_overlap(
         return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype)
 
     monkeypatch.setattr(flashinfer_gemm, "mm_bf16", fake_mm_bf16)
+    monkeypatch.setattr(
+        k3_gemm,
+        "_kda_qkvg_flashinfer_backend",
+        lambda: backend,
+    )
 
     k3_gemm.autotune_kda_qkvg(kda)
 
-    assert calls == [(torch.Size([14, 8]), torch.Size([8, 6144]), True, "cute-dsl")]
+    expected_calls = []
+    if backend is not None:
+        expected_calls.append(
+            (torch.Size([14, 8]), torch.Size([8, 6144]), True, "cute-dsl")
+        )
+    assert calls == expected_calls
     assert (
         kda._projection_overlap_max_tokens == k3_gemm.KDA_PROJECTION_OVERLAP_MAX_TOKENS
     )
@@ -598,8 +713,8 @@ def test_low_latency_table_capability_routing(
 def test_qwen4_exp_hopper_plans_are_valid() -> None:
     plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
 
-    assert len(plans) == 9
-    assert sum(map(len, plans.values())) == 31
+    assert len(plans) == 7
+    assert sum(map(len, plans.values())) == 24
     assert (320, 10240) in plans
     assert (10240, 320) not in plans
     for (n, k), shape_plans in plans.items():
@@ -613,8 +728,11 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
 @pytest.mark.parametrize(
     "capability,expected_plans",
     [
-        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_SM103_GEMM_PLANS),
+        ((10, 0), qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS),
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
+        ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS),
+        ((12, 0), {}),
         ((8, 0), {}),
     ],
 )
@@ -625,11 +743,16 @@ def test_qwen4_exp_gemm_capability_routing(
 ) -> None:
     monkeypatch.setattr(
         qwen4_exp_gemm.current_platform,
-        "is_device_capability",
-        lambda target: capability == target,
+        "get_device_capability",
+        lambda: capability,
     )
 
-    assert qwen4_exp_gemm._gemm_plans() == expected_plans
+    assert (
+        qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY.get(
+            qwen4_exp_gemm.current_platform.get_device_capability(), {}
+        )
+        == expected_plans
+    )
 
 
 def test_installation_is_shape_specific_and_unquantized(
@@ -796,6 +919,52 @@ def test_qwen4_exp_sm90_selected_shapes(
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
 
     selected = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM100_CASES)
+def test_qwen4_exp_sm100_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((10, 0))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM100_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM121_CASES)
+def test_qwen4_exp_sm121_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((12, 1))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS[(n, k)][num_tokens]
     assert selected == config
     output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
 

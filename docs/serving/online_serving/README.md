@@ -76,6 +76,9 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Generative Scoring API](generative_scoring.md) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
+- [Structured Decisions API](structured_decisions.md) (`/v1/systemone`)
+    - Applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
+    - Answers typed questions about a state with a probability for every allowed answer.
 
 ## Instrumentator APIs
 
@@ -121,26 +124,30 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale-Out APIs
 
-Scale-out APIs are disabled by default on `vllm serve`. The environment
-variable accepts only `0` or `1`; set `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` to
-register the endpoints below. The
-dedicated `vllm launch render` and `vllm serve --tokens-only` modes are explicit
-opt-ins and enable their required endpoints when the variable is unset; an
-explicit value of `0` is rejected for those modes.
+Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
 
 ### Tokens IN <> Tokens OUT APIs
 
-- `/inference/v1/generate` - Generate completions
-- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
+- [Generate API](token_in_token_out.md) (`/inference/v1/generate`)
+    - Generate completions from token IDs, optionally with detokenized text (`output_mode`)
+- `/inference/v1/abort_requests` - Abort in-flight requests (registered wherever `/inference/v1/generate` is)
+- `/abort_requests` - Unauthenticated alias of `/inference/v1/abort_requests` (`--tokens-only` only)
 
 ### Renderer APIs
 
-For further details on renderer APIs, please refer to [this page](renderer.md).
+Renderer APIs preprocess completion, chat, and Responses requests without running
+inference. They handle tokenization, model-specific prompt formatting, and
+multimodal preprocessing, returning prompt token IDs, sampling parameters, and
+any processed multimodal inputs for generation.
+
+See the [renderer guide](renderer.md) for setup instructions and examples.
 
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
     - Render chat completions
+- [Responses Render API](renderer.md) (`/v1/responses/render`)
+    - Render self-contained Responses requests
 
 ### Derenderer APIs
 

@@ -54,7 +54,9 @@ impl TokenizeCompletionRequest {
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
             session_id: None,
-            reasoning_parser_kwargs: None,
+            kv_hints: None,
+            reasoning_parser_kwargs: Default::default(),
+            reasoning_ended: None,
             lora_request: None,
             arrival_time: None,
         }
@@ -213,6 +215,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: None,
+                defer_loading: None,
             }]
         );
     }

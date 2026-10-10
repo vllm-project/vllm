@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Registry for KVCacheSpec types and their associated managers.
+"""Registry for KVCacheSpec types and their associated managers.
 
 This module provides a pluggable architecture for registering custom KVCacheSpec
 subclasses without modifying vLLM core code. Out-of-tree platforms can define
@@ -34,6 +33,7 @@ class KVCacheSpecMetadata:
 
 
 _REGISTRY_KVCACHESPEC_LIST: dict[type["KVCacheSpec"], KVCacheSpecMetadata] = {}
+_REGISTRY_ROLE_MANAGERS: dict[str, type["SingleTypeKVCacheManager"]] = {}
 
 
 class KVCacheSpecRegistry:
@@ -41,9 +41,7 @@ class KVCacheSpecRegistry:
 
     @classmethod
     def _ensure_registered(cls, vllm_config=None) -> None:
-        """
-        Run full KVCacheSpec registration if the registration is not done.
-        """
+        """Run full KVCacheSpec registration if the registration is not done."""
         if _REGISTRY_KVCACHESPEC_LIST:
             return
 
@@ -66,8 +64,7 @@ class KVCacheSpecRegistry:
         manager_class: type["SingleTypeKVCacheManager"] | None = None,
         uniform_type_base_spec: type["KVCacheSpec"] | None = None,
     ) -> None:
-        """
-        Register a KVCacheSpec class with its manager and base spec.
+        """Register a KVCacheSpec class with its manager and base spec.
 
         Args:
             kvcache_spec_cls: The KVCacheSpec subclass to register
@@ -76,6 +73,7 @@ class KVCacheSpecRegistry:
                 instead of being grouped to different kvcache group, `kvcache_spec_cls`
                 and `uniform_type_base_spec` will be trated as uniform type.
                 If None, defaults to kvcache_spec_cls itself (for built-in base specs).
+
         """
         assert manager_class is not None, "manager_class is required"
         if uniform_type_base_spec is None:
@@ -103,19 +101,33 @@ class KVCacheSpecRegistry:
         )
 
     @classmethod
+    def register_role_manager(
+        cls, role: str, manager_class: type["SingleTypeKVCacheManager"]
+    ) -> None:
+        """Select ``manager_class`` for every group with the given role."""
+        registered = _REGISTRY_ROLE_MANAGERS.get(role)
+        assert registered is None or registered is manager_class, (
+            f"Conflicting manager registration for group role {role}"
+        )
+        _REGISTRY_ROLE_MANAGERS[role] = manager_class
+
+    @classmethod
     def get_manager_class(
-        cls, kvcache_spec: "KVCacheSpec"
+        cls, kvcache_spec: "KVCacheSpec", role: str | None = None
     ) -> type["SingleTypeKVCacheManager"] | None:
-        """
-        Get the single type kvcache manager class for a given kvcache spec instance.
+        """Get the single type kvcache manager class for a given kvcache spec instance.
 
         Args:
             kvcache_spec: A KVCacheSpec instance
+            role: The group's role; a role-registered manager takes precedence.
 
         Returns:
             The SingleTypeKVCacheManager class to use for this kvcache_spec
+
         """
         cls._ensure_registered()
+        if role is not None and (manager_class := _REGISTRY_ROLE_MANAGERS.get(role)):
+            return manager_class
         kvcache_spec_cls = type(kvcache_spec)
 
         # Walk up the MRO to find a registered base class
@@ -129,8 +141,7 @@ class KVCacheSpecRegistry:
     def get_uniform_type_base_spec(
         cls, kvcache_spec: "KVCacheSpec"
     ) -> type["KVCacheSpec"] | None:
-        """
-        Get the base kvcache spec class for grouping compatibility checks.
+        """Get the base kvcache spec class for grouping compatibility checks.
         KVCacheSpecs with uniform_type_base_spec will be trated as one group.
 
         Args:
@@ -138,6 +149,7 @@ class KVCacheSpecRegistry:
 
         Returns:
             The base KVCacheSpec class for checking uniform type kvcache specs
+
         """
         cls._ensure_registered()
         kvcache_spec_cls = type(kvcache_spec)
@@ -153,9 +165,7 @@ class KVCacheSpecRegistry:
     def check_kv_cache_spec_registry(
         cls, kv_cache_spec: dict[str, "KVCacheSpec"]
     ) -> None:
-        """
-        Check if the KVCacheSpecs of each layer are registered as expected.
-        """
+        """Check if the KVCacheSpecs of each layer are registered as expected."""
         cls._ensure_registered()
         for layer_name, spec in kv_cache_spec.items():
             # use raise instead of assert to make it effective in production environment
@@ -177,8 +187,7 @@ def register_kv_cache_spec(
     manager_class: type["SingleTypeKVCacheManager"] | None = None,
     uniform_type_base_spec: type["KVCacheSpec"] | None = None,
 ):
-    """
-    Decorator to register a custom KVCacheSpec class.
+    """Decorator to register a custom KVCacheSpec class.
 
     Args:
         manager_class: The SingleTypeKVCacheManager to use for this spec.
@@ -196,6 +205,7 @@ def register_kv_cache_spec(
         @dataclass(frozen=True, kw_only=True)
         class CustomFullAttentionSpec(FullAttentionSpec):
             pass
+
     """
 
     def decorator(kvcache_spec_cls: type["KVCacheSpec"]) -> type["KVCacheSpec"]:

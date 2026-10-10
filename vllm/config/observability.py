@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from functools import cached_property
-from typing import Any, Literal, cast
+from itertools import pairwise
+from typing import Any, Literal
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
@@ -65,6 +67,18 @@ class ObservabilityConfig:
     kv_cache_metrics_sample: float = Field(default=0.01, gt=0, le=1)
     """Sampling rate for KV cache metrics (0.0, 1.0]. Default 0.01 = 1% of blocks."""
 
+    custom_histogram_buckets: dict[str, list[float]] | None = None
+    """Custom Prometheus histogram bucket boundaries, as a JSON mapping from
+    bucket-family key to a list of strictly increasing, positive, finite
+    upper bounds. When a family key is present, its list replaces the default
+    buckets for every histogram in that family; families not listed keep
+    their defaults. Known families: `request_latency`, `time_to_first_token`,
+    `inter_token_latency`, `iteration_tokens`, `request_params_n`,
+    `request_num_preemptions`, `request_tokens`, `kv_cache_residency`. Example:
+    `--custom-histogram-buckets '{"request_latency": [0.01, 0.05, 0.1, 0.5]}'`.
+    Note that every extra bucket adds one time series per metric and label
+    set."""
+
     cudagraph_metrics: bool = False
     """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
     dispatch modes, and their observed frequencies at every logging interval)."""
@@ -112,8 +126,7 @@ class ObservabilityConfig:
         )
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -151,15 +164,53 @@ class ObservabilityConfig:
                 )
         return value
 
-    @field_validator("collect_detailed_traces")
+    @field_validator("custom_histogram_buckets", mode="before")
     @classmethod
-    def _validate_collect_detailed_traces(
-        cls, value: list[DetailedTraceModules] | None
-    ) -> list[DetailedTraceModules] | None:
-        """Handle the legacy case where users might provide a comma-separated
-        string instead of a list of strings."""
-        if value is not None and len(value) == 1 and "," in value[0]:
-            value = cast(list[DetailedTraceModules], value[0].split(","))
+    def _reject_bool_histogram_bounds(cls, value: object) -> object:
+        """Reject booleans before pydantic silently coerces them to floats."""
+        if isinstance(value, dict):
+            for family, buckets in value.items():
+                if not isinstance(buckets, list):
+                    continue
+                for bound in buckets:
+                    if isinstance(bound, bool):
+                        raise ValueError(
+                            f"custom_histogram_buckets[{family!r}]: bound "
+                            f"{bound!r} must be a number, not a boolean"
+                        )
+        return value
+
+    @field_validator("custom_histogram_buckets")
+    @classmethod
+    def _validate_custom_histogram_buckets(
+        cls, value: dict[str, list[float]] | None
+    ) -> dict[str, list[float]] | None:
+        if value is None:
+            return value
+        from vllm.v1.metrics.buckets import BUCKET_FAMILY_KEYS
+
+        for family, buckets in value.items():
+            if family not in BUCKET_FAMILY_KEYS:
+                raise ValueError(
+                    f"custom_histogram_buckets: unknown bucket family "
+                    f"{family!r}; known families: {sorted(BUCKET_FAMILY_KEYS)}"
+                )
+            if not buckets:
+                raise ValueError(
+                    f"custom_histogram_buckets[{family!r}]: bucket list "
+                    "must not be empty"
+                )
+            for bound in buckets:
+                if not math.isfinite(bound) or bound <= 0:
+                    raise ValueError(
+                        f"custom_histogram_buckets[{family!r}]: bound "
+                        f"{bound!r} must be finite and greater than 0"
+                    )
+            if any(a >= b for a, b in pairwise(buckets)):
+                raise ValueError(
+                    f"custom_histogram_buckets[{family!r}]: bounds {buckets} "
+                    "must be strictly increasing"
+                )
         return value
 
     @model_validator(mode="after")
