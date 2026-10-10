@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
-from .rocm_block32_gemm import BLOCK_ROWS, rocm_mxfp8_block32_gemm
+from .rocm_block32_gemm import BLOCK_ROWS, rocm_mxfp8_block32_linear
 
 
 @triton.jit
@@ -272,9 +272,8 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         x2d = x.reshape(-1, x.shape[-1])
         if layer.weight_scale.shape[0] != layer.weight.shape[0]:
             # One scale row per 32 weight rows (see process_weights_after_loading).
-            x_q, x_scale = mxfp8_e4m3_quantize(x2d)
-            out = rocm_mxfp8_block32_gemm(
-                x_q, x_scale, layer.weight, layer.weight_scale, x.dtype
+            out = rocm_mxfp8_block32_linear(
+                x2d, layer.weight, layer.weight_scale, x.dtype
             )
         elif layer.weight.element_size() >= 2:
             out = torch.nn.functional.linear(x2d, layer.weight.to(x.dtype))
