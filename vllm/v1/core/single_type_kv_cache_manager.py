@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -43,6 +44,13 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+
+
+@dataclass
+class KVCacheHitDiagnostics:
+    """Track tokens excluded by sliding-window EAGLE replay requirements."""
+
+    eagle_drop_tokens: int = 0
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -616,6 +624,7 @@ class SingleTypeKVCacheManager(ABC):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Get the longest cache hit prefix of the blocks that is not longer than
         `max_length`. The prefix should be a common prefix hit for all the
@@ -645,6 +654,7 @@ class SingleTypeKVCacheManager(ABC):
                 be set to the block_size.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
+            diagnostics: Optional output for EAGLE replay token counts.
 
         Returns:
             A tuple containing cached blocks and the exact cache-hit length in
@@ -756,6 +766,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
@@ -989,6 +1000,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
@@ -1024,11 +1036,27 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
+        track_eagle = diagnostics is not None and drop_eagle_block
+        hit_without_eagle = 0
+        diagnostic_run = 0
+        diagnostic_candidate = 0
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(
+            cached_block = block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
-            ):
+            )
+            # Track the cached run before EAGLE's replay and alignment rules,
+            # using the same lookups as the normal hit search.
+            if track_eagle and hit_without_eagle == 0:
+                if not cached_block:
+                    diagnostic_run = 0
+                elif diagnostic_run or (i + 1) * block_size % alignment_tokens == 0:
+                    if diagnostic_run == 0:
+                        diagnostic_candidate = (i + 1) * block_size
+                    diagnostic_run += 1
+                    if diagnostic_run >= sliding_window_contiguous_blocks - 1:
+                        hit_without_eagle = diagnostic_candidate
+            if cached_block:
                 # Skip prefix matching check if the block is not aligned with
                 # `alignment_tokens`.
                 if num_contiguous_blocks == 0 and block_size != alignment_tokens:
@@ -1073,6 +1101,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 for computed in computed_blocks:
                     computed.pop()
         hit_length = len(computed_blocks[0]) * block_size
+        if diagnostics is not None:
+            if track_eagle and hit_without_eagle == 0:
+                hit_without_eagle = diagnostic_run * block_size
+                hit_without_eagle -= hit_without_eagle % alignment_tokens
+            diagnostics.eagle_drop_tokens = (
+                max(hit_without_eagle - hit_length, 0) if track_eagle else 0
+            )
         return computed_blocks, hit_length
 
     @classmethod
@@ -1259,6 +1294,7 @@ class CircularBufferManager(FullAttentionManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         return tuple([] for _ in kv_cache_group_ids), 0
 
@@ -1313,6 +1349,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """For chunked local attention, we need to find the longest cache hit
         prefix of the blocks that is not longer than `max_length`. The prefix
@@ -1342,6 +1379,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
+            diagnostics: Optional output for EAGLE replay token counts.
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens).
 
@@ -1502,6 +1540,7 @@ class MambaManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
@@ -2209,6 +2248,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
@@ -2409,6 +2449,7 @@ class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        diagnostics: KVCacheHitDiagnostics | None = None,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         return tuple([] for _ in kv_cache_group_ids), 0
 

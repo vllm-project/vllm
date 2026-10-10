@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -6024,6 +6025,164 @@ def test_swa_reachable_block_mask_final_partial_segment():
     assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
 
 
+def test_prefix_cache_stats_report_sparse_retention_miss():
+    """An align-mode Mamba group holding no checkpoint at a shared-prefix
+    junction vetoes the attention group's match, so a request that could have
+    reused two blocks reuses nothing. Report the lost tokens, otherwise the
+    loss is indistinguishable from "these requests share no prefix"."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    shared = [7 for _ in range(2 * block_size)]
+
+    def distinct(v):
+        return [v for _ in range(2 * block_size)]
+
+    # req0 primes the shared prefix densely on the attention group; align-mode
+    # Mamba keeps only its own tail, which sits past the shared prefix.
+    req0 = make_request("0", shared + distinct(50), block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(req0)
+    manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
+
+    # req1 shares the prefix, but the Mamba group has nothing cached there.
+    req1 = make_request("1", shared + distinct(60), block_size, sha256)
+    _, num_hits, boundary = manager.get_computed_blocks(req1)
+    req1.shared_prefix_boundary = boundary
+    assert num_hits == 0
+    assert boundary == 2 * block_size
+
+    manager.record_prefix_cache_stats(req1, num_hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.hits == 0
+    assert stats.sparse_retention_misses == 2 * block_size
+
+
+@pytest.mark.parametrize(
+    "eagle,with_mamba,expected_hits,expected_misses",
+    [(True, False, 48, 0), (False, False, 32, 0), (False, True, 0, 32)],
+)
+def test_sparse_retention_misses_exclude_dense_group_losses(
+    eagle, with_mamba, expected_hits, expected_misses
+):
+    """Dense eviction and EAGLE drops must not be attributed to sparse state."""
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(
+        block_size, 200, ["full", "full"] + (["mamba_align"] if with_mamba else [])
+    )
+    draft = config.kv_cache_groups[1]
+    draft.kv_cache_spec = replace(draft.kv_cache_spec, num_kv_heads=2)
+    draft.is_eagle_group = eagle
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=eagle,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    shared = [7] * (4 * block_size)
+    seed = make_request("seed", shared + [50] * block_size, block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(seed)
+    allocated = manager.allocate_slots(seed, seed.num_tokens, nc, cb)
+    assert allocated is not None
+    draft_block = allocated.blocks[1][2].block_id
+    manager.free(seed)
+    if not eagle:
+        manager.block_pool.evict_blocks({draft_block})
+
+    request = make_request("request", shared + [60] * block_size, block_size, sha256)
+    _, hits, boundary = manager.get_computed_blocks(request)
+    assert hits == expected_hits
+    assert boundary == len(shared)
+    request.shared_prefix_boundary = boundary
+    manager.record_prefix_cache_stats(request, hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.sparse_retention_misses == expected_misses
+
+
+@pytest.mark.parametrize(
+    "evict,expected_hits,expected_misses", [(False, 48, 0), (True, 16, 32)]
+)
+@pytest.mark.parametrize("full_block_size", [16, 32])
+def test_sparse_retention_misses_exclude_sliding_window_eagle_drop(
+    evict, expected_hits, expected_misses, full_block_size
+):
+    """Count missing sliding-window state, excluding its intentional block drop."""
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"])
+    config.kv_cache_groups[0].kv_cache_spec = replace(
+        config.kv_cache_groups[0].kv_cache_spec, block_size=full_block_size
+    )
+    expected_hits = expected_hits // full_block_size * full_block_size
+    config.kv_cache_groups[1].is_eagle_group = True
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        use_eagle=True,
+        hash_block_size=block_size,
+        retention_interval=None,
+        log_stats=True,
+    )
+    shared = [7] * (4 * block_size)
+    seed = make_request("seed", shared + [50] * block_size, block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(seed)
+    allocated = manager.allocate_slots(seed, seed.num_tokens, nc, cb)
+    assert allocated is not None
+    sw_block = allocated.blocks[1][2].block_id
+    manager.free(seed)
+    if evict:
+        manager.block_pool.evict_blocks({sw_block})
+
+    request = make_request("request", shared + [60] * block_size, block_size, sha256)
+    _, hits, boundary = manager.get_computed_blocks(request)
+    assert hits == expected_hits
+    assert boundary == len(shared)
+    request.shared_prefix_boundary = boundary
+    manager.record_prefix_cache_stats(request, hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.sparse_retention_misses == expected_misses
+
+
+def test_prefix_cache_stats_no_sparse_retention_miss_on_clean_hit():
+    """A hit that every group agrees on reports no loss, so the counter does
+    not fire on healthy reuse."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    tokens = [7 for _ in range(4 * block_size)]
+
+    req0 = make_request("0", tokens, block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(req0)
+    manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
+    manager.free(req0)
+
+    req1 = make_request(
+        "1", tokens + [8 for _ in range(block_size)], block_size, sha256
+    )
+    _, num_hits, boundary = manager.get_computed_blocks(req1)
+    assert num_hits == 4 * block_size
+    req1.shared_prefix_boundary = boundary
+
+    manager.record_prefix_cache_stats(req1, num_hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.sparse_retention_misses == 0
+
+
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     ``need``-block sliding-window tail ending on that boundary (not a single
@@ -6318,3 +6477,35 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_zero_retention_is_announced_on_sparse_models(caplog):
+    """The default retains only semantic checkpoints, which is silent otherwise.
+
+    A sparse group files a state at every boundary it crosses and only the
+    semantic ones are hashed, so the rest can never serve a hit -- while the
+    prefix-cache hit-rate metric still reports non-zero. Nothing in the log said
+    so, and the neighbouring derived default (`mamba_cache_mode='align'`) is
+    announced, so this pins the missing half of that pair.
+    """
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 32, ["full", "mamba_align"])
+
+    def log_for(retention_interval, enable_caching=True):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="vllm.v1.core.kv_cache_coordinator"):
+            make_kv_cache_manager(
+                config,
+                max_model_len=8192,
+                enable_caching=enable_caching,
+                hash_block_size=block_size,
+                retention_interval=retention_interval,
+            )
+        return "retain only semantic checkpoints" in caplog.text
+
+    # The default, on a model that actually has a sparse group.
+    assert log_for(0)
+    # Not noise: a periodic interval retains those states, and with caching off
+    # retention cannot affect anything.
+    assert not log_for(block_size)
+    assert not log_for(0, enable_caching=False)

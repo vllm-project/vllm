@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    KVCacheHitDiagnostics,
     MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
@@ -34,6 +35,7 @@ def _validate_prefix_cache_retention_interval(
     retention_interval: int | None,
     scheduler_block_size: int,
     kv_cache_config: KVCacheConfig,
+    enable_caching: bool,
 ) -> None:
     if retention_interval is None:
         return
@@ -59,6 +61,18 @@ def _validate_prefix_cache_retention_interval(
             f"prefix_cache_retention_interval ({retention_interval}) "
             "must be non-negative and a multiple of scheduler_block_size "
             f"({scheduler_block_size})."
+        )
+
+    if retention_interval == 0 and enable_caching:
+        # Silent otherwise: unretained boundary states are filed and never
+        # hashed, while the prefix-cache hit rate still reports non-zero.
+        logger.info(
+            "prefix_cache_retention_interval is 0, so sliding-window and Mamba "
+            "groups retain only semantic checkpoints (the latest replay boundary "
+            "and shared-prefix junctions). Other boundary states are not "
+            "reusable. Set prefix_cache_retention_interval to a multiple of the "
+            "scheduler block size (%d) to retain them periodically.",
+            scheduler_block_size,
         )
 
 
@@ -159,8 +173,12 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = kv_cache_config.prefix_cache_retention_interval
+        self.sparse_retention_misses = 0
         _validate_prefix_cache_retention_interval(
-            self.retention_interval, self.scheduler_block_size, kv_cache_config
+            self.retention_interval,
+            self.scheduler_block_size,
+            kv_cache_config,
+            enable_caching,
         )
 
     def get_num_blocks_to_allocate(
@@ -833,6 +851,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
         longest_hit_length = 0
+        self.sparse_retention_misses = 0
+        diagnostics = KVCacheHitDiagnostics()
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
         hit_length_by_group: list[int] = [0] * num_groups
 
@@ -886,6 +906,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         curr_hit_length + eagle_margin,
                         len(block_hashes) * self.hash_block_size,
                     )
+                diagnostics.eagle_drop_tokens = 0
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
                     max_length=_max_length,
@@ -900,7 +921,17 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     pcp_world_size=self.single_type_managers[
                         first_group_id
                     ].pcp_world_size,
+                    diagnostics=diagnostics,
                 )
+                if isinstance(spec, (MambaSpec, SlidingWindowSpec)):
+                    # Only reductions made by a sparse group count; the EAGLE
+                    # drop is intentional even when all its blocks are cached.
+                    self.sparse_retention_misses += max(
+                        min(curr_hit_length, longest_hit_length)
+                        - _new_hit_length
+                        - diagnostics.eagle_drop_tokens,
+                        0,
+                    )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:

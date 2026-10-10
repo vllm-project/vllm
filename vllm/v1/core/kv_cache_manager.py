@@ -259,6 +259,7 @@ class KVCacheManager:
             num_tokens=request.num_tokens,
             num_hits=num_hits,
             preempted=request.num_preemptions > 0,
+            sparse_retention_misses=request.sparse_retention_misses,
         )
 
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:
@@ -283,6 +284,7 @@ class KVCacheManager:
         # disabled or the request is marked as skipping kv cache read
         # (which happens when the request requires prompt logprobs
         # or calls a pooling model with all pooling).
+        request.sparse_retention_misses = 0
         if not self.prefix_cache_lookup_enabled(request):
             return self.empty_kv_cache_blocks, 0, 0
 
@@ -298,6 +300,7 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+        request.sparse_retention_misses = self.coordinator.sparse_retention_misses
 
         # When kv_cache_report_mode is "full", emit BlockStored events
         # for the reused prefix cache blocks so that external consumers
@@ -342,6 +345,7 @@ class KVCacheManager:
             tokens, shared-prefix boundary) plus ``hit_diverged``.
 
         """
+        request.sparse_retention_misses = 0
         coordinator = self.coordinator
         if not (
             self.kv_cache_config.has_mamba_layers
