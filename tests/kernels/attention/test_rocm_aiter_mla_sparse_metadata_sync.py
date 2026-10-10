@@ -67,6 +67,7 @@ def test_rocm_index_conversion_matrix(block_size, topk_tokens):
         token_indices,
         cu_seqlens,
         output,
+        BLOCK_STRIDE_ROWS=block_size,
         BLOCK_SIZE=block_size,
         NUM_TOPK_TOKENS=topk_tokens,
     )
@@ -88,6 +89,7 @@ def test_rocm_index_conversion_rejects_mismatched_token_extents():
             torch.zeros(2, 128, dtype=torch.int32),
             torch.arange(3, dtype=torch.int32),
             torch.zeros(256, dtype=torch.int32),
+            BLOCK_STRIDE_ROWS=64,
             NUM_TOPK_TOKENS=128,
         )
 
@@ -113,6 +115,7 @@ def test_rocm_index_conversion_respects_packed_valid_counts():
         token_indices,
         cu_seqlens,
         output,
+        BLOCK_STRIDE_ROWS=64,
         BLOCK_SIZE=64,
         NUM_TOPK_TOKENS=topk_tokens,
     )

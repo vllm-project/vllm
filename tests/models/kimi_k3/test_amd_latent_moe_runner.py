@@ -22,7 +22,7 @@ from tests.utils import (
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.runner import moe_runner
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.models.kimi_k3.amd import latent_moe_runner
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
 from vllm.models.kimi_k3.amd.linear import KimiRoutedOutputTransform
@@ -40,20 +40,42 @@ EPS = 1e-5
 DTYPE = torch.bfloat16
 
 
-def _build_transform(device: torch.device) -> KimiRoutedOutputTransform:
+def _build_transform(
+    device: torch.device, *, row_sharded: bool = False
+) -> tuple[KimiRoutedOutputTransform, torch.Tensor]:
     norm = RMSNorm(LATENT_SIZE, eps=EPS).to(device=device, dtype=DTYPE)
-    up_proj = ReplicatedLinear(
-        LATENT_SIZE,
-        HIDDEN_SIZE,
-        bias=False,
-        params_dtype=DTYPE,
-        prefix="routed_expert_up_proj",
-    ).to(device=device)
 
     torch.manual_seed(0)
     norm.weight.data.copy_(1 + 0.1 * torch.randn_like(norm.weight))
-    up_proj.weight.data.copy_(torch.randn_like(up_proj.weight) / LATENT_SIZE**0.5)
-    return KimiRoutedOutputTransform(norm, up_proj)
+    full_weight = (
+        torch.randn(HIDDEN_SIZE, LATENT_SIZE, device=device, dtype=DTYPE)
+        / LATENT_SIZE**0.5
+    )
+
+    up_proj: ReplicatedLinear | ColumnParallelLinear
+    if row_sharded:
+        up_proj = ColumnParallelLinear(
+            LATENT_SIZE,
+            HIDDEN_SIZE,
+            bias=False,
+            gather_output=True,
+            params_dtype=DTYPE,
+            prefix="routed_expert_up_proj",
+        ).to(device=device)
+        up_proj.weight_loader(up_proj.weight, full_weight)
+    else:
+        up_proj = ReplicatedLinear(
+            LATENT_SIZE,
+            HIDDEN_SIZE,
+            bias=False,
+            params_dtype=DTYPE,
+            prefix="routed_expert_up_proj",
+        ).to(device=device)
+        up_proj.weight.data.copy_(full_weight)
+    return (
+        KimiRoutedOutputTransform(norm, up_proj, row_sharded=row_sharded),
+        full_weight,
+    )
 
 
 def _tail_runner(
@@ -72,6 +94,7 @@ def _tail_runner(
     runner = object.__new__(ROCmLatentMoERunner)
     attrs = {
         "routed_output_transform": transform,
+        "_up_proj_preshard": bool(getattr(transform, "row_sharded", False)),
         "_up_proj_shard_size": HIDDEN_SIZE // tp_world,
         "_logged_sharded_tail": False,
         "moe_config": SimpleNamespace(
@@ -101,9 +124,13 @@ def _rank_partials(
 
 
 def _check_matches_replicated(
-    device: torch.device, tp_world: int, rank: int, use_ep: bool = False
+    device: torch.device,
+    tp_world: int,
+    rank: int,
+    use_ep: bool = False,
+    row_sharded: bool = False,
 ) -> None:
-    transform = _build_transform(device)
+    transform, up_weight = _build_transform(device, row_sharded=row_sharded)
     runner = _tail_runner(transform, tp_world, use_ep)
     group = get_tp_group().device_group
 
@@ -118,7 +145,7 @@ def _check_matches_replicated(
                 transform.norm.weight,
                 EPS,
             ),
-            transform.up_proj.weight,
+            up_weight,
         )
         expected.add_(_all_reduced(shared_output, group))
 
@@ -136,12 +163,37 @@ def _check_matches_replicated_under_ep(
     _check_matches_replicated(device, tp_world, rank, use_ep=True)
 
 
+def _check_presharded_matches_replicated(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    _check_matches_replicated(device, tp_world, rank, row_sharded=True)
+
+
+def _check_unfused_tail_gathers_full_hidden(
+    device: torch.device, tp_world: int, rank: int
+) -> None:
+    transform, up_weight = _build_transform(device, row_sharded=True)
+    assert transform.up_proj.weight.shape[0] == HIDDEN_SIZE // tp_world
+
+    # all-gather reconstructs the full projection when all ranks feed the same
+    # input, so use one seed for all ranks.
+    torch.manual_seed(1234)
+    latent = torch.randn(4, LATENT_SIZE, device=device, dtype=DTYPE).mul_(0.01)
+
+    torch.testing.assert_close(
+        transform(latent),
+        F.linear(transform.norm(latent), up_weight),
+        atol=8e-2,
+        rtol=3e-2,
+    )
+
+
 def _check_writes_only_its_own_shard(
     device: torch.device, tp_world: int, rank: int
 ) -> None:
     """Two ranks that swapped both weight rows and write offsets still sum to
     the right total, so inspect each slice before the final collective."""
-    transform = _build_transform(device)
+    transform, up_weight = _build_transform(device)
     runner = _tail_runner(transform, tp_world)
     group = get_tp_group().device_group
 
@@ -169,7 +221,7 @@ def _check_writes_only_its_own_shard(
     shard = HIDDEN_SIZE // tp_world
     start, end = rank * shard, (rank + 1) * shard
     local = captured["states"]
-    projected = F.linear(latent, transform.up_proj.weight[start:end])
+    projected = F.linear(latent, up_weight[start:end])
 
     torch.testing.assert_close(
         local[:, start:end], before[:, start:end] + projected, atol=8e-2, rtol=3e-2
@@ -181,6 +233,8 @@ def _check_writes_only_its_own_shard(
 _CHECKS = {
     "matches_replicated": _check_matches_replicated,
     "matches_replicated_ep": _check_matches_replicated_under_ep,
+    "presharded_matches_replicated": _check_presharded_matches_replicated,
+    "unfused_gathers": _check_unfused_tail_gathers_full_hidden,
     "own_shard_only": _check_writes_only_its_own_shard,
 }
 
@@ -217,6 +271,16 @@ def test_sharded_tail_tp8_matches_replicated_projection() -> None:
 @multi_gpu_test(num_gpus=8)
 def test_sharded_tail_tp8_ep8_matches_replicated_projection() -> None:
     _run_ranks("matches_replicated_ep", 8)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_presharded_tail_tp4_matches_replicated_projection() -> None:
+    _run_ranks("presharded_matches_replicated", 4)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_presharded_unfused_tail_gathers_the_full_hidden_dim() -> None:
+    _run_ranks("unfused_gathers", 4)
 
 
 @multi_gpu_test(num_gpus=4)
