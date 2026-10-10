@@ -1,0 +1,162 @@
+openapi: 3.0.3
+info:
+  title: Structured diffusion System One example
+  version: 1.0.0
+  description: >-
+    Optional gateway in front of vLLM. Text-only Nemotron reads support one
+    masked forward. Probabilities are model scores, not calibrated guarantees.
+paths:
+  /v1/systemone:
+    post:
+      operationId: decide
+      tags: [Decisions]
+      security:
+        - bearerAuth: []
+      description: >-
+        Authentication is enforced when the gateway's API_KEY is set.
+        Answer templates must resolve every alternative to one token at the
+        same position. Oversized templates are chunked without reordering.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state, questions]
+              properties:
+                model:
+                  type: string
+                  description: Serving alias; the gateway uses its configured model.
+                  example: jev-latest
+                state:
+                  description: String or JSON state, serialized for the model.
+                questions:
+                  type: object
+                  minProperties: 1
+                  maxProperties: 64
+                  additionalProperties:
+                    oneOf:
+                      - $ref: '#/components/schemas/Choice'
+                      - $ref: '#/components/schemas/Noul'
+                      - $ref: '#/components/schemas/Score'
+                samples:
+                  type: integer
+                  enum: [1]
+            example:
+              model: jev-latest
+              state: Customer payouts have failed for three days.
+              questions:
+                urgent:
+                  type: noul
+                  instructions: Has this problem lasted multiple days?
+      responses:
+        '200':
+          description: Typed answers keyed by the original question IDs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [model, answers, usage, diagnostics]
+                properties:
+                  model:
+                    type: string
+                  answers:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      description: >-
+                        Noul returns type and noul (P(yes)); Choice returns type,
+                        choice, probabilities and confidence; Score returns type,
+                        score (zero-indexed expectation), legend, probabilities
+                        and confidence.
+                  usage:
+                    type: object
+                  diagnostics:
+                    type: object
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Malformed JSON or multipart request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid question schema, unsupported feature or answer template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Unexpected gateway error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Upstream vLLM request failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, type]
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+    Choice:
+      type: object
+      required: [type, criteria]
+      properties:
+        type:
+          type: string
+          enum: [choice]
+        instructions: {}
+        criteria:
+          type: object
+          minProperties: 2
+          maxProperties: 26
+          additionalProperties: {}
+    Noul:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [noul]
+        instructions: {}
+        criteria:
+          type: object
+          properties:
+            'true': {}
+            'false': {}
+    Score:
+      type: object
+      required: [type, criteria]
+      properties:
+        type:
+          type: string
+          enum: [score]
+        instructions: {}
+        criteria:
+          type: array
+          minItems: 2
+          maxItems: 26
+          items: {}
