@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -215,6 +216,8 @@ def test_scheduler_requires_align_mode_for_mamba_kv_transfer(
         store_scheduler = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
         assert store_scheduler.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
         mock_client.return_value.lookup.assert_not_called()
+        meta = store_scheduler.build_connector_meta(SchedulerOutput.make_empty())
+        assert meta.requests == []
 
 
 def _make_block_stored(
