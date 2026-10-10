@@ -18,6 +18,8 @@ steps:
       DOCKER_BUILDKIT: "1"
       BUILDKIT_PROGRESS: "tty"
       TERM: "xterm-256color"
+      CI_ROCM_DOCKERFILE_BASE: "docker/Dockerfile.rock_base"
+      CI_ROCM_DOCKERFILE: "docker/Dockerfile.rock"
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
@@ -49,6 +51,8 @@ steps:
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       REMOTE_VLLM: "0"
+      CI_ROCM_DOCKERFILE_BASE: "docker/Dockerfile.rock_base"
+      CI_ROCM_DOCKERFILE: "docker/Dockerfile.rock"
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
@@ -78,6 +82,8 @@ steps:
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       IMAGE_TAG: "rocm/vllm-ci:build-$BUILDKITE_BUILD_ID"
       REMOTE_VLLM: "0"
+      CI_ROCM_DOCKERFILE_BASE: "docker/Dockerfile.rock_base"
+      CI_ROCM_DOCKERFILE: "docker/Dockerfile.rock"
     retry:
       automatic:
         - exit_status: 1  # Transient Docker/BuildKit failure
