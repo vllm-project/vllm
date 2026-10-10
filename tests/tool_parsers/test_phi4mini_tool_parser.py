@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,6 +10,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.tokenizers import TokenizerLike
 
 
@@ -101,9 +103,12 @@ Would you like to know more?""",
                     "Phi4MiniJsonToolParser regex has nesting limitations "
                     "with nested objects"
                 ),
-                "test_malformed_input": (
-                    "Phi4MiniJsonToolParser incorrectly sets "
-                    "tools_called=True on empty array"
-                ),
             },
         )
+
+    def test_empty_marker_keeps_output(self, tool_parser: Any) -> None:
+        """An empty marker parses to no call, and the text still comes back."""
+        output = "functools[] This is just text"
+        content, tool_calls = run_tool_extraction(tool_parser, output)
+        assert tool_calls == []
+        assert content == output
