@@ -8,6 +8,7 @@ from dataclasses import replace
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
@@ -1214,6 +1215,7 @@ def share_replayssm_ring_trackers(
         replayssm_mixers[last_layer_name]._updates_replayssm_trackers = True
 
 
+@eager_break_during_capture
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,
