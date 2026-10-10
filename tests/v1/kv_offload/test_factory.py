@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -285,7 +287,7 @@ def test_tiering_spec_create_worker_uses_logical_rank_for_sharded_layout(monkeyp
     assert region_calls[0]["rank"] == 1
 
 
-def test_tiering_spec_aborts_region_when_worker_creation_fails(monkeypatch):
+def test_tiering_spec_aborts_real_region_before_scheduler_mapping(monkeypatch):
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     spec = _create_spec(
@@ -295,19 +297,31 @@ def test_tiering_spec_aborts_region_when_worker_creation_fails(monkeypatch):
     )
     assert isinstance(spec, TieringOffloadingSpec)
 
-    region = MagicMock()
+    engine_id = f"test-tier-abort-{uuid.uuid4().hex}"
+    spec._engine_id = engine_id
+    mmap_path = Path(f"/dev/shm/vllm_offload_{engine_id}.mmap")
     _patch_local_rank(monkeypatch, 0)
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", lambda **_: region)
+    monkeypatch.setattr(tiering_spec_module, "_shared_region_barrier", lambda: None)
+
+    def fail_worker(**kwargs):
+        assert mmap_path.exists()
+        raise RuntimeError("worker setup failed")
+
     monkeypatch.setattr(
         tiering_spec_module,
         "CPUOffloadingWorker",
-        MagicMock(side_effect=RuntimeError("worker setup failed")),
+        fail_worker,
     )
 
-    with pytest.raises(RuntimeError, match="worker setup failed"):
-        spec.create_worker(MagicMock())
+    try:
+        with pytest.raises(RuntimeError, match="worker setup failed"):
+            spec.create_worker(MagicMock())
 
-    region.abort_startup_cleanup.assert_called_once_with()
+        # get_manager() has not mapped a scheduler region yet. The failed
+        # worker region must remove its real shared-memory pathname.
+        assert not mmap_path.exists()
+    finally:
+        mmap_path.unlink(missing_ok=True)
 
 
 def test_tiering_spec_scheduler_region_uses_startup_barrier(monkeypatch):
