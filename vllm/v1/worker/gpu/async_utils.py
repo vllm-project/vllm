@@ -122,6 +122,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool,
         pending_aux_output: "PendingAuxOutput | None",
+        num_verified_draft_tokens_per_req: torch.Tensor | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -130,6 +131,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.pending_aux_output = pending_aux_output
+        self.num_verified_draft_tokens_per_req = num_verified_draft_tokens_per_req
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -147,6 +149,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
+            self.num_verified_draft_tokens_per_req_np = (
+                async_copy_to_np(num_verified_draft_tokens_per_req)
+                if num_verified_draft_tokens_per_req is not None
+                else None
+            )
             self.sampling_mask_tensors: SamplingMaskTensors | None = None
             if sampler_output.sampling_mask_tensors is not None:
                 self.sampling_mask_tensors = (
@@ -182,6 +189,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
         for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
+        if self.num_verified_draft_tokens_per_req_np is not None:
+            self.model_runner_output.num_verified_draft_tokens_per_req = (
+                self.num_verified_draft_tokens_per_req_np.tolist()
+            )
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (

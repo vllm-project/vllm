@@ -2175,6 +2175,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            num_verified_draft_tokens_per_req=(
+                input_batch.cu_num_logits.diff()
+                - self.model_state.num_new_sampled_tokens_per_step
+                if self.adaptive_verification is not None
+                else None
+            ),
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

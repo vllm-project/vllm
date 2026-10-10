@@ -2034,6 +2034,7 @@ class Scheduler(SchedulerInterface):
             model_runner_output.prompt_token_id_logprobs_dict
         )
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        num_verified_tokens = model_runner_output.num_verified_draft_tokens_per_req
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
@@ -2125,12 +2126,18 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens -= num_rejected
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
+
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
+                    num_verified_draft_tokens=(
+                        num_verified_tokens[req_index]
+                        if num_verified_tokens is not None
+                        else None
+                    ),
                 )
                 if request.spec_decode_metrics is not None:
                     # Exclude grammar-invalidated drafts from the proposed
@@ -2964,6 +2971,7 @@ class Scheduler(SchedulerInterface):
         num_accepted_tokens: int,
         num_invalid_spec_tokens: dict[str, int] | None,
         request_id: str,
+        num_verified_draft_tokens: int | None = None,
     ) -> SpecDecodingStats | None:
         if not self.log_stats or not num_draft_tokens:
             return None
@@ -2971,8 +2979,10 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         if num_invalid_spec_tokens:
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
-        spec_decoding_stats.observe_draft(
-            num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
+        spec_decoding_stats.observe_draft_stats_per_req(
+            num_draft_tokens=num_draft_tokens,
+            num_accepted_tokens=num_accepted_tokens,
+            num_verified_draft_tokens=num_verified_draft_tokens,
         )
         return spec_decoding_stats
 
