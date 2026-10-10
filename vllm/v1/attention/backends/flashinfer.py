@@ -720,6 +720,10 @@ class FlashInferMetadata:
     num_prefill_tokens: int
     causal: bool
 
+    kv_cache_layout: KVCacheLayout
+    """From the builder's config: a draft impl's construction-time config is a
+    derived copy that never sees the layout resolved after loading."""
+
     prefill: FIPrefill | TRTLLMPrefill | None
     """
     Holds the metadata for the prefill portion of the batch.
@@ -1521,6 +1525,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             causal=causal,
+            kv_cache_layout=self.kv_cache_layout,
             use_cascade=use_cascade,
             prefill=None,
             decode=None,
@@ -2222,6 +2227,7 @@ class FlashInferImpl(AttentionImpl):
         query = query[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
+        kv_cache_layout = attn_metadata.kv_cache_layout
 
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).
