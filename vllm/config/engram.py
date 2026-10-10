@@ -20,6 +20,12 @@ _NGRAM_LAYER_FIELDS = {
 }
 
 
+# Architectures whose Engram embedding implements checkpoint_mapped storage.
+_CHECKPOINT_MAPPED_ARCHITECTURES = frozenset(
+    {"Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"}
+)
+
+
 def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
     """Whether the model carries n-gram embedding layers."""
     if model_config is None:
@@ -40,6 +46,16 @@ class EngramConfig:
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
+
+    checkpoint_mapped: bool = False
+    """Read embedding rows in place from the checkpoint's safetensors files
+    instead of storing the table (overrides cpu_offload). Requires a GPU that
+    reads pageable host memory through the host page tables (checked through
+    the CUDA device attributes at startup): there is no table-sized device or
+    pinned allocation, and the table's clean, file-backed page-cache pages can
+    be dropped and re-read and are shared between processes. Qwen4Exp on CUDA
+    only, not with embedding_across_dp; validated on DGX Spark (GB10, unified
+    memory) only."""
 
     dp_shared_memory: bool | None = None
     """Share CPU-offloaded embedding weights between co-located
@@ -62,6 +78,16 @@ class EngramConfig:
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
             )
+        if self.embedding_across_dp and self.checkpoint_mapped:
+            raise ValueError(
+                "checkpoint_mapped does not support embedding_across_dp: its host "
+                "page prefetch only sees this DP rank's requests."
+            )
+        if self.dp_shared_memory and self.checkpoint_mapped:
+            raise ValueError(
+                "dp_shared_memory does not apply to checkpoint_mapped: mapped "
+                "checkpoint pages are already shared between processes"
+            )
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
@@ -80,6 +106,24 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
+        if (
+            self.checkpoint_mapped
+            and model_config.architecture not in _CHECKPOINT_MAPPED_ARCHITECTURES
+        ):
+            raise ValueError(
+                "Engram checkpoint_mapped is implemented for "
+                f"{sorted(_CHECKPOINT_MAPPED_ARCHITECTURES)} only, not "
+                f"{model_config.architecture}."
+            )
+        if self.checkpoint_mapped:
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                # The ROCm Qwen4Exp path has no mapped backend and would
+                # silently store the full pinned table instead.
+                raise ValueError(
+                    "Engram checkpoint_mapped is implemented for CUDA only."
+                )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
@@ -87,6 +131,7 @@ class EngramConfig:
             self.dp_shared_memory = (
                 self.cpu_offload
                 and not self.use_thp
+                and not self.checkpoint_mapped
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
             )
