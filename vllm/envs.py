@@ -212,6 +212,9 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_MOE_BALANCE_ROUTING_EMA: bool = False
+    VLLM_MOE_BALANCE_ROUTING_EMA_ALPHA: float = 0.1
+    VLLM_MOE_BALANCE_ROUTING_EMA_LAMBDA: float = 2.0
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
@@ -1644,6 +1647,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
+    ),
+    # Adjust router logits before top-k to proactively steer tokens away from
+    # overloaded EP ranks using an EMA of per-rank token-slot counts.
+    # See vllm/model_executor/layers/fused_moe/router/balance_routing_ema.py.
+    "VLLM_MOE_BALANCE_ROUTING_EMA": lambda: bool(
+        int(os.getenv("VLLM_MOE_BALANCE_ROUTING_EMA", "0"))
+    ),
+    # EMA smoothing factor for VLLM_MOE_BALANCE_ROUTING_EMA.
+    # Higher values respond faster to load changes but are noisier.
+    "VLLM_MOE_BALANCE_ROUTING_EMA_ALPHA": lambda: float(
+        os.getenv("VLLM_MOE_BALANCE_ROUTING_EMA_ALPHA", "0.1")
+    ),
+    # Penalty strength for VLLM_MOE_BALANCE_ROUTING_EMA.
+    # Higher values enforce tighter balance at the cost of more logit distortion.
+    "VLLM_MOE_BALANCE_ROUTING_EMA_LAMBDA": lambda: float(
+        os.getenv("VLLM_MOE_BALANCE_ROUTING_EMA_LAMBDA", "2.0")
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that

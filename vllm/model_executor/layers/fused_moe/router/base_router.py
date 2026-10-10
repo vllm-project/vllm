@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -180,6 +181,10 @@ class BaseRouter(FusedMoERouter):
         self.top_k = top_k
         self.global_num_experts = global_num_experts
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        # EMA state for VLLM_MOE_BALANCE_ROUTING_EMA; lazy-initialized on
+        # first forward pass once the device and ep_size are known.
+        self._ema_load: torch.Tensor | None = None
+        self._ema_prev_topk_ids: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -287,10 +292,37 @@ class BaseRouter(FusedMoERouter):
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
-        # Step 2: Compute routing (delegated to subclass)
+        # Step 2: Compute routing (delegated to subclass).
+        # If EMA load-aware routing is enabled, adjust logits before top-k
+        # to proactively steer tokens away from overloaded EP ranks.
+        if envs.VLLM_MOE_BALANCE_ROUTING_EMA:
+            from vllm.model_executor.layers.fused_moe.router \
+                    .balance_routing_ema import adjust_logits_ema
+            if self._ema_load is None:
+                try:
+                    from vllm.distributed import get_ep_group
+                    ep_size = get_ep_group().world_size
+                except Exception:
+                    ep_size = 1
+                self._ema_load = torch.zeros(
+                    ep_size, dtype=torch.float32, device=router_logits.device
+                )
+            router_logits = adjust_logits_ema(
+                router_logits=router_logits,
+                ema_load=self._ema_load,
+                prev_topk_ids=self._ema_prev_topk_ids,
+                num_experts=self.global_num_experts,
+                alpha=envs.VLLM_MOE_BALANCE_ROUTING_EMA_ALPHA,
+                lambda_=envs.VLLM_MOE_BALANCE_ROUTING_EMA_LAMBDA,
+            )
+
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
+
+        # Store logical topk_ids so the next step can update the EMA.
+        if envs.VLLM_MOE_BALANCE_ROUTING_EMA:
+            self._ema_prev_topk_ids = topk_ids.detach()
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
