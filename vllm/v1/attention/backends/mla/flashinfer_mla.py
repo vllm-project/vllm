@@ -10,6 +10,7 @@ from flashinfer.utils import (
     get_device_sm_count,
     get_trtllm_gen_multi_ctas_kv_counter_bytes,
 )
+from typing_extensions import override
 
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
@@ -29,11 +30,12 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     MultipleOf,
+    max_decode_query_len,
 )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import AttentionSpec
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -134,10 +136,7 @@ class FlashInferMLAMetadata(MLACommonMetadata[FlashInferMLADecodeMetadata]):
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadata]):
-    # Adaptive verification requires ALWAYS from every builder, matching upstream's
-    # DeepseekV4FlashMLAMetadataBuilder. The kernels tile ragged queries from the device
-    # query offsets (flashinfer #3238), so one k+1 graph replays any 1..k+1 mix.
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
     # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
@@ -167,6 +166,20 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadat
             FlashInferMLAMetadata,
             supports_dcp_with_varlen=True,
         )
+
+    @override  # type: ignore[misc]
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["FlashInferMLAMetadataBuilder"],
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "KVCacheSpec",
+    ) -> int | None:
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
 
     def _build_decode(
         self,
