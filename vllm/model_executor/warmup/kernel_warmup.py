@@ -418,9 +418,6 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
     Args:
         runner: The model runner to tune.
         skip_attn: Additionally skip attention in the tuning dummy runs.
-            Required when the runner has no KV cache (the weight cache
-            daemon's warmup). No attention backend registers tunable ops, so
-            the tuned table is unaffected.
 
     With PP > 1, stages run different layers and may profile different ops,
     so each stage's TP group tunes separately with its own cache file;
