@@ -96,6 +96,40 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 CPU offload requires a GPU with UVA support;
 vLLM fails fast when it is unavailable.
 
+## Host file gather (Qwen4Exp)
+
+`host_file_gather` serves Qwen4Exp PLE rows by reading them from the
+safetensors shard files instead of allocating the table. Set
+`--engram-config '{"host_file_gather": true}'`. It applies only to Qwen4Exp
+and takes precedence over `cpu_offload`.
+
+Rows stay in the checkpoint dtype: an FP8 table stays FP8 and is dequantized
+on the GPU, an NVFP4 table reads its packed rows and block scales and decodes
+them on the GPU, and an unquantized table must match `--dtype`. CPU offload
+converts on load; this mode rejects the mismatch at load.
+
+Each step reads its rows from the files with `preadv` and stages them on the
+device, so the table is never mapped into the worker after load and never
+counts toward its RSS. Its pages are plain page cache: shared by co-located
+ranks and reclaimable under memory pressure. Each step pays a host sync, and
+every TP rank reads all rows.
+
+Serving depends on the checkpoint files staying unchanged while the server
+runs: an in-place overwrite serves the new bytes, truncation stops the engine
+with an error naming the file and offset, and deleting or renaming the files
+is safe.
+
+The first touch of a row costs a disk read, and a page evicted under memory
+pressure is read again on the next miss. By default no prewarm is needed; for
+a fast first request, read the PLE files once after the server has started
+and allocated its KV cache.
+
+Reload is unsupported and fails closed. Non-CUDA platforms and elastic EP reject
+the key.
+Load paths that do not hand over file-backed safetensors tensors fail at bind
+(`eager`, `.bin`, runai, `fastsafetensors`, `instanttensor`). The multithread
+loader is file-backed and is admitted. `--load-format dummy` serves zeros.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
@@ -115,7 +149,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only.
+Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload` and
+`host_file_gather`.
 
 ## Sharing host tables across DP replicas
 

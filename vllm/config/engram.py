@@ -37,6 +37,11 @@ class EngramConfig:
     cpu_offload: bool = True
     """Store embedding weights in pinned CPU memory for UVA lookup."""
 
+    host_file_gather: bool = False
+    """Serve Qwen4Exp PLE rows by reading them on the CPU from the checkpoint
+    files and staging them on the device each step, instead of allocating the
+    table; takes precedence over `cpu_offload`."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
@@ -80,6 +85,11 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
+        if self.host_file_gather:
+            from vllm.platforms import current_platform
+
+            if field != "ple_layer_ids" or not current_platform.is_cuda():
+                raise ValueError("host_file_gather requires a Qwen4Exp model on CUDA")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
@@ -106,6 +116,8 @@ class EngramConfig:
             raise ValueError(
                 "Engram embedding_across_dp is not supported with elastic EP yet."
             )
+        if self.host_file_gather and parallel_config.enable_elastic_ep:
+            raise ValueError("host_file_gather is not supported with elastic EP.")
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
