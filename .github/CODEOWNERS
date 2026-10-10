@@ -43,7 +43,6 @@
 /vllm/entrypoints/pooling @noooop
 /vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
-/vllm/entrypoints/*.py @njhill
 /vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
 
