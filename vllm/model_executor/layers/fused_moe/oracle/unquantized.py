@@ -97,10 +97,19 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         # XPUExperts does not support batch invariance; TRITON is kept as a
         # fallback so VLLM_BATCH_INVARIANT=1 still resolves to a valid
         # (batch-invariant) backend on XPU.
-        _AVAILABLE_BACKENDS = [
-            UnquantizedMoeBackend.XPU,
-            UnquantizedMoeBackend.TRITON,
-        ]
+        #
+        # XPUExperts cannot consume the batched activation format, so prefer
+        # BATCHED_TRITON when the dispatch emits it.
+        if moe_config.moe_parallel_config.use_batched_activation_format:
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.BATCHED_TRITON,
+                UnquantizedMoeBackend.XPU,
+            ]
+        else:
+            _AVAILABLE_BACKENDS = [
+                UnquantizedMoeBackend.XPU,
+                UnquantizedMoeBackend.TRITON,
+            ]
     elif current_platform.is_cpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
     return _AVAILABLE_BACKENDS

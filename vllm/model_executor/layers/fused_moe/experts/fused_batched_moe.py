@@ -505,6 +505,14 @@ def invoke_moe_batched_triton_kernel(
     if use_td:
         set_triton_allocator(A.device)
 
+    # Tuned launch options. XPU only: CUDA keeps the Triton defaults, so tuned
+    # JSONs written for the non-batched kernel are not reinterpreted there.
+    launch_options: dict[str, int | str] = {}
+    if current_platform.is_xpu():
+        for key in ("num_warps", "num_stages", "grf_mode"):
+            if key in config:
+                launch_options[key] = config[key]
+
     batched_triton_kernel[grid](
         A,
         B,
@@ -547,6 +555,7 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         USE_TD=use_td,
+        **launch_options,
     )
 
 
