@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 from typing import Any
 
 import torch
@@ -15,6 +16,11 @@ class RecoverSSMState:
 
     def __init__(self) -> None:
         self._step: tuple[RecoverSSMMetadata, ...] | None = None
+
+    def reset(self) -> None:
+        """Drop the recorded step. Its metadata holds the commit contexts, which
+        reference the KV cache tensors they were built for."""
+        self._step = None
 
     def record_step(
         self,
@@ -35,6 +41,35 @@ class RecoverSSMState:
                     step.append(metadata)
         self._step = tuple(step)
 
+    def detach_step(self) -> tuple[RecoverSSMMetadata, ...] | None:
+        """Hand the recorded step to a deferred commit (non-last PP ranks).
+
+        A non-last pipeline-parallel rank commits in the PP postprocess
+        ``pp_size`` steps later, after the other micro-batches have recorded
+        their own steps and rebuilt the persistent metadata buffers. The commit
+        index tensors are therefore cloned here. The replay records themselves
+        live in each request's own state block, so they are not overwritten in
+        between.
+        """
+        step, self._step = self._step, None
+        if not step:
+            return None
+        detached = []
+        for metadata in step:
+            commit = getattr(metadata, "recoverssm_commit", None)
+            if commit is not None:
+                commit = dataclasses.replace(
+                    commit,
+                    **{
+                        f.name: getattr(commit, f.name).clone()
+                        for f in dataclasses.fields(commit)
+                        if isinstance(getattr(commit, f.name), torch.Tensor)
+                    },
+                )
+                metadata = dataclasses.replace(metadata, recoverssm_commit=commit)
+            detached.append(metadata)
+        return tuple(detached)
+
     def commit_step(
         self,
         num_sampled: torch.Tensor | int,
@@ -42,9 +77,22 @@ class RecoverSSMState:
         *,
         state_indices: torch.Tensor | None,
         num_accepted_tokens: torch.Tensor,
+        step: tuple[RecoverSSMMetadata, ...] | None = None,
     ) -> None:
-        step = self._step
-        self._step = None
+        if step is None:
+            step = self._step
+            self._step = None
+        elif not isinstance(num_sampled, int):
+            # Deferred PP commit: rows whose request was freed while the commit
+            # was pending carry idx -1 and may already have a new owner for
+            # their state block; an accepted count of 0 makes the commit kernel
+            # skip them. num_sampled from the PP broadcast is padded past
+            # num_reqs, so only the first len(idx_mapping) rows are real.
+            n = idx_mapping.shape[0]
+            assert idx_mapping.ndim == 1 and num_sampled.ndim == 1
+            assert num_sampled.shape[0] >= n, (num_sampled.shape, n)
+            num_sampled = num_sampled.clone()
+            num_sampled[:n] = torch.where(idx_mapping >= 0, num_sampled[:n], 0)
         if isinstance(num_sampled, int) or step is None:
             return
 
@@ -91,10 +139,12 @@ def _postprocess_recoverssm_align_kernel(
         return
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
     num_computed = tl.load(num_computed_ptr + batch_idx)
+    # Match the commit plan: the running state lives in the block holding the
+    # last computed token, so the next step migrates it across a boundary.
     tl.store(
         state_idx_ptr + req_state_idx,
         tl.minimum(
-            (num_computed + num_sampled) // MAMBA_BLOCK_SIZE,
+            tl.maximum(num_computed + num_sampled - 1, 0) // MAMBA_BLOCK_SIZE,
             BLOCK_TABLE_WIDTH - 1,
         ),
     )

@@ -71,6 +71,13 @@ else:
 
 logger = init_logger(__name__)
 
+# Architectures whose GDN (and PLE) layers run RecoverSSM under --use-replayssm.
+_QWEN4EXP_RECOVERSSM_ARCHS = (
+    "Qwen4ExpForCausalLM",
+    "Qwen4ExpForConditionalGeneration",
+    "Qwen4ExpMTP",
+)
+
 # TODO(rocm): These models are either unsupported by MRV2 or slower with
 # MRV2 on AMD GPUs.
 ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
@@ -3373,22 +3380,23 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
-            self.cache_config.use_kda_recoverssm = False
+            self.cache_config.use_recoverssm = False
             return self
 
-        kda_architectures = (
+        recoverssm_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
+            *_QWEN4EXP_RECOVERSSM_ARCHS,
         )
-        is_kda_model = (
+        is_recoverssm_model = (
             self.model_config is not None
-            and self.model_config.architecture in kda_architectures
+            and self.model_config.architecture in recoverssm_architectures
         )
-        self.cache_config.use_kda_recoverssm = (
-            self.num_speculative_tokens > 0 and is_kda_model
+        self.cache_config.use_recoverssm = (
+            self.num_speculative_tokens > 0 and is_recoverssm_model
         )
         use_mamba_replayssm_spec = (
-            self.num_speculative_tokens > 0 and not self.cache_config.use_kda_recoverssm
+            self.num_speculative_tokens > 0 and not self.cache_config.use_recoverssm
         )
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
@@ -3397,13 +3405,24 @@ class VllmConfig:
                 f"{self.model_config.architecture!r}"
             )
         if (
+            self.model_config is not None
+            and self.model_config.architecture in _QWEN4EXP_RECOVERSSM_ARCHS
+            and not self.cache_config.use_recoverssm
+        ):
+            # Qwen4Exp's GDN and PLE layers have no plain ReplaySSM path; with them the
+            # flag selects RecoverSSM, which needs speculative decoding.
+            raise ValueError(
+                "--use-replayssm on Qwen4Exp selects GDN RecoverSSM and requires "
+                "speculative decoding (num_speculative_tokens > 0)"
+            )
+        if (
             self.mamba_config.backend == MambaBackendEnum.FLASHINFER
             and self.cache_config.replayssm_buffer_len > 16
         ):
             raise ValueError(
                 "FlashInfer ReplaySSM requires --replayssm-buffer-len <= 16"
             )
-        if self.cache_config.use_kda_recoverssm:
+        if self.cache_config.use_recoverssm:
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
                     "RecoverSSM supports bfloat16/float32 "
@@ -3417,9 +3436,16 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM with align mode requires VLLM_USE_V2_MODEL_RUNNER=1"
                 )
-            if self.parallel_config.pipeline_parallel_size > 1:
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                and self.cache_config.mamba_cache_mode == "align"
+            ):
+                # Non-last PP ranks commit in the deferred PP postprocess (see
+                # RecoverSSMState.detach_step); the align-mode boundary postprocess
+                # is not wired through that path yet.
                 raise ValueError(
-                    "RecoverSSM currently requires pipeline_parallel_size=1"
+                    "RecoverSSM with pipeline_parallel_size > 1 does not support "
+                    "--mamba-cache-mode align yet"
                 )
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")

@@ -92,7 +92,7 @@ class MambaHybridModelState(DefaultModelState):
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
         self.recoverssm = (
-            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
+            RecoverSSMState() if self.cache_config.use_recoverssm else None
         )
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
@@ -345,6 +345,7 @@ class MambaHybridModelState(DefaultModelState):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        recoverssm_step: tuple | None = None,
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
@@ -372,6 +373,7 @@ class MambaHybridModelState(DefaultModelState):
                 idx_mapping,
                 state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
                 num_accepted_tokens=self.num_accepted_tokens_gpu,
+                step=recoverssm_step,
             )
 
         if not num_reqs:
