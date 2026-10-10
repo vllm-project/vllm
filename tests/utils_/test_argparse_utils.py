@@ -153,6 +153,38 @@ def test_config_file(parser_with_config):
         )
 
 
+def test_empty_config_file(parser_with_config, tmp_path):
+    empty_file = tmp_path / "empty.yaml"
+    empty_file.write_text("")
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", "--config", str(empty_file), "--port", "8000"]
+    )
+    assert args.model_tag == "mymodel"
+    assert args.port == 8000
+
+    comment_file = tmp_path / "comment.yaml"
+    comment_file.write_text("# This is a comment\n# Another comment\n")
+    args = parser_with_config.parse_args(
+        ["serve", "mymodel", "--config", str(comment_file), "--port", "9000"]
+    )
+    assert args.model_tag == "mymodel"
+    assert args.port == 9000
+
+
+def test_invalid_yaml_config_file(parser_with_config, tmp_path):
+    list_file = tmp_path / "list.yaml"
+    list_file.write_text("- item1\n- item2\n")
+    with pytest.raises(ValueError, match="expected a dictionary/mapping"):
+        parser_with_config.parse_args(["serve", "mymodel", "--config", str(list_file)])
+
+    scalar_file = tmp_path / "scalar.yaml"
+    scalar_file.write_text("scalar_value\n")
+    with pytest.raises(ValueError, match="expected a dictionary/mapping"):
+        parser_with_config.parse_args(
+            ["serve", "mymodel", "--config", str(scalar_file)]
+        )
+
+
 def test_no_model_tag(parser_with_config, cli_config_file):
     with pytest.raises(ValueError):
         parser_with_config.parse_args(["serve", "--config", cli_config_file])
