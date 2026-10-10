@@ -187,3 +187,164 @@ def test_minimax_m3_sparse_decode_fp8_kv_scales(scale_mode: str):
 
     torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
     assert not torch.allclose(unscaled, ref, rtol=1e-1, atol=1e-1)
+
+
+@pytest.mark.parametrize("page_capacity", [1, 4, 17])
+@pytest.mark.parametrize("mode", ["bf16", "scalar", "per_token_head"])
+@pytest.mark.parametrize("decode_query_len", [1, 3])
+@pytest.mark.parametrize("num_reqs,num_kv_heads", [(1, 1), (2, 2), (4, 1)])
+@torch.inference_mode()
+def test_page_split_decode_matches_dense(
+    mode, decode_query_len, num_reqs, num_kv_heads, page_capacity
+):
+    """Check causal tails, permuted physical pages and both FP8 scale layouts."""
+    if not current_platform.is_cuda() or torch.cuda.get_device_capability() not in (
+        (10, 3),
+        (12, 0),
+    ):
+        pytest.skip("Blackwell single-page path")
+    if page_capacity > 1 and (
+        torch.cuda.get_device_capability() != (12, 0)
+        or (mode == "bf16" and num_reqs * decode_query_len * num_kv_heads > 16)
+    ):
+        pytest.skip("Outside page-split dispatch")
+    torch.manual_seed(73)
+    total_q = num_reqs * decode_query_len
+    heads = num_kv_heads * 16
+    q = torch.randn(total_q, heads, 128, device=DEVICE, dtype=DTYPE)
+    kv = torch.randn(
+        (num_reqs + 1) * page_capacity,
+        num_kv_heads,
+        128,
+        256,
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    if mode != "bf16":
+        kv = kv.to(torch.float8_e4m3fn)
+    ks = vs = None
+    if mode == "scalar":
+        ks = torch.tensor([0.7], device=DEVICE)
+        vs = torch.tensor([1.3], device=DEVICE)
+    elif mode == "per_token_head":
+        ks = 0.5 + torch.rand(
+            num_kv_heads, (num_reqs + 1) * page_capacity * 128, device=DEVICE
+        )
+        vs = 0.5 + torch.rand_like(ks)
+    table = torch.randperm(
+        num_reqs * page_capacity, device=DEVICE, dtype=torch.int32
+    ).reshape(num_reqs, page_capacity)
+    lens = torch.tensor(
+        ([1, 63, 127, 128][:num_reqs]), device=DEVICE, dtype=torch.int32
+    )
+    if page_capacity > 1:
+        lens += (page_capacity - 1) * 128
+    topk = torch.full(
+        (num_kv_heads, total_q, 16), 2147483647, device=DEVICE, dtype=torch.int32
+    )
+    for token in range(total_q):
+        req, local = divmod(token, decode_query_len)
+        visible = max(int(lens[req]) - decode_query_len + local + 1, 0)
+        pages = (visible + 127) // 128
+        for head in range(num_kv_heads):
+            topk[head, token, : min(16, pages)] = torch.randperm(
+                pages, device=DEVICE, dtype=torch.int32
+            )[:16]
+    output = torch.full_like(q, float("nan"))
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv,
+        topk,
+        table,
+        lens,
+        num_kv_heads,
+        128**-0.5,
+        output,
+        decode_query_len,
+        ks,
+        vs,
+    )
+    reference = torch.zeros_like(q)
+    for token in range(total_q):
+        req, local = divmod(token, decode_query_len)
+        visible = max(int(lens[req]) - decode_query_len + local + 1, 0)
+        if visible == 0:
+            continue
+        for head in range(num_kv_heads):
+            keys, values = [], []
+            for logical in topk[
+                head, token, : min(16, (visible + 127) // 128)
+            ].tolist():
+                page = int(table[req, logical])
+                count = min(128, visible - logical * 128)
+                k = kv[page, head, :count, :128].to(DTYPE)
+                v = kv[page, head, :count, 128:].to(DTYPE)
+                if ks is not None:
+                    assert vs is not None
+                    k_scale = (
+                        ks
+                        if ks.numel() == 1
+                        else ks[head, page * 128 : page * 128 + count, None]
+                    )
+                    v_scale = (
+                        vs
+                        if vs.numel() == 1
+                        else vs[head, page * 128 : page * 128 + count, None]
+                    )
+                    k = (k.float() * k_scale).to(DTYPE)
+                    v = (v.float() * v_scale).to(DTYPE)
+                keys.append(k)
+                values.append(v)
+            k, v = torch.cat(keys), torch.cat(values)
+            qq = q[token, head * 16 : (head + 1) * 16].float()
+            reference[token, head * 16 : (head + 1) * 16] = (
+                torch.softmax(qq @ k.float().T * 128**-0.5, dim=-1) @ v.float()
+            ).to(DTYPE)
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("page_capacity", [1, 4, 17])
+@pytest.mark.parametrize("fp8", [False, True])
+@torch.inference_mode()
+def test_page_split_decode_graph_length_changes(fp8, page_capacity):
+    """A reused output must become zero for empty rows, including after replay."""
+    if not current_platform.is_cuda() or torch.cuda.get_device_capability() not in (
+        (10, 3),
+        (12, 0),
+    ):
+        pytest.skip("Blackwell single-page path")
+    if page_capacity > 1 and torch.cuda.get_device_capability() != (12, 0):
+        pytest.skip("SM120 page-split path")
+    q = torch.randn(1, 16, 128, device=DEVICE, dtype=DTYPE)
+    kv = torch.randn(page_capacity, 1, 128, 256, device=DEVICE, dtype=DTYPE)
+    if fp8:
+        kv = kv.to(torch.float8_e4m3fn)
+    topk = torch.arange(16, device=DEVICE, dtype=torch.int32).reshape(1, 1, 16)
+    table = torch.arange(page_capacity, device=DEVICE, dtype=torch.int32).reshape(
+        1, page_capacity
+    )
+    lens = torch.tensor([128 * page_capacity], device=DEVICE, dtype=torch.int32)
+    output = torch.empty_like(q)
+
+    def run():
+        minimax_m3_sparse_attn_decode(q, kv, topk, table, lens, 1, 128**-0.5, output, 1)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        for length in [0, 1, min(129, page_capacity * 128), page_capacity * 128, 0]:
+            lens.fill_(length)
+            output.fill_(float("nan"))
+            graph.replay()
+            assert torch.isfinite(output).all()
+            if length == 0:
+                assert torch.count_nonzero(output) == 0
+            elif length == 1:
+                expected = kv[0, 0, 0, 128:].to(DTYPE).expand_as(output)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    torch.cuda.current_stream().wait_stream(stream)
