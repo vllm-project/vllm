@@ -22,6 +22,9 @@
 
 static constexpr int get_lds_size_int4() { return 64 * 1024; }
 
+// K must be a multiple of this; checked host-side in wvSplitK_int4_g.
+static constexpr int kInt4KAlign = 16;
+
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
@@ -147,7 +150,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     float f[A_CHUNK / 8];
   };
 
-  __shared__ scalar_t s[max_lds_len];
+  static_assert(kInt4KAlign % A_CHUNK == 0,
+                "K is only host-checked to be a multiple of kInt4KAlign");
+  __shared__ alignas(sizeof(bigTypeA)) scalar_t s[max_lds_len];
 
   for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
@@ -199,7 +204,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         if (k_ >= K) break;
 
         for (int n = 0; n < N; n++) {
-          bigA[n][k2] = *((const bigTypeA*)(&(s[k_ + K * n])));
+          bigA[n][k2] = *((const bigTypeA*)__builtin_assume_aligned(
+              &(s[k_ + K * n]), sizeof(bigTypeA)));
         }
       }
 
@@ -382,7 +388,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     float f[A_CHUNK / 8];
   };
 
-  __shared__ scalar_t s[max_lds_len];
+  static_assert(kInt4KAlign % A_CHUNK == 0,
+                "K is only host-checked to be a multiple of kInt4KAlign");
+  __shared__ alignas(sizeof(bigTypeA)) scalar_t s[max_lds_len];
 
   uint32_t commitColumn[YTILE];
   for (uint32_t i = 0; i < YTILE; i++) {
@@ -447,7 +455,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
         for (int n = 0; n < N; n++) {
           if (k_ + K * n < max_lds_len)
-            bigA[n][k2] = *((const bigTypeA*)(&(s[k_ + K * n])));
+            bigA[n][k2] = *((const bigTypeA*)__builtin_assume_aligned(
+                &(s[k_ + K * n]), sizeof(bigTypeA)));
           else
             bigA[n][k2] = *((const bigTypeA*)(&(A[k_ + K * n])));
         }
@@ -703,7 +712,7 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                 num_groups, "] but got [", in_zero_points->size(0), ", ",
                 in_zero_points->size(1), "]");
   }
-  TORCH_CHECK(K_in % 16 == 0, "K must be divisible by 16");
+  TORCH_CHECK(K_in % kInt4KAlign == 0, "K must be divisible by ", kInt4KAlign);
 
   const int max_lds_len = get_lds_size_int4() / 2;
   TORCH_CHECK(K_in * N_in <= (int64_t)(max_lds_len * 1.2),
