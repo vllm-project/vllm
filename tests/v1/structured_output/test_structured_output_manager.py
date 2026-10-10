@@ -563,6 +563,56 @@ def test_outlines_termination(tokenizer):
     assert grammar.is_terminated()
 
 
+class RecordingReasoner(MockReasoner):
+    def __init__(self, tokenizer, marker: int | None = None):
+        super().__init__(tokenizer, marker)
+        self.probes: list[tuple[list[int], list[int]]] = []
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids):
+        delta_ids = list(delta_ids)
+        self.probes.append((list(input_ids), delta_ids))
+        return super().is_reasoning_end_streaming(input_ids, delta_ids)
+
+
+@pytest.mark.parametrize("committed", [False, True], ids=["drafts", "committed"])
+@pytest.mark.parametrize("marker_pos", [0, 2])
+def test_fallback_probes_see_history_and_draft_prefixes(
+    tokenizer, committed: bool, marker_pos: int
+):
+    """The fallback probes must see the same token ids as when the history was
+    copied and popped: the history plus each prefix of the drafts."""
+    marker = _single_token(tokenizer, THINK_END)
+    manager, request = _build_harness(
+        tokenizer,
+        "xgrammar",
+        reasoning_ended=False,
+        reasoning_parser_kwargs={"marker": marker},
+    )
+    manager.reasoner_cls = RecordingReasoner
+    request.append_output_token_ids(_to_token_ids(tokenizer, ("a", "b")))
+    drafts = _to_token_ids(tokenizer, ("c", "d", "e", "f"))
+    drafts[marker_pos] = marker
+    if committed:
+        request.append_output_token_ids(drafts)
+    history = list(request.all_token_ids)
+    base = history[: len(history) - len(drafts)] if committed else history
+
+    start = manager._get_constraint_bounds(
+        request, drafts, spec_tokens_committed=committed
+    ).constraint_start
+
+    reasoner = request.structured_output_request.reasoner
+    assert isinstance(reasoner, RecordingReasoner)
+    expected = [(base + drafts, drafts)]
+    expected += [
+        (base + drafts[:i], drafts[:i]) for i in range(len(drafts) - 1, marker_pos, -1)
+    ]
+    if marker_pos > 0:
+        expected.append((base + drafts[:marker_pos], drafts[:marker_pos]))
+    assert reasoner.probes == expected
+    assert start == marker_pos + 1
+
+
 def test_outlines_choice_with_non_bmp_characters(tokenizer):
     """The choice spec is JSON, which encodes emoji as surrogate pairs."""
     choices = ["😀 yes", "no"]
