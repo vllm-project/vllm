@@ -167,10 +167,14 @@ fn call_tag(tool: &FunctionToolParam, options: StructuralTagOptions) -> TagForma
             excludes: vec![],
         },
     );
-    let call_body = Format::or(vec![
-        typed_arguments,
-        raw_json_arguments(&parameters, options),
-    ]);
+    // Typed arguments are absent only when free keys cannot render; raw JSON
+    // still covers the call.
+    let call_body = one_of(
+        typed_arguments
+            .into_iter()
+            .chain([raw_json_arguments(&parameters, options)])
+            .collect(),
+    );
 
     TagFormat::new(
         format!(

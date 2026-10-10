@@ -7,12 +7,17 @@ use winnow::error::{ContextError, ErrMode};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
+use xgrammar_structural_tag::format::Format;
 
+use self::structural_tag::MINIMAX_M3_STRUCTURAL_TAG_BUILDER;
 use super::parameters::{ParamElement, ParamInput, ToolSchemas};
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::output_grammar::{self, OutputGrammarContext};
 use crate::tool::Tool;
 use crate::utils::recursion::ParserRecursionGuard;
+
+mod structural_tag;
 
 const NAMESPACE: &str = "]<]minimax[>[";
 const TOOL_CALL_START: &str = "]<]minimax[>[<tool_call>";
@@ -143,6 +148,13 @@ impl ToolParser for MinimaxM3ToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
+    }
+
+    fn build_visible_format(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<Format>> {
+        output_grammar::visible_format_from_builder(Some(&MINIMAX_M3_STRUCTURAL_TAG_BUILDER), ctx)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
