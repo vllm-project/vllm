@@ -2290,9 +2290,18 @@ def generate_scheduler_kv_cache_config(
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             # All layers in the UniformTypeKVCacheSpecs have the same type,
-            # so use an arbitrary one to initialize the scheduler.
+            # so use one to initialize the scheduler. Prefer a spec requiring
+            # zeroing so this backend capability is not lost when collapsing
+            # per-layer specs.
+            layer_specs = list(group.kv_cache_spec.kv_cache_specs.values())
             group.kv_cache_spec = next(
-                iter(group.kv_cache_spec.kv_cache_specs.values())
+                (
+                    spec
+                    for spec in layer_specs
+                    if isinstance(spec, AttentionSpec)
+                    and spec.requires_kv_cache_zeroing
+                ),
+                layer_specs[0],
             )
     return cfg
 
