@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -647,6 +647,7 @@ class MoERunner(MoERunnerInterface):
             fused_out,
         )
 
+    @contextmanager
     def _sequence_parallel_context(self):
         """Return a context manager for sequence-parallel token
         redistribution.
@@ -656,7 +657,21 @@ class MoERunner(MoERunnerInterface):
         returns a no-op context.
         """
         ctx = get_forward_context()
-        return (
+        local_is_padding = ctx.is_padding
+        if (
+            local_is_padding is not None
+            and self.moe_config.pcp_size > 1
+            and not self.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            padding_key = "pcp_moe_is_padding"
+            if padding_key not in ctx.additional_kwargs:
+                ctx.additional_kwargs[padding_key] = (
+                    get_pcp_group()
+                    .all_gather(local_is_padding.to(torch.uint8), dim=0)
+                    .bool()
+                )
+            ctx.is_padding = ctx.additional_kwargs[padding_key]
+        sp_context = (
             ctx.dp_metadata.sp_local_sizes(
                 self.moe_config.sp_size,
                 pcp_size=self.moe_config.pcp_size,
@@ -665,6 +680,11 @@ class MoERunner(MoERunnerInterface):
             if ctx.dp_metadata
             else nullcontext()
         )
+        try:
+            with sp_context:
+                yield
+        finally:
+            ctx.is_padding = local_is_padding
 
     def _maybe_add_zero_expert_output(
         self,
