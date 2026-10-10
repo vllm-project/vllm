@@ -236,18 +236,25 @@ class SparseIndexerTopk(torch.nn.Module):
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
-        """The priority chain: cooperative -> persistent -> per_row.
-        aiter/deep_select/flashinfer/torch are opt-in only.
+        """The priority chain: cooperative -> deep_select -> persistent -> per_row.
+        aiter/flashinfer/torch are opt-in only.
 
         cooperative_topk is preferred whenever it is applicable, i.e. within
-        its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
-        persistent_topk.
+        its AUTO_COOPERATIVE_MAX_ROWS row limit. Batches beyond that limit go
+        to deep_select on the SM100/SM103 family when the extension supports
+        the input, and fall back to persistent_topk elsewhere.
 
         aiter not auto-resolved as it does not outperform the per-row on every shape,
         hence we delegate to the caller to decide when to use it.
         """
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
+        if (
+            self._has_deep_select
+            and _HAS_DEEP_SELECT_C
+            and is_deep_select_supported(logits, topk_tokens)
+        ):
+            return "deep_select"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
             return "persistent"
         return "per_row"
