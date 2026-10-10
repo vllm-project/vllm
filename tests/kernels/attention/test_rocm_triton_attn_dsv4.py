@@ -915,6 +915,7 @@ def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> Non
 
     monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
     monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
+    monkeypatch.setattr(mod, "_get_aiter_pa_prefill_sparse", lambda: None)
     monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_dense_fallback)
     monkeypatch.setattr(
         mod,

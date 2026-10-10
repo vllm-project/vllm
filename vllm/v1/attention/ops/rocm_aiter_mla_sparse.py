@@ -46,9 +46,36 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
     return pa_sparse_prefill_opus
 
 
+@functools.cache
+def _get_aiter_pa_prefill_sparse() -> Callable[..., torch.Tensor] | None:
+    """gfx942 prefill kernel when AITER is enabled."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not _ON_GFX942 or not rocm_aiter_ops.is_enabled():
+        return None
+    from aiter.ops.triton.attention.pa_prefill_sparse import pa_prefill_sparse
+
+    return pa_prefill_sparse
+
+
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
+# gfx942 gate against the in-tree ragged prefill, not the gfx950 OPUS
+# crossover. MI325, H=16, D=512, bf16: from 512 rows AITER is ahead at
+# fanouts 128, 512, and 2048. At 256 rows and fanout 128 the ratio is 1.04,
+# on a flat ~0.025 ms.
+_GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES = 512
+
+
+def _can_use_aiter_pa_prefill_sparse(q: torch.Tensor, kv: torch.Tensor) -> bool:
+    """Cheap gate. The AITER import runs only after this passes."""
+    return (
+        _ON_GFX942
+        and q.shape[0] >= _GFX942_AITER_PA_PREFILL_SPARSE_MIN_QUERIES
+        and q.dtype in (torch.bfloat16, torch.float16)
+        and kv.dtype == q.dtype
+    )
 
 
 def _indexer_k_is_c4a_block_flat(compress_ratio: int) -> bool:
@@ -3647,6 +3674,36 @@ def _rocm_sparse_attn_prefill_ragged_aiter_opus(
     return True
 
 
+def _rocm_sparse_attn_prefill_aiter(
+    pa_prefill_sparse: Callable[..., torch.Tensor],
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+    output: torch.Tensor,
+) -> None:
+    """gfx942 path. One KV pool; the extend sources stay unset."""
+    logger.info_once("Using AITER pa_prefill_sparse for sparse MLA prefill on gfx942")
+    indices = _as_int32_contiguous_1d(indices)
+    indptr = _as_int32_contiguous_1d(indptr)
+    written = pa_prefill_sparse(
+        q,
+        kv,
+        indices,
+        indptr,
+        None,
+        None,
+        None,
+        attn_sink,
+        float(scale),
+        out=output if output.shape == q.shape and output.dtype == q.dtype else None,
+    )
+    if written.data_ptr() != output.data_ptr():
+        output.copy_(written[..., : output.shape[-1]].to(output.dtype))
+
+
 @functools.lru_cache
 def _decode_cu_count() -> int:
     try:
@@ -4411,6 +4468,33 @@ def rocm_sparse_attn_prefill(
             output=output,
         ):
             return
+
+    if _can_use_aiter_pa_prefill_sparse(q, kv):
+        pa_prefill_sparse = _get_aiter_pa_prefill_sparse()
+    else:
+        pa_prefill_sparse = None
+    if pa_prefill_sparse is not None:
+        if ragged_indices is None or ragged_indptr is None:
+            assert indices is not None
+            indices_2d = indices.reshape(indices.shape[0], -1)
+            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+                indices_2d,
+                topk_length
+                if topk_length is not None
+                else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
+                num_rows=kv.shape[0],
+            )
+        _rocm_sparse_attn_prefill_aiter(
+            pa_prefill_sparse,
+            q=q,
+            kv=kv.squeeze(1),
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=opus_attn_sink,
+            output=output,
+        )
+        return
 
     if ragged_indices is not None and ragged_indptr is not None:
         _rocm_sparse_attn_prefill_ragged_triton(
