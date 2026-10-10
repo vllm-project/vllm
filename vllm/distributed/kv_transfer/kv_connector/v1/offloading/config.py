@@ -277,6 +277,9 @@ def build_offloading_config(
             data_parallel_size=parallel_config.data_parallel_size,
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
+            per_rank_engine=(
+                parallel_config.distributed_executor_backend == "external_launcher"
+            ),
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
