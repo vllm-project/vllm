@@ -697,8 +697,12 @@ class Worker(WorkerBase):
             profile_result.non_kv_cache_memory = (
                 profile_result.total_consumed + profile_result.transient_peak_headroom
             )
+        # State the KV cache init allocates beside the cache, which the runner
+        # measured while profiling CUDA graphs. It is consumed memory, not CUDA
+        # graph memory, and it comes out of the KV cache budget.
+        kv_cache_init_memory = getattr(self.model_runner, "kv_cache_init_memory", 0)
 
-        self.total_consumed = profile_result.total_consumed
+        self.total_consumed = profile_result.total_consumed + kv_cache_init_memory
         self.peak_activation_memory = (
             profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
         )
@@ -707,6 +711,7 @@ class Worker(WorkerBase):
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
+            - kv_cache_init_memory
             - cudagraph_memory_estimate_applied
         )
 

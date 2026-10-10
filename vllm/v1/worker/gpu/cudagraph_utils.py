@@ -907,8 +907,23 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     platform_cls._global_graph_pool = throwaway_pool
 
     try:
+        free_before_init = torch.accelerator.get_memory_info()[0]
         with set_current_vllm_config(runner.vllm_config):
             _init_minimal_kv_cache_for_profiling(runner)
+        # The real KV cache init re-creates what this one allocated beside the
+        # KV cache (e.g. attention workspaces) after the KV cache is sized, so
+        # the worker counts it as consumed. Shared layers reuse one storage.
+        torch.accelerator.empty_cache()
+        kv_cache_storages = {
+            cache.untyped_storage().data_ptr(): cache.untyped_storage().nbytes()
+            for cache in runner.kv_caches
+        }
+        runner.kv_cache_init_memory = max(
+            free_before_init
+            - torch.accelerator.get_memory_info()[0]
+            - sum(kv_cache_storages.values()),
+            0,
+        )
 
         manager = runner.cudagraph_manager
         assert manager is not None
