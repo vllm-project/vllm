@@ -352,13 +352,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         ``j > 0`` of each has rank ``j`` and no column was widened.
         """
         n = len(self)
-        if n == 0:
-            return (
-                np.empty((0, 0), dtype="<i4"),
-                np.empty((0, 0), dtype="<f4"),
-                np.empty(0, dtype="<i8"),
-            )
-        if (
+        if n and (
             self._ends is not None
             or self._width < 1
             or self._ranks is not None
