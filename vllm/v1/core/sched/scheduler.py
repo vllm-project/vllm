@@ -2947,6 +2947,7 @@ class Scheduler(SchedulerInterface):
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
+            kv_cache_token_usage=self.kv_cache_manager.token_usage(self.running),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
