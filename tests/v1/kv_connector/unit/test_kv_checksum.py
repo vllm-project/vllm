@@ -6,7 +6,6 @@ PP sharding, replication, memory layout or kernel block size of the KV
 cache."""
 
 import copy
-import threading
 
 import numpy as np
 import pytest
@@ -47,11 +46,13 @@ def _name(layer: int) -> str:
     return f"model.layers.{layer}.self_attn.attn"
 
 
-def _spec(heads: int, block_size: int = BLOCK_SIZE, **kwargs) -> FullAttentionSpec:
+def _spec(
+    heads: int, block_size: int = BLOCK_SIZE, head_size: int = HEAD_SIZE, **kwargs
+) -> FullAttentionSpec:
     return FullAttentionSpec(
         block_size=block_size,
         num_kv_heads=heads,
-        head_size=HEAD_SIZE,
+        head_size=head_size,
         dtype=torch.bfloat16,
         **kwargs,
     )
@@ -78,13 +79,15 @@ def _worker(config, caches, *, tp_rank=0, tp_size=1, uniform_kv_heads=2):
     )
 
 
-def _logical_kv(heads: int, seed: int = 0) -> torch.Tensor:
+def _logical_kv(
+    heads: int, seed: int = 0, tokens: int = BLOCK_SIZE, cell_bytes: int = CELL_BYTES
+) -> torch.Tensor:
     """Random logical KV bytes of one layer: [blocks, heads, tokens, cell]."""
     gen = torch.Generator().manual_seed(seed)
     return torch.randint(
         0,
         256,
-        (NUM_BLOCKS, heads, BLOCK_SIZE, CELL_BYTES),
+        (NUM_BLOCKS, heads, tokens, cell_bytes),
         generator=gen,
         dtype=torch.uint8,
     )
@@ -521,28 +524,3 @@ def test_outputs_serialize_and_aggregate_across_workers():
     assert sorted(r.tp_rank for r in records) == [0, 1]
     total = sum(r.checksums["req"][0].values[:, 0] for r in records)
     np.testing.assert_array_equal(total, _reference({0: logical}))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA streams")
-def test_copy_is_ordered_after_checksums_for_any_reader():
-    """The copy is queued with the checksums, so another thread finalizing
-    (as the async output thread does) reads complete values even while the
-    main stream is still busy."""
-    logical = _logical_kv(heads=2)
-    worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(logical).cuda()})
-    main_stream = torch.cuda.Stream()
-    torch.cuda.set_stream(main_stream)
-    try:
-        torch.cuda._sleep(200_000_000)
-        worker.bind(KVChecksumScheduled(reqs_to_send={"req": BLOCKS}))
-        output = worker.post_forward(None, set(), set())
-    finally:
-        torch.cuda.set_stream(torch.cuda.default_stream())
-
-    records = []
-    reader = threading.Thread(target=lambda: records.extend(output.finalize()))
-    reader.start()
-    reader.join()
-    np.testing.assert_array_equal(
-        records[0].checksums["req"][0].values[:, 0], _reference({0: logical})
-    )

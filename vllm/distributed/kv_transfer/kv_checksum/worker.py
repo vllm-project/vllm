@@ -31,12 +31,14 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     kv_checksum_enabled,
     num_valid_tokens,
 )
+from vllm.distributed.kv_transfer.kv_checksum.kernels import layer_checksum
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import PIN_MEMORY, current_stream
 from vllm.v1.core.kv_cache_planning import layer_tp_replicas
 from vllm.v1.kv_cache_interface import (
@@ -55,20 +57,23 @@ _MAX_GATHER_BYTES = 64 * 1024 * 1024
 
 
 class _LayerView:
-    """One layer's KV cache as 8-byte pieces, with each piece's weight.
+    """One layer's KV cache as 8-byte pieces, for weighted sums.
 
-    ``blocks`` is ``[num_blocks, kernel_blocks, heads, tokens, pieces]``. A
+    ``pieces`` is ``[num_blocks, kernel_blocks, heads, tokens, pieces]``. A
     piece ``j`` of slice ``(layer, head)`` weighs ``m * (2 * j + 1)``, with
     ``m = 2 * (layer * H + head) + 1`` for the global head (see
     ``checksum.py``). ``weights`` are those of a block holding the request's
     first tokens; a block starting at token ``f`` adds ``f`` times
     ``offset_weights`` to them.
+
+    On CUDA with Triton the sums come from ``layer_checksum``; otherwise from
+    PyTorch ops on gathered blocks.
     """
 
     def __init__(
         self, pieces: torch.Tensor, first_slice: int, replica_key: ReplicaKey
     ) -> None:
-        """Precompute this rank's piece weights.
+        """Set up the weighted sums of this rank's slices.
 
         Args:
             pieces: The layer's cache viewed as 8-byte pieces.
@@ -76,6 +81,12 @@ class _LayerView:
             replica_key: The replicas and replica index of this rank's heads.
 
         """
+        self.pieces = pieces
+        self.first_slice = first_slice
+        self.replica_key = replica_key
+        self.use_triton = pieces.is_cuda and HAS_TRITON
+        if self.use_triton:
+            return
         _, kernel_blocks, heads, tokens, num_pieces = pieces.shape
         tokens_per_block = kernel_blocks * tokens
         device = pieces.device
@@ -93,11 +104,15 @@ class _LayerView:
         position = self.token_index * num_pieces + piece
         self.weights = slice_weight * (2 * position + 1)
         self.offset_weights = 2 * num_pieces * slice_weight
-        self.pieces = pieces
-        self.replica_key = replica_key
         self.rows_per_gather = max(
             1, _MAX_GATHER_BYTES // (tokens_per_block * heads * num_pieces * 8)
         )
+
+    def warm_up(self) -> None:
+        """Compile the Triton kernel now rather than in a serving step."""
+        if self.use_triton:
+            zeros = torch.zeros(1, dtype=torch.int64, device=self.pieces.device)
+            self.accumulate(zeros, zeros, zeros, torch.zeros_like(zeros))
 
     def accumulate(
         self,
@@ -116,6 +131,16 @@ class _LayerView:
             out: ``[n]`` int64 accumulator, wrapping around (mod 2**64).
 
         """
+        if self.use_triton:
+            layer_checksum(
+                self.pieces,
+                self.first_slice,
+                block_ids,
+                first_tokens,
+                valid_tokens,
+                out,
+            )
+            return
         dims = (1, 2, 3, 4)
         for start in range(0, block_ids.shape[0], self.rows_per_gather):
             end = start + self.rows_per_gather
@@ -465,6 +490,9 @@ class KVChecksumWorker:
             if device is not None and device.type == "cuda"
             else None
         )
+        for views in self._layer_views.values():
+            for view in views:
+                view.warm_up()
         self._skipped_groups = frozenset(skipped_groups)
         self._reqs_to_send: dict[str, KVChecksumBlocks] = {}
         self._reqs_to_recv: dict[str, KVChecksumBlocks] = {}
