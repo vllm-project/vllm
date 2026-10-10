@@ -3,12 +3,14 @@
 from typing import Any
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
@@ -1184,3 +1186,75 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+def _expected_parse_output(
+    output_token_ids: torch.Tensor, vocab_size: int, discard_req_indices
+) -> list[list[int]]:
+    rows = output_token_ids.tolist()
+    expected = [
+        [t for t in row if t != PLACEHOLDER_TOKEN_ID and t < vocab_size] for row in rows
+    ]
+    for i in discard_req_indices:
+        expected[int(i)] = []
+    return expected
+
+
+@pytest.mark.parametrize("batch_size", [0, 1, 4, 17])
+@pytest.mark.parametrize("max_spec_len", [1, 3])
+@pytest.mark.parametrize("discard_kind", ["none", "list", "ndarray", "all"])
+def test_parse_output_filters_placeholders_and_discards(
+    batch_size: int, max_spec_len: int, discard_kind: str
+):
+    """Each row keeps the tokens that are neither a placeholder nor out of
+    vocabulary, in order; discarded rows come back empty."""
+    vocab_size = 11
+    torch.manual_seed(batch_size * 100 + max_spec_len * 10 + len(discard_kind))
+    # The range spans the placeholder, ordinary ids and out-of-vocabulary ids,
+    # so a row exercises every branch of the filter.
+    output_token_ids = torch.randint(
+        -3, vocab_size + 3, (batch_size, max_spec_len + 1), dtype=torch.int32
+    )
+    every_third = list(range(0, batch_size, 3))
+    discard_req_indices = {
+        "none": [],
+        "list": every_third,
+        "ndarray": np.array(every_third, dtype=np.int64),
+        "all": list(range(batch_size)),
+    }[discard_kind]
+
+    outputs, logprobs = RejectionSampler.parse_output(
+        output_token_ids, vocab_size, discard_req_indices
+    )
+
+    assert logprobs is None
+    assert outputs == _expected_parse_output(
+        output_token_ids, vocab_size, discard_req_indices
+    )
+
+
+def test_parse_output_logprobs_ignore_discarded_rows():
+    """The logprobs boundaries are built before the discards are applied, so
+    dropping a request's tokens must not shift another request's logprobs."""
+    vocab_size = 11
+    output_token_ids = torch.tensor(
+        [[3, 4], [5, PLACEHOLDER_TOKEN_ID], [6, 7]], dtype=torch.int32
+    )
+    num_elems = output_token_ids.numel()
+    logprobs_tensors = LogprobsTensors(
+        logprob_token_ids=torch.arange(num_elems * 2, dtype=torch.int32).view(
+            num_elems, 2
+        ),
+        logprobs=torch.arange(num_elems * 2, dtype=torch.float32).view(num_elems, 2),
+        selected_token_ranks=torch.arange(num_elems, dtype=torch.int32),
+    )
+
+    outputs, logprobs = RejectionSampler.parse_output(
+        output_token_ids, vocab_size, [1], logprobs_tensors=logprobs_tensors
+    )
+
+    assert outputs == [[3, 4], [], [6, 7]]
+    # Five tokens pass the mask; the discarded row still owns its slot in the
+    # cumulative boundaries.
+    assert logprobs is not None
+    assert logprobs.cu_num_generated_tokens == [0, 2, 3, 5]
