@@ -12,7 +12,10 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
-from vllm.v1.sample.ops.logprobs import batched_count_greater_than
+from vllm.v1.sample.ops.logprobs import (
+    batched_count_greater_than,
+    batched_count_greater_than_per_value,
+)
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
@@ -206,19 +209,27 @@ class Sampler(nn.Module):
         token_ids_tensor[:, 0] = sampled
 
         # Gather logprobs at the requested token ids.
-        gathered_logprobs = logprobs.gather(-1, token_ids_tensor)
+        raw_gathered_logprobs = logprobs.gather(-1, token_ids_tensor)
 
         # Mask invalid (padded) positions with -inf
-        gathered_logprobs = gathered_logprobs.masked_fill(~valid_mask, float("-inf"))
+        gathered_logprobs = raw_gathered_logprobs.masked_fill(
+            ~valid_mask, float("-inf")
+        )
 
-        # Compute ranks for the sampled token. log_softmax is monotonic w.r.t.
-        # the original logits, so ranks computed from logprobs are equivalent.
-        sampled_logprobs = logprobs.gather(-1, sampled.unsqueeze(-1))
-        # Avoid 0/1 specialization recompile on the batch dimension of the
-        # compiled batched_count_greater_than. See gather_logprobs for context.
+        # Rank every column, not just the sampled token: requested ids are in
+        # request order, so unlike top-k their ranks can't be inferred from
+        # their positions. log_softmax is monotonic w.r.t. the original
+        # logits, so ranks computed from logprobs are equivalent. Ranks of
+        # padded columns are dropped downstream along with the columns.
+        # Mark the batch and column dims unbacked so neither the 0/1
+        # specialization nor a new number of requested ids recompiles. See
+        # gather_logprobs for context.
         torch._dynamo.decorators.mark_unbacked(logprobs, 0)
-        torch._dynamo.decorators.mark_unbacked(sampled_logprobs, 0)
-        token_ranks = batched_count_greater_than(logprobs, sampled_logprobs)
+        torch._dynamo.decorators.mark_unbacked(raw_gathered_logprobs, 0)
+        torch._dynamo.decorators.mark_unbacked(raw_gathered_logprobs, 1)
+        token_ranks = batched_count_greater_than_per_value(
+            logprobs, raw_gathered_logprobs
+        )
 
         return LogprobsTensors(
             logprob_token_ids=token_ids_tensor.to(torch.int32),
