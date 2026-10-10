@@ -131,7 +131,7 @@ def _sleep_test_hf_overrides(hf_config, *, model_arch: str):
 
 def _get_sleep_tensor_targets(
     model_name: str,
-) -> tuple[tuple[type[torch.nn.Module], tuple[str, ...]], ...]:
+) -> tuple[tuple[type[torch.torch.nn.Module], tuple[str, ...]], ...]:
     if model_name == "fireredasr2":
         from vllm.model_executor.models.conformer_encoder import (
             RelPositionalEncoding,
@@ -177,7 +177,7 @@ def _get_sleep_tensor_targets(
 
 
 def _snapshot_sleep_tensors(
-    model: torch.nn.Module,
+    model: torch.torch.nn.Module,
     *,
     model_name: str,
     tensor_names: tuple[str, ...],
@@ -252,6 +252,42 @@ def _assert_tensor_snapshots_equal(
             before_value,
             msg=lambda msg, name=name: (f"{model_name}: {name} was corrupted: {msg}"),
         )
+
+
+def test_weight_wake_hooks_reset_module_and_quant_state() -> None:
+    from vllm.v1.worker.gpu_worker import _run_post_weights_wake_up_hooks
+
+    events: list[str] = []
+
+    class QuantMethod:
+        def post_weights_wake_up(self, layer: torch.nn.Module) -> None:
+            events.append("quant")
+
+    class Layer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = QuantMethod()
+
+        def post_weights_wake_up(self) -> None:
+            events.append("module")
+
+    model = torch.nn.Sequential(Layer())
+    _run_post_weights_wake_up_hooks(model)
+
+    assert events == ["module", "quant"]
+
+
+def test_humming_moe_can_be_prepared_for_repeated_reload() -> None:
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
+
+    method = object.__new__(HummingMoEMethod)
+    method.processed = True
+
+    method.prepare_for_reload(SimpleNamespace())
+
+    assert not method.processed
 
 
 @create_new_process_for_each_test("spawn")
