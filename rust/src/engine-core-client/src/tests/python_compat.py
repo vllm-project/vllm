@@ -126,6 +126,19 @@ class ExtendedEngineCoreOutput(EngineCoreOutput):
     new_prompt_len_snapshot: int | None = None
 
 
+class CustomNotification(
+    msgspec.Struct,
+    tag="custom",
+    omit_defaults=True,
+):
+    key: str
+    payload: dict[str, object] = {}
+
+
+# Union of engine-level event types; mirrors vllm/v1/notifications.py.
+EngineNotification = CustomNotification
+
+
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,
@@ -139,6 +152,7 @@ class EngineCoreOutputs(
     finished_requests: set[str] | None = None
     wave_complete: int | None = None
     start_wave: int | None = None
+    engine_notifications: list[EngineNotification] | None = None
 
 
 request = EngineCoreRequest(
@@ -240,6 +254,9 @@ outputs = EngineCoreOutputs(
         )
     ],
     finished_requests={"req-1"},
+    engine_notifications=[
+        CustomNotification(key="my_plugin", payload={"count": 5}),
+    ],
 )
 
 extended_outputs = EngineCoreOutputs(
@@ -252,6 +269,7 @@ extended_outputs = EngineCoreOutputs(
         )
     ],
     finished_requests=outputs.finished_requests,
+    engine_notifications=outputs.engine_notifications,
 )
 extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
 # The ordinary frontend's schema ignores even non-default extension values.
