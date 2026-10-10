@@ -65,6 +65,7 @@ class GDNAttentionMetadata:
     non_spec_state_indices_tensor: torch.Tensor | None = (
         None  # shape: [batch - num_spec_decodes,]
     )
+    non_spec_flashinfer_state_indices_tensor: torch.Tensor | None = None
     spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
     spec_sequence_masks_cpu: torch.Tensor | None = None  # shape: [batch,]
     spec_token_indx: torch.Tensor | None = None
@@ -160,6 +161,22 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             dtype=torch.int32,
             device=device,
         )
+        self.non_spec_flashinfer_state_indices_tensor: torch.Tensor | None = None
+        self._flashinfer_padding_index: torch.Tensor | None = None
+        if vllm_config.kernel_config.gdn_decode_backend == "flashinfer":
+            self._flashinfer_padding_index = torch.full(
+                (), -1, dtype=torch.int32, device=device
+            )
+            self.non_spec_flashinfer_state_indices_tensor = torch.empty(
+                (
+                    max(
+                        self.decode_cudagraph_max_bs,
+                        vllm_config.scheduler_config.max_num_seqs,
+                    ),
+                ),
+                dtype=torch.int32,
+                device=device,
+            )
         self.spec_sequence_masks: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,),
             dtype=torch.bool,
@@ -597,6 +614,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        flashinfer_state_indices = (
+            self._prepare_flashinfer_state_indices(non_spec_state_indices_tensor)
+            if num_decodes > 0
+            else None
+        )
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -617,6 +639,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
             non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+            non_spec_flashinfer_state_indices_tensor=flashinfer_state_indices,
             spec_sequence_masks=spec_sequence_masks,
             spec_sequence_masks_cpu=spec_sequence_masks_cpu,
             spec_token_indx=spec_token_indx,
@@ -628,6 +651,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata
+
+    def _prepare_flashinfer_state_indices(
+        self, state_indices: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if (
+            self.non_spec_flashinfer_state_indices_tensor is None
+            or state_indices is None
+        ):
+            return None
+        result = self.non_spec_flashinfer_state_indices_tensor[: state_indices.shape[0]]
+        # FlashInfer uses negative padding indices; slot 0 is valid there.
+        assert self._flashinfer_padding_index is not None
+        torch.where(
+            state_indices <= NULL_BLOCK_ID,
+            self._flashinfer_padding_index,
+            state_indices,
+            out=result,
+        )
+        return result
 
     def _stage_spec_decode(
         self,
@@ -710,6 +752,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             m,
             spec_state_indices_tensor=spec_indices,
             non_spec_state_indices_tensor=non_spec_indices,
+            non_spec_flashinfer_state_indices_tensor=(
+                self._prepare_flashinfer_state_indices(non_spec_indices)
+                if m.num_decodes > 0
+                else None
+            ),
             prefill_state_indices=prefill_indices,
             checkpoint=checkpoint,
         )

@@ -58,6 +58,15 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+def test_gdn_decode_backend_separates_compile_cache():
+    """Changing the opaque decode implementation must invalidate graph caches."""
+    triton = KernelConfig(gdn_decode_backend="triton")
+    flashinfer = KernelConfig(gdn_decode_backend="flashinfer")
+    assert triton.compute_hash() != flashinfer.compute_hash()
+    with pytest.raises(ValidationError, match="gdn_decode_backend"):
+        KernelConfig(gdn_decode_backend="unsupported")
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 

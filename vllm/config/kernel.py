@@ -330,6 +330,14 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    gdn_decode_backend: Literal["auto", "triton", "flashinfer"] = "auto"
+    """Backend for Qwen GDN non-speculative decode.
+
+    ``auto`` preserves Triton/FLA selection. ``flashinfer`` supports CUDA SM80+,
+    BF16 inputs, FP32 SSM state, and 128-dimensional heads in this adapter.
+    Prefill and speculative decode retain their existing backend selection.
+    """
+
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 

@@ -28,6 +28,7 @@ from vllm.config import SpeculativeConfig, set_current_vllm_config  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
     ChunkGatedDeltaRule,
+    GDNDecode,
     QwenGatedDeltaNetAttention,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
@@ -123,6 +124,7 @@ def _build_layer(
     )
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        layer.gdn_decode = GDNDecode(H, HV, K, V, ssm_state.dtype)
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
