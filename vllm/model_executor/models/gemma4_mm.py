@@ -16,7 +16,7 @@ reason about temporal order.
 
 import math
 from collections.abc import Hashable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
 import numpy as np
 import torch
@@ -67,6 +67,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -405,6 +406,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             + [processor.audio_token_id] * num_tokens
             + [getattr(config, "eoa_token_id", config.eoa_token_index)]
         )
+        assert processor.audio_token_id is not None
         return PromptUpdateDetails.select_token_id(token_ids, processor.audio_token_id)
 
     def get_video_repl(
@@ -535,7 +537,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
         return data
 
-    def _get_dummy_videos(
+    def _get_dummy_videos(  # type: ignore[override]
         self,
         *,
         width: int,
@@ -923,6 +925,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     processor=hf_processor,
                 )
 
+            assert audio_token_id is not None
             prompt_updates.append(
                 PromptReplacement(
                     modality="audio",
@@ -998,6 +1001,294 @@ class Gemma4MultimodalEmbedder(nn.Module):
         embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
         embs_proj, _ = self.embedding_projection(embs_normed)
         return embs_proj
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+@triton.jit
+def _vision_rmsnorm_kernel(
+    x_ptr,
+    w_ptr,
+    out_ptr,
+    stride_x_m,
+    stride_out_m,
+    H: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    eps: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < H
+
+    x = tl.load(x_ptr + pid * stride_x_m + offs, mask=mask, other=0.0)
+    x_f32 = x.to(tl.float32)
+    var = tl.sum(x_f32 * x_f32, axis=0) / H
+    r = tl.rsqrt(var + eps)
+    out = x_f32 * r
+
+    if HAS_WEIGHT:
+        w = tl.load(w_ptr + offs, mask=mask, other=1.0).to(tl.float32)
+        out = out * w
+
+    out_final = out.to(x_ptr.dtype.element_ty)
+    tl.store(out_ptr + pid * stride_out_m + offs, out_final, mask=mask)
+
+
+@triton.jit
+def _vision_2d_rope_kernel(
+    x_ptr,
+    cos_ptr,
+    sin_ptr,
+    out_ptr,
+    stride_xb,
+    stride_xl,
+    stride_xh,
+    stride_xd,
+    stride_cb,
+    stride_cl,
+    stride_cd,
+    stride_sb,
+    stride_sl,
+    stride_sd,
+    stride_ob,
+    stride_ol,
+    stride_oh,
+    stride_od,
+    N_HEADS: tl.constexpr,
+    D: tl.constexpr,
+    D_Q: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+):
+    pid_b = tl.program_id(0).to(tl.int64)
+    pid_l = tl.program_id(1).to(tl.int64)
+
+    offs_q = tl.arange(0, BLOCK_Q)
+    mask_q = offs_q < D_Q
+
+    cos_base = cos_ptr + pid_b * stride_cb + pid_l * stride_cl
+    sin_base = sin_ptr + pid_b * stride_sb + pid_l * stride_sl
+
+    c0_a = tl.load(cos_base + offs_q * stride_cd, mask=mask_q, other=0.0)
+    c0_b = tl.load(cos_base + (D_Q + offs_q) * stride_cd, mask=mask_q, other=0.0)
+    c1_a = tl.load(cos_base + (2 * D_Q + offs_q) * stride_cd, mask=mask_q, other=0.0)
+    c1_b = tl.load(cos_base + (3 * D_Q + offs_q) * stride_cd, mask=mask_q, other=0.0)
+
+    s0_a = tl.load(sin_base + offs_q * stride_sd, mask=mask_q, other=0.0)
+    s0_b = tl.load(sin_base + (D_Q + offs_q) * stride_sd, mask=mask_q, other=0.0)
+    s1_a = tl.load(sin_base + (2 * D_Q + offs_q) * stride_sd, mask=mask_q, other=0.0)
+    s1_b = tl.load(sin_base + (3 * D_Q + offs_q) * stride_sd, mask=mask_q, other=0.0)
+
+    for h in range(N_HEADS):
+        x_base = x_ptr + pid_b * stride_xb + pid_l * stride_xl + h * stride_xh
+        out_base = out_ptr + pid_b * stride_ob + pid_l * stride_ol + h * stride_oh
+
+        x0_a = tl.load(x_base + offs_q * stride_xd, mask=mask_q, other=0.0)
+        x0_b = tl.load(x_base + (D_Q + offs_q) * stride_xd, mask=mask_q, other=0.0)
+        x1_a = tl.load(
+            x_base + (2 * D_Q + offs_q) * stride_xd,
+            mask=mask_q,
+            other=0.0,
+        )
+        x1_b = tl.load(
+            x_base + (3 * D_Q + offs_q) * stride_xd,
+            mask=mask_q,
+            other=0.0,
+        )
+
+        out_dtype = x_ptr.dtype.element_ty
+        p0_a = (x0_a.to(tl.float32) * c0_a.to(tl.float32)).to(out_dtype)
+        q0_a = ((-x0_b).to(tl.float32) * s0_a.to(tl.float32)).to(out_dtype)
+        y0_a = (p0_a.to(tl.float32) + q0_a.to(tl.float32)).to(out_dtype)
+
+        p0_b = (x0_b.to(tl.float32) * c0_b.to(tl.float32)).to(out_dtype)
+        q0_b = (x0_a.to(tl.float32) * s0_b.to(tl.float32)).to(out_dtype)
+        y0_b = (p0_b.to(tl.float32) + q0_b.to(tl.float32)).to(out_dtype)
+
+        p1_a = (x1_a.to(tl.float32) * c1_a.to(tl.float32)).to(out_dtype)
+        q1_a = ((-x1_b).to(tl.float32) * s1_a.to(tl.float32)).to(out_dtype)
+        y1_a = (p1_a.to(tl.float32) + q1_a.to(tl.float32)).to(out_dtype)
+
+        p1_b = (x1_b.to(tl.float32) * c1_b.to(tl.float32)).to(out_dtype)
+        q1_b = (x1_a.to(tl.float32) * s1_b.to(tl.float32)).to(out_dtype)
+        y1_b = (p1_b.to(tl.float32) + q1_b.to(tl.float32)).to(out_dtype)
+
+        tl.store(out_base + offs_q * stride_od, y0_a, mask=mask_q)
+        tl.store(out_base + (D_Q + offs_q) * stride_od, y0_b, mask=mask_q)
+        tl.store(out_base + (2 * D_Q + offs_q) * stride_od, y1_a, mask=mask_q)
+        tl.store(out_base + (3 * D_Q + offs_q) * stride_od, y1_b, mask=mask_q)
+
+
+def fused_vision_rmsnorm(
+    x: torch.Tensor,
+    weight: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fused RMSNorm for Gemma4 multimodal vision/audio towers.
+
+    Supports arbitrary [..., H] shapes. If weight is None, performs unscaled RMSNorm.
+    Exact FP32 arithmetic matches HF Gemma4RMSNorm.
+    """
+    if not HAS_TRITON or not x.is_cuda:
+        mean_squared = x.float().pow(2).mean(-1, keepdim=True) + eps
+        out = x.float() * torch.pow(mean_squared, -0.5)
+        if weight is not None:
+            out = out * weight.float()
+        return out.type_as(x)
+
+    orig_shape = x.shape
+    H = orig_shape[-1]
+    if x.numel() == 0:
+        return x.clone()
+    x_2d = x.reshape(-1, H).contiguous()
+    M = x_2d.shape[0]
+
+    out = torch.empty_like(x_2d)
+    BLOCK_SIZE = triton.next_power_of_2(H)
+    has_weight = weight is not None
+    w_ptr = weight.contiguous() if weight is not None else x_2d
+
+    grid = (M,)
+    _vision_rmsnorm_kernel[grid](
+        x_2d,
+        w_ptr,
+        out,
+        x_2d.stride(0),
+        out.stride(0),
+        H=H,
+        BLOCK_SIZE=BLOCK_SIZE,
+        eps=eps,
+        HAS_WEIGHT=has_weight,
+    )
+    return out.view(orig_shape)
+
+
+def fused_vision_2d_rope(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """Fused 2D RoPE for Gemma4 Vision Attention.
+
+    Applies rotary position embeddings across 4 quarter-segments of head_dim
+    for 2D vision spatial positions with parity to HF
+    apply_multidimensional_rope.
+    """
+    if x.numel() == 0:
+        return x.clone()
+
+    if not HAS_TRITON or not x.is_cuda:
+        split_sizes = [x.shape[-1] // 2, x.shape[-1] // 2]
+        x_parts = torch.split(x, split_sizes, dim=-1)
+        cos_parts = torch.split(cos, split_sizes, dim=-1)
+        sin_parts = torch.split(sin, split_sizes, dim=-1)
+        y_parts = [
+            (x_parts[k] * cos_parts[k].unsqueeze(2))
+            + (_rotate_half(x_parts[k]) * sin_parts[k].unsqueeze(2))
+            for k in range(2)
+        ]
+        return torch.cat(y_parts, dim=-1)
+
+    B, L, N, D = x.shape
+    D_Q = D // 4
+    BLOCK_Q = triton.next_power_of_2(D_Q)
+
+    out = torch.empty_like(x)
+    grid = (B, L)
+    _vision_2d_rope_kernel[grid](
+        x,
+        cos,
+        sin,
+        out,
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        x.stride(3),
+        cos.stride(0),
+        cos.stride(1),
+        cos.stride(2),
+        sin.stride(0),
+        sin.stride(1),
+        sin.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        out.stride(3),
+        N_HEADS=N,
+        D=D,
+        D_Q=D_Q,
+        BLOCK_Q=BLOCK_Q,
+    )
+    return out
+
+
+def _optimize_hf_multimodal_tower(tower: nn.Module) -> None:
+    """Optimize HF multimodal tower with fused Triton kernels (RMSNorm, 2D RoPE)."""
+    for module in tower.modules():
+        name = module.__class__.__name__
+        if name == "Gemma4RMSNorm":
+            orig_rmsnorm_forward = module.forward
+
+            def _fused_rmsnorm_forward(
+                hidden_states: torch.Tensor,
+                _m=module,
+                _orig=orig_rmsnorm_forward,
+            ) -> torch.Tensor:
+                if hidden_states.is_cuda:
+                    weight = _m.weight if getattr(_m, "with_scale", True) else None
+                    return fused_vision_rmsnorm(hidden_states, weight, eps=_m.eps)
+                return _orig(hidden_states)
+
+            module.forward = _fused_rmsnorm_forward
+
+        elif name == "Gemma4VisionAttention":
+            import sys
+
+            mod: Any = sys.modules.get(module.__module__)
+            orig_rope = (
+                getattr(mod, "apply_multidimensional_rope", None)
+                if mod is not None
+                else None
+            )
+            if orig_rope is not None and not getattr(
+                mod, "_fused_2d_rope_patched", False
+            ):
+
+                def _patched_multidimensional_rope(
+                    x: torch.Tensor,
+                    cos: torch.Tensor,
+                    sin: torch.Tensor,
+                    position_ids: torch.Tensor | None = None,
+                    unsqueeze_dim: int = 2,
+                    _orig=orig_rope,
+                ) -> torch.Tensor:
+                    if (
+                        x.is_cuda
+                        and x.ndim == 4
+                        and unsqueeze_dim == 2
+                        and position_ids is not None
+                        and position_ids.shape[-1] == 2
+                        and x.shape[-1] % 4 == 0
+                        and cos.ndim == 3
+                        and sin.ndim == 3
+                        and cos.shape == (x.shape[0], x.shape[1], x.shape[3])
+                        and sin.shape == cos.shape
+                    ):
+                        return fused_vision_2d_rope(x, cos, sin)
+                    return _orig(
+                        x,
+                        cos,
+                        sin,
+                        position_ids=position_ids,
+                        unsqueeze_dim=unsqueeze_dim,
+                    )
+
+                mod.apply_multidimensional_rope = _patched_multidimensional_rope
+                mod._fused_2d_rope_patched = True
 
 
 # ---------------------------------------------------------------------------
@@ -1105,6 +1396,7 @@ class Gemma4ForConditionalGeneration(
                 tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
+            _optimize_hf_multimodal_tower(self.vision_tower)
 
         # ---- Audio tower (variants with audio_config) ----
         self.embed_audio: Gemma4MultimodalEmbedder | None
@@ -1127,22 +1419,27 @@ class Gemma4ForConditionalGeneration(
                     tower_quant,
                     prefix=maybe_prefix(prefix, "audio_tower"),
                 )
+                _optimize_hf_multimodal_tower(self.audio_tower)
         else:
             self.audio_tower = None
             self.embed_audio = None
 
         # ---- Language model (vLLM optimised) ----
         with self._mark_language_model(vllm_config):
-            self.language_model: Gemma4ForCausalLM = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                hf_config=config.text_config,
-                prefix=maybe_prefix(prefix, "language_model"),
-                architectures=["Gemma4ForCausalLM"],
+            self.language_model = cast(
+                Gemma4ForCausalLM,
+                init_vllm_registered_model(
+                    vllm_config=vllm_config,
+                    hf_config=config.text_config,
+                    prefix=maybe_prefix(prefix, "language_model"),
+                    architectures=["Gemma4ForCausalLM"],
+                ),
             )
 
             # Pre-allocate PLE buffer for CUDA graph compatibility.
             # Some variants have hidden_size_per_layer_input=None (no PLE).
             ple_dim = config.text_config.hidden_size_per_layer_input
+            self.per_layer_embeddings: torch.Tensor | None
             if ple_dim is not None and ple_dim > 0:
                 embed = self.language_model.model.embed_tokens
                 self.per_layer_embeddings = torch.zeros(
@@ -1150,7 +1447,7 @@ class Gemma4ForConditionalGeneration(
                     config.text_config.num_hidden_layers,
                     ple_dim,
                     device=next(embed.parameters()).device,
-                    dtype=vllm_config.model_config.dtype,
+                    dtype=cast(torch.dtype, embed.weight.dtype),
                 )
             else:
                 self.per_layer_embeddings = None
@@ -1161,6 +1458,7 @@ class Gemma4ForConditionalGeneration(
 
         # --- Precompute full-attention layer indices for bidi clearing ---
         self._full_attn_layer_idxs: frozenset[int] = frozenset()
+        self._cached_full_attn_layer_names: dict[tuple[str, ...], list[str]] = {}
         text_config = config.text_config
         if getattr(text_config, "use_bidirectional_attention", None) == "vision":
             layer_types = getattr(text_config, "layer_types", None)
@@ -1321,6 +1619,8 @@ class Gemma4ForConditionalGeneration(
             if isinstance(pixel_values, list)
             else pixel_values.shape[0]
         )
+        if total_images == 0:
+            return []
         pool_position_ids = pixel_position_ids
 
         if self._enable_mm_lora:
@@ -1410,38 +1710,62 @@ class Gemma4ForConditionalGeneration(
                 for i, (orig_idx, _, _) in enumerate(chunk_items):
                     last_hidden_states_map[orig_idx] = hidden_states[i]
 
-        # Pool per image to strip padding and reduce spatial resolution.
-        all_valid_states: list[torch.Tensor] = [None] * total_images  # type: ignore[list-item]
-        valid_lens = [0] * total_images
-
+        # Pool across same-resolution images in batched calls
+        length_groups: dict[int, list[int]] = {}
         for orig_idx in range(total_images):
-            chunk_hidden = last_hidden_states_map[orig_idx]
-            output_length = chunk_hidden.shape[0] // pooling_k2
+            seq_len = last_hidden_states_map[orig_idx].shape[0]
+            length_groups.setdefault(seq_len, []).append(orig_idx)
 
-            single_hidden = chunk_hidden.unsqueeze(0)
-            single_pos_ids = pool_position_ids[orig_idx].unsqueeze(0)
-            padding_positions = (single_pos_ids == -1).all(dim=-1)
-
-            # The pooler goes through HuggingFace's mask builder, which probes
-            # `padding_mask.all()`, and the mask indexing below needs the
-            # selected count on the host.
+        if len(length_groups) == 1:
+            seq_len, orig_indices = next(iter(length_groups.items()))
+            output_length = seq_len // pooling_k2
+            batch_hidden = torch.stack(
+                [last_hidden_states_map[idx] for idx in orig_indices], dim=0
+            )
+            batch_pos_ids = torch.stack(
+                [pool_position_ids[idx] for idx in orig_indices], dim=0
+            )
+            padding_positions = (batch_pos_ids == -1).all(dim=-1)
             with gpu_sync_allowed():
                 pooled_states, valid_mask = vt.pooler(
-                    hidden_states=single_hidden,
-                    pixel_position_ids=single_pos_ids,
+                    hidden_states=batch_hidden,
+                    pixel_position_ids=batch_pos_ids,
                     padding_positions=padding_positions,
                     output_length=output_length,
                 )
-                valid_states = pooled_states[valid_mask]
+                valid_lens = valid_mask.sum(dim=-1).tolist()
+                flat_valid_states = pooled_states[valid_mask]
+        else:
+            all_valid_states: list[torch.Tensor] = [None] * total_images  # type: ignore[list-item]
+            valid_lens = [0] * total_images
+            for seq_len, orig_indices in length_groups.items():
+                output_length = seq_len // pooling_k2
+                batch_hidden = torch.stack(
+                    [last_hidden_states_map[idx] for idx in orig_indices], dim=0
+                )
+                batch_pos_ids = torch.stack(
+                    [pool_position_ids[idx] for idx in orig_indices], dim=0
+                )
+                padding_positions = (batch_pos_ids == -1).all(dim=-1)
+                with gpu_sync_allowed():
+                    pooled_states, valid_mask = vt.pooler(
+                        hidden_states=batch_hidden,
+                        pixel_position_ids=batch_pos_ids,
+                        padding_positions=padding_positions,
+                        output_length=output_length,
+                    )
+                    group_valid_lens = valid_mask.sum(dim=-1).tolist()
+                    for b_idx, orig_idx in enumerate(orig_indices):
+                        all_valid_states[orig_idx] = pooled_states[
+                            b_idx, valid_mask[b_idx]
+                        ]
+                        valid_lens[orig_idx] = group_valid_lens[b_idx]
+            flat_valid_states = torch.cat(all_valid_states, dim=0)
 
-            if getattr(vt.config, "standardize", False):
-                valid_states = (valid_states - vt.std_bias) * vt.std_scale
+        if getattr(vt.config, "standardize", False):
+            flat_valid_states = (flat_valid_states - vt.std_bias) * vt.std_scale
+        flat_valid_states = flat_valid_states.to(self.model_dtype)
 
-            all_valid_states[orig_idx] = valid_states
-            valid_lens[orig_idx] = valid_states.shape[0]
-
-        # Project all images in a single batched call.
-        flat_valid_states = torch.cat(all_valid_states, dim=0).to(self.model_dtype)
         flat_proj_embs = self.embed_vision(
             inputs_embeds=flat_valid_states.unsqueeze(0)
         ).squeeze(0)
@@ -1490,6 +1814,8 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
+        if total_frames == 0:
+            return []
         free, total = torch.accelerator.get_memory_info()
         max_batch_size = min(
             total_frames,
@@ -1526,36 +1852,23 @@ class Gemma4ForConditionalGeneration(
 
         last_hidden_states = torch.cat(last_hidden_states_list, dim=0)
 
-        # Pool per frame to strip padding and reduce spatial resolution.
+        # Pool all frames in a single batched call to strip padding and reduce
+        # spatial resolution.
         output_length = pixel_values.shape[1] // pooling_k2
-        all_frame_valid_states: list[torch.Tensor] = []
-        frame_valid_lens: list[int] = []
 
-        for i in range(total_frames):
-            single_hidden = last_hidden_states[i].unsqueeze(0)
-            single_pos_ids = pixel_position_ids[i].unsqueeze(0)
-            single_pad_pos = padding_positions[i].unsqueeze(0)
+        with gpu_sync_allowed():
+            pooled_states, valid_mask = vt.pooler(
+                hidden_states=last_hidden_states,
+                pixel_position_ids=pixel_position_ids,
+                padding_positions=padding_positions,
+                output_length=output_length,
+            )
+            frame_valid_lens: list[int] = valid_mask.sum(dim=-1).tolist()
+            flat_valid_states = pooled_states[valid_mask]
 
-            # As above, plus mask indexing that needs the count on the host.
-            with gpu_sync_allowed():
-                pooled_states, valid_mask = vt.pooler(
-                    hidden_states=single_hidden,
-                    pixel_position_ids=single_pos_ids,
-                    padding_positions=single_pad_pos,
-                    output_length=output_length,
-                )
-                valid_states = pooled_states[valid_mask]
-
-            if getattr(vt.config, "standardize", False):
-                valid_states = (valid_states - vt.std_bias) * vt.std_scale
-
-            all_frame_valid_states.append(valid_states)
-            frame_valid_lens.append(valid_states.shape[0])
-
-        # Project all frames in a single batched call.
-        flat_valid_states = torch.cat(all_frame_valid_states, dim=0).to(
-            self.model_dtype
-        )
+        if getattr(vt.config, "standardize", False):
+            flat_valid_states = (flat_valid_states - vt.std_bias) * vt.std_scale
+        flat_valid_states = flat_valid_states.to(self.model_dtype)
         flat_proj_embs = self.embed_vision(
             inputs_embeds=flat_valid_states.unsqueeze(0)
         ).squeeze(0)
@@ -2097,14 +2410,14 @@ class Gemma4ForConditionalGeneration(
     # Forward
     # ------------------------------------------------------------------ #
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -2179,14 +2492,31 @@ class Gemma4ForConditionalGeneration(
             return
 
         def _process(metadata_dict: dict) -> None:
-            for layer_name, metadata in metadata_dict.items():
-                if ".layers." not in layer_name:
-                    continue
-                try:
-                    layer_idx = int(layer_name.split(".layers.")[1].split(".")[0])
-                except (ValueError, IndexError):
-                    continue
-                if layer_idx in self._full_attn_layer_idxs:
+            keys_tuple = tuple(metadata_dict.keys())
+            cache = getattr(self, "_cached_full_attn_layer_names", None)
+            if cache is None:
+                cache = {}
+                self._cached_full_attn_layer_names = cache
+            matching_keys = cache.get(keys_tuple)
+            if matching_keys is None:
+                matching_keys = []
+                for layer_name in keys_tuple:
+                    if ".layers." in layer_name:
+                        try:
+                            layer_idx = int(
+                                layer_name.split(".layers.")[1].split(".")[0]
+                            )
+                            if layer_idx in self._full_attn_layer_idxs:
+                                matching_keys.append(layer_name)
+                        except (ValueError, IndexError):
+                            pass
+                if len(cache) >= 8:
+                    cache.clear()
+                cache[keys_tuple] = matching_keys
+
+            for key in matching_keys:
+                metadata = metadata_dict.get(key)
+                if metadata is not None:
                     if hasattr(metadata, "mm_prefix_range"):
                         metadata.mm_prefix_range = None
                     if hasattr(metadata, "mm_prefix_range_tensor"):
