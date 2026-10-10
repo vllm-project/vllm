@@ -43,7 +43,7 @@ def _assert_modernbert_online_fp8(model) -> None:
         Fp8PerTensorOnlineLinearMethod,
     )
 
-    layer = model.encoder_layer.layers[0]
+    layer = model.model.layers[0]
     linears = {
         "attn.Wqkv": layer.attn.Wqkv,
         "attn.Wo": layer.attn.Wo,

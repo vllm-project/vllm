@@ -1804,6 +1804,10 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForSequenceClassification": _HfExamplesInfo(
         "papluca/xlm-roberta-base-language-detection",
     ),
+    "TransformersForTokenClassification": _HfExamplesInfo(
+        "disham993/electrical-ner-ModernBERT-base",
+        min_transformers_version="5.0.0",
+    ),
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),

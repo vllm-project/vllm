@@ -752,6 +752,14 @@ def test_attention_scale_is_the_argument_not_the_attribute():
     assert fuser.scale(attention) == 1.0 != attention.scaling
 
 
+def test_attention_scale_resolves_arithmetic():
+    """ModernBERT declares `self.head_dim**-0.5` rather than a stored attribute."""
+    attention = build_model("modernbert", pad_token_id=0).layers[0].attn
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == attention.head_dim**-0.5
+
+
 def test_attention_scale_rejects_unresolvable_expression():
     """Unresolvable declared scales must not silently use the Llama default."""
 
