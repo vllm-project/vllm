@@ -66,6 +66,7 @@ from vllm.utils.torch_utils import (
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
+from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
@@ -841,6 +842,7 @@ class WorkerProc:
                 death_pipe.recv()
             except EOFError:
                 logger.info_once("Parent process exited, terminating worker queues")
+                get_watch_dog().dump_stack("shutdown")
                 shutdown_requested.set()
                 for mq in queues_to_shutdown:
                     if mq is not None:
@@ -883,9 +885,10 @@ class WorkerProc:
 
         # Publish the logical-to-physical mapping early so topology helpers
         # work before init_device (needed by set_worker_net_device below).
-        assigned_physical_gpu_ids = kwargs[
-            "vllm_config"
-        ].parallel_config.assigned_physical_gpu_ids
+        vllm_config = kwargs["vllm_config"]
+        assigned_physical_gpu_ids = (
+            vllm_config.parallel_config.assigned_physical_gpu_ids
+        )
         if assigned_physical_gpu_ids is not None:
             from vllm.platforms.interface import set_assigned_physical_gpu_ids
 
@@ -941,6 +944,7 @@ class WorkerProc:
             ready_writer.close()
             ready_writer = None
 
+            start_watch_dog(f"worker_{rank}", vllm_config.watchdog_config, logger)
             worker.worker_busy_loop()
 
         except Exception:
@@ -1038,7 +1042,14 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers."""
         assert self.rpc_broadcast_mq is not None
         while True:
-            self._execute_worker_rpc(self.rpc_broadcast_mq.dequeue(indefinite=True))
+            with get_watch_dog().disable():
+                rpc_request = self.rpc_broadcast_mq.dequeue(indefinite=True)
+            try:
+                self._execute_worker_rpc(rpc_request)
+            finally:
+                # Drop the reference so the payload can be reclaimed before
+                # the next dequeue starts.
+                del rpc_request
 
     def _execute_worker_rpc(
         self,
@@ -1052,7 +1063,13 @@ class WorkerProc:
             elif isinstance(method, bytes):
                 func = partial(cloudpickle.loads(method), self.worker)
 
+            watchdog = get_watch_dog()
+            watchdog.feed()
             output = func(*args, **kwargs)
+            # Feed again: the RPC itself may run close to the watchdog
+            # timeout, so the pre-call feed can go stale while the result
+            # is serialized/enqueued in handle_output().
+            watchdog.feed()
 
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)
