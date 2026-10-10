@@ -23,11 +23,8 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 
-def _all_workers_barrier() -> None:
-    """Block until every worker rank has reached this point (gloo cpu group).
-
-    A superset of the node-local mmap openers suffices: once the barrier
-    releases, every worker sharing the region file has mapped it."""
+def _shared_region_barrier() -> None:
+    """Synchronize all ranks that may open the shared mmap region."""
     from vllm.distributed.parallel_state import (
         get_inner_dp_world_group,
         get_world_group,
@@ -165,21 +162,44 @@ class CPUOffloadingSpec(OffloadingSpec):
             current_platform.is_cuda_alike() and not current_platform.is_rocm()
         ) or current_platform.is_xpu()
 
+    @property
+    def worker_rank(self) -> int:
+        """Return this worker's rank within its local engine topology."""
+        worker_world_size = self.config.parallel.world_size
+        if self.config.parallel.per_rank_engine:
+            # external_launcher includes all DP engines in world_size, but
+            # each mmap path belongs to one DP engine. Use the topology of
+            # one engine because independent DP setup may reset
+            # data_parallel_size to one before this spec is built.
+            worker_world_size = (
+                self.config.parallel.tp_size
+                * self.config.parallel.pp_size
+                * self.config.parallel.pcp_size
+            )
+        from vllm.distributed.parallel_state import get_world_group
+
+        return get_world_group().local_rank % worker_world_size
+
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
+            # Normalize the device index to the current DP engine.  This is
+            # separate from `rank`: replicated layout intentionally maps every
+            # worker to slot 0, but only worker rank 0 should own unlinking.
+            worker_rank = self.worker_rank
             # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each worker uses its own rank-indexed slot.
-            rank = 0 if self.replicated_layout else self.config.parallel.rank
+            # otherwise each worker uses its own logical rank-indexed slot.
+            rank = 0 if self.replicated_layout else worker_rank
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,
                 rank=rank,
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
-                barrier=_all_workers_barrier,
+                barrier=_shared_region_barrier,
+                unlink_owner=worker_rank == 0,
             )
         try:
             return CPUOffloadingWorker(
@@ -190,7 +210,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         except Exception:
             if mmap_region is not None:
-                mmap_region.cleanup()
+                mmap_region.abort_startup_cleanup()
             raise
 
     @override

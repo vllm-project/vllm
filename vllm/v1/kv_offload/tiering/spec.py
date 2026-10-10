@@ -68,7 +68,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, _shared_region_barrier
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
@@ -355,8 +355,15 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                    barrier=(
+                        _shared_region_barrier
+                        if self.config.parallel.per_rank_engine
+                        else None
+                    ),
+                    unlink_owner=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
+                scheduler_mmap.unlink()
 
                 # Create primary tier (CPU-based)
                 primary_tier = CPUPrimaryTierOffloadingManager(
@@ -407,10 +414,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                         )
                 elif scheduler_mmap is not None:
                     try:
-                        scheduler_mmap.cleanup()
+                        scheduler_mmap.abort_startup_cleanup()
                     except Exception:
                         logger.exception(
-                            "Failed to clean up scheduler mmap during "
+                            "Failed to abort scheduler mmap during "
                             "initialization cleanup"
                         )
                 self._scheduler_mmap = None
@@ -435,15 +442,21 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = 0 if self.replicated_layout else self.config.parallel.rank
-        worker_mmap = SharedOffloadRegion(
-            engine_id=self._engine_id,
-            num_chunks=self.num_chunks,
-            rank=rank,
-            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-            cpu_page_size=self.cpu_page_size_per_worker,
-        )
+        rank = 0 if self.replicated_layout else self.worker_rank
+        worker_mmap: SharedOffloadRegion | None = None
         try:
+            worker_mmap = SharedOffloadRegion(
+                engine_id=self._engine_id,
+                num_chunks=self.num_chunks,
+                rank=rank,
+                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
+                # All workers must have mapped the file before a failed worker
+                # aborts startup and removes its name. On success the
+                # scheduler mapping phase performs the final unlink.
+                barrier=_shared_region_barrier,
+                unlink_owner=False,
+            )
             if self.config.canonical_layout:
                 self._validate_canonical_refs(kv_caches)
             return CPUOffloadingWorker(
@@ -454,7 +467,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 canonical_layout=self.config.canonical_layout,
             )
         except Exception:
-            worker_mmap.cleanup()
+            # The constructor barrier above guarantees that every worker has
+            # finished opening/mapping before this abort cleanup runs.  Thus
+            # removing the name cannot make a peer create a second inode.
+            if worker_mmap is not None:
+                worker_mmap.abort_startup_cleanup()
             raise
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:

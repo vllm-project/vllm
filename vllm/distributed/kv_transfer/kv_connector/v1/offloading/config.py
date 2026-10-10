@@ -68,6 +68,14 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
+    if (
+        parallel_config.distributed_executor_backend == "external_launcher"
+        and parallel_config.data_parallel_size > 1
+    ):
+        # Each external-launcher process owns one DP engine.  TP ranks within
+        # that engine must share a region, while different DP engines need
+        # separate regions even when they receive the same base engine_id.
+        engine_id = f"{engine_id}_dp{parallel_config.data_parallel_index}"
     selected_groups = tuple(
         (group_id, kv_cache_config.kv_cache_groups[group_id])
         for group_id in get_offloading_group_ids(kv_cache_config)
@@ -277,6 +285,9 @@ def build_offloading_config(
             data_parallel_size=parallel_config.data_parallel_size,
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
+            per_rank_engine=(
+                parallel_config.distributed_executor_backend == "external_launcher"
+            ),
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,

@@ -201,6 +201,7 @@ MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register row-aligned chunks, rolling back on failure."""
     rank = region.rank
+    assert region._base is not None
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
     # Chunks end on block-row boundaries, which are page aligned, so neither the
