@@ -2438,10 +2438,19 @@ def test_survivor_kv_budget_clears_the_engine_admission_floor():
     the model pin, block size or context fails on CPU instead of only on a GPU.
     """
     from tests.v1.e2e.spec_decode import uno_kv_budget
-    from vllm.v1.core.kv_cache_utils import check_enough_kv_cache_memory
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+    from vllm.v1.core.kv_cache_utils import (
+        _pool_bytes_per_block,
+        check_enough_kv_cache_memory,
+        get_kv_cache_groups,
+    )
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
     block = uno_kv_budget.kv_bytes_per_block()
+    # The engine core resolves one KV cache layout from the served backend
+    # (FLASH_ATTN) and sizes a pool block by it.
+    layout = get_supported_kv_cache_layouts([FlashAttentionBackend])[0]
 
     def max_len_config(max_model_len: int):
         # The admission path under test reads only these fields; a real
@@ -2450,6 +2459,7 @@ def test_survivor_kv_budget_clears_the_engine_admission_floor():
             model_config=SimpleNamespace(max_model_len=max_model_len),
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
             scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=None),
+            cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout),
         )
 
     def qwen3_specs() -> dict:
@@ -2461,6 +2471,11 @@ def test_survivor_kv_budget_clears_the_engine_admission_floor():
             dtype=torch.bfloat16,
         )
         return {f"model.layers.{index}.self_attn": spec for index in range(num_layers)}
+
+    # The budget helper's block is the engine's pool block for this layout.
+    config = max_len_config(uno_kv_budget.SURVIVOR_MAX_MODEL_LEN)
+    groups = get_kv_cache_groups(config, qwen3_specs())
+    assert _pool_bytes_per_block(config, groups) == block
 
     # Both e2e budgets sit at or above the floor and the engine admits them.
     for max_model_len, budget in (
