@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
 use thiserror::Error;
-use thiserror_ext::Macro;
+use thiserror_ext::{AsReport, Macro};
 use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -125,6 +125,14 @@ pub(crate) enum LoadLoraError {
     },
     #[error("one or more engine ranks rejected LoRA adapter `{lora_name}`")]
     NotLoaded { lora_name: String },
+    #[error("cleanup of LoRA adapter `{lora_name}` (id {lora_int_id}) failed: {cleanup}", cleanup = .cleanup_error.as_report())]
+    Cleanup {
+        lora_name: String,
+        lora_int_id: u64,
+        #[source]
+        load_error: Box<LoadLoraError>,
+        cleanup_error: vllm_engine_core_client::Error,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -147,8 +155,6 @@ pub(crate) enum UnloadLoraError {
         #[source]
         source: vllm_engine_core_client::Error,
     },
-    #[error("engine rejected removal of LoRA adapter `{lora_name}` with id {lora_int_id}")]
-    NotRemoved { lora_name: String, lora_int_id: u64 },
 }
 
 impl LoraManager {
@@ -254,14 +260,36 @@ impl LoraManager {
         };
         drop(requests);
 
-        let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {
-            LoadLoraError::Engine {
+        let load_error = match engine_core_client.add_lora(&lora_request).await {
+            Ok(true) => None,
+            Ok(false) => Some(LoadLoraError::NotLoaded {
+                lora_name: lora_name.clone(),
+            }),
+            Err(source) => Some(LoadLoraError::Engine {
                 lora_name: lora_name.clone(),
                 source,
+            }),
+        };
+        if let Some(load_error) = load_error {
+            // Existing IDs may still serve the previous adapter after a failed refresh.
+            if existing_lora_int_id.is_none()
+                && let Err(cleanup_error) = engine_core_client.remove_lora(lora_int_id).await
+            {
+                tracing::warn!(
+                    lora_name,
+                    lora_int_id,
+                    load_error = %load_error.as_report(),
+                    cleanup_error = %cleanup_error.as_report(),
+                    "failed to clean up LoRA load"
+                );
+                return Err(LoadLoraError::Cleanup {
+                    lora_name,
+                    lora_int_id,
+                    load_error: Box::new(load_error),
+                    cleanup_error,
+                });
             }
-        })?;
-        if !loaded {
-            return Err(LoadLoraError::NotLoaded { lora_name });
+            return Err(load_error);
         }
         self.requests.write().await.insert(lora_name, lora_request.clone());
         Ok(lora_request)
@@ -292,20 +320,14 @@ impl LoraManager {
             });
         }
 
-        let removed =
-            engine_core_client
-                .remove_lora(lora_request.lora_int_id)
-                .await
-                .map_err(|source| UnloadLoraError::Engine {
-                    lora_name: lora_request.lora_name.clone(),
-                    source,
-                })?;
-        if !removed {
-            return Err(UnloadLoraError::NotRemoved {
-                lora_name: lora_request.lora_name,
-                lora_int_id: lora_request.lora_int_id,
-            });
-        }
+        // A false result means the adapter was already absent on an engine.
+        engine_core_client
+            .remove_lora(lora_request.lora_int_id)
+            .await
+            .map_err(|source| UnloadLoraError::Engine {
+                lora_name: lora_request.lora_name.clone(),
+                source,
+            })?;
 
         Ok(self.requests.write().await.shift_remove(lora_name).unwrap_or(lora_request))
     }

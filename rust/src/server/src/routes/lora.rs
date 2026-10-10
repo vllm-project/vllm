@@ -56,9 +56,9 @@ fn load_lora_api_error(error: LoadLoraError) -> ApiError {
         LoadLoraError::BaseModelName { .. } => {
             ApiError::invalid_request(message, Some("lora_name"))
         }
-        LoadLoraError::Engine { .. } | LoadLoraError::NotLoaded { .. } => {
-            ApiError::server_error(message)
-        }
+        LoadLoraError::Engine { .. }
+        | LoadLoraError::NotLoaded { .. }
+        | LoadLoraError::Cleanup { .. } => ApiError::server_error(message),
     }
 }
 
@@ -70,9 +70,7 @@ fn unload_lora_api_error(error: UnloadLoraError) -> ApiError {
         UnloadLoraError::IntIdMismatch { .. } => {
             ApiError::invalid_request(message, Some("lora_int_id"))
         }
-        UnloadLoraError::Engine { .. } | UnloadLoraError::NotRemoved { .. } => {
-            ApiError::server_error(message)
-        }
+        UnloadLoraError::Engine { .. } => ApiError::server_error(message),
     }
 }
 

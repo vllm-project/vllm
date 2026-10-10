@@ -1033,6 +1033,14 @@ fn add_lora_script(
             let args = array[3].as_array().expect("utility args");
             check(args[0].as_array().expect("lora request tuple"));
             send_outputs(push, utility_outputs(call_id, utility_result_value(loaded))).await;
+            if !loaded {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode cleanup payload");
+                let array = payload.as_array().expect("cleanup payload array");
+                assert_eq!(array[2], Value::from("remove_lora"));
+                let call_id = array[1].as_u64().expect("cleanup call id");
+                send_outputs(push, utility_outputs(call_id, utility_result_value(false))).await;
+            }
         })
     }
 }
@@ -2440,20 +2448,8 @@ async fn unload_lora_adapter_rejects_mismatched_lora_int_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn load_lora_adapter_rejects_engine_false_result() {
-    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
-        boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-            assert_eq!(array[2], Value::from("add_lora"));
-
-            send_outputs(push, utility_outputs(call_id, utility_result_value(false))).await;
-        })
-    })
-    .await;
+    let (mut app, engine_task) =
+        test_admin_app_with_engine_script(add_lora_script(false, |_| {})).await;
 
     let response = app
         .call(
@@ -8177,4 +8173,260 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+mod lora_lifecycle {
+    use super::*;
+    use crate::lora::UnloadLoraError;
+    use thiserror_ext::AsReport;
+    use vllm_engine_core_client::TransportMode;
+    use vllm_engine_core_client::protocol::lora::LoraRequest;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Failure {
+        None,
+        LoadError,
+        LoadRejected,
+        CleanupError,
+        RefreshError,
+        RefreshRejected,
+        UnloadError,
+    }
+
+    struct Fixture {
+        state: Arc<AppState>,
+        stores: Vec<Arc<std::sync::Mutex<BTreeSet<u64>>>>,
+        removals: Arc<std::sync::atomic::AtomicUsize>,
+        _engines: Vec<MockEngineTask>,
+        _ipc: IpcNamespace,
+    }
+
+    fn module(path: &str) -> LoraModulePath {
+        LoraModulePath {
+            name: "adapter".into(),
+            path: path.into(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        }
+    }
+
+    impl Fixture {
+        async fn new(failure: Failure) -> Self {
+            let ipc = IpcNamespace::new().unwrap();
+            let stores: Vec<_> = (0..2)
+                .map(|_| Arc::new(std::sync::Mutex::new(BTreeSet::<u64>::new())))
+                .collect();
+            let removals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut engines = Vec::new();
+            for (rank, store) in stores.iter().cloned().enumerate() {
+                let mut ready = default_ready_response();
+                ready.supports_lora = true;
+                ready.max_loras = 4;
+                let removals = removals.clone();
+                engines.push(MockEngineTask::new(spawn_mock_engine_task_with_ready(
+                    ipc.handshake_endpoint(),
+                    EngineId::from_engine_index(rank as u16),
+                    ready,
+                    move |dealer, push| {
+                        boxed_test_future(async move {
+                            let mut load_count = 0;
+                            let mut remove_count = 0;
+                            loop {
+                                let message = recv_engine_message(dealer).await;
+                                let payload = decode_value(&message[1]).unwrap();
+                                let array = payload.as_array().unwrap();
+                                let call_id = array[1].as_u64().unwrap();
+                                let args = array[3].as_array().unwrap();
+                                let mut output = UtilityOutput {
+                                    call_id: call_id.into(),
+                                    failure_message: None,
+                                    result: None,
+                                };
+                                match array[2].as_str().unwrap() {
+                                    "add_lora" => {
+                                        load_count += 1;
+                                        let id = args[0].as_array().unwrap()[1].as_u64().unwrap();
+                                        let reject = rank == 1
+                                            && match failure {
+                                                Failure::LoadError
+                                                | Failure::LoadRejected
+                                                | Failure::CleanupError => true,
+                                                Failure::RefreshError
+                                                | Failure::RefreshRejected => load_count > 1,
+                                                _ => false,
+                                            };
+                                        if reject {
+                                            if matches!(
+                                                failure,
+                                                Failure::LoadRejected | Failure::RefreshRejected
+                                            ) {
+                                                output.result = Some(utility_result_value(false));
+                                            } else {
+                                                output.failure_message = Some("load failed".into());
+                                            }
+                                        } else {
+                                            store.lock().unwrap().insert(id);
+                                            output.result = Some(utility_result_value(true));
+                                        }
+                                    }
+                                    "remove_lora" => {
+                                        remove_count += 1;
+                                        removals.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        if (failure == Failure::CleanupError && rank == 0)
+                                            || (failure == Failure::UnloadError
+                                                && rank == 1
+                                                && remove_count == 1)
+                                        {
+                                            output.failure_message = Some("remove failed".into());
+                                        } else {
+                                            let removed = store
+                                                .lock()
+                                                .unwrap()
+                                                .remove(&args[0].as_u64().unwrap());
+                                            output.result = Some(utility_result_value(removed));
+                                        }
+                                    }
+                                    method => panic!("unexpected utility {method}"),
+                                }
+                                send_outputs(
+                                    push,
+                                    UtilityCallOutput {
+                                        engine_index: rank as u32,
+                                        output,
+                                        ..Default::default()
+                                    }
+                                    .into(),
+                                )
+                                .await;
+                            }
+                        })
+                    },
+                )));
+            }
+            let mut config = EngineCoreClientConfig::new_single(ipc.handshake_endpoint())
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                );
+            if let TransportMode::HandshakeOwner { engine_count, .. } = &mut config.transport_mode {
+                *engine_count = 2;
+            }
+            let client = EngineCoreClient::connect(config).await.unwrap();
+            let chat =
+                ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+            Self {
+                state: Arc::new(AppState::new(vec!["test-model".into()], chat)),
+                stores,
+                removals,
+                _engines: engines,
+                _ipc: ipc,
+            }
+        }
+        async fn load(&self, inplace: bool) -> Result<LoraRequest, LoadLoraError> {
+            self.state
+                .load_lora(
+                    module(if inplace {
+                        "org/refreshed"
+                    } else {
+                        "org/adapter"
+                    }),
+                    inplace,
+                )
+                .await
+        }
+        fn loaded(&self) -> Vec<Vec<u64>> {
+            self.stores
+                .iter()
+                .map(|store| store.lock().unwrap().iter().copied().collect())
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_new_load_cleans_every_engine_for_error_and_false_results() {
+        for failure in [Failure::LoadError, Failure::LoadRejected] {
+            // load_inplace on an unregistered name still allocates a fresh ID.
+            for inplace in [false, true] {
+                let fixture = Fixture::new(failure).await;
+                let error = fixture.load(inplace).await.unwrap_err();
+                match failure {
+                    Failure::LoadError => assert!(matches!(error, LoadLoraError::Engine { .. })),
+                    Failure::LoadRejected => {
+                        assert!(matches!(error, LoadLoraError::NotLoaded { .. }))
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(fixture.loaded(), vec![Vec::<u64>::new(), Vec::new()]);
+                assert!(fixture.state.served_lora_requests().await.is_empty());
+                assert_eq!(
+                    fixture.removals.load(std::sync::atomic::Ordering::Relaxed),
+                    2
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn cleanup_error_preserves_load_error_and_adapter_id() {
+        let fixture = Fixture::new(Failure::CleanupError).await;
+        let error = fixture.load(false).await.unwrap_err();
+        let report = error.to_report_string();
+        assert!(report.contains("id 1"), "{report}");
+        assert!(report.contains("load failed"), "{report}");
+        assert!(report.contains("remove failed"), "{report}");
+        match error {
+            LoadLoraError::Cleanup {
+                lora_int_id,
+                load_error,
+                cleanup_error,
+                ..
+            } => {
+                assert_eq!(lora_int_id, 1);
+                assert!(matches!(*load_error, LoadLoraError::Engine { .. }));
+                assert!(matches!(
+                    cleanup_error,
+                    vllm_engine_core_client::Error::UtilityCallFailed { .. }
+                ));
+            }
+            error => panic!("unexpected error: {error:?}"),
+        }
+        assert_eq!(fixture.loaded(), vec![vec![1], vec![]]);
+        assert!(fixture.state.served_lora_requests().await.is_empty());
+    }
+    #[tokio::test]
+    async fn failed_refresh_does_not_remove_existing_adapter_or_replace_registration() {
+        for failure in [Failure::RefreshError, Failure::RefreshRejected] {
+            let fixture = Fixture::new(failure).await;
+            let original = fixture.load(false).await.unwrap();
+            assert!(fixture.load(true).await.is_err());
+            assert_eq!(fixture.state.served_lora_requests().await, vec![original]);
+            assert_eq!(fixture.loaded(), vec![vec![1], vec![1]]);
+            assert_eq!(
+                fixture.removals.load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+        }
+    }
+    #[tokio::test]
+    async fn unload_succeeds_when_one_engine_already_evicted_adapter() {
+        let fixture = Fixture::new(Failure::None).await;
+        fixture.load(false).await.unwrap();
+        fixture.stores[1].lock().unwrap().remove(&1);
+        fixture.state.unload_lora("adapter", Some(1)).await.unwrap();
+        assert_eq!(fixture.loaded(), vec![Vec::<u64>::new(), Vec::new()]);
+        assert!(fixture.state.served_lora_requests().await.is_empty());
+    }
+    #[tokio::test]
+    async fn failed_unload_keeps_registration_and_retry_accepts_already_removed_ranks() {
+        let fixture = Fixture::new(Failure::UnloadError).await;
+        fixture.load(false).await.unwrap();
+        assert!(matches!(
+            fixture.state.unload_lora("adapter", Some(1)).await,
+            Err(UnloadLoraError::Engine { .. })
+        ));
+        assert_eq!(fixture.state.served_lora_requests().await.len(), 1);
+        fixture.state.unload_lora("adapter", Some(1)).await.unwrap();
+        assert_eq!(fixture.loaded(), vec![Vec::<u64>::new(), Vec::new()]);
+        assert!(fixture.state.served_lora_requests().await.is_empty());
+    }
 }
