@@ -250,6 +250,7 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   if (error_code != 0) {
     return;
   }
+  *p_memHandle = 0;  // Marks the handle released until create_and_map.
 #else
   unsigned long long allocated_size = 0;
   CUresult first_error = no_error;
@@ -566,7 +567,10 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
 
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
-  unmap_and_release(device, size, d_mem, p_memHandle);
+  // A zero handle was already released by sleep(); only free the address.
+  if (*p_memHandle != 0) {
+    unmap_and_release(device, size, d_mem, p_memHandle);
+  }
 #endif
 
   // Free the virtual address. On ROCm this also covers an asleep allocation,
