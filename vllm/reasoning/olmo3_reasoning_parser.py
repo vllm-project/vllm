@@ -219,6 +219,11 @@ class Olmo3ReasoningParser(ReasoningParser):
     # with an optional leading space, so there are 2 possible tokenizations
     think_end_first_split: list[str] = [r"Ġ</", r"</"]
     think_end_rest_split: list[str] = [r"think", r">"]
+    # <think> splits differently depending on what precedes it
+    think_start_splits: list[list[str]] = [
+        [r"<th", r"ink", r">"],
+        [r"Ġ<", r"think", r">"],
+    ]
     # notice that the first think is optional; this allows template to
     # work in cases when we hardcode a <think> at the beginning of the
     # reasoning template.
@@ -239,6 +244,9 @@ class Olmo3ReasoningParser(ReasoningParser):
         self.think_end_rest_token_ids: list[int] = [
             self.vocab[token] for token in self.think_end_rest_split
         ]
+        self.think_start_token_ids: list[list[int]] = [
+            [self.vocab[token] for token in split] for split in self.think_start_splits
+        ]
 
     @property
     def reasoning_start_str(self) -> str:
@@ -249,9 +257,17 @@ class Olmo3ReasoningParser(ReasoningParser):
         return self.think_end
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        # Only the latest marker counts: a prompt can contain an earlier
+        # </think> (in a user message or a prior turn) before the generation
+        # prompt opens a new <think>.
         rest_ids = self.think_end_rest_token_ids
         rest_len = len(rest_ids)
-        for i in range(len(input_ids) - rest_len, -1, -1):
+        for i in range(len(input_ids) - 1, -1, -1):
+            if any(
+                list(input_ids[i : i + len(start_ids)]) == start_ids
+                for start_ids in self.think_start_token_ids
+            ):
+                return False
             if (
                 list(input_ids[i + 1 : i + 1 + rest_len]) == rest_ids
                 and input_ids[i] in self.think_end_first_token_ids
