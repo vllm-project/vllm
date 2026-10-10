@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::SamplingParams;
 
 use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
@@ -48,6 +49,13 @@ pub struct GenerateRequest {
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
     pub return_token_ids: Option<bool>,
+    /// Whether reasoning has ended before the first generated token, as
+    /// resolved by `/render`. `true` applies structured outputs from the first
+    /// token; `None` lets the engine check the prompt with its reasoning parser.
+    pub reasoning_ended: Option<bool>,
+    /// Set by `/render` so the engine-side reasoning parser agrees with the
+    /// frontend on flags such as `enable_thinking`.
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }

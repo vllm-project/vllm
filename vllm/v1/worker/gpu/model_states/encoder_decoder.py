@@ -130,7 +130,7 @@ class EncoderDecoderModelState(ModelState):
         if for_capture:
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max())
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,

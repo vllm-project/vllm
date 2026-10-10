@@ -7,9 +7,9 @@ from unittest.mock import Mock
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
 
 def _make_mock_llm() -> LLM:
