@@ -3,10 +3,9 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, Self, TypeVar
 
 import torch
-from typing_extensions import Self
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 

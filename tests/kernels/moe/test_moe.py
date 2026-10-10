@@ -1437,6 +1437,7 @@ def test_humming_global_valid_shape_m(
 def test_humming_permute_scratch_is_shared_by_config(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Layers share one scratch whose key is independent of batch shape."""
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -1447,34 +1448,19 @@ def test_humming_permute_scratch_is_shared_by_config(
     manager = workspace.WorkspaceManager(torch.device("cpu"))
     monkeypatch.setattr(workspace, "_manager", manager)
 
-    scratch_topk6 = Mock()
-    scratch_topk1 = Mock()
-    scratch_type = Mock(side_effect=[scratch_topk6, scratch_topk1])
+    scratch = Mock()
+    scratch_type = Mock(side_effect=[scratch])
     monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
     monkeypatch.setattr(permute, "MoEPermuteScratch", scratch_type)
     moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
-    moe_config.moe_parallel_config.dp_size = 2
     experts = SimpleNamespace(moe_config=moe_config)
     other_layer = SimpleNamespace(moe_config=moe_config)
 
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
-    assert (
-        humming.HummingExpertsBase._get_permute_scratch(other_layer, 6) is scratch_topk6
-    )
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 1) is scratch_topk1
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
-
-    assert scratch_type.call_count == 2
-    first_call, second_call = scratch_type.call_args_list
-    assert first_call.kwargs["max_num_tokens"] == 1024
-    assert first_call.kwargs["topk"] == 6
-    assert second_call.kwargs["max_num_tokens"] == 6144
-    assert second_call.kwargs["topk"] == 1
-
+    assert humming.HummingExpertsBase._get_permute_scratch(experts) is scratch
+    assert humming.HummingExpertsBase._get_permute_scratch(other_layer) is scratch
     manager.lock()
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
-    with pytest.raises(AssertionError, match="was not allocated during warmup"):
-        humming.HummingExpertsBase._get_permute_scratch(experts, 2)
+    assert humming.HummingExpertsBase._get_permute_scratch(experts) is scratch
+    assert scratch_type.call_count == 1
 
 
 def test_humming_delegates_to_instance_activation():
@@ -1531,7 +1517,7 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         num_experts=2,
         estimate_local_valid_shape_m=lambda _: 6,
         prepare_buffers=lambda *_: buffers,
-        _get_permute_scratch=lambda _, *, indices_only=False: object(),
+        _get_permute_scratch=lambda: object(),
         process_input=Mock(
             side_effect=lambda _, **kwargs: (
                 kwargs["inputs"],

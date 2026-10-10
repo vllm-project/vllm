@@ -36,10 +36,9 @@ layer when available, otherwise Triton. FlashInfer cannot serve this model (a
 batch mixes causal prefill with bidirectional denoising), and
 `--attention-backend FLASHINFER` is rejected.
 
-Per-request canvas widths smaller than the served canvas require async
-scheduling. The diffusion async scheduler is selected automatically; no
-`--scheduler-cls` argument is needed. Synchronous execution supports full-width
-canvases only.
+Per-request canvas widths may be smaller than the served canvas with either
+synchronous or asynchronous scheduling. Omit `diffusion_canvas_length` to use
+the served canvas width.
 
 Question types: `noul` (yes/no), `choice` with `options`, `score` with
 ordered `levels`. Each label must be a single token in the answer template,

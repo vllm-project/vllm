@@ -405,6 +405,80 @@ def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     torch.testing.assert_close(cache_backing, expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="needs a CUDA or ROCm device"
+)
+@pytest.mark.parametrize("gather_len", [None, 70, 200])
+@pytest.mark.parametrize("one_pass", [False, True])
+def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatch):
+    """The gather grid only partitions tokens, so its width cannot move the
+    result, and the rows it writes must match a host-side dequantization.
+
+    Covers the fp8_ds_mla record (584 B); the MXFP8 one is covered below.
+    Both dequantization forms are checked against the same host reference on
+    whatever device is present: the wrapper picks the one-pass form on ROCm
+    alone, so otherwise each platform would only ever see one of them.
+    """
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: one_pass)
+    from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache_triton,
+    )
+
+    torch.manual_seed(7)
+    device = "cuda"
+    block_size, num_blocks = 64, 6
+    num_tokens = block_size * num_blocks
+
+    k = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    # insert takes [num_blocks, block_bytes]; gather takes the record view.
+    cache = torch.zeros(num_blocks, block_size * 584, dtype=torch.uint8, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    quantize_and_insert_k_cache(k, cache, slot_mapping, block_size=block_size)
+    cache_view = cache.view(num_blocks, block_size, 584)
+
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    gls = (
+        None
+        if gather_len is None
+        else torch.tensor([gather_len], dtype=torch.int32, device=device)
+    )
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(1, -1)
+
+    def gather(bound):
+        out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
+        dequantize_and_gather_k_cache_triton(
+            out,
+            cache_view,
+            seq_lens,
+            gls,
+            block_table,
+            block_size,
+            0,
+            max_gather_len=bound,
+        )
+        return out
+
+    # None keeps the historical 128; the rest make the wrapper pick other widths
+    # for the same work, and the output must not notice.
+    baseline = gather(None)
+    for bound in (8, num_tokens, 1 << 20):
+        torch.testing.assert_close(gather(bound), baseline, rtol=0, atol=0)
+
+    n = num_tokens if gather_len is None else gather_len
+    start = num_tokens - n
+    for i in (0, 1, n // 2, n - 1):
+        values, scales = _ue8m0_reference(k[start + i, :448], 64, 448.0)
+        nope = (values.to(torch.float32).view(7, 64) * scales.view(7, 1)).reshape(448)
+        torch.testing.assert_close(
+            baseline[0, i, :448], nope.to(torch.bfloat16), rtol=4e-3, atol=1e-6
+        )
+        # The RoPE dims are stored verbatim, so they come back exactly.
+        torch.testing.assert_close(
+            baseline[0, i, 448:], k[start + i, 448:], rtol=0, atol=0
+        )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_v41_mxfp8_cache_round_trip():
     """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
@@ -711,7 +785,8 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
     builder must map every real token to ``ring_block * capacity + pos %
-    capacity`` and keep padding tokens at PAD."""
+    capacity``. Padding tokens and requests on the null block (block 0, as in
+    dummy batches) must stay at PAD."""
     from unittest.mock import MagicMock
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
@@ -731,29 +806,30 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     device = torch.device("cuda")
     builder = CompressorMetadataBuilder(spec, ["state"], vllm_config, device)
 
-    # Two requests: 3 tokens at positions 13..15 on ring block 5, then 2
-    # tokens at positions 7..8 on ring block 2; three padding tokens.
-    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
-    positions = torch.tensor([13, 14, 15, 7, 8, 0, 0, 0], device=device)
-    block_table = torch.tensor([[5], [2]], dtype=torch.int32, device=device)
+    # Three requests: 3 tokens at positions 13..15 on ring block 5, 2 tokens
+    # at positions 7..8 on ring block 2, then 2 tokens on the null block;
+    # three padding tokens.
+    query_start_loc = torch.tensor([0, 3, 5, 7], dtype=torch.int32, device=device)
+    positions = torch.tensor([13, 14, 15, 7, 8, 0, 1, 0, 0, 0], device=device)
+    block_table = torch.tensor([[5], [2], [0]], dtype=torch.int32, device=device)
     common = CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
-        seq_lens=torch.tensor([16, 9], dtype=torch.int32, device=device),
-        num_reqs=2,
-        num_actual_tokens=5,
+        seq_lens=torch.tensor([16, 9, 2], dtype=torch.int32, device=device),
+        num_reqs=3,
+        num_actual_tokens=7,
         max_query_len=3,
         max_seq_len=16,
         block_table_tensor=block_table,
-        slot_mapping=torch.full((8,), -1, dtype=torch.int64, device=device),
+        slot_mapping=torch.full((10,), -1, dtype=torch.int64, device=device),
         positions=positions,
     )
     metadata = builder.build(0, common)
 
-    expected = [5 * 8 + 5, 5 * 8 + 6, 5 * 8 + 7, 2 * 8 + 7, 2 * 8 + 0, -1, -1, -1]
-    assert metadata.slot_mapping.tolist() == expected
+    ring = [5 * 8 + 5, 5 * 8 + 6, 5 * 8 + 7, 2 * 8 + 7, 2 * 8 + 0]
+    assert metadata.slot_mapping.tolist() == ring + [-1] * 5
     assert metadata.query_start_loc is query_start_loc
-    assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1]
+    assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1, 2, 2]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA stream coverage")
@@ -2182,7 +2258,9 @@ def test_v41_rocm_csa2_full_pipeline():
         )
 
     q_out, kv_out, index_q_out, index_q_scale_out, index_weights_out_out = result
-    assert torch.equal(q_out, q)
+    assert torch.equal(
+        q_out, q.view(num_tokens, attention.n_local_heads, attention.head_dim)
+    )
     assert torch.equal(kv_out, kv)
     assert torch.equal(index_q_out, index_q)
     assert torch.equal(index_q_scale_out, index_q_scale)
@@ -2273,7 +2351,9 @@ def test_v41_rocm_csa2_reindex_pipeline():
         )
 
     q_out, kv_out, index_q_out, index_q_scale_out, index_weights_out_out = result
-    assert torch.equal(q_out, q)
+    assert torch.equal(
+        q_out, q.view(num_tokens, attention.n_local_heads, attention.head_dim)
+    )
     assert torch.equal(kv_out, kv)
     assert torch.equal(index_q_out, index_q)
     assert torch.equal(index_q_scale_out, index_q_scale)

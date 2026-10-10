@@ -16,6 +16,7 @@ from vllm.third_party.flash_linear_attention.ops.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 CHUNK_SIZE = 64
 HEAD_DIM = 128
@@ -26,6 +27,15 @@ _BLOCKS_P2 = 1  # kV / kBV
 _MIN_LEN = 4
 _DEEP_LEN = 12
 _MAX_GROUPS = 32
+
+
+def _hip_checkpoint_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
+    """NULL_BLOCK_ID marks no checkpoint; the HIP kernel skips negative rows."""
+    return (
+        torch.where(state_indices != NULL_BLOCK_ID, state_indices, -1)
+        .to(torch.int32)
+        .contiguous()
+    )
 
 
 @cache
@@ -295,7 +305,7 @@ def fused_kda_chunk(
         None if checkpoint_offsets is None else checkpoint_offsets.to(torch.int32),
         None
         if checkpoint_state_indices is None
-        else checkpoint_state_indices.to(torch.int32).contiguous(),
+        else _hip_checkpoint_state_indices(checkpoint_state_indices),
         state_cache,
         None if state_indices is None else state_indices.to(torch.int32).contiguous(),
         has_initial_state,
