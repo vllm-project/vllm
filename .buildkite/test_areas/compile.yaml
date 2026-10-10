@@ -17,9 +17,9 @@ steps:
   - pytest -s -v tests/compile/passes/distributed
   mirror:
     amd:
-      label: ':amd: (MI300) Distributed Compile'
+      label: ':amd: (MI355) Distributed Compile'
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 65
       working_dir: /vllm-workspace/
       depends_on:

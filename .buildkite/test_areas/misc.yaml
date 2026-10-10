@@ -415,9 +415,9 @@ steps:
   - pytest -v -s tracing
   mirror:
     amd:
-      label: ":amd: (MI300) Metrics, Tracing"
+      label: ":amd: (MI355) Metrics, Tracing"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd
@@ -435,9 +435,9 @@ steps:
   - bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Python-only Installation"
+      label: ":amd: (MI355 DPX) Python-only Installation"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd

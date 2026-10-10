@@ -26,9 +26,9 @@ steps:
     - pytest -v -s -m 'not slow_test' v1/spec_decode
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Spec Decode"
+      label: ":amd: (MI355 DPX) V1 Spec Decode"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
@@ -136,9 +136,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/speculators/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Speculators"
+      label: ":amd: (MI355 DPX) Spec Decode Speculators"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -166,9 +166,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/gemma4/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode MTP Gemma4"
+      label: ":amd: (MI355 DPX) Spec Decode MTP Gemma4"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -197,9 +197,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode MTP DeepSeek + MiMo"
+      label: ":amd: (MI355 DPX) Spec Decode MTP DeepSeek + MiMo"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -227,9 +227,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode MTP Qwen3.5"
+      label: ":amd: (MI355 DPX) Spec Decode MTP Qwen3.5"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -386,9 +386,9 @@ steps:
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
   mirror:
     amd:
-      label: ":amd: (MI300) Speculators Correctness Nightly"
+      label: ":amd: (MI355 DPX) Speculators Correctness Nightly"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
@@ -413,9 +413,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode DeepSeek MTP Parallel Load"
+      label: ":amd: (MI355) Spec Decode DeepSeek MTP Parallel Load"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
@@ -451,9 +451,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode AL DFlash Nightly"
+      label: ":amd: (MI355 DPX) Spec Decode AL DFlash Nightly"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 120
       commands:
       - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
@@ -530,9 +530,9 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode AL DSpark Nightly"
+      label: ":amd: (MI355 DPX) Spec Decode AL DSpark Nightly"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd

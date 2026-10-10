@@ -109,9 +109,9 @@ steps:
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:
     amd:
-      label: ":amd: (MI300) Mooncake EC TCP E2E"
+      label: ":amd: (MI355) Mooncake EC TCP E2E"
       dind: false
-      device: mi300_2
+      device: mi355_2
       num_devices: 2
       timeout_in_minutes: 60
       working_dir: /vllm-workspace

@@ -215,9 +215,9 @@ steps:
       v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
   mirror:
     amd:
-      label: ":amd: (MI300) V1 E2E"
+      label: ":amd: (MI355) V1 E2E"
       dind: false
-      device: mi300_2
+      device: mi355_2
       timeout_in_minutes: 30
       depends_on:
       - image-build-amd
@@ -237,9 +237,9 @@ steps:
     - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
   mirror:
     amd:
-      label: ":amd: (MI300) V1 E2E Hybrid Chunked Prefill"
+      label: ":amd: (MI355 DPX) V1 E2E Hybrid Chunked Prefill"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 35
       depends_on:
       - image-build-amd
