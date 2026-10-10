@@ -1287,6 +1287,7 @@ def should_moe_wna16_use_cuda(
 ):
     return (
         current_platform.is_cuda()
+        and not envs.VLLM_BATCH_INVARIANT
         and bit == 4
         and group_size in [32, 64, 128]
         and num_valid_tokens / num_experts <= 6
