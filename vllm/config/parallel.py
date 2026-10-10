@@ -190,6 +190,14 @@ class ParallelConfig:
     cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
     least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
     by implementing `compute_logits_local`."""
+    enable_sequence_parallel: bool = False
+    """Only supported by the Transformers modeling backend, ignored otherwise.
+    Shard the residual stream across tensor parallel ranks along the token
+    dimension, replacing each all-reduce with a reduce-scatter and all-gather."""
+    enable_async_tp: bool = False
+    """Only supported by the Transformers modeling backend, ignored otherwise.
+    Overlap the sequence parallel collectives with the adjacent GEMMs using
+    symmetric memory. Implies `enable_sequence_parallel`."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -532,6 +540,9 @@ class ParallelConfig:
                 self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
+
+        if self.enable_async_tp:
+            self.enable_sequence_parallel = True
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(

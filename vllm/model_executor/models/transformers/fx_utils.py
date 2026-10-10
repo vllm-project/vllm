@@ -13,6 +13,7 @@ import contextlib
 import inspect
 import operator
 import textwrap
+import types
 from collections.abc import Callable
 from itertools import chain
 from typing import Any
@@ -234,7 +235,12 @@ def _leaf_attention_interfaces():
 
 def trace(module: nn.Module) -> fx.Graph | None:
     """Trace `module.forward`, returning the partial graph on failure."""
-    parameters = forward_parameters(type(module))
+    cls = type(module)
+    # fx traces the class's forward, so trace a fuser's per-instance forward via a
+    # subclass instead
+    if isinstance(forward := module.__dict__.get("forward"), types.MethodType):
+        cls = type(cls.__name__, (cls,), {"forward": forward.__func__})
+    parameters = forward_parameters(cls)
     # vLLM never passes `past_key_values` so it is always the default value of `None`.
     # Make this concrete to simplify tracing.
     concrete_args = None
@@ -250,12 +256,15 @@ def trace(module: nn.Module) -> fx.Graph | None:
         ),
         None,
     )
+    original_cls, module.__class__ = module.__class__, cls
     try:
         with _leaf_attention_interfaces():
             return tracer.trace(module, concrete_args=concrete_args)
     except Exception as exc:
-        logger.debug("Could not fully trace %s: %s", type(module), exc)
+        logger.debug("Could not fully trace %s: %s", original_cls, exc)
         return getattr(tracer, "graph", None)
+    finally:
+        module.__class__ = original_cls
 
 
 def recover_forward(cls: type[nn.Module]) -> tuple[ast.FunctionDef, Callable]:

@@ -543,6 +543,8 @@ class EngineArgs:
         ParallelConfig.enable_batch_sharded_sampling
     )
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
+    enable_sequence_parallel: bool = ParallelConfig.enable_sequence_parallel
+    enable_async_tp: bool = ParallelConfig.enable_async_tp
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
@@ -1270,6 +1272,13 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-ep-weight-filter",
             **parallel_kwargs["enable_ep_weight_filter"],
+        )
+        parallel_group.add_argument(
+            "--enable-sequence-parallel",
+            **parallel_kwargs["enable_sequence_parallel"],
+        )
+        parallel_group.add_argument(
+            "--enable-async-tp", **parallel_kwargs["enable_async_tp"]
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
@@ -2535,6 +2544,8 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
+            enable_sequence_parallel=self.enable_sequence_parallel,
+            enable_async_tp=self.enable_async_tp,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
