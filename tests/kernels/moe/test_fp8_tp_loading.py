@@ -160,10 +160,19 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
 
 @pytest.mark.parametrize("backend", ["auto", "triton"])
 @pytest.mark.parametrize("tp_size,block", [(2, 64), (4, 32)])
-def test_fp8_tp_default_keeps_refined_layout(monkeypatch, backend, tp_size, block):
+def test_fp8_tp_layout_matches_backend_support(monkeypatch, backend, tp_size, block):
+    """Auto keeps refined scales; Triton uses complete native checkpoint blocks."""
     layer = _make_fp8_tp_experts(monkeypatch, tp_size, 0, backend)
-    assert layer.moe_config.intermediate_size_per_partition == 640 // tp_size
-    assert layer.quant_method.moe_block_shape == [block, block]
+    if backend == "triton":
+        assert (
+            layer.moe_config.intermediate_size_per_partition
+            == ((5 + tp_size - 1) // tp_size) * 128
+        )
+        assert layer.quant_method.moe_block_shape == [128, 128]
+        assert layer.quant_method.weight_scale_refine is None
+    else:
+        assert layer.moe_config.intermediate_size_per_partition == 640 // tp_size
+        assert layer.quant_method.moe_block_shape == [block, block]
 
 
 @pytest.mark.parametrize(
