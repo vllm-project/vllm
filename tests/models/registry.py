@@ -731,6 +731,12 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
     ),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),
+    # Laya ships `rl_agent_config.json` plus a nested `encoder/config.json`
+    # rather than a single HF `config.json`, so the Hub repo cannot be loaded
+    # as-is; the architecture is exercised by `tests/models/language/pooling`.
+    "LayaForDecision": _HfExamplesInfo(
+        "convaiinnovations/laya", is_available_online=False
+    ),
     "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
         "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
     ),
