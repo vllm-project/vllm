@@ -26,7 +26,9 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
+from vllm.v1.attention.backends.utils import compute_mm_prefix_range_tensor
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
     has_native_kv_cache_layout,
@@ -35,7 +37,7 @@ from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -72,9 +74,47 @@ class RocmAttentionMetadata:
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
 
+    mm_prefix_range_tensor: torch.Tensor | None = None  # [num_reqs, max_ranges, 2]
+
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+    @classmethod
+    def get_cudagraph_support(
+        cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
+    ) -> AttentionCGSupport:
+        if not vllm_config.model_config.is_mm_prefix_lm:
+            return cls._cudagraph_support
+        if not vllm_config.use_v2_model_runner:
+            return AttentionCGSupport.NEVER
+
+        # The runner bounds image spans by the model window. A prompt's last
+        # token and its draft placeholders must match the causal decode graph.
+        model_window = vllm_config.model_config.get_sliding_window()
+        layers = vllm_config.compilation_config.static_forward_context.values()
+        for layer in layers:
+            if not getattr(layer, "use_mm_prefix", False):
+                continue
+            window = getattr(layer, "sliding_window", None)
+            if (
+                window is not None
+                and not getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                and (model_window is None or model_window > window)
+            ):
+                return AttentionCGSupport.NEVER
+        return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls, vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
+    ) -> int | None:
+        if (
+            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            != AttentionCGSupport.UNIFORM_BATCH
+        ):
+            return None
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -93,6 +133,16 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+        layers = vllm_config.compilation_config.static_forward_context
+        self.mm_prefix_unclamped_window = min(
+            (
+                layers[name].sliding_window
+                for name in layer_names
+                if getattr(layers[name], "sliding_window", None) is not None
+                and not getattr(layers[name], "mm_prefix_clamp_sliding_window", False)
+            ),
+            default=None,
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -141,6 +191,51 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             suffix_kv_lens = None
             prefix_scheduler_metadata = None
 
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        is_prefilling = common_attn_metadata.is_prefilling
+        if (
+            mm_ranges is not None
+            and is_prefilling is not None
+            and is_prefilling.device.type == "cpu"
+        ):
+            # Generated tokens lie outside image ranges and use paged decode.
+            mm_ranges = {
+                req_idx: ranges
+                for req_idx, ranges in mm_ranges.items()
+                if is_prefilling[req_idx]
+            }
+
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        seq_lens_cpu_upper_bound = common_attn_metadata.seq_lens_cpu_upper_bound
+        if (
+            mm_ranges
+            and is_prefilling is not None
+            and is_prefilling.device.type == "cpu"
+            and query_start_loc_cpu.device.type == "cpu"
+            and seq_lens_cpu_upper_bound is not None
+            and seq_lens_cpu_upper_bound.device.type == "cpu"
+        ):
+            # Prefill bounds include draft placeholders. Generated requests
+            # were filtered above because their CPU sequence lengths can lag.
+            window = self.mm_prefix_unclamped_window
+            active_ranges: dict[int, list[tuple[int, int]]] = {}
+            for req_idx, ranges in mm_ranges.items():
+                query_len = int(
+                    query_start_loc_cpu[req_idx + 1] - query_start_loc_cpu[req_idx]
+                )
+                query_start_pos = int(seq_lens_cpu_upper_bound[req_idx]) - query_len
+                active_ranges[req_idx] = [
+                    (start, end)
+                    for start, end in ranges
+                    if query_start_pos < end
+                    or (
+                        query_start_pos == end
+                        and window is not None
+                        and end - start + 1 > window
+                    )
+                ]
+            mm_ranges = active_ranges
+
         attn_metadata = RocmAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -156,6 +251,11 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             causal=common_attn_metadata.causal,
+            mm_prefix_range_tensor=compute_mm_prefix_range_tensor(
+                mm_ranges,
+                common_attn_metadata.num_reqs,
+                seq_lens.device,
+            ),
         )
         return attn_metadata
 
@@ -193,8 +293,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        # Not implemented
-        return False
+        return True
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -488,6 +587,10 @@ class RocmAttentionImpl(AttentionImpl):
             output_scale=output_scale,
             sinks=self.sinks,
             causal=attn_metadata.causal,
+            mm_prefix_range=attn_metadata.mm_prefix_range_tensor,
+            mm_prefix_clamp_sliding_window=getattr(
+                layer, "mm_prefix_clamp_sliding_window", False
+            ),
         )
 
         return output

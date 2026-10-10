@@ -75,15 +75,31 @@ def _get_vllm_prefill_hidden(
 
 
 @pytest.mark.core_model
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="ROCm attention has accuracy issue for this test"
+@pytest.mark.parametrize(
+    "attention_backend",
+    [
+        pytest.param(
+            None,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Default ROCm attention has accuracy issues for this test",
+            ),
+        ),
+        pytest.param(
+            "ROCM_ATTN",
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm backend"
+            ),
+        ),
+    ],
 )
 def test_mm_prefix_lm_e2e(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     image_assets: ImageTestAssets,
     monkeypatch: pytest.MonkeyPatch,
-):
+    attention_backend: str | None,
+) -> None:
     """Regression: Gemma3 native prefill must apply image prefix-LM mask."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     image = image_assets[0].pil_image
@@ -92,6 +108,8 @@ def test_mm_prefix_lm_e2e(
         "mm_processor_cache_gb": 0,
         "mm_processor_kwargs": {"do_pan_and_scan": True},
     }
+    if attention_backend is not None:
+        vllm_runner_kwargs["attention_backend"] = attention_backend
     vllm_hidden = _get_vllm_prefill_hidden(vllm_runner, image, vllm_runner_kwargs)
 
     hf_model = hf_runner(

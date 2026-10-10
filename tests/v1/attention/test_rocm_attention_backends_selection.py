@@ -920,3 +920,22 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     assert layouts
     assert all(layout.is_block_compact for layout in layouts)
+
+
+def test_rocm_prefix_backend_can_be_selected(mock_get_cdna_version) -> None:
+    from vllm.platforms.rocm import RocmPlatform
+
+    config = AttentionSelectorConfig(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mm_prefix=True,
+    )
+    assert (
+        RocmPlatform.get_attn_backend_cls(
+            AttentionBackendEnum.ROCM_ATTN,
+            config,
+        )
+        == AttentionBackendEnum.ROCM_ATTN.get_path()
+    )
