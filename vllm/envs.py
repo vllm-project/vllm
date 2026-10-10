@@ -153,6 +153,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
+    VLLM_ROCM_USE_AITER_FP8_MLA_PREFILL: bool = True
+    VLLM_ROCM_USE_AITER_FUSED_MLA_PREFILL: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_MONO_DECODE: bool = False
@@ -1376,6 +1378,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+    ),
+    # Whether to use aiter fp8 mla prefill asm kernel
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FP8_MLA_PREFILL": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FP8_MLA_PREFILL", "True").lower()
+        in ("true", "1")
+    ),
+    # Whether to fuse mla prefill
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_FUSED_MLA_PREFILL": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSED_MLA_PREFILL", "False").lower()
+        in ("true", "1")
     ),
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
