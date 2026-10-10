@@ -39,7 +39,10 @@ class ShortConvAttentionBackend(AttentionBackend):
 
 @dataclass
 class ShortConvAttentionMetadata(BaseMambaAttentionMetadata):
-    pass
+    # Independent drafter history before the correction token in step 0.
+    draft_checkpoint: torch.Tensor | None = None
+    draft_request_indices: torch.Tensor | None = None
+    draft_correction_indices: torch.Tensor | None = None
 
 
 class ShortConvAttentionMetadataBuilder(

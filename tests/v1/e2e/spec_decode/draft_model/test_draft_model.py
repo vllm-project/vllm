@@ -111,6 +111,42 @@ def test_draft_model_realistic_example(vllm_runner):
 
 
 @single_gpu_only
+def test_short_conv_drafter_preserves_history(vllm_runner, monkeypatch):
+    """Identical hybrid draft and target models should accept consecutive rounds."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    model = "LiquidAI/LFM2.5-350M"
+    with vllm_runner(
+        model,
+        dtype="bfloat16",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=512,
+        max_num_seqs=4,
+        max_num_batched_tokens=16,
+        kv_cache_memory_bytes=64 * 1024**2,
+        enable_chunked_prefill=True,
+        disable_log_stats=False,
+        speculative_config={
+            "method": "draft_model",
+            "model": model,
+            "num_speculative_tokens": 3,
+        },
+    ) as runner:
+        params = SamplingParams(
+            temperature=0, max_tokens=32, min_tokens=32, ignore_eos=True
+        )
+        prompts = [
+            "Write a Python function that returns the nth Fibonacci number.",
+            "List three practical ways to save energy at home.",
+        ]
+        for _ in range(2):
+            before = runner.llm.get_metrics()
+            outputs = runner.llm.generate(prompts, params)
+            assert all(len(o.outputs[0].token_ids) == 32 for o in outputs)
+            assert compute_acceptance_rate(runner.llm.get_metrics(), before) > 0.9
+
+
+@single_gpu_only
 def test_draft_model_parallel_drafting(vllm_runner):
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
