@@ -474,6 +474,7 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     token_to_req_indices: torch.Tensor | None = None
+    cross_group_cache: dict[Any, Any] = {}
     # Mamba groups with the same spec and builder differ only in their state
     # indices, so later groups re-gather those from the first group's metadata.
     # Also at capture, so FULL graphs share the batch-level buffers.
@@ -525,6 +526,7 @@ def build_attn_metadata(
             rswa_prefix_lens=rswa_prefix_lens,
             req_idx=req_idx,
             _token_to_req_indices_cache=token_to_req_indices,
+            _cross_group_cache=cross_group_cache,
             **common_attn_metadata_extra_kwargs,
         )
 
