@@ -60,7 +60,7 @@ from vllm.config.multimodal import (
     VideoPruningMethod,
 )
 from vllm.distributed import get_pp_group, parallel_state
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalHashes
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -81,6 +81,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -94,6 +95,7 @@ from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -1342,6 +1344,54 @@ def _replace_video_token_placeholders(
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    def _get_per_video_kwargs(
+        self, kwargs: Mapping[str, object]
+    ) -> dict[str, list[Any]]:
+        merged = self.info._merge_and_resolve_mm_processor_kwargs(kwargs)
+        return {
+            key: value
+            for key, value in merged.get("videos_kwargs", {}).items()
+            if key in ("fps", "num_frames") and isinstance(value, list)
+        }
+
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        hashes = dict(super()._get_mm_hashes(inputs))
+        per_video_kwargs = self._get_per_video_kwargs(inputs.hf_processor_mm_kwargs)
+        if per_video_kwargs and "video" in hashes:
+            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+            hashes["video"] = [
+                MultiModalHasher.hash_kwargs(
+                    algorithm,
+                    mm_hash=mm_hash,
+                    **{key: values[i] for key, values in per_video_kwargs.items()},
+                )
+                for i, mm_hash in enumerate(hashes["video"])
+            ]
+        return hashes
+
+    def _get_cache_missing_processor_kwargs(
+        self,
+        inputs: ProcessorInputs,
+        mm_is_cached: Mapping[str, list[bool]],
+    ) -> Mapping[str, object]:
+        per_video_kwargs = self._get_per_video_kwargs(inputs.hf_processor_mm_kwargs)
+        if not per_video_kwargs or "video" not in mm_is_cached:
+            return inputs.hf_processor_mm_kwargs
+        kwargs = self.info._merge_and_resolve_mm_processor_kwargs(
+            inputs.hf_processor_mm_kwargs
+        )
+        kwargs["videos_kwargs"].update(
+            {
+                key: [
+                    value
+                    for value, hit in zip(values, mm_is_cached["video"])
+                    if not hit
+                ]
+                for key, values in per_video_kwargs.items()
+            }
+        )
+        return kwargs
+
     @staticmethod
     def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
         """Transformers>=5.10 processors override `replace_video_token`
@@ -1544,6 +1594,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             non_video_scoped_kwargs = dict(non_video_mm_kwargs["videos_kwargs"])
             non_video_scoped_kwargs.pop("fps", None)
             non_video_scoped_kwargs.pop("num_frames", None)
+            # The context merges model defaults again when calling HF.
+            for key in self._get_per_video_kwargs({}):
+                non_video_scoped_kwargs[key] = None
             non_video_mm_kwargs["videos_kwargs"] = non_video_scoped_kwargs
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**non_video_mm_kwargs),
