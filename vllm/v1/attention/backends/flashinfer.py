@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from flashinfer import (
     BatchAttentionWithAttentionSinkWrapper,
+    BatchDecodeWithAttentionSinkWrapper,
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
@@ -595,7 +596,7 @@ class FlashInferBackend(AttentionBackend):
             return supports_trtllm_attention(is_prefill=False)
 
         if not current_platform.is_device_capability_family(100):
-            return False
+            return current_platform.is_device_capability_family(80)
 
         return supports_trtllm_attention(
             is_prefill=False
@@ -1259,10 +1260,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "NVFP4 KV cache."
                 )
             if self._noncausal_prefill_wrapper is None:
-                if self.has_sinks and (
-                    current_platform.is_device_capability(90)
-                    or current_platform.is_device_capability_family(120)
-                ):
+                if self.has_sinks:
                     self._noncausal_prefill_wrapper = (
                         BatchAttentionWithAttentionSinkWrapper(
                             self._get_workspace_buffer(),
@@ -1293,10 +1291,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     dcp_a2a=self.dcp_a2a,
                 )
             else:
-                if self.has_sinks and (
-                    current_platform.is_device_capability(90)
-                    or current_platform.is_device_capability_family(120)
-                ):
+                if self.has_sinks:
                     assert not self.is_kvcache_nvfp4
                     self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
                         self._get_workspace_buffer(),
@@ -1338,18 +1333,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # NVFP4 KV cache requires the trtllm-gen backend inside
             # the wrapper on SM100; SM8x, SM90 and SM12x read it with fa2.
             backend = "trtllm-gen" if self.nvfp4_trtllm else "auto"
-            decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+            wrapper_cls, wrapper_args = BatchDecodeWithPagedKVCacheWrapper, {}
+            if self.has_sinks:
+                wrapper_cls = BatchDecodeWithAttentionSinkWrapper
+                wrapper_args = dict(
+                    q_data_type=self.q_data_type_decode,
+                    kv_data_type=self.kv_cache_dtype,
+                    head_dim_qk=self.head_dim,
+                    head_dim_vo=self.head_dim,
+                    window_left=self.window_left,
+                )
+            else:
+                # Tensor cores are enabled by default because the perf would be
+                # at least as good as cuda cores for all attention ops in latest
+                # gpus.
+                wrapper_args["use_tensor_cores"] = True
+            decode_wrapper = wrapper_cls(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
                 use_cuda_graph=use_cudagraph,
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
-                # Tensor cores are enabled by default because the perf would be
-                # at least as good as cuda cores for all attention ops in latest
-                # gpus.
-                use_tensor_cores=True,
                 backend=backend,
+                **wrapper_args,
             )
 
             # save the decode wrapper
@@ -2562,6 +2569,15 @@ class FlashInferImpl(AttentionImpl):
                         output_tmp,
                         lse,
                         get_dcp_group(),
+                    )
+                elif isinstance(decode_wrapper, BatchDecodeWithAttentionSinkWrapper):
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_for_fi,
+                        self.sinks,
+                        self.scale * layer._q_scale_float * layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=out_decode,
                     )
                 else:
                     decode_wrapper.run(
