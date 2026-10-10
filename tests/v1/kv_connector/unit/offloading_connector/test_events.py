@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
 
@@ -228,6 +229,33 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert isinstance(events[0], BlockStored)
     assert events[0].block_size == 0
     assert events[0].locality == "REMOTE"
+
+
+@pytest.mark.parametrize(
+    "kind,window", [("mamba", None), ("sliding_window", 16), (None, None)]
+)
+@pytest.mark.parametrize("reset", [False, True])
+def test_placeholder_group_classification_survives_reset(kind, window, reset):
+    tracker = OffloadingEventsTracker(
+        OffloadingKVEventsConfig(True, True),
+        {0: OffloadingEventGroupSpec(kind, window)},
+    )
+    if reset:
+        tracker.reset()
+    key = make_offload_key(_hash(0), 0)
+    # A removal can arrive before any store metadata is available.
+    removed, stored = tracker.take_events(
+        [_removed_event([key], ownership="kvcr"), _stored_event([key])]
+    )
+    assert (stored.block_size, stored.token_ids) == (0, [])
+    assert (stored.kv_cache_spec_kind, stored.kv_cache_spec_sliding_window) == (
+        kind,
+        window,
+    )
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(removed))
+    assert decoded.get("kv_cache_spec_kind") == kind
+    assert decoded.get("kv_cache_spec_sliding_window") == window
+    assert decoded["ownership"] == "kvcr"
 
 
 def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
