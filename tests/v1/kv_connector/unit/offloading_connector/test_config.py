@@ -742,6 +742,18 @@ def test_preserves_data_parallel_config():
     assert offloading_config.parallel.data_parallel_rank_local == 1
 
 
+def test_external_launcher_names_offloading_region_per_dp_engine():
+    config = _make_vllm_config()
+    config.kv_transfer_config.engine_id = "base-engine"
+    config.parallel_config.distributed_executor_backend = "external_launcher"
+    config.parallel_config.data_parallel_index = 1
+    config.parallel_config.data_parallel_size = 2
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.engine_id == "base-engine_dp1"
+
+
 def test_resolves_heterogeneous_hybrid_block_sizes():
     config = _make_vllm_config()
     config.cache_config.block_size = 4
