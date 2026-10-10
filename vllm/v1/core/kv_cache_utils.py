@@ -2537,6 +2537,10 @@ def get_kv_cache_configs(
     5. Change the num_blocks of each worker to the smallest among all workers
        and shrink tensor sizes proportionally to avoid allocating unused memory.
 
+    Native CPU offloading unifies its own chunk count across workers in the
+    offloading subsystem (see
+    ``offloading.config.unify_cpu_offload_num_chunks``).
+
     Args:
         vllm_config: The global VllmConfig
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.

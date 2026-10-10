@@ -109,6 +109,17 @@ def compute_sub_block_ptrs(
     base_ptr = tensor.data_ptr()
     row_stride = tensor.stride(0)
 
+    # Both paths below turn an id into base_ptr + id * row_stride and nothing
+    # downstream re-checks it, so an id past the end becomes a host address
+    # outside the allocation. The copy engine writes through it later, from a
+    # driver thread, as a SIGSEGV carrying no Python frames. Refuse it here.
+    ids = block_ids[:num_sub_blocks] if blocks_per_chunk == 1 else block_ids
+    if len(ids) and int(ids.max()) >= tensor.shape[0]:
+        raise ValueError(
+            f"Block id {int(ids.max())} is out of range for a "
+            f"{tensor.shape[0]}-block {tensor.device.type} KV tensor."
+        )
+
     if blocks_per_chunk == 1:
         # Fast path: 1:1 mapping, no sub-block expansion needed.
         output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride

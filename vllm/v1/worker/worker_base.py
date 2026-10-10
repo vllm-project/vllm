@@ -338,8 +338,23 @@ class WorkerWrapperBase:
             self.worker = worker_class(**kwargs)
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
-        kv_cache_config = kv_cache_configs[self.global_rank]
         assert self.vllm_config is not None
+        kv_cache_config = kv_cache_configs[self.global_rank]
+
+        # The engine computes the unified CPU-offload chunk count from the same
+        # full config list; recompute it here so workers never size their CPU
+        # tier from a single stage's capacity under pipeline parallelism.
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_connector == "OffloadingConnector"
+        ):
+            from vllm.v1.kv_offload.config import unify_cpu_offload_num_chunks
+
+            self.vllm_config.cache_config.num_cpu_blocks = (
+                unify_cpu_offload_num_chunks(self.vllm_config, kv_cache_configs)
+            )
+
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 

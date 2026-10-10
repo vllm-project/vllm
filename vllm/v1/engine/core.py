@@ -324,6 +324,15 @@ class EngineCore:
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
 
+        # Native CPU offloading must agree on one chunk count across PP ranks.
+        # Unify it here, where every worker's config is available, before the
+        # scheduler and worker connectors build their offloading specs.
+        from vllm.v1.kv_offload.config import unify_cpu_offload_num_chunks
+
+        vllm_config.cache_config.num_cpu_blocks = unify_cpu_offload_num_chunks(
+            vllm_config, kv_cache_configs
+        )
+
         # If auto-fit reduced max_model_len, sync the new value to workers.
         # This is needed because workers were spawned before memory profiling
         # and have the original (larger) max_model_len cached.

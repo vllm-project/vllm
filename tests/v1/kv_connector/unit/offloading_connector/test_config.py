@@ -37,6 +37,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_offload.config import unify_cpu_offload_num_chunks
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, cpu_offload_layout
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
@@ -55,6 +57,7 @@ def _make_vllm_config(
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
     config.cache_config.prefix_cache_retention_interval = None
+    config.cache_config.num_cpu_blocks = None
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
@@ -520,6 +523,111 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.worker_kv_bytes_per_block == 16
     assert offloading_config.parallel.world_size == 6
     assert offloading_config.cache.blocks_per_chunk == 2
+
+
+def _make_pp_stage_kv_cache_config(
+    num_layers: int, num_blocks: int = 4, spec: KVCacheSpec | None = None
+) -> KVCacheConfig:
+    """A pipeline stage owning ``num_layers`` identical attention layers.
+
+    More layers, or a larger per-layer page, means more KV bytes per block,
+    hence fewer CPU chunks.
+    """
+    spec = spec if spec is not None else _full_attention_spec()
+    page = spec.page_size_bytes
+    layers = [f"stage_layer{i}" for i in range(num_layers)]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_layers * page * num_blocks,
+                layers=layers,
+                layer_stride=page * num_blocks,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+    )
+
+
+def _cpu_offload_capacity(vllm_config: VllmConfig, cfg: KVCacheConfig) -> int:
+    return cpu_offload_layout(build_offloading_config(vllm_config, cfg)).num_chunks
+
+
+def _assert_all_ranks_use(
+    vllm_config: VllmConfig, stages: list[KVCacheConfig], unified: int
+) -> None:
+    """The scheduler config (built from stage 0) and every worker adopt the
+    unified count, for scheduler allocation and worker buffers alike."""
+    vllm_config.cache_config.num_cpu_blocks = unified
+    scheduler_cfg = generate_scheduler_kv_cache_config(stages)
+    for cfg in (scheduler_cfg, *stages):
+        offloading_config = build_offloading_config(vllm_config, cfg)
+        assert offloading_config.num_cpu_blocks == unified
+        assert CPUOffloadingSpec(offloading_config).num_chunks == unified
+
+
+@pytest.mark.parametrize("big_stage_first", [True, False])
+def test_unify_cpu_offload_num_chunks_across_pp_stages(big_stage_first: bool):
+    """The scheduler (built from stage 0) and every worker must agree on the
+    smallest CPU chunk count. ``big_stage_first=False`` reproduces the failing
+    ordering, where stage 0 has more capacity than a later stage."""
+    num_blocks = 4
+    big_stage = _make_pp_stage_kv_cache_config(5, num_blocks)
+    small_stage = _make_pp_stage_kv_cache_config(3, num_blocks)
+    stages = [big_stage, small_stage] if big_stage_first else [small_stage, big_stage]
+
+    vllm_config = _make_vllm_config(
+        extra_config={"cpu_bytes_to_use": 1 << 30},
+        pipeline_parallel_size=2,
+    )
+
+    big_capacity = _cpu_offload_capacity(vllm_config, big_stage)
+    small_capacity = _cpu_offload_capacity(vllm_config, small_stage)
+    assert big_capacity < small_capacity
+
+    unified = unify_cpu_offload_num_chunks(vllm_config, stages)
+    assert unified == big_capacity
+    _assert_all_ranks_use(vllm_config, stages, unified)
+
+
+@pytest.mark.parametrize("draft_stage_first", [True, False])
+def test_unify_cpu_offload_num_chunks_balanced_pp_spec_decode(
+    draft_stage_first: bool,
+):
+    """Balanced PP + spec decode: the draft (MTP) stage owns the same number of
+    groups and the same num_blocks as the target stage but a different page
+    size, so the two still derive different chunk counts."""
+    num_blocks = 4
+    target_stage = _make_pp_stage_kv_cache_config(4, num_blocks)
+    draft_stage = _make_pp_stage_kv_cache_config(
+        4,
+        num_blocks,
+        spec=FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float32
+        ),
+    )
+    # Same group count and same num_blocks, as in the reported reproduction.
+    assert len(target_stage.kv_cache_groups) == len(draft_stage.kv_cache_groups) == 1
+    assert target_stage.num_blocks == draft_stage.num_blocks == num_blocks
+
+    if draft_stage_first:
+        stages = [draft_stage, target_stage]
+    else:
+        stages = [target_stage, draft_stage]
+
+    vllm_config = _make_vllm_config(
+        extra_config={"cpu_bytes_to_use": 1 << 30},
+        pipeline_parallel_size=2,
+    )
+
+    target_capacity = _cpu_offload_capacity(vllm_config, target_stage)
+    draft_capacity = _cpu_offload_capacity(vllm_config, draft_stage)
+    assert target_capacity != draft_capacity
+
+    unified = unify_cpu_offload_num_chunks(vllm_config, stages)
+    assert unified == min(target_capacity, draft_capacity)
+    _assert_all_ranks_use(vllm_config, stages, unified)
 
 
 def test_offloading_skips_scratch_group():

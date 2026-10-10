@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, NamedTuple
 
 from typing_extensions import override
 
@@ -38,6 +38,56 @@ def _all_workers_barrier() -> None:
     except AssertionError:
         group = get_world_group()
     group.barrier()
+
+
+def uses_shared_region() -> bool:
+    """Whether the worker CPU buffer is the shared mmap region (vs a private
+    per-rank tensor); replicated-layout dedup is gated on this being True."""
+    return (
+        current_platform.is_cuda_alike() and not current_platform.is_rocm()
+    ) or current_platform.is_xpu()
+
+
+class CPUOffloadLayout(NamedTuple):
+    """How the shared CPU tier is carved up for one worker's KV layout."""
+
+    # Chunks the tier can hold.
+    num_chunks: int
+    # Bytes per chunk row, aligned up and so possibly padded.
+    kv_bytes_per_chunk: int
+    # Bytes one worker owns inside a chunk row.
+    cpu_page_size_per_worker: int
+    # Worker copies packed into one chunk row.
+    num_copies: int
+
+
+def cpu_offload_layout(config: OffloadingConfig) -> CPUOffloadLayout:
+    """Derive the CPU tier geometry for one worker's KV layout.
+
+    Every worker sizes its own view from this, and the scheduler unifies the
+    chunk count across workers with it, so the two can never disagree about how
+    many chunks exist. Under pipeline parallelism they otherwise can: stages own
+    different layers, so ``worker_kv_bytes_per_block`` differs per stage.
+    """
+    cpu_bytes_to_use = config.extra_config.get("cpu_bytes_to_use")
+    world_size = config.parallel.world_size
+    if not cpu_bytes_to_use or config.worker_kv_bytes_per_block <= 0 or world_size <= 0:
+        return CPUOffloadLayout(0, 0, 0, 0)
+
+    replicated = config.replicated_layout and uses_shared_region()
+    num_copies = 1 if replicated else world_size
+    kv_bytes_per_chunk = (
+        config.worker_kv_bytes_per_block * num_copies * config.cache.blocks_per_chunk
+    )
+    # A chunk row is |--- W0 ---|--- W1 ---| ... |--- Wn ---| *** maybe-pad ***,
+    # or one copy plus padding under the replicated layout.
+    aligned = round_up(kv_bytes_per_chunk, SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT)
+    return CPUOffloadLayout(
+        num_chunks=int(cpu_bytes_to_use) // aligned,
+        kv_bytes_per_chunk=aligned,
+        cpu_page_size_per_worker=kv_bytes_per_chunk // num_copies,
+        num_copies=num_copies,
+    )
 
 
 class CPUOffloadingSpec(OffloadingSpec):
@@ -103,27 +153,18 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.num_chunks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
-        self.replicated_layout = config.replicated_layout and self._uses_shared_region()
+        self.replicated_layout = config.replicated_layout and uses_shared_region()
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
-            num_copies = 1 if self.replicated_layout else world_size
-            kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
-            kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
-
-            # calculate cpu_page_size_per_worker
-            self.cpu_page_size_per_worker = kv_bytes_per_chunk // num_copies
-
-            # calculate num_chunks
-            aligned_kv_bytes_per_chunk = round_up(
-                kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
+            layout = cpu_offload_layout(config)
+            self.cpu_page_size_per_worker = layout.cpu_page_size_per_worker
+            self.kv_bytes_per_chunk = layout.kv_bytes_per_chunk
+            # The scheduler's unified count wins: it is the minimum over workers,
+            # so it is addressable on every one of them.
+            self.num_chunks = (
+                config.num_cpu_blocks
+                if config.num_cpu_blocks is not None
+                else layout.num_chunks
             )
-            self.num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
-
-            # Expose aligned_kv_bytes_per_chunk as
-            # kv_bytes_per_chunk. Note that this might contain
-            # some padding. i.e. each offloaded chunk is of the form,
-            # |--- W0-C0---|---- W1-C0---| ... |---- Wn-C0---| *** maybe-pad *** |
-            # or |--- C0 (single copy) ---| *** maybe-pad *** |
-            self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -159,11 +200,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         return self._manager
 
     def _uses_shared_region(self) -> bool:
-        """Whether the worker CPU buffer is the shared mmap region (vs a private
-        per-rank tensor); replicated-layout dedup is gated on this being True."""
-        return (
-            current_platform.is_cuda_alike() and not current_platform.is_rocm()
-        ) or current_platform.is_xpu()
+        return uses_shared_region()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None

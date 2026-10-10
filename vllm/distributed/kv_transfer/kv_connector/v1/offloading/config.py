@@ -281,4 +281,22 @@ def build_offloading_config(
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        # Unified across workers by `unify_cpu_offload_num_chunks` before the
+        # scheduler and worker connectors are built.
+        num_cpu_blocks=vllm_config.cache_config.num_cpu_blocks,
     )
+
+
+def uses_cpu_offloading_spec(vllm_config: "VllmConfig") -> bool:
+    """Whether the configured native offloading backend is the CPU tier."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if (
+        kv_transfer_config is None
+        or kv_transfer_config.kv_connector != "OffloadingConnector"
+    ):
+        return False
+
+    spec_name = kv_transfer_config.kv_connector_extra_config.get(
+        "spec_name", "CPUOffloadingSpec"
+    )
+    return spec_name == "CPUOffloadingSpec"

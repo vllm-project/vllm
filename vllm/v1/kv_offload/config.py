@@ -4,7 +4,11 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
 @dataclass(frozen=True)
@@ -88,3 +92,43 @@ class OffloadingConfig:
     canonical_layout: bool = False
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None
+    # Unified number of CPU offload blocks across all workers, if precomputed.
+    num_cpu_blocks: int | None = None
+
+
+def unify_cpu_offload_num_chunks(
+    vllm_config: "VllmConfig", kv_cache_configs: "list[KVCacheConfig]"
+) -> int | None:
+    """Smallest CPU-offload chunk count any worker can hold, or None.
+
+    Under pipeline parallelism workers own different layers, so each derives a
+    different capacity from its own KV cache tensors while the scheduler would
+    otherwise size its block ids from a single worker. Taking the minimum keeps
+    every scheduler-allocated chunk id addressable on every worker.
+
+    Sizing is delegated to the CPU backend's own ``cpu_offload_layout`` so a
+    worker's view and the scheduler's unified count cannot be derived
+    differently.
+    """
+    # Imported here to avoid a cycle: the offloading connector config imports
+    # this module, and the CPU spec imports the connector's group selection.
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+        build_offloading_config,
+        get_offloading_group_ids,
+        uses_cpu_offloading_spec,
+    )
+    from vllm.v1.kv_offload.cpu.spec import cpu_offload_layout
+
+    if not uses_cpu_offloading_spec(vllm_config):
+        return None
+
+    def _num_chunks(kv_cache_config: "KVCacheConfig") -> int:
+        # A stage owning no offloadable group contributes no capacity of its own.
+        if not get_offloading_group_ids(kv_cache_config):
+            return 0
+        layout = cpu_offload_layout(
+            build_offloading_config(vllm_config, kv_cache_config)
+        )
+        return layout.num_chunks
+
+    return min(_num_chunks(c) for c in kv_cache_configs)
