@@ -35,6 +35,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -57,7 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.worker.tpsp_utils import TPSPProfile
+from vllm.v1.worker.tpsp_utils import TPSPContext
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
@@ -79,6 +80,8 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+
+logger = init_logger(__name__)
 
 
 class LlamaMLP(nn.Module):
@@ -258,7 +261,7 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    tpsp: TPSPProfile
+    tpsp_context: TPSPContext
 
     def __init__(
         self,
@@ -343,11 +346,9 @@ class LlamaDecoderLayer(nn.Module):
             tpsp_active=tpsp_active,
         )
         if tpsp_active:
-            backend_cls = current_platform.get_tpsp_backend_cls()
-            if backend_cls is None:
-                raise RuntimeError("TPSP backend is unavailable")
-            hidden_states, residual = backend_cls.fused_gemm_rs_norm_ag(
-                self.tpsp.o_proj,
+            backend = self.tpsp_context.backend
+            hidden_states, residual = backend.fused_gemm_rs_norm_ag(
+                self.tpsp_context.o_proj,
                 hidden_states,
                 self.self_attn.o_proj,
                 residual,
@@ -355,8 +356,8 @@ class LlamaDecoderLayer(nn.Module):
                 residual_is_sharded,
             )
             hidden_states = self.mlp(hidden_states, tpsp_active=True)
-            return backend_cls.fused_gemm_rs_norm_ag(
-                self.tpsp.down_proj,
+            return backend.fused_gemm_rs_norm_ag(
+                self.tpsp_context.down_proj,
                 hidden_states,
                 self.mlp.down_proj,
                 residual,
@@ -437,13 +438,47 @@ class LlamaModel(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
         self.tpsp_requested = False
-        self.tpsp: TPSPProfile | None = None
+        self.tpsp_context: TPSPContext | None = None
         self.max_tpsp_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def _maybe_profile_tpsp(self) -> None:
+        if not self.tpsp_requested or self.tpsp_context is not None:
+            return
+
+        backend_cls = current_platform.get_tpsp_backend_cls()
+        if backend_cls is None:
+            logger.warning(
+                "TPSP using regular forward: no fused backend on this device"
+            )
+            self.tpsp_requested = False
+            return
+
+        from vllm.distributed.parallel_state import get_tp_group
+
+        first_layer = self.layers[0]
+        backend = backend_cls(
+            get_tp_group().device_group.group_name,
+            first_layer.self_attn.o_proj.weight.device,
+        )
+        args = (
+            first_layer.self_attn.o_proj,
+            first_layer.post_attention_layernorm,
+            first_layer.mlp.down_proj,
+            self.layers[1].input_layernorm,
+            self.max_tpsp_batched_tokens,
+        )
+        context = backend.profile(*args)
+        if context is not None:
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                layer.tpsp_context = context
+        else:
+            self.tpsp_requested = False
+        self.tpsp_context = context
 
     def forward(
         self,
@@ -453,35 +488,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if self.tpsp_requested and self.tpsp is None:
-            from vllm.distributed.parallel_state import get_tp_group
-
-            first_layer = self.layers[0]
-            backend_cls = current_platform.get_tpsp_backend_cls()
-            backend = (
-                backend_cls(
-                    get_tp_group().device_group.group_name,
-                    first_layer.self_attn.o_proj.weight.device,
-                )
-                if backend_cls is not None
-                else None
-            )
-            args = (
-                first_layer.self_attn.o_proj,
-                first_layer.post_attention_layernorm,
-                first_layer.mlp.down_proj,
-                self.layers[1].input_layernorm,
-                self.max_tpsp_batched_tokens,
-            )
-            new_profile = (
-                backend.profile(*args)
-                if backend is not None
-                else TPSPProfile.without_backend(*args)
-            )
-            if new_profile.enabled:
-                for layer in islice(self.layers, self.start_layer, self.end_layer):
-                    layer.tpsp = new_profile
-            self.tpsp = new_profile
+        self._maybe_profile_tpsp()
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -494,12 +501,10 @@ class LlamaModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        profile = self.tpsp
-        tpsp_active = profile is not None and profile.is_active(hidden_states.size(0))
-        if tpsp_active and intermediate_tensors is not None:
-            raise RuntimeError("TP/SP Llama does not support pipeline inputs")
-        if tpsp_active and self.aux_hidden_state_layers:
-            raise ValueError("TP/SP Llama does not support auxiliary hidden states")
+        context = self.tpsp_context
+        tpsp_active = context is not None and context.profile.is_active(
+            hidden_states.size(0)
+        )
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []

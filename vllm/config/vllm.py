@@ -1180,7 +1180,10 @@ class VllmConfig:
             return
         if self.parallel_config.pipeline_parallel_size > 1:
             raise ValueError("--enable-tpsp requires pipeline_parallel_size=1.")
-        if self.speculative_config is not None and self.speculative_config.use_eagle():
+        if self.speculative_config is not None and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_extract_hidden_states()
+        ):
             raise ValueError(
                 "--enable-tpsp is incompatible with speculative decoding "
                 "methods requiring target hidden states."

@@ -62,48 +62,14 @@ class TPSPScanResult:
         return self.status == "enabled"
 
 
-class TPSPProjectionContext:
-    """A projection's chunk configuration and rank-local backend context."""
-
-    def __init__(
-        self,
-        input_width: int,
-        hidden_size: int,
-        norm_eps: float,
-        tp_size: int,
-        group_name: str,
-    ) -> None:
-        self.input_width = input_width
-        self.hidden_size = hidden_size
-        self.norm_eps = norm_eps
-        self.tp_size = tp_size
-        self.group_name = group_name
-        self.config: object = None
-        self.backend: Any | None = None
-        self.context: Any | None = None
-
-
 @dataclass(frozen=True)
 class TPSPProfile:
+    """Shared TPSP activation decision."""
+
     enabled: bool
     threshold_tokens: int | None
     max_batched_tokens: int
-    o_proj: TPSPProjectionContext
-    down_proj: TPSPProjectionContext
     reason: str = ""
-
-    @classmethod
-    def without_backend(
-        cls,
-        o_proj: nn.Module,
-        o_norm: nn.Module,
-        down_proj: nn.Module,
-        down_norm: nn.Module,
-        max_batched_tokens: int,
-    ) -> TPSPProfile:
-        return profile_tpsp(
-            None, o_proj, o_norm, down_proj, down_norm, max_batched_tokens
-        )
 
     def is_active(self, num_tokens: int) -> bool:
         if not self.enabled:
@@ -113,6 +79,16 @@ class TPSPProfile:
         if not 1 <= num_tokens <= self.max_batched_tokens:
             raise ValueError("current_batched_tokens must be within the profiled range")
         return num_tokens >= self.threshold_tokens
+
+
+@dataclass(frozen=True)
+class TPSPContext:
+    """Shared backend and opaque per-projection handles."""
+
+    profile: TPSPProfile
+    backend: Any
+    o_proj: object
+    down_proj: object
 
 
 def _projection_inputs(
@@ -163,13 +139,13 @@ def _run_conventional_projection(
 
 def _run_fused_projection(
     backend: Any,
-    projection_context: TPSPProjectionContext,
+    projection_context: object,
     projection: nn.Module,
     norm: nn.Module,
     inputs: _ProjectionInputs,
-    chunk: object,
+    chunk: object | None = None,
 ) -> torch.Tensor:
-    return type(backend).fused_gemm_rs_norm_ag(
+    return backend.fused_gemm_rs_norm_ag(
         projection_context,
         inputs.hidden_states,
         projection,
@@ -181,88 +157,73 @@ def _run_fused_projection(
 
 
 def profile_tpsp(
-    backend: Any | None,
+    backend: Any,
     o_proj: nn.Module,
     o_norm: nn.Module,
     down_proj: nn.Module,
     down_norm: nn.Module,
     max_batched_tokens: int,
-) -> TPSPProfile:
+) -> TPSPContext | None:
     """Choose a chunk for each projection, then one shared token threshold.
 
     Each projection gets its own backend context and chunk scan. The threshold
     scan compares the sum of both fused projections against their normal paths.
     If either scan is inconclusive or finds no benefit, use the normal path.
     """
+    if backend is None:
+        raise ValueError("TPSP profiling requires a backend")
+
     from vllm.distributed.parallel_state import get_tp_group
 
     group = get_tp_group()
     hidden_size = o_norm.weight.numel()
     if down_norm.weight.numel() != hidden_size:
         raise ValueError("TPSP projections require matching norm hidden sizes")
-    group_name = group.device_group.group_name
-    o_plan = TPSPProjectionContext(
-        o_proj.input_size_per_partition,
-        hidden_size,
-        o_norm.variance_epsilon,
-        group.world_size,
-        group_name,
-    )
-    down_plan = TPSPProjectionContext(
-        down_proj.input_size_per_partition,
-        hidden_size,
-        down_norm.variance_epsilon,
-        group.world_size,
-        group_name,
-    )
-    plans = (o_plan, down_plan)
 
-    def disabled(reason: str) -> TPSPProfile:
+    def disabled(reason: str) -> None:
         _LOG.warning("TPSP using regular forward: %s", reason)
-        return TPSPProfile(False, None, max_batched_tokens, o_plan, down_plan, reason)
+        return None
 
-    if backend is None:
-        return disabled("no fused backend on this device")
     parameter = o_proj.weight
     started = time.perf_counter()
     enabled = False
     threshold = None
+    handles: list[object] = []
     try:
-        for plan in plans:
-            plan.backend = backend
-            plan.context = backend.open(
+        for projection, norm in ((o_proj, o_norm), (down_proj, down_norm)):
+            handle = backend.open(
                 dtype=parameter.dtype,
                 tp_size=group.world_size,
                 hidden_size=hidden_size,
                 max_batched_tokens=max_batched_tokens,
-                group_name=group_name,
+                group_name=group.device_group.group_name,
                 device=parameter.device,
             )
-            if plan.context is None:
+            if handle is None:
                 return disabled("fused backend unavailable for this projection")
-            candidate = scan_chunk(
-                backend,
-                projection=o_proj if plan is o_plan else down_proj,
-                norm=o_norm if plan is o_plan else down_norm,
+            handles.append(handle)
+            candidate = backend.profile_projection(
+                handle,
+                projection=projection,
+                norm=norm,
                 tp_size=group.world_size,
                 hidden_size=hidden_size,
-                input_width=plan.input_width,
+                input_width=projection.input_size_per_partition,
                 max_batched_tokens=max_batched_tokens,
-                norm_eps=plan.norm_eps,
+                norm_eps=norm.variance_epsilon,
                 time_budget_s=240.0,
-                projection_context=plan,
             )
             if candidate.status != "candidate" or candidate.config is None:
                 return disabled(
                     f"chunk selection {candidate.status}: {candidate.reason}"
                 )
-            plan.config = candidate.config
 
         measurement = scan_threshold(
-            o_plan,
+            backend,
+            handles[0],
             o_proj,
             o_norm,
-            down_plan,
+            handles[1],
             down_proj,
             down_norm,
             max_batched_tokens,
@@ -275,25 +236,23 @@ def profile_tpsp(
         if threshold is None or not 1 <= threshold <= max_batched_tokens:
             raise RuntimeError("TPSP Llama has an invalid enabled profile")
         enabled = True
-        return TPSPProfile(True, threshold, max_batched_tokens, o_plan, down_plan)
+        return TPSPContext(
+            TPSPProfile(True, threshold, max_batched_tokens),
+            backend,
+            handles[0],
+            handles[1],
+        )
     finally:
         if group.rank_in_group == 0:
             _LOG.info(
-                "TPSP projection scan: elapsed=%.2fs o_chunk=%s "
-                "down_chunk=%s threshold=%s enabled=%s",
+                "TPSP projection scan: elapsed=%.2fs threshold=%s enabled=%s",
                 time.perf_counter() - started,
-                o_plan.config,
-                down_plan.config,
                 threshold,
                 enabled,
             )
         if not enabled:
-            for plan in plans:
-                if plan.context is not None:
-                    backend.close(plan.context)
-                plan.context = None
-                plan.backend = None
-                plan.config = None
+            for handle in handles:
+                backend.close(handle)
             backend.close()
 
 
@@ -303,23 +262,22 @@ def _beneficial(measurement: TPSPMeasurement) -> bool:
 
 @torch.inference_mode()
 def scan_threshold(
-    o_plan: TPSPProjectionContext,
+    backend: Any,
+    o_handle: object,
     o_proj: nn.Module,
     o_norm: nn.Module,
-    down_plan: TPSPProjectionContext,
+    down_handle: object,
     down_proj: nn.Module,
     down_norm: nn.Module,
     max_batched_tokens: int,
 ) -> TPSPScanResult:
     """Compare the sum of the two projection timings with their normal paths."""
-    backend = o_plan.backend
-    if backend is None or down_plan.backend is not backend:
-        raise RuntimeError("TPSP projections require the same backend")
     group = c10d._resolve_process_group(backend.group_name)
-    tp_size = o_plan.tp_size
+    tp_size = dist.get_world_size(group)
+    hidden_size = o_norm.weight.numel()
     rank = dist.get_rank(group)
     device = backend.device
-    entries = ((o_plan, o_proj, o_norm), (down_plan, down_proj, down_norm))
+    entries = ((o_handle, o_proj, o_norm), (down_handle, down_proj, down_norm))
     deadline = time.monotonic() + 240.0
 
     def expired() -> bool:
@@ -330,7 +288,7 @@ def scan_threshold(
         return bool(flag.item())
 
     def measure(
-        plan: TPSPProjectionContext,
+        handle: object,
         projection: nn.Module,
         norm: nn.Module,
         inputs: _ProjectionInputs,
@@ -342,9 +300,7 @@ def scan_threshold(
         torch.accelerator.synchronize(device)
         start = time.perf_counter()
         if fused:
-            result = _run_fused_projection(
-                backend, plan, projection, norm, inputs, plan.config
-            )
+            result = _run_fused_projection(backend, handle, projection, norm, inputs)
         else:
             result = _run_conventional_projection(projection, norm, inputs)
         torch.accelerator.synchronize(device)
@@ -357,22 +313,22 @@ def scan_threshold(
 
     def measure_size(tokens: int) -> TPSPMeasurement | None:
         data = tuple(
-            _projection_inputs(
-                tokens, projection, plan.hidden_size, tp_size, rank, device
-            )
-            for plan, projection, norm in entries
+            _projection_inputs(tokens, projection, hidden_size, tp_size, rank, device)
+            for handle, projection, norm in entries
         )
-        for (plan, projection, norm), inputs in zip(entries, data):
-            measure(plan, projection, norm, inputs, False)
-            measure(plan, projection, norm, inputs, True)
+        for (handle, projection, norm), inputs in zip(entries, data):
+            measure(handle, projection, norm, inputs, False)
+            measure(handle, projection, norm, inputs, True)
         conventional: list[float] = []
         fused: list[float] = []
         for trial in range(_TRIALS):
             order = (False, True) if trial % 2 == 0 else (True, False)
             timings = {False: 0.0, True: 0.0}
-            for (plan, projection, norm), inputs in zip(entries, data):
+            for (handle, projection, norm), inputs in zip(entries, data):
                 for enabled in order:
-                    timings[enabled] += measure(plan, projection, norm, inputs, enabled)
+                    timings[enabled] += measure(
+                        handle, projection, norm, inputs, enabled
+                    )
             conventional.append(timings[False])
             fused.append(timings[True])
             if expired():
@@ -425,7 +381,7 @@ def scan_threshold(
         )
     profile = TPSPScanResult(
         tp_size,
-        o_plan.hidden_size,
+        hidden_size,
         max_batched_tokens,
         status,
         reason,
@@ -439,7 +395,7 @@ def scan_threshold(
 
 def scan_chunk(
     backend: Any,
-    projection_context: TPSPProjectionContext,
+    projection_context: object,
     projection: nn.Module,
     norm: nn.Module,
     tp_size: int,
@@ -458,7 +414,7 @@ def scan_chunk(
     """
     if backend._closed:
         raise RuntimeError("TPSP backend is closed")
-    if projection_context.context is None:
+    if projection_context is None:
         raise ValueError("TPSP requires a projection context")
     device = backend.device
     group_name = backend.group_name

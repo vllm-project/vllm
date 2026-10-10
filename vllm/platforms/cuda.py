@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
-    from vllm.v1.worker.tpsp_utils import TPSPProjectionContext
 else:
     VllmConfig = None
     CacheDType = None
@@ -1088,6 +1087,7 @@ class CudaTPSPContext:
     peer_workspaces: tuple[torch.Tensor, ...] = ()
     signal_one: torch.Tensor | None = None
     workspace_handle: object | None = None
+    config: int | None = None
 
 
 class CudaTPSPBackend(TPSPBackend):
@@ -1274,7 +1274,7 @@ class CudaTPSPBackend(TPSPBackend):
         context.signal_one = torch.ones(1, dtype=torch.int32, device=device)
         context.workspace_handle = handle
 
-    def _profile_context(self, context: CudaTPSPContext | None) -> CudaTPSPContext:
+    def _profile_context(self, context: object) -> CudaTPSPContext:
         if context is None:
             raise ValueError("CUDA TPSP requires a projection context")
         if (
@@ -1284,10 +1284,15 @@ class CudaTPSPBackend(TPSPBackend):
             raise ValueError("CUDA TPSP context belongs to another backend")
         return context
 
-    @classmethod
+    def set_config(self, handle: object, config: object) -> None:
+        context = self._profile_context(handle)
+        if type(config) is not int or config <= 0:
+            raise ValueError("CUDA TPSP requires a positive microchunk size")
+        context.config = config
+
     def fused_gemm_rs_norm_ag(
-        cls,
-        projection_context: TPSPProjectionContext,
+        self,
+        projection_context: object,
         x: torch.Tensor,
         projection: torch.nn.Module,
         residual: torch.Tensor,
@@ -1297,28 +1302,24 @@ class CudaTPSPBackend(TPSPBackend):
         config: object | None = None,
         norm_type: str = "rms_norm",
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        backend = projection_context.backend
-        if not isinstance(backend, cls):
-            raise ValueError("TPSP projection context belongs to another backend")
-        if backend._closed:
+        if self._closed:
             raise RuntimeError("TPSP backend is closed")
-        context = backend._profile_context(projection_context.context)
+        context = self._profile_context(projection_context)
+        hidden_size = norm.weight.numel()
         rows = (x.size(0) + context.tp_size - 1) // context.tp_size
         if residual_is_sharded:
-            if residual.shape != (rows, projection_context.hidden_size):
+            if residual.shape != (rows, hidden_size):
                 raise RuntimeError("TPSP residual shard has an unexpected shape")
             local_residual = residual
         else:
-            if residual.shape != (x.size(0), projection_context.hidden_size):
+            if residual.shape != (x.size(0), hidden_size):
                 raise RuntimeError("TPSP full residual has an unexpected shape")
             start = context.rank * rows
             count = min(rows, max(0, x.size(0) - start))
             if count == rows:
                 local_residual = residual[start : start + rows].contiguous()
             else:
-                local_residual = residual.new_zeros(
-                    (rows, projection_context.hidden_size)
-                )
+                local_residual = residual.new_zeros((rows, hidden_size))
                 local_residual[:count] = residual[start : start + count]
 
         weight = projection.weight
@@ -1332,7 +1333,7 @@ class CudaTPSPBackend(TPSPBackend):
         eps = norm.eps if norm_type == "layer_norm" else norm.variance_epsilon
         projection_bias = projection.bias
         norm_bias = getattr(norm, "bias", None)
-        chunk = projection_context.config if config is None else config
+        chunk = context.config if config is None else config
         if type(chunk) is not int or chunk <= 0:
             raise ValueError("CUDA TPSP requires a positive microchunk size")
         if (

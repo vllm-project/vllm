@@ -58,7 +58,9 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
-@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp", "dflash", "dspark"])
+@pytest.mark.parametrize(
+    "method", ["eagle", "eagle3", "mtp", "dflash", "dspark", "extract_hidden_states"]
+)
 def test_tpsp_rejects_target_hidden_state_speculation(method):
     config = VllmConfig()
     config.model_config = SimpleNamespace(enable_tpsp=True)

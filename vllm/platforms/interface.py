@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
-    from vllm.v1.worker.tpsp_utils import TPSPProfile, TPSPProjectionContext
+    from vllm.v1.worker.tpsp_utils import TPSPContext, TPSPScanResult
 else:
     FlexibleArgumentParser = object
 
@@ -162,7 +162,7 @@ class TPSPBackend(ABC):
         down_proj: torch.nn.Module,
         down_norm: torch.nn.Module,
         max_batched_tokens: int,
-    ) -> "TPSPProfile":
+    ) -> "TPSPContext | None":
         """Select independent chunks and a shared threshold for two projections."""
         from vllm.v1.worker.tpsp_utils import profile_tpsp
 
@@ -170,11 +170,44 @@ class TPSPBackend(ABC):
             self, o_proj, o_norm, down_proj, down_norm, max_batched_tokens
         )
 
-    @classmethod
+    def profile_projection(
+        self,
+        handle: object,
+        *,
+        projection: torch.nn.Module,
+        norm: torch.nn.Module,
+        tp_size: int,
+        hidden_size: int,
+        input_width: int,
+        max_batched_tokens: int,
+        norm_eps: float,
+        time_budget_s: float,
+    ) -> "TPSPScanResult":
+        from vllm.v1.worker.tpsp_utils import scan_chunk
+
+        result = scan_chunk(
+            self,
+            handle,
+            projection=projection,
+            norm=norm,
+            tp_size=tp_size,
+            hidden_size=hidden_size,
+            input_width=input_width,
+            max_batched_tokens=max_batched_tokens,
+            time_budget_s=time_budget_s,
+            norm_eps=norm_eps,
+        )
+        if result.status == "candidate" and result.config is not None:
+            self.set_config(handle, result.config)
+        return result
+
+    @abstractmethod
+    def set_config(self, handle: object, config: object) -> None: ...
+
     @abstractmethod
     def fused_gemm_rs_norm_ag(
-        cls,
-        projection_context: "TPSPProjectionContext",
+        self,
+        projection_context: object,
         x: torch.Tensor,
         projection: torch.nn.Module,
         residual: torch.Tensor,
