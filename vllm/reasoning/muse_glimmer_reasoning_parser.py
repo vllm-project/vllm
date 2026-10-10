@@ -15,6 +15,7 @@ Usage: ``--reasoning-parser muse_glimmer``
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Iterable, Sequence
 
 import regex as re
@@ -121,6 +122,7 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         self._emitted_reasoning: str = ""
         self._emitted_content: str = ""
         self._tool_handoff_done: bool = False
+        self._token_text_cache: dict[int, str] = {}
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -185,7 +187,53 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         return ""
 
     @staticmethod
-    def _classify_bodies(text: str) -> tuple[str, str]:
+    def _body_end(text: str, start: int) -> tuple[int, str | None]:
+        """Where the channel body starting at ``start`` ends, and what ends it.
+        Returns ``(end, terminator)``: ``terminator`` is ``<|eom|>``/``<|eot|>``
+        when a marker closes the body, ``""`` when the next channel header does
+        (the model sometimes skips ``<|eom|>``), and ``None`` for an OPEN body
+        that runs to end-of-text.
+        """
+        end, terminator = text.find(_EOM, start), _EOM
+        if end == -1:
+            end, terminator = len(text), None
+        if (eot := text.find(_EOT, start, end)) != -1:
+            end, terminator = eot, _EOT
+        if header := _CHANNEL_HEADER_RE.search(text, start, end):
+            end, terminator = header.start(), ""
+        return end, terminator
+
+    @classmethod
+    def _reasoning_body_spans(cls, text: str) -> list[tuple[int, int]]:
+        """Character spans of each ``to=self`` body, framing excluded."""
+        spans = []
+        pos = 0
+        while (idx := text.find(_REASONING_OPEN, pos)) != -1:
+            start = idx + len(_REASONING_OPEN)
+            pos, _ = cls._body_end(text, start)
+            spans.append((start, pos))
+        return spans
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count tokens inside ``to=self`` bodies, excluding framing.
+        Markers are not guaranteed to be single tokens, so tokens are matched
+        by their character offset in the per-token decoded text.
+        """
+        cache = self._token_text_cache
+        offsets: list[int] = []
+        text = ""
+        for token_id in token_ids:
+            offsets.append(len(text))
+            if token_id not in cache:
+                cache[token_id] = self.model_tokenizer.decode([token_id])
+            text += cache[token_id]
+        return sum(
+            bisect_left(offsets, end) - bisect_left(offsets, start)
+            for start, end in self._reasoning_body_spans(text)
+        )
+
+    @classmethod
+    def _classify_bodies(cls, text: str) -> tuple[str, str]:
         """Split ``text`` into (reasoning_body, content_body), channel-aware.
         Framing markers and tool channels contribute nothing -- the tool parser
         owns those. A body ends at ``<|eom|>`` / ``<|eot|>``, at the next channel
@@ -201,15 +249,9 @@ class MuseGlimmerReasoningParser(ReasoningParser):
                 break
             recipient = match.group("recipient")
             body_start = match.end()
-            eom = text.find(_EOM, body_start)
-            eot = text.find(_EOT, body_start)
-            terminators = [p for p in (eom, eot) if p != -1]
-            next_header = _CHANNEL_HEADER_RE.search(text, body_start)
-            if next_header is not None:
-                terminators.append(next_header.start())
-            body_end = min(terminators) if terminators else n
+            body_end, terminator = cls._body_end(text, body_start)
             body = text[body_start:body_end]
-            if not terminators:
+            if terminator is None:
                 body = _trim_open_body(body)
             if recipient == "self":
                 reasoning_parts.append(body)
@@ -220,10 +262,7 @@ class MuseGlimmerReasoningParser(ReasoningParser):
                 and "<atem:invoke" not in body
             ):
                 content_parts.append(body)
-            if terminators and body_end in (eom, eot):
-                pos = body_end + len(_EOM if body_end == eom else _EOT)
-            else:
-                pos = body_end
+            pos = body_end + len(terminator or "")
         return "".join(reasoning_parts), "".join(content_parts)
 
     def get_streaming_fallback_content(
