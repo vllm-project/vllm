@@ -17,6 +17,7 @@ from vllm.multimodal.media.audio import load_audio
 from vllm.platforms import current_platform
 
 MODEL_NAME = "openai/whisper-large-v3-turbo"
+TINY_MODEL_NAME = "openai/whisper-tiny"
 
 # Disable prefix caching on ROCm to reduce non-determinism in
 # streaming-vs-non-streaming comparisons.
@@ -78,6 +79,16 @@ def server(request):
 async def whisper_client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest_asyncio.fixture
+async def tiny_whisper_client():
+    args = [*_ROCM_ARGS]
+    if current_platform.is_cpu():
+        args += ["--kv-cache-memory-bytes", "128m"]
+    with RemoteOpenAIServer(TINY_MODEL_NAME, args) as remote_server:
+        async with remote_server.get_async_client() as async_client:
+            yield async_client
 
 
 @pytest.mark.asyncio
@@ -156,6 +167,31 @@ async def test_long_audio_request(mary_had_lamb, whisper_client):
     counts = out_text.count("Mary had a little lamb")
     assert counts == 10, counts
     assert out_usage["seconds"] == 161, out_usage["seconds"]
+
+
+@pytest.mark.asyncio
+async def test_verbose_json_segment_ids_across_audio_chunks(
+    mary_had_lamb, tiny_whisper_client
+):
+    mary_had_lamb.seek(0)
+    audio, sr = load_audio(mary_had_lamb)
+    audio = np.pad(audio, (0, 1600))
+    buffer = io.BytesIO()
+    sf.write(buffer, np.tile(audio, 3), sr, format="WAV")
+    buffer.seek(0)
+
+    transcription = await tiny_whisper_client.audio.transcriptions.create(
+        model=TINY_MODEL_NAME,
+        file=buffer,
+        language="en",
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+
+    segments = transcription.segments
+    assert segments is not None
+    assert any(segment.seek > 0 for segment in segments)
+    assert [segment.id for segment in segments] == list(range(len(segments)))
 
 
 @pytest.mark.asyncio
