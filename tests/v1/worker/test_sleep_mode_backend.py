@@ -88,6 +88,63 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     assert calls == expected
 
 
+@pytest.mark.parametrize(
+    ("call", "expected"),
+    [
+        (lambda w: w.sleep(level=1), ["release", "suspend"]),
+        (lambda w: w.wake_up(tags=None), ["resume", "restore"]),
+        (lambda w: w.wake_up(tags=["kv_cache"]), ["resume", "restore"]),
+        (lambda w: w.wake_up(tags=["weights"]), ["resume"]),
+        (lambda w: w.discard(("kv_cache",)), ["release", "discard"]),
+        (lambda w: w.discard(("weights",)), ["discard"]),
+    ],
+    ids=[
+        "sleep",
+        "wake-all",
+        "wake-kv",
+        "wake-weights",
+        "discard-kv",
+        "discard-weights",
+    ],
+)
+def test_worker_releases_kv_connector_around_kv_cache_remap(
+    monkeypatch, call, expected
+):
+    """The KV connector is released before the KV cache is unmapped and restored
+    after it is mapped again, and only then."""
+    from types import SimpleNamespace
+
+    import vllm.v1.worker.gpu_worker as gpu_worker
+    from vllm.v1.worker.gpu_worker import Worker
+
+    calls: list[str] = []
+    backend = SimpleNamespace(
+        suspend=lambda level=1: calls.append("suspend"),
+        resume=lambda tags=None: calls.append("resume"),
+        discard=lambda tags: calls.append("discard"),
+    )
+    connector = SimpleNamespace(
+        release_kv_caches=lambda: calls.append("release"),
+        restore_kv_caches=lambda: calls.append("restore"),
+    )
+    worker = object.__new__(Worker)
+    worker._sleep_mode_backend = backend
+    worker._sleep_saved_parameters = {}
+    worker._sleep_saved_buffers = {}
+    worker._sleep_saved_draft_buffers = {}
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
+    )
+    worker.synchronize_device = lambda: None
+    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
+    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
+    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(gpu_worker, "get_kv_transfer_group", lambda: connector)
+
+    call(worker)
+    assert calls == expected
+
+
 def test_unknown_backend_raises():
     with pytest.raises(ValueError, match="Unsupported sleep-mode backend"):
         SleepModeBackendFactory.get_backend_class("does-not-exist")

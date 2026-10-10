@@ -5652,6 +5652,90 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+@pytest.mark.parametrize("then", ["reset", "resume"])
+@pytest.mark.parametrize("load_outcome", ["written", "failed-blocks", "failed-request"])
+def test_release_transfer_kv_frees_blocks_for_reset(load_outcome, then):
+    """Releasing transfer KV ends loads in flight and drops held sends; the
+    reset recomputes all waiting KV, and a load in flight once it ends, even
+    under the default fail policy and if a resume cancels the reset first."""
+    scheduler = create_scheduler(use_kv_connector=True)
+    running, loading, arrived, loaded, session, queued = create_requests(
+        num_requests=6,
+        req_ids=["running", "loading", "arrived", "loaded", "session", "queued"],
+    )
+    scheduler.add_request(running)
+    scheduler.schedule()
+    for request in (loading, arrived, loaded, session, queued):
+        scheduler.add_request(request)
+    # A remote load in flight, one arrived, one already promoted, and a
+    # streaming session between turns: all hold KV while waiting.
+    held = (loading, arrived, loaded, session)
+    scheduler.waiting.remove_requests(held)
+    for request, status in zip(
+        held,
+        (
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+            RequestStatus.WAITING,
+            RequestStatus.WAITING_FOR_STREAMING_REQ,
+        ),
+    ):
+        scheduler.kv_cache_manager.allocate_slots(request, request.num_prompt_tokens)
+        request.num_computed_tokens = request.num_prompt_tokens
+        request.status = status
+        scheduler._enqueue_waiting_request(request)
+    scheduler.finished_recving_kv_req_ids.add(arrived.request_id)
+    scheduler.connector.abort_transfers = Mock()
+    blocks = scheduler.kv_cache_manager.get_block_ids
+
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.release_transfer_kv()
+    scheduler.connector.abort_transfers.assert_called_once()
+    # The paused engine keeps stepping until the load in flight ends.
+    assert scheduler.has_requests()
+    assert running.status == RequestStatus.RUNNING
+    assert list(scheduler.waiting) == [queued]
+
+    # The load in flight keeps its blocks until its transfer ends; the session
+    # keeps its KV; loaded KV is recomputed.
+    assert not scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert blocks(loading.request_id)[0] and blocks(session.request_id)[0]
+    assert session.num_computed_tokens == session.num_prompt_tokens
+    # Recomputed requests keep their place: running first, then waiting KV.
+    assert list(scheduler.waiting) == [running, arrived, loaded, queued]
+    for request in (arrived, loaded):
+        assert request.status == RequestStatus.WAITING
+        assert request.num_computed_tokens == 0
+        assert not blocks(request.request_id)[0]
+
+    if then == "resume":
+        scheduler.set_pause_state(PauseState.UNPAUSED)
+    output = KVConnectorOutput(finished_recving={loading.request_id})
+    if load_outcome == "failed-blocks":
+        output.invalid_block_ids = set(blocks(loading.request_id)[0])
+    elif load_outcome == "failed-request":
+        output.failed_recving = {loading.request_id}
+    scheduler.update_from_output(
+        SchedulerOutput.make_empty(),
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}, kv_connector_output=output),
+    )
+    # Not failed, not even under the default fail policy.
+    assert scheduler.requests[loading.request_id] is loading
+    if then == "resume":
+        # Recomputed locally from scratch, without another remote load.
+        output = scheduler.schedule()
+        assert loading.status == RequestStatus.RUNNING
+        assert output.num_scheduled_tokens[loading.request_id] == len(
+            loading.prompt_token_ids
+        )
+    else:
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+        assert loading.status == RequestStatus.WAITING
+        assert loading.num_computed_tokens == 0 and not blocks(loading.request_id)[0]
+        assert loading in scheduler.waiting
+    assert loading.request_id not in scheduler.failed_recving_kv_req_ids
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
@@ -5667,6 +5751,12 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
 
     assert scheduler.has_finished_requests()
     assert scheduler.has_requests()
+    # A paused engine waits for the held KV only while releasing it.
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    assert not scheduler.has_requests()
+    scheduler.release_transfer_kv()
+    assert scheduler.has_requests()
+    scheduler.set_pause_state(PauseState.UNPAUSED)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],

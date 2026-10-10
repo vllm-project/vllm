@@ -400,6 +400,10 @@ class MoRIIOConstants:
     # ZMQ message types
     GET_META_MSG = b"get_meta_msg"
     POP_DONE_RECV = b"pop_done_recv"
+    # Sent to every peer that fetched our metadata before our KV cache is
+    # deregistered; the peer drops it and handshakes again on next use.
+    INVALIDATE_MSG = b"invalidate_msg"
+    INVALIDATE_ACK = b"invalidate_ack"
     OVER = b"OVER"
     COMPLETION_PREFIX = "cmpl"
     TRANSFER_PREFIX = "tx"

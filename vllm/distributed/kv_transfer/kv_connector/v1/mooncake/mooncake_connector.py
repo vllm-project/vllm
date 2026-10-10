@@ -7,10 +7,11 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Coroutine
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum, IntEnum, auto
 from typing import TYPE_CHECKING, Any, Final
 
 import msgspec
@@ -69,6 +70,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -87,6 +89,7 @@ except ImportError:
     TransferEngine = None
 
 if TYPE_CHECKING:
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -654,9 +657,18 @@ class PullReqMeta:
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
     pull_tasks_count: int = 0
-    # Set once any worker reports a failure, so a success from another worker
-    # for the same request is not counted afterwards.
+    # Set once any worker reports a failure; the load still ends only after
+    # every worker has answered.
     failed: bool = False
+
+
+class SendState(Enum):
+    # P has not finished the request: pulls wait.
+    WAITING = auto()
+    # P holds the request's blocks for D's pulls.
+    READY = auto()
+    # Nothing more will be sent: pulls fail fast until the state expires.
+    DONE = auto()
 
 
 @dataclass
@@ -664,11 +676,17 @@ class SendBlockMeta:
     p_req_id: ReqId
     transfer_id: TransferId
     local_block_ids: list[list[int]]
+    # Set once the state leaves WAITING.
     ready: asyncio.Event
     expire_time: float = float("inf")
+    state: SendState = SendState.WAITING
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+
+    def expired(self, now: float) -> bool:
+        # Past its expire time and not being sent: the state is dropped.
+        return self.expire_time < now and self.sending == 0
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -678,6 +696,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         self.reqs_not_processed: set[TransferId] = set()
+        self.abort_pending_sends = False
 
     def add_new_req(
         self,
@@ -781,6 +800,14 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
 
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
+
+    def abort_transfers(self) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.abort_transfers()
+
     def request_finished(
         self,
         request: "Request",
@@ -800,9 +827,23 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        # Only RDMA peers drop a stale remote key (the failed access refreshes it).
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        return extra_config.get("mooncake_protocol", "rdma") == "rdma"
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def release_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.release_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.restore_kv_caches()
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -910,6 +951,10 @@ class MooncakeConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
+        # D: requests whose KV is still being pulled.
+        self._reqs_loading: dict[ReqId, Request] = {}
+        # P: drop the KV held for D at the next step.
+        self._abort_pending_sends = False
 
         # Compute sliding window block counts per KV cache group.
         sw_sizes_tokens: list[tuple[int, int]] = [
@@ -1094,6 +1139,8 @@ class MooncakeConnectorScheduler:
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
                 )
+                if any(block_ids):
+                    self._reqs_loading[req_id] = req
             self._reqs_need_recv.clear()
 
         if not self.is_kv_consumer:
@@ -1108,8 +1155,20 @@ class MooncakeConnectorScheduler:
             self._reqs_need_send.clear()
             meta.reqs_not_processed = self._reqs_not_processed
             self._reqs_not_processed = set()
+        meta.abort_pending_sends = self._abort_pending_sends
+        self._abort_pending_sends = False
 
         return meta
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        for req_id in connector_output.finished_recving or ():
+            self._reqs_loading.pop(req_id, None)
+
+    def abort_transfers(self) -> None:
+        self._abort_pending_sends = True
+        # Ask P to drop each load in flight; the load ends with P's answer.
+        for req_id, request in self._reqs_loading.items():
+            self._reqs_need_recv[req_id] = (request, [])
 
     def request_finished(
         self,
@@ -1140,6 +1199,12 @@ class MooncakeConnectorScheduler:
             assert not self.is_kv_producer
             self._reqs_need_recv[request.request_id] = (request, [])
             params["do_remote_prefill"] = False
+            return False, None
+
+        if request.request_id in self._reqs_loading:
+            # Finished while its KV is still arriving: ask P to drop the
+            # transfer. The scheduler frees the blocks once the pull ends.
+            self._reqs_need_recv[request.request_id] = (request, [])
             return False, None
 
         if not params.get("do_remote_decode"):
@@ -1195,10 +1260,6 @@ class MooncakeConnectorWorker:
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
-        # Create more tasks than workers to keep the thread pool saturated.
-        # Tasks can await async events, so a surplus (2x is a robust heuristic)
-        # prevents workers from idling.
-        self.num_sender_tasks = self.num_sender_workers * 2
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
@@ -1239,6 +1300,10 @@ class MooncakeConnectorWorker:
         self.region_row_offsets: list[int] = []
         self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
+        self._kv_data_lens: list[int] = []
+        self._kv_released = False
+        # Pulls on the receiver loop that may still write into local blocks.
+        self._local_pulls = 0
         # Aligned regions depend only on the peer's registered layout.
         # The third item is an error string when alignment cannot proceed.
         self._prepared_transfer_regions: dict[
@@ -1271,8 +1336,7 @@ class MooncakeConnectorWorker:
                 "Mooncake Prefiller: use %d workers to send kvcaches",
                 self.num_sender_workers,
             )
-            # An asyncio queue to buffer incoming requests for the sender
-            self.sender_worker_queue = asyncio.Queue[tuple[bytes, bytes]]()
+            self._send_slots = asyncio.Semaphore(self.num_sender_workers)
             self.sender_loop = asyncio.new_event_loop()
             # Background thread for processing new sending requests.
             self._sender_listener_t = threading.Thread(
@@ -1450,54 +1514,49 @@ class MooncakeConnectorWorker:
 
         await self.register_worker_with_bootstrap()
 
-        # Create async worker tasks that process items from the queue
-        sender_tasks = [
-            asyncio.create_task(self._sender_worker(sock))
-            for _ in range(self.num_sender_tasks)
-        ]
+        # One task per pull: a pull waiting for its prefill must not delay
+        # others. The executor bounds the concurrent transfers.
+        sender_tasks: set[asyncio.Task] = set()
 
         ready_event.set()
 
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
-                await self.sender_worker_queue.put((identity, metadata_bytes))
+                task = asyncio.create_task(
+                    self._handle_xfer_request(sock, identity, metadata_bytes)
+                )
+                sender_tasks.add(task)
+                task.add_done_callback(sender_tasks.discard)
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake sender thread.")
         except Exception as e:
             logger.error("Error in Mooncake sender thread: %s. Exiting thread.", str(e))
         finally:
-            # Clean up worker tasks
             for task in sender_tasks:
                 task.cancel()
             await asyncio.gather(*sender_tasks, return_exceptions=True)
             sock.close()
 
-    async def _sender_worker(self, sock: zmq.asyncio.Socket):
-        while True:
-            try:
-                identity, metadata_bytes = await self.sender_worker_queue.get()
-                try:
-                    metadata = self._xfer_meta_decoder.decode(metadata_bytes)
-                    await self.send_kv_to_decode(identity, sock, metadata)
-                except Exception as e:
-                    logger.error("Error processing Mooncake xfer request: %s", e)
-                    error_response = MooncakeXferResponse(
-                        status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
-                    )
-                    await sock.send_multipart(
-                        (identity, self._encoder.encode(error_response))
-                    )
-                finally:
-                    self.sender_worker_queue.task_done()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Error in _sender_worker: %s", e)
+    async def _handle_xfer_request(
+        self, sock: zmq.asyncio.Socket, identity: bytes, metadata_bytes: bytes
+    ):
+        try:
+            metadata = self._xfer_meta_decoder.decode(metadata_bytes)
+            await self.send_kv_to_decode(identity, sock, metadata)
+        except Exception as e:
+            logger.error("Error processing Mooncake xfer request: %s", e)
+            error_response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR, err_msg=str(e)
+            )
+            await sock.send_multipart((identity, self._encoder.encode(error_response)))
 
     async def send_kv_to_decode(
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
+        # D waits this timeout plus 60 s from its send; the margin covers the
+        # write itself, so never start one past our deadline.
+        deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
         remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
         if meta.remote_tp_rank not in remote_tp_ranks:
@@ -1561,17 +1620,23 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        for d_req_id, (transfer_id, _) in meta.req_blocks.items():
-            if transfer_id not in self.reqs_need_send:
-                # This req is not enqueued in P side yet, create it here.
-                self.reqs_need_send[transfer_id] = SendBlockMeta(
-                    p_req_id="",
-                    transfer_id=transfer_id,
-                    local_block_ids=[],
-                    ready=asyncio.Event(),
-                )
-            send_meta = self.reqs_need_send[transfer_id]
-            pending_reqs[d_req_id] = send_meta
+        released: list[ReqId] = []
+        for d_req_id, (transfer_id, block_ids) in meta.req_blocks.items():
+            send_meta = self._get_send_meta(transfer_id)
+            if any(block_ids):
+                pending_reqs[d_req_id] = send_meta
+            else:
+                # D needs no KV (prefix hit or abort): end it without waiting.
+                self._end_send(send_meta)
+                released.append(d_req_id)
+        if released:
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.CONTINUE
+                if pending_reqs
+                else MooncakeXferResponseStatus.FINISH,
+                ok_reqs=released,
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
 
         async def wait_and_ret(
             d_req_id: ReqId, send_meta: SendBlockMeta
@@ -1584,13 +1649,13 @@ class MooncakeConnectorWorker:
             for d_req_id, send_meta in pending_reqs.items()
         ]
 
+        def time_left() -> float:
+            return max(deadline - time.perf_counter(), 0)
+
         while wait_tasks:
             done, pending = await asyncio.wait(
-                wait_tasks,
-                timeout=envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                return_when=asyncio.FIRST_COMPLETED,
+                wait_tasks, timeout=time_left(), return_when=asyncio.FIRST_COMPLETED
             )
-
             if not done:
                 # Timeout, abort all pending requests.
                 for task in wait_tasks:
@@ -1612,88 +1677,154 @@ class MooncakeConnectorWorker:
                 if wait_tasks
                 else MooncakeXferResponseStatus.FINISH
             )
-            ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
-            for task in done:
-                d_req_id, send_meta = task.result()
+            woken = [task.result() for task in done]
+            for d_req_id, _ in woken:
                 del pending_reqs[d_req_id]
-                # Do we still in reqs_need_send (not expired)?
-                if send_meta.transfer_id in self.reqs_need_send:
-                    # Mark it sending to avoid expiration.
-                    send_meta.sending += 1
-                    if not send_meta.need_send:
-                        self.resolve_need_send(
-                            send_meta, remote_tp_ranks, meta.remote_pp_size
-                        )
-                    ready_reqs.append((d_req_id, send_meta))
-                else:
-                    # Otherwise (expired, very unlikely), just forget it.
-                    logger.warning(
-                        "Request %s expired before sending on P side.", d_req_id
-                    )
-
-            (
-                src_ptrs,
-                dst_ptrs,
-                lengths,
-                err_reqs,
-                err_msg,
-            ) = await self._build_transfer_params(
-                ready_reqs,
-                meta,
-                local_regions,
-                remote_regions,
-            )
-            err_req_set = set(err_reqs)
-            ok_ready_reqs = [
-                (d_req_id, send_meta)
-                for d_req_id, send_meta in ready_reqs
-                if d_req_id not in err_req_set
-            ]
-
-            if src_ptrs:
-                remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
-                ret_value = await self.sender_loop.run_in_executor(
-                    self._sender_executor,
-                    self._send_blocks,
-                    remote_session,
-                    src_ptrs,
-                    dst_ptrs,
-                    lengths,
+            live = [pull for pull in woken if pull[1].state is not SendState.DONE]
+            if len(live) < len(woken):
+                # Answered before the writes, which may wait for a sender.
+                response = MooncakeXferResponse(
+                    status=MooncakeXferResponseStatus.CONTINUE
+                    if live or wait_tasks
+                    else MooncakeXferResponseStatus.FINISH,
+                    err_reqs=[d for d, m in woken if m.state is SendState.DONE],
+                    err_msg="Aborted on the P side",
                 )
-
-                if ret_value != 0:
-                    transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
-                    err_msg = (
-                        transfer_err_msg
-                        if err_msg is None
-                        else f"{err_msg}; {transfer_err_msg}"
-                    )
-                    err_reqs = list(err_reqs)
-                    for d_req_id, _ in ok_ready_reqs:
-                        err_reqs.append(d_req_id)
-                        err_req_set.add(d_req_id)
-                    ok_ready_reqs = []
-
-            for d_req_id, send_meta in ready_reqs:
-                send_meta.sending -= 1
-
-                if d_req_id in err_req_set:
-                    continue
-
-                send_meta.sent += 1
-                if (
-                    send_meta.sent == send_meta.need_send
-                    and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
-                ):
-                    self.finished_sending_reqs.add(send_meta.p_req_id)
-
+                await sock.send_multipart((identity, self._encoder.encode(response)))
+            if not live:
+                continue
+            ok_reqs, err_reqs, err_msg = await self._write_pulls(
+                live, deadline, meta, remote_tp_ranks, local_regions, remote_regions
+            )
             response = MooncakeXferResponse(
                 status=response_status,
-                ok_reqs=[d_req_id for d_req_id, _ in ok_ready_reqs] or None,
+                ok_reqs=ok_reqs or None,
                 err_reqs=err_reqs or None,
                 err_msg=err_msg,
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
+
+    async def _write_pulls(
+        self,
+        pulls: list[tuple[ReqId, SendBlockMeta]],
+        deadline: float,
+        meta: MooncakeXferMetadata,
+        remote_tp_ranks: list[int],
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> tuple[list[ReqId], list[ReqId], str | None]:
+        """Write the KV of woken pulls; returns (ok, err, err_msg). A write holds
+        P's blocks, so it starts only with a free sender before the deadline."""
+        timeout = max(deadline - time.perf_counter(), 0)
+        try:
+            await asyncio.wait_for(self._send_slots.acquire(), timeout)
+        except TimeoutError:
+            admitted = False
+        else:
+            # The event loop may resume this task past the deadline.
+            admitted = time.perf_counter() < deadline
+            if not admitted:
+                self._send_slots.release()
+        if not admitted:
+            pull_ids = [d_req_id for d_req_id, _ in pulls]
+            return [], pull_ids, "Timeout waiting for a P sender."
+        ok_reqs: list[ReqId] = []
+        err_reqs: list[ReqId] = []
+        err_msg: str | None = None
+        ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
+        try:
+            # A pull aborted while it queues is answered here, not woken early:
+            # it holds no blocks, and its wait is bounded by the deadline.
+            for d_req_id, send_meta in pulls:
+                if send_meta.state is SendState.DONE:
+                    continue
+                # Mark it sending to avoid expiration.
+                send_meta.sending += 1
+                if not send_meta.need_send:
+                    self.resolve_need_send(
+                        send_meta, remote_tp_ranks, meta.remote_pp_size
+                    )
+                ready_reqs.append((d_req_id, send_meta))
+            if ready_reqs:
+                ok_reqs, err_reqs, err_msg = await self._send_ready_reqs(
+                    ready_reqs, meta, local_regions, remote_regions
+                )
+        finally:
+            for d_req_id, send_meta in ready_reqs:
+                send_meta.sending -= 1
+                send_meta.sent += d_req_id in ok_reqs
+                complete = send_meta.sent == send_meta.need_send
+                if complete:
+                    # Every D rank has the KV: no pull can come anymore.
+                    self.reqs_need_send.pop(send_meta.transfer_id, None)
+                # A failed send fails D's load, so nothing more is sent.
+                failed = d_req_id not in ok_reqs
+                if complete or failed or send_meta.state is SendState.DONE:
+                    self._end_send(send_meta)
+            self._send_slots.release()
+        written = {d_req_id for d_req_id, _ in ready_reqs}
+        aborted = [d_req_id for d_req_id, _ in pulls if d_req_id not in written]
+        if aborted:
+            err_msg = "; ".join(filter(None, ("Aborted on the P side", err_msg)))
+        return ok_reqs, aborted + err_reqs, err_msg
+
+    async def _send_ready_reqs(
+        self,
+        ready_reqs: list[tuple[ReqId, SendBlockMeta]],
+        meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> tuple[list[ReqId], list[ReqId], str | None]:
+        """Write the KV of ready requests to D; returns (ok, err, err_msg)."""
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await self._build_transfer_params(
+            ready_reqs,
+            meta,
+            local_regions,
+            remote_regions,
+        )
+        ok_reqs = [d_req_id for d_req_id, _ in ready_reqs if d_req_id not in err_reqs]
+
+        if src_ptrs:
+            remote_session = f"{meta.remote_hostname}:{meta.remote_port}"
+            ret_value = await self.sender_loop.run_in_executor(
+                self._sender_executor,
+                self._send_blocks,
+                remote_session,
+                src_ptrs,
+                dst_ptrs,
+                lengths,
+            )
+
+            if ret_value != 0:
+                transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
+                err_msg = (
+                    transfer_err_msg
+                    if err_msg is None
+                    else f"{err_msg}; {transfer_err_msg}"
+                )
+                err_reqs = list(err_reqs) + ok_reqs
+                ok_reqs = []
+        return ok_reqs, err_reqs, err_msg
+
+    def _get_send_meta(self, transfer_id: TransferId) -> SendBlockMeta:
+        """Get the send state of a transfer, creating it on first sight.
+        P's scheduler or D's pull may come first; unclaimed state expires."""
+        if (send_meta := self.reqs_need_send.get(transfer_id)) is None:
+            send_meta = self.reqs_need_send[transfer_id] = SendBlockMeta(
+                p_req_id="",
+                transfer_id=transfer_id,
+                local_block_ids=[],
+                ready=asyncio.Event(),
+                expire_time=time.perf_counter()
+                + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+            )
+        return send_meta
 
     def resolve_need_send(
         self,
@@ -2156,6 +2287,7 @@ class MooncakeConnectorWorker:
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
+        self._kv_data_lens = kv_data_lens
 
         if not kv_data_ptrs:
             raise RuntimeError("No KV cache tensors were registered with Mooncake.")
@@ -2211,38 +2343,107 @@ class MooncakeConnectorWorker:
                     f"{ready_timeout:.0f}s."
                 )
 
+    def release_kv_caches(self) -> None:
+        """Unregister the KV caches once no send or pull uses them; TimeoutError
+        past the abort timeout. Idempotent."""
+        if self._kv_released or not self.seen_base_addresses:
+            return
+        deadline = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+        try:
+            while self._transfers_pending(deadline):
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError
+                time.sleep(0.01)
+        except (TimeoutError, FuturesTimeoutError) as e:
+            raise TimeoutError("Mooncake KV transfers did not finish in time") from e
+        if self.engine.batch_unregister_memory(self.seen_base_addresses) != 0:
+            raise RuntimeError("Mooncake batch memory unregistration failed.")
+        self._kv_released = True
+
+    def restore_kv_caches(self) -> None:
+        """Register the released KV caches again: same addresses, new pages."""
+        if not self._kv_released:
+            return
+        ret_value = self.engine.batch_register_memory(
+            self.seen_base_addresses, self._kv_data_lens
+        )
+        if ret_value != 0:
+            raise RuntimeError("Mooncake batch memory registration failed.")
+        self._kv_released = False
+
+    def _transfers_pending(self, deadline: float) -> bool:
+        pending = []
+        if not self.is_kv_consumer:
+            pending.append(
+                asyncio.run_coroutine_threadsafe(
+                    self._has_pending_sends(), self.sender_loop
+                )
+            )
+        if not self.is_kv_producer:
+            pending.append(
+                asyncio.run_coroutine_threadsafe(
+                    self._has_pending_recvs(), self.receiver_loop
+                )
+            )
+        # A wedged loop raises TimeoutError instead of hanging past the deadline.
+        return any(
+            fut.result(timeout=deadline - time.perf_counter()) for fut in pending
+        )
+
+    async def _has_pending_sends(self) -> bool:
+        # Held blocks are read while a send runs or once D asks, until expiry.
+        now = time.perf_counter()
+        return any(
+            meta.local_block_ids and not meta.expired(now)
+            for meta in self.reqs_need_send.values()
+        )
+
+    async def _has_pending_recvs(self) -> bool:
+        return self._local_pulls > 0
+
+    def _create_pull_task(
+        self, coro: Coroutine[Any, Any, None], pull_metas: dict[ReqId, PullReqMeta]
+    ) -> None:
+        """Run a pull; one that writes local blocks is counted until it ends."""
+        if any(any(meta.local_block_ids) for meta in pull_metas.values()):
+            self._local_pulls += 1
+            coro = self._counted_pull(coro)
+        asyncio.create_task(coro)
+
+    async def _counted_pull(self, coro: Coroutine[Any, Any, None]) -> None:
+        try:
+            await coro
+        finally:
+            self._local_pulls -= 1
+
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs
         self.finished_recving_reqs = set()
         return finished_recving_reqs
 
     async def fetch_finished_sending_reqs(self) -> set[ReqId]:
-        finished_sending_reqs = self.finished_sending_reqs
-        self.finished_sending_reqs = set()
-
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
 
         expired_transfer_id = []
         for transfer_id, send_meta in self.reqs_need_send.items():
-            if (
-                send_meta.p_req_id
-                and send_meta.expire_time < now
-                and send_meta.sending == 0
-            ):
-                logger.warning(
-                    "Request %s timed out after %d seconds without "
-                    "being sent. Freeing its blocks on the producer side.",
-                    send_meta.p_req_id,
-                    envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                )
-                self.xfer_stats.record_kv_expired_req()
-                finished_sending_reqs.add(send_meta.p_req_id)
+            if send_meta.expired(now):
+                if send_meta.local_block_ids:
+                    logger.warning(
+                        "Request %s timed out after %d seconds without "
+                        "being sent. Freeing its blocks on the producer side.",
+                        send_meta.p_req_id,
+                        envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                    )
+                    self.xfer_stats.record_kv_expired_req()
+                self._end_send(send_meta)
                 expired_transfer_id.append(transfer_id)
 
         for transfer_id in expired_transfer_id:
             del self.reqs_need_send[transfer_id]
 
+        finished_sending_reqs = self.finished_sending_reqs
+        self.finished_sending_reqs = set()
         return finished_sending_reqs
 
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
@@ -2342,6 +2543,8 @@ class MooncakeConnectorWorker:
         )
 
         # Send query for the request.
+        unanswered = set(req_ids)
+        reason = "no answer from the prefill side"
         try:
             with make_zmq_socket(
                 self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
@@ -2351,24 +2554,22 @@ class MooncakeConnectorWorker:
                     zmq.RCVTIMEO, (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000
                 )
                 await sock.send(encoded_data)
-                while True:
+                while unanswered:
                     ret_msg = await sock.recv()
                     response = self._xfer_resp_decoder.decode(ret_msg)
                     if response.status == MooncakeXferResponseStatus.ERROR:
-                        self._handle_failed_recv(
-                            pull_metas,
-                            req_ids,
-                            response.err_msg or "transfer error",
-                        )
-                        return
-                    self.process_pulling_result(response, pull_metas)
+                        reason = response.err_msg or "transfer error"
+                        break
+                    unanswered -= self.process_pulling_result(response, pull_metas)
                     if response.status == MooncakeXferResponseStatus.FINISH:
                         break
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
-        except Exception as e:
-            self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
             return
+        except Exception as e:
+            reason = f"transfer failed: {e}"
+        if unanswered:
+            self._handle_failed_recv(pull_metas, unanswered, reason)
 
     def _handle_failed_recv(
         self,
@@ -2376,33 +2577,30 @@ class MooncakeConnectorWorker:
         req_ids: Collection[ReqId],
         reason: str,
     ) -> None:
-        """Report a failed remote KV load so the scheduler can fail or recompute it."""
-        failed: list[ReqId] = []
+        """Count one producer's failure for each request; see _finish_pull."""
+        logger.error("pulling kv_caches for %s failed: %s", list(req_ids), reason)
         for req_id in req_ids:
-            pull_meta = pull_metas.get(req_id)
-            if pull_meta is None or pull_meta.failed:
-                continue
-            pull_meta.failed = True
-            failed.append(req_id)
-            self.xfer_stats.record_failed_recv()
+            self._finish_pull(pull_metas[req_id], failed=True)
 
-            invalid = {b for group in pull_meta.local_block_ids for b in group}
-            if not invalid:
-                # A pull with no local blocks only asks P to release its blocks
-                # for a request that never reached the scheduler (see
-                # AsyncLLM.notify_kv_transfer_request_rejected, which submits an
-                # abort_immediately request just to run request_finished). No D
-                # request is waiting on a load, and reporting one here would trip
-                # the scheduler's `assert req_id in self.requests`.
-                continue
+    def _finish_pull(self, pull_meta: PullReqMeta, failed: bool = False) -> None:
+        """Count one producer's answer. The load ends once every producer has
+        answered; until then one of them may still write the blocks."""
+        pull_meta.failed |= failed
+        pull_meta.pull_tasks_count -= 1
+        # Empty pulls only release the producer's blocks; the consumer did not
+        # enter WAITING_FOR_REMOTE_KVS and must not report a load.
+        if pull_meta.pull_tasks_count > 0 or not any(pull_meta.local_block_ids):
+            return
+        if pull_meta.failed:
+            # Report the failed load so the scheduler fails or recomputes it.
+            self.xfer_stats.record_failed_recv()
             if self._is_hma_required:
                 self._failed_recv_reqs.put(pull_meta.d_req_id)
             else:
-                self._invalid_block_ids.put(invalid)
-            self.finished_recving_reqs.add(pull_meta.d_req_id)
-
-        if failed:
-            logger.error("pulling kv_caches for %s failed: %s", failed, reason)
+                self._invalid_block_ids.put(
+                    {b for group in pull_meta.local_block_ids for b in group}
+                )
+        self.finished_recving_reqs.add(pull_meta.d_req_id)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain the blocks whose remote KV load failed since the last call."""
@@ -2418,19 +2616,13 @@ class MooncakeConnectorWorker:
         self,
         response: MooncakeXferResponse,
         pull_metas: dict[ReqId, PullReqMeta],
-    ):
+    ) -> set[ReqId]:
+        """Apply one producer's response; returns the requests it answered."""
         ok_reqs: list[ReqId] = response.ok_reqs or []
 
+        # No race because we are in async loop.
         for req_id in ok_reqs:
-            pull_meta = pull_metas[req_id]
-            if pull_meta.failed:
-                continue
-            # No race because we are in async loop.
-            pull_meta.pull_tasks_count -= 1
-            # Empty pulls only release the producer's blocks; the consumer
-            # did not enter WAITING_FOR_REMOTE_KVS.
-            if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
-                self.finished_recving_reqs.add(pull_meta.d_req_id)
+            self._finish_pull(pull_metas[req_id])
 
         if ok_reqs:
             logger.debug("pulling kv_caches for %s finished", ok_reqs)
@@ -2439,6 +2631,7 @@ class MooncakeConnectorWorker:
             self._handle_failed_recv(
                 pull_metas, response.err_reqs, response.err_msg or "unknown error"
             )
+        return {*ok_reqs, *(response.err_reqs or ())}
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
         url = remote_bootstrap_addr + "/query"
@@ -2520,8 +2713,9 @@ class MooncakeConnectorWorker:
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for worker_addr in worker_addrs:
-            asyncio.create_task(
-                self.receive_kv_from_single_worker(worker_addr, pull_metas)
+            self._create_pull_task(
+                self.receive_kv_from_single_worker(worker_addr, pull_metas),
+                pull_metas,
             )
 
     async def handle_new_engine_id(
@@ -2537,6 +2731,8 @@ class MooncakeConnectorWorker:
             await self._pending_bootstrap_queries[remote_bootstrap_addr].wait()
 
         if remote_engine_id not in self._remote_agents:
+            for pull_meta in pull_metas.values():
+                pull_meta.pull_tasks_count = 1  # the failed lookup is the only answer
             self._handle_failed_recv(
                 pull_metas,
                 list(pull_metas),
@@ -2552,39 +2748,51 @@ class MooncakeConnectorWorker:
     ):
         for remote_engine_id, pull_metas in reqs_to_recv.items():
             if remote_engine_id not in self._remote_agents:
-                asyncio.create_task(
-                    self.handle_new_engine_id(remote_engine_id, pull_metas)
+                self._create_pull_task(
+                    self.handle_new_engine_id(remote_engine_id, pull_metas),
+                    pull_metas,
                 )
             else:
                 self.receive_kv(remote_engine_id, pull_metas)
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
+        # A state expires a timeout after P is done with the request; P owns
+        # it while the request runs.
+        expire_time = time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
-            if block_ids:
-                # Already gone through request_finished()
-                send_meta = self.reqs_need_send[transfer_id]
-                send_meta.p_req_id = p_req_id
-                send_meta.local_block_ids = block_ids
-                send_meta.expire_time = (
-                    time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
-                )
+            send_meta = self._get_send_meta(transfer_id)
+            send_meta.p_req_id = p_req_id
+            if not block_ids:
+                # From update_state_after_alloc(): the request is running.
+                send_meta.expire_time = float("inf")
+                continue
+            # From request_finished(): hold the blocks for D, unless D ended
+            # the transfer first.
+            send_meta.expire_time = expire_time
+            send_meta.local_block_ids = block_ids
+            if send_meta.state is SendState.WAITING:
+                send_meta.state = SendState.READY
                 send_meta.ready.set()
             else:
-                # From update_state_after_alloc(),
-                # but not reach request_finished() yet
-                # This may be already created by send_kv_to_decode()
-                # when D is sending MooncakeXferMetadata.
-                if transfer_id not in self.reqs_need_send:
-                    self.reqs_need_send[transfer_id] = SendBlockMeta(
-                        p_req_id=p_req_id,
-                        transfer_id=transfer_id,
-                        local_block_ids=[],
-                        ready=asyncio.Event(),
-                    )
+                self._end_send(send_meta)
         for transfer_id in metadata.reqs_not_processed:
-            send_meta = self.reqs_need_send.pop(transfer_id)
-            if send_meta:
-                assert not send_meta.ready.is_set()
+            send_meta = self._get_send_meta(transfer_id)
+            send_meta.expire_time = expire_time
+            self._end_send(send_meta)
+        if metadata.abort_pending_sends:
+            # Only finished requests' KV; P still owns its unfinished ones.
+            for send_meta in self.reqs_need_send.values():
+                if send_meta.state is SendState.READY:
+                    self._end_send(send_meta)
+
+    def _end_send(self, send_meta: SendBlockMeta) -> None:
+        """Send nothing more: pulls fail fast until the state expires, and P's
+        blocks are freed once no transfer reads them."""
+        send_meta.state = SendState.DONE
+        send_meta.ready.set()
+        if send_meta.local_block_ids and not send_meta.sending:
+            send_meta.local_block_ids = []
+            self.finished_sending_reqs.add(send_meta.p_req_id)
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
@@ -2593,7 +2801,9 @@ class MooncakeConnectorWorker:
             )
 
         if not self.is_kv_consumer and (
-            metadata.reqs_to_send or metadata.reqs_not_processed
+            metadata.reqs_to_send
+            or metadata.reqs_not_processed
+            or metadata.abort_pending_sends
         ):
             asyncio.run_coroutine_threadsafe(
                 self.record_send_reqs(metadata), self.sender_loop
