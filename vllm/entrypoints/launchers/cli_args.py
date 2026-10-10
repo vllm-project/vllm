@@ -314,6 +314,13 @@ class FrontendArgs(BaseFrontendArgs):
     like health checks. Example: "/health,/metrics,/ping".
     When set, access logs for requests to these paths will be suppressed
     while keeping logs for other endpoints."""
+    warmup_config: str | None = None
+    """Path to a JSON file or JSON string containing warmup configuration.
+    The configuration specifies prompts to run through the engine before
+    the server starts accepting traffic, to warm up kernels and avoid
+    lazy compilation latency. See docs/serving/warmup.md. Example format:
+    {"prompts": [{"prompt": "Hello", "max_tokens": 100}], "concurrency": [1, 4]}
+    """
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
