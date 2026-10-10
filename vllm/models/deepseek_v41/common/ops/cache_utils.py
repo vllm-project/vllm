@@ -973,7 +973,10 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-_COMBINE_TOPK_SWA_BLOCK_T = 2
+def _combine_topk_swa_block_t(topk: int) -> int:
+    # Top-k rows carry the selected indices as well as the SWA window;
+    # give each row a program while retaining two rows for SWA-only work.
+    return 1 if topk > 0 else 2
 
 
 # Representative pointer alignment variants for Triton pointer specialization.
@@ -1206,7 +1209,7 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
             PADDED_WIDTH=compile_key.PADDED_WIDTH,
-            BLOCK_T=_COMBINE_TOPK_SWA_BLOCK_T,
+            BLOCK_T=_combine_topk_swa_block_t(compile_key.TOP_K),
             num_warps=2,
             grid=(1,),
         )
@@ -1228,7 +1231,8 @@ class CombineTopkSwaIndicesKernel(
     ) -> None:
         num_reqs = seq_lens.shape[0]
         num_tokens = topk_indices.shape[0]
-        self.kernel[(cdiv(num_tokens, _COMBINE_TOPK_SWA_BLOCK_T),)](
+        block_t = _combine_topk_swa_block_t(TOP_K)
+        self.kernel[(cdiv(num_tokens, block_t),)](
             combined_indices,
             combined_indices.stride(0),
             combined_lens,
@@ -1245,7 +1249,7 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=COMPRESS_RATIO,
             WINDOW_SIZE=WINDOW_SIZE,
             PADDED_WIDTH=next_power_of_2((TOP_K + WINDOW_SIZE + 127) // 128 * 128),
-            BLOCK_T=_COMBINE_TOPK_SWA_BLOCK_T,
+            BLOCK_T=block_t,
             num_warps=2,
         )
 
