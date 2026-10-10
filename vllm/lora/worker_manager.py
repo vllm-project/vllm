@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from contextlib import contextmanager
+from functools import cached_property
 from typing import Any, Literal
 
 import torch
@@ -18,10 +20,38 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.lora.utils import (
+    get_adapter_absolute_path,
+    get_transformers_renames,
+)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
+
+
+class _RenamedAdapterMapper(WeightsMapper):
+    """Maps adapter keys like `mapper`, except a key that then names no LoRA target
+    is first put back through Transformers' reversed renames (see
+    `get_transformers_renames`), if that names one."""
+
+    def __init__(
+        self,
+        mapper: WeightsMapper | None,
+        renames: WeightsMapper,
+        is_target: Callable[[str], bool],
+    ):
+        super().__init__()
+        self.mapper, self.renames, self.is_target = mapper, renames, is_target
+
+    def map_name(self, key: str) -> str | None:
+        name = self.mapper.map_name(key) if self.mapper else key
+        if name is None or self.is_target(name):
+            return name
+        renamed = self.renames.map_name(key)
+        if renamed is not None and self.mapper:
+            renamed = self.mapper.map_name(renamed)
+        return renamed if renamed is not None and self.is_target(renamed) else name
 
 
 class WorkerLoRAManager:
@@ -47,6 +77,7 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
+        self.hf_config = vllm_config.model_config.hf_config
         lora_config = vllm_config.lora_config
         if lora_config is None:
             raise ValueError("LoRA config must be set for WorkerLoRAManager.")
@@ -82,6 +113,24 @@ class WorkerLoRAManager:
     @property
     def is_enabled(self) -> bool:
         return True
+
+    @cached_property
+    def _transformers_renames(self) -> WeightsMapper | None:
+        return get_transformers_renames(self.hf_config)
+
+    @cached_property
+    def _module_names(self) -> set[str]:
+        return {name for name, _ in self._adapter_manager.model.named_modules()}
+
+    def _is_lora_target(self, name: str) -> bool:
+        module = name.split(".lora_")[0]
+        if module in self._module_names:
+            return True
+        prefix, _, leaf = module.rpartition(".")
+        return any(
+            leaf in subs and f"{prefix}.{packed}" in self._module_names
+            for packed, subs in self._adapter_manager.packed_modules_mapping.items()
+        )
 
     def create_lora_manager(
         self,
@@ -133,6 +182,10 @@ class WorkerLoRAManager:
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
             if hf_to_vllm_mapper is not None:
                 hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
+            if (renames := self._transformers_renames) is not None:
+                hf_to_vllm_mapper = _RenamedAdapterMapper(
+                    hf_to_vllm_mapper, renames, self._is_lora_target
+                )
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)

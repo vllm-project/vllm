@@ -220,6 +220,33 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
+def get_transformers_renames(hf_config: PreTrainedConfig) -> "WeightsMapper | None":
+    """Transformers' load-time renames for this model, reversed.
+
+    PEFT saves adapters under the module names Transformers uses at runtime, which
+    its `conversion_mapping` may have renamed from the checkpoint's (e.g. GLM-5.3's
+    `self_attn.f_a_proj` -> `self_attn.forget_gate.f_a_proj`).
+    """
+    from transformers.conversion_mapping import get_checkpoint_conversion_mapping
+    from transformers.core_model_loading import WeightRenaming
+
+    from vllm.model_executor.models.utils import WeightsMapper
+
+    keys = dict.fromkeys(
+        [hf_config.model_type, hf_config.get_text_config().model_type]
+        + list(hf_config.architectures or [])
+    )
+    renamings = {}  # keyed by repr: a config and its text config can share them
+    for key in keys:
+        for renaming in get_checkpoint_conversion_mapping(key) or []:
+            if isinstance(renaming, WeightRenaming):
+                reverse = renaming.reverse_transform()
+                renamings.setdefault(repr(reverse), reverse)
+    if not renamings:
+        return None
+    return WeightsMapper(orig_to_new_renaming=list(renamings.values()))
+
+
 def is_base_embedding_weights(name: str) -> bool:
     # hardcoded subfixes for input & output embedding weights
     embedding_suffixes = (
