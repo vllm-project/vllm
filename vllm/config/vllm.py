@@ -26,6 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from .attention import AttentionConfig, HiSparseConfig
 from .aux_output import AuxOutputConfig
@@ -1234,6 +1235,33 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_unquantized_kv_cache_dtype(self) -> None:
+        """Reject an unquantized KV cache dtype that differs from the model dtype.
+
+        The kAuto arm of `DISPATCH_BY_KV_CACHE_DTYPE` only instantiates same-type
+        copies, so such a cache would store the model dtype's bits and read them
+        back as the requested dtype.
+        """
+        if self.model_config is None:
+            return
+        cache_dtype = self.cache_config.cache_dtype
+        # The unquantized set, mirroring get_fp8_kv_cache_data_type's kAuto arm.
+        if cache_dtype not in ("float16", "bfloat16"):
+            return
+        requested = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        model_dtype = self.model_config.dtype
+        if requested is model_dtype:
+            return
+        raise ValueError(
+            f"--kv-cache-dtype {cache_dtype} cannot be used with a "
+            f"{model_dtype} model: the unquantized cache write has no conversion "
+            f"between the two, so the cache would hold {model_dtype} bits read "
+            f"back as {requested}, silently. Use --kv-cache-dtype auto to store "
+            f"the cache in the model dtype, pass --dtype {cache_dtype} to run the "
+            f"model in that dtype instead, or use a quantized cache dtype such as "
+            f"fp8, which does convert."
+        )
+
     def _verify_sampling_replay_config(self) -> None:
         model_config = self.model_config
         if model_config is None or not model_config.return_sampling_mask:
@@ -1491,6 +1519,8 @@ class VllmConfig:
                 )
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
+
+        self._verify_unquantized_kv_cache_dtype()
 
         if (
             self.mamba_config.enable_stochastic_rounding
