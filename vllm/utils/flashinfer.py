@@ -11,6 +11,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import os
+import platform
 import shutil
 from collections.abc import Callable
 from typing import Any, NoReturn
@@ -517,6 +518,12 @@ def has_flashinfer_fused_kda_decode() -> bool:
 @functools.cache
 def has_flashinfer_trtllm_fused_moe() -> bool:
     """Return `True` if FlashInfer TRTLLM fused MoE is available."""
+    if platform.machine() != "x86_64":
+        logger.debug_once(
+            "FlashInfer TRTLLM fused MoE unavailable on %s (x86_64 only)",
+            platform.machine(),
+        )
+        return False
     if not has_flashinfer_moe():
         return False
     required_functions = [
