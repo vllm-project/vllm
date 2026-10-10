@@ -49,6 +49,7 @@ pub struct ChatDelta {
 #[derive(Deserialize)]
 pub struct ChunkUsage {
     pub completion_tokens: Option<u64>,
+    pub prompt_tokens: Option<u64>,
 }
 
 use crate::cli::BackendKind;
