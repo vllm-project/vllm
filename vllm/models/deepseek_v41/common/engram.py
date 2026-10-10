@@ -1305,7 +1305,7 @@ def _engram_select_rows(
 ) -> None:
     """Copy one token window out of a rank-major gathered buffer.
 
-    Both gathers land rank-major ([rank][token][local width]); this walks the
+    Both gathers land rank-major (`[rank][token][local width]`); this walks the
     window the rank keeps and lays its ranks out side by side as width.
     """
     if output.numel() == 0:
