@@ -3199,43 +3199,21 @@ def test_validate_chat_template_rejects_invalid_type():
     assert exc_info.value.parameter == "chat_template"
 
 
-def _text_only_tracker() -> MagicMock:
-    """A multimodal item tracker stand-in for a plain-text-only message.
-
-    ``_parse_chat_message_content_parts`` only reads
-    ``mm_parser.model_config.enable_prompt_embeds`` (falsy for a plain string
-    part) and ``mm_parser.mm_placeholder_storage()`` (falsy so the plain
-    ``"\n".join(texts)`` path is taken) when the content is text.
-    """
+def _parse_one(message) -> ConversationMessage:
+    # Plain-text content only reads these two tracker attributes.
     tracker = MagicMock()
     parser = tracker.create_parser.return_value
     parser.model_config.enable_prompt_embeds = False
     parser.mm_placeholder_storage.return_value = {}
-    return tracker
-
-
-def _parse_one(message) -> ConversationMessage:
     result = _parse_chat_message_content(
-        message,
-        _text_only_tracker(),
-        content_format="string",
-        interleave_strings=False,
+        message, tracker, content_format="string", interleave_strings=False
     )
     assert len(result) == 1
     return result[0]
 
 
 def test_assistant_reasoning_is_mirrored_to_reasoning_content():
-    """``reasoning`` must also be exposed as ``reasoning_content``.
-
-    ``ChatCompletionRequest`` normalizes an incoming ``reasoning_content``
-    key to ``reasoning``, so by the time a message dict reaches
-    ``_parse_chat_message_content`` only ``reasoning`` is set. Many chat
-    templates still branch on ``message.reasoning_content`` (the legacy
-    name), so ``_parse_chat_message_content`` restores it for the renderer.
-    Without that mirror, a re-sent assistant turn renders an empty thinking
-    block and the model loses its own prior reasoning across turns.
-    """
+    """``reasoning`` is mirrored to ``reasoning_content`` for legacy templates."""
     conv_msg = _parse_one(
         {
             "role": "assistant",
@@ -3249,11 +3227,7 @@ def test_assistant_reasoning_is_mirrored_to_reasoning_content():
 
 
 def test_assistant_without_reasoning_sets_neither_field():
-    """Over-correction guard: no reasoning in, no reasoning keys out.
-
-    A template that renders ``message.reasoning_content`` unconditionally
-    must not start emitting an empty thinking block for ordinary turns.
-    """
+    """No reasoning in, no reasoning keys out: no empty thinking block in templates."""
     conv_msg = _parse_one({"role": "assistant", "content": "Hi"})
 
     assert "reasoning" not in conv_msg

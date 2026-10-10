@@ -1290,14 +1290,7 @@ async def test_streaming_logprobs_kept_when_parser_suppresses_delta(
 async def test_non_streaming_reasoning_gated_but_usage_unconditional(
     include_reasoning,
 ):
-    """Non-streaming sibling of the streaming test above.
-
-    ``include_reasoning=False`` suppresses ``message.reasoning`` only; the
-    reasoning tokens still happened, so they stay counted in
-    ``usage.completion_tokens_details.reasoning_tokens``. A client that sees
-    a null ``reasoning`` next to a nonzero ``reasoning_tokens`` is looking at
-    this flag, not at a dropped field.
-    """
+    """``include_reasoning=False`` nulls ``message.reasoning``, not the usage count."""
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
     serving._include_reasoning_tokens_details = True
     serving.model_config = None
