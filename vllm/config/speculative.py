@@ -93,6 +93,19 @@ _QWEN3_OMNI_TARGET_ARCHITECTURES = frozenset(
 _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 
 
+def _get_default_num_speculative_tokens(hf_config: PreTrainedConfig) -> int | None:
+    for attribute in ("n_predict", "num_lookahead_tokens"):
+        value = getattr(hf_config, attribute, None)
+        if value is not None:
+            logger.info(
+                "Defaulting num_speculative_tokens to %s from draft config %s.",
+                value,
+                attribute,
+            )
+            return value
+    return None
+
+
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
     hf_config = model_config.hf_config
     architectures = set(getattr(model_config, "architectures", ()) or ())
@@ -1468,9 +1481,6 @@ class SpeculativeConfig:
                         self.num_speculative_tokens
                     )
 
-                n_predict = getattr(
-                    self.draft_model_config.hf_config, "n_predict", None
-                )
                 if self.use_dspark():
                     if self.num_speculative_tokens is None:
                         # DSpark's parallel width is independent of MTP stages.
@@ -1479,12 +1489,19 @@ class SpeculativeConfig:
                         if block_size is None:
                             block_size = getattr(hf_config, "dspark_block_size", None)
                         self.num_speculative_tokens = block_size
-                elif n_predict is not None:
+                else:
                     if self.num_speculative_tokens is None:
-                        # Default to max value defined in draft model config.
-                        self.num_speculative_tokens = n_predict
-                    elif (
-                        self.num_speculative_tokens > n_predict
+                        self.num_speculative_tokens = (
+                            _get_default_num_speculative_tokens(
+                                self.draft_model_config.hf_config
+                            )
+                        )
+                    n_predict = getattr(
+                        self.draft_model_config.hf_config, "n_predict", None
+                    )
+                    if (
+                        n_predict is not None
+                        and self.num_speculative_tokens > n_predict
                         and self.num_speculative_tokens % n_predict != 0
                     ):
                         # Ensure divisibility for MTP module reuse.
