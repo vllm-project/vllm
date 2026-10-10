@@ -239,7 +239,7 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 @pytest.mark.skip_global_cleanup
 def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     page = mmap.PAGESIZE
-    tp_group = MagicMock()
+    tp_group = MagicMock(rank_in_group=1, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
@@ -280,16 +280,13 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     pinned: list[torch.Tensor] = []
 
     def pin_tensor(tensor):
+        tp_group.barrier.assert_called_once_with()
         pinned.append(tensor)
 
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
         instance_id="instance",
-        parallel_config=_hisparse_parallel_config(
-            tensor_parallel_size=1,
-            world_size=1,
-            distributed_executor_backend="uni",
-        ),
+        parallel_config=_hisparse_parallel_config(),
     )
 
     pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
@@ -310,7 +307,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_only_on_creator": True,
+        "populate_shard": (1, 2),
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -322,13 +319,16 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert region.is_pinned
 
 
-@pytest.mark.parametrize("fail_registration", [None, 1, 2])
+@pytest.mark.parametrize("fail_registration", [None, 1, 2, "barrier"])
 def test_shared_host_pool_tracks_successful_registrations(
     monkeypatch, fail_registration
 ):
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
-    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
+    tp_group = MagicMock(rank_in_group=0, world_size=2)
+    if fail_registration == "barrier":
+        tp_group.barrier.side_effect = RuntimeError("TP barrier failed")
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(
@@ -347,15 +347,25 @@ def test_shared_host_pool_tracks_successful_registrations(
     config = SimpleNamespace(
         instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
     )
+    error = (
+        "TP barrier failed"
+        if fail_registration == "barrier"
+        else "cudaHostRegister failed"
+    )
     context = (
-        pytest.raises(RuntimeError, match="cudaHostRegister failed")
-        if fail_registration
-        else nullcontext()
+        pytest.raises(RuntimeError, match=error) if fail_registration else nullcontext()
     )
     with context:
         hisparse_runtime_module.allocate_hisparse_host_pools(
             config, [3 * page], 3, page, use_shared_host_pool=True
         )
+    if fail_registration == "barrier":
+        assert region.pinned_addresses == []
+        assert not region.is_pinned
+        region.cleanup.assert_called_once_with()
+        cudart.cudaHostRegister.assert_not_called()
+        return
+
     successful = 2 if fail_registration is None else fail_registration - 1
     assert region.pinned_addresses == [
         backing.data_ptr() + i * page for i in range(successful)
