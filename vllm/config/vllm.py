@@ -212,10 +212,34 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if use_inductor_graph_partition is enabled."""
+    """Enable when the MLA cache update stays inside the compiled graph."""
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import _USE_LAYERNAME
+
+    compilation_config = cfg.compilation_config
+    if (
+        compilation_config.use_inductor_graph_partition
+        or not compilation_config.splitting_ops_contain_kv_cache_update()
+    ):
+        return True
+
+    # Dynamo piecewise mode is about to split unified_mla_kv_cache_update
+    # out, which hides it from MLARoPEKVCacheCatFusionPass. A hoisted
+    # LayerName is a graph input, so that split is unnecessary for MLA.
+    if not _USE_LAYERNAME or not current_platform.is_cuda_alike():
+        return False
+    model_config = cfg.model_config
+    if model_config is None or not model_config.use_mla:
+        return False
+    # HiSparse rebuilds plan state from Python on every step. Checked again
+    # in set_splitting_ops_for_v1 because HiSparseConnector can turn it on
+    # after this default is applied.
+    if cfg.attention_config.hisparse_config is not None:
+        return False
+    splitting_ops = compilation_config.splitting_ops
     return (
-        cfg.compilation_config.use_inductor_graph_partition
-        or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+        splitting_ops is None
+        or "vllm::unified_mla_kv_cache_update" not in splitting_ops
     )
 
 
@@ -2087,6 +2111,7 @@ class VllmConfig:
         self.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
+            hisparse_enabled=self.attention_config.hisparse_config is not None,
         )
 
         # final check of cudagraph mode after all possible updates

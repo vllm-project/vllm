@@ -138,7 +138,11 @@ class PassConfig:
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
-    """Enable fused MLA KV cache update with RoPE."""
+    """Enable fused MLA KV cache update with RoPE.
+
+    Defaults on at -O2 for CUDA/ROCm MLA models when layer names are hoisted
+    (torch >= 2.11) or Inductor graph partition is enabled.
+    """
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
@@ -1153,7 +1157,11 @@ class CompilationConfig:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
     def set_splitting_ops_for_v1(
-        self, all2all_backend: str, data_parallel_size: int = 1
+        self,
+        all2all_backend: str,
+        data_parallel_size: int = 1,
+        *,
+        hisparse_enabled: bool = False,
     ):
         # To compatible with OOT hardware plugin platform (for example vllm-ascend)
         # which currently only supports sequence parallelism in eager mode.
@@ -1161,6 +1169,21 @@ class CompilationConfig:
             if self.splitting_ops is None:
                 self.splitting_ops = []
             return
+
+        mla_kv_cache_update = "vllm::unified_mla_kv_cache_update"
+        # HiSparseConnector can enable HiSparse after fusion defaults run.
+        if (
+            hisparse_enabled
+            and not self.use_inductor_graph_partition
+            and self.pass_config.fuse_rope_kvcache_cat_mla
+        ):
+            logger.warning_once(
+                "Disabling fuse_rope_kvcache_cat_mla because HiSparse rebuilds "
+                "KV-cache plan state on every step. With Inductor graph "
+                "partition off, that update has to stay outside the compiled "
+                "graph."
+            )
+            self.pass_config.fuse_rope_kvcache_cat_mla = False
 
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
@@ -1203,7 +1226,16 @@ class CompilationConfig:
                         )
                         self.pass_config.fuse_qk_norm_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
-                    self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
+                    # A hoisted LayerName is a graph input, so this op can
+                    # stay in the compiled piece when MLA RoPE+KV fusion is
+                    # on. A plain string is still split out.
+                    # https://github.com/vllm-project/vllm/issues/33267
+                    from vllm.utils.torch_utils import _USE_LAYERNAME
+
+                    if not (
+                        _USE_LAYERNAME and self.pass_config.fuse_rope_kvcache_cat_mla
+                    ):
+                        self.splitting_ops.append(mla_kv_cache_update)
 
             elif len(self.splitting_ops) == 0:
                 if (
@@ -1250,6 +1282,24 @@ class CompilationConfig:
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
+        # Fusion matches RoPE and the cache update in one piece. If the op
+        # was split out, registering the pass matches nothing.
+        if (
+            not self.use_inductor_graph_partition
+            and self.pass_config.fuse_rope_kvcache_cat_mla
+            and self.splitting_ops is not None
+            and mla_kv_cache_update in self.splitting_ops
+        ):
+            logger.warning_once(
+                "fuse_rope_kvcache_cat_mla is enabled, but "
+                "unified_mla_kv_cache_update is a splitting op and Inductor "
+                "graph partition is off, so the fusion pass cannot match. "
+                "Disabling fuse_rope_kvcache_cat_mla. Set "
+                "use_inductor_graph_partition=True, or leave that op out of "
+                "splitting_ops when layer names are hoisted."
+            )
+            self.pass_config.fuse_rope_kvcache_cat_mla = False
+
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
         if self.splitting_ops is None:
@@ -1283,6 +1333,9 @@ class CompilationConfig:
         # In this case, we return True if the kv_cache_update_ops
         # are not in the splitting_ops yet, but will subsequently
         # be added to splitting_ops.
+        # unified_mla_kv_cache_update can stay compiled when MLA fusion is
+        # on. This predicate still reports True so the non-MLA RoPE+KV
+        # fusions, which share it, stay off.
         if (
             not self.use_inductor_graph_partition
             and self.splitting_ops is None
