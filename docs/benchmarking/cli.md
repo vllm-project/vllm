@@ -887,7 +887,7 @@ vllm bench throughput \
 
 #### Synthetic Random Multimodal (random-mm)
 
-Generate synthetic multimodal inputs for offline throughput testing without external datasets.
+Use `--dataset-name random-mm` without `--dataset-path` to generate synthetic multimodal inputs for offline throughput testing.
 Use `--backend vllm-chat` so that image tokens are counted correctly.
 
 ```bash

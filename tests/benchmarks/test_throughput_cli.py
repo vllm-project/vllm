@@ -22,6 +22,7 @@ from vllm.benchmarks.throughput import (
     add_cli_args,
     assign_loras,
     get_requests,
+    validate_args,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -72,6 +73,19 @@ def test_bench_throughput_accepts_custom_audio_args():
     assert args.no_oversample
     assert args.custom_output_len == 32
     assert args.enable_multimodal_chat
+
+
+@pytest.mark.parametrize("dataset_name", [None, "random-rerank", "prefix_repetition"])
+def test_validate_args_without_dataset_path(dataset_name: str | None):
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(
+        [] if dataset_name is None else ["--dataset-name", dataset_name]
+    )
+
+    validate_args(args)
+
+    assert args.dataset_name == (dataset_name or "random")
 
 
 def test_vllm_chat_requests_include_multimodal_content():
@@ -323,22 +337,24 @@ def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
 
 
 @pytest.mark.benchmark
-def test_get_requests_random_mm_with_mm_processor_args(
+@pytest.mark.parametrize("benchmark", ["throughput", "mm-processor"])
+def test_get_requests_random_mm_without_dataset_path(
+    benchmark: str,
     hf_tokenizer: PreTrainedTokenizerBase,
 ) -> None:
-    """Regression: bench mm-processor's random-mm sampling must not crash.
-
-    get_requests feeds mm-processor's parsed args (no legacy length/backend
-    flags) through the shared get_samples dispatch. With the default
-    --random-prefix-len 0 this previously crashed inside
-    RandomMultiModalDataset.get_prefix with a TypeError.
-    """
+    """Both CLI paths must retain synthetic images without a dataset path."""
     from vllm.benchmarks.mm_processor import add_cli_args as add_mm_cli_args
 
     parser = FlexibleArgumentParser()
-    add_mm_cli_args(parser)
+    if benchmark == "throughput":
+        add_cli_args(parser)
+        backend_args = ["--backend", "vllm-chat"]
+    else:
+        add_mm_cli_args(parser)
+        backend_args = []
     args = parser.parse_args(
         [
+            *backend_args,
             "--dataset-name",
             "random-mm",
             "--num-prompts",
@@ -357,12 +373,12 @@ def test_get_requests_random_mm_with_mm_processor_args(
             "{(224, 224, 1): 1.0}",
         ]
     )
+    if benchmark == "throughput":
+        validate_args(args)
 
     requests = get_requests(args, hf_tokenizer)
     assert len(requests) == 3
     assert all(isinstance(r, SampleRequest) for r in requests)
-    # mm-processor drives llm.chat, so prompts must be chat-formatted with
-    # multimodal content attached.
     for req in requests:
         assert isinstance(req.prompt, list)
         assert req.prompt[0]["role"] == "user"

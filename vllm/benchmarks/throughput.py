@@ -650,7 +650,7 @@ def validate_args(args):
     if (
         not args.dataset
         and not args.dataset_path
-        and args.dataset_name not in {"prefix_repetition"}
+        and args.dataset_name not in {"random-mm", "random-rerank", "prefix_repetition"}
     ):
         print("When dataset path is not set, it will default to random dataset")
         args.dataset_name = "random"
