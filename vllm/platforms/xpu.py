@@ -141,75 +141,121 @@ class XPUPlatform(Platform):
         pass
 
     @classmethod
+    def _validate_backend(
+        cls,
+        backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
+    ) -> list[str]:
+        """Reasons `backend` cannot serve this configuration; empty if valid.
+
+        Mirrors the CUDA and ROCm platforms so the capability gates declared
+        by each attention backend are enforced on XPU too.
+        """
+        try:
+            backend_cls = backend.get_class()
+        except (ImportError, OSError) as e:
+            return [f"{type(e).__name__}: {e}"]
+        return backend_cls.validate_configuration(
+            device_capability=cls.get_device_capability(),
+            **attn_selector_config._asdict(),
+        )
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
+        def resolve(
+            backend: "AttentionBackendEnum",
+            fallback: "AttentionBackendEnum | None" = None,
+        ) -> str:
+            """Validate `backend` before committing to it.
+
+            A single fallback is allowed for the auto-selected backend; an
+            explicitly requested backend (or the fallback itself) must be
+            valid, or startup fails with the reasons.
+            """
+            invalid_reasons = cls._validate_backend(backend, attn_selector_config)
+            if invalid_reasons and fallback is not None:
+                logger.warning_once(
+                    "%s is not valid for this configuration on XPU (%s); "
+                    "falling back to %s.",
+                    backend.name,
+                    ", ".join(invalid_reasons),
+                    fallback.name,
+                )
+                backend = fallback
+                invalid_reasons = cls._validate_backend(backend, attn_selector_config)
+            if invalid_reasons:
+                raise ValueError(
+                    f"Attention backend {backend.name} is not valid for this "
+                    f"configuration on {cls.device_name}. Reasons: "
+                    f"{invalid_reasons}"
+                )
+            return backend.get_path()
+
         # TurboQuant KV cache: route directly to TQ backend
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
             logger.info_once("Using TurboQuant attention backend.")
-            return AttentionBackendEnum.TURBOQUANT.get_path()
+            return resolve(AttentionBackendEnum.TURBOQUANT)
 
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
             logger.info_once("Using XPU MLA Sparse backend.")
-            return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
+            return resolve(AttentionBackendEnum.XPU_MLA_SPARSE)
         if attn_selector_config.use_mla:
             logger.info_once("Using Triton MLA backend on V1 engine.")
-            return AttentionBackendEnum.TRITON_MLA.get_path()
+            return resolve(AttentionBackendEnum.TRITON_MLA)
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
+            return resolve(AttentionBackendEnum.TRITON_ATTN)
         elif attn_selector_config.use_batch_invariant:
             # Flash Attention on XPU has not been validated for batch
-            # invariance. Honor an explicit Flash Attention request;
-            # otherwise fall back to Triton Attention, which implements
-            # batch-invariant kernels.
+            # invariance, while Triton Attention implements batch-invariant
+            # kernels. Reject an explicit Flash Attention request instead of
+            # silently running a backend that is not batch-invariant.
             if selected_backend == AttentionBackendEnum.FLASH_ATTN:
-                logger.warning_once(
-                    "Using Flash Attention on XPU with batch invariance "
-                    "enabled because it was explicitly requested. This "
-                    "backend has not been validated for batch invariance "
-                    "on XPU and may produce non-deterministic results "
-                    "across batch sizes."
+                raise ValueError(
+                    "Flash Attention on XPU does not support batch "
+                    "invariance (VLLM_BATCH_INVARIANT=1). Use the Triton "
+                    "Attention backend (the default under batch invariance "
+                    "on XPU) or disable batch invariance."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
             logger.info_once(
                 "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
                 "backend on XPU, which implements batch-invariant kernels."
             )
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
+            return resolve(AttentionBackendEnum.TRITON_ATTN)
         elif attn_selector_config.use_mm_prefix:
-            # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
-            # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
-            # Attention request (for text-only workloads); otherwise fall back
-            # to Triton Attention, which supports mm_prefix.
+            # Flash Attention on XPU has no FA4 kernel, so it cannot apply
+            # the multimodal prefix-LM bidirectional mask. Reject an explicit
+            # Flash Attention request instead of silently mis-executing
+            # image/video inputs.
             if selected_backend == AttentionBackendEnum.FLASH_ATTN:
-                logger.warning_once(
-                    "Using Flash Attention on XPU for a multimodal prefix-LM "
-                    "model because it was explicitly requested. The prefix-LM "
-                    "bidirectional mask cannot be applied, so image/video "
-                    "inputs will produce incorrect results; only use this for "
-                    "text-only workloads."
+                raise ValueError(
+                    "Flash Attention on XPU cannot apply the multimodal "
+                    "prefix-LM bidirectional mask, so image/video inputs "
+                    "would produce incorrect results. Use the Triton "
+                    "Attention backend for multimodal prefix-LM models "
+                    "on XPU."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."
             )
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
+            return resolve(AttentionBackendEnum.TRITON_ATTN)
         elif dtype == torch.float32:
             logger.warning_once(
                 "Flash Attention on XPU does not support float32 dtype. "
                 "Falling back to Triton Attention backend."
             )
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
+            return resolve(AttentionBackendEnum.TRITON_ATTN)
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend.")
-            return AttentionBackendEnum.FLASH_ATTN.get_path()
+            return resolve(AttentionBackendEnum.FLASH_ATTN)
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
@@ -217,7 +263,10 @@ class XPUPlatform(Platform):
             )
 
         logger.info_once("Using Flash Attention backend.")
-        return AttentionBackendEnum.FLASH_ATTN.get_path()
+        return resolve(
+            AttentionBackendEnum.FLASH_ATTN,
+            fallback=AttentionBackendEnum.TRITON_ATTN,
+        )
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
