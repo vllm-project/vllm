@@ -8,10 +8,15 @@ Run `pytest tests/kernels/moe/test_fused_topk.py`.
 import pytest
 import torch
 
+import vllm._custom_ops as ops
+from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    _use_a100_small_topk,
+    fused_topk,
+)
 from vllm.platforms import current_platform
 
 
@@ -42,6 +47,111 @@ def torch_topk(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights, topk_ids
+
+
+def current_topk_reference(
+    gating_output: torch.Tensor,
+    is_padding: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens = gating_output.shape[0]
+    weights = torch.empty((num_tokens, 4), dtype=torch.float32, device="cuda")
+    ids = torch.empty((num_tokens, 4), dtype=torch.int32, device="cuda")
+    source_rows = torch.empty_like(ids)
+    ops.topk_softmax(
+        weights,
+        ids,
+        source_rows,
+        gating_output,
+        False,
+        is_padding=is_padding,
+    )
+    return weights, ids, source_rows
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((8, 0)),
+    reason="The specialized kernel is restricted to SM80.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 64])
+@pytest.mark.parametrize("seed", [0, 17, 2026])
+def test_a100_small_topk_bitwise(num_tokens: int, seed: int):
+    torch.manual_seed(seed)
+    hidden_states = torch.empty((num_tokens, 1), dtype=torch.bfloat16, device="cuda")
+    gating_output = torch.randn((num_tokens, 60), dtype=torch.bfloat16, device="cuda")
+    reference = current_topk_reference(gating_output)
+    actual = fused_topk(hidden_states, gating_output, 4, False)
+    assert all(torch.equal(ref, out) for ref, out in zip(reference, actual))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((8, 0)),
+    reason="The specialized kernel is restricted to SM80.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32, 64])
+def test_a100_small_topk_ties(num_tokens: int):
+    hidden_states = torch.empty((num_tokens, 1), dtype=torch.bfloat16, device="cuda")
+    gating_output = torch.zeros((num_tokens, 60), dtype=torch.bfloat16, device="cuda")
+    reference = current_topk_reference(gating_output)
+    actual = fused_topk(hidden_states, gating_output, 4, False)
+    assert all(torch.equal(ref, out) for ref, out in zip(reference, actual))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((8, 0)),
+    reason="The specialized kernel is restricted to SM80.",
+)
+def test_a100_small_topk_padding_and_opcheck():
+    gating_output = torch.randn((8, 60), dtype=torch.bfloat16, device="cuda")
+    is_padding = torch.tensor(
+        [False, True, False, False, True, False, False, True], device="cuda"
+    )
+    reference = current_topk_reference(gating_output, is_padding)
+    actual = tuple(torch.empty_like(tensor) for tensor in reference)
+    ops.topk_softmax_a100(*actual, gating_output, is_padding)
+    assert all(torch.equal(ref, out) for ref, out in zip(reference, actual))
+    opcheck(
+        torch.ops._moe_C.topk_softmax_a100,
+        (*actual, gating_output, is_padding),
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((8, 0)),
+    reason="The specialized kernel is restricted to SM80.",
+)
+def test_a100_small_topk_dispatch_scope():
+    gating_output = torch.empty((8, 60), dtype=torch.bfloat16, device="cuda")
+    ids = torch.empty((8, 4), dtype=torch.int32, device="cuda")
+    assert _use_a100_small_topk(gating_output, ids, False)
+    assert not _use_a100_small_topk(gating_output.half(), ids, False)
+    assert not _use_a100_small_topk(gating_output.T.contiguous().T, ids, False)
+    assert not _use_a100_small_topk(gating_output[:, :59], ids, False)
+    assert not _use_a100_small_topk(gating_output.repeat(9, 1), ids.repeat(9, 1), False)
+    assert not _use_a100_small_topk(gating_output, ids[:, :3], False)
+    assert not _use_a100_small_topk(gating_output, ids, True)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability((8, 0)),
+    reason="The specialized kernel is restricted to SM80.",
+)
+def test_a100_small_topk_cuda_graph():
+    hidden_states = torch.empty((16, 1), dtype=torch.bfloat16, device="cuda")
+    gating_output = torch.randn((16, 60), dtype=torch.bfloat16, device="cuda")
+    side_stream = torch.cuda.Stream()
+    side_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side_stream):
+        for _ in range(3):
+            fused_topk(hidden_states, gating_output, 4, False)
+    torch.cuda.current_stream().wait_stream(side_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = fused_topk(hidden_states, gating_output, 4, False)
+    reference = current_topk_reference(gating_output)
+    graph.replay()
+    torch.accelerator.synchronize()
+    assert all(torch.equal(ref, out) for ref, out in zip(reference, captured))
 
 
 @pytest.mark.skipif(

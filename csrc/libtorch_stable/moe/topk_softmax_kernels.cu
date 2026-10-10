@@ -259,6 +259,71 @@ __launch_bounds__(TPB) __global__ void moeTopK(
     }
 }
 
+#ifndef USE_ROCM
+template <int TPB>
+__launch_bounds__(TPB) __global__ void topkSoftmaxA100(
+    const __nv_bfloat16* input, float* output, int* indices,
+    int* source_rows, const int num_rows, const bool* is_padding) {
+  using FloatReduce = cub::BlockReduce<float, TPB>;
+  using Kvp = cub::KeyValuePair<int, float>;
+  using KvpReduce = cub::BlockReduce<Kvp, TPB>;
+  __shared__ typename FloatReduce::TempStorage float_storage;
+  __shared__ typename KvpReduce::TempStorage kvp_storage;
+  __shared__ float row_max;
+  __shared__ float inverse_sum;
+  __shared__ float probabilities[60];
+
+  const int row = blockIdx.x;
+  const int row_offset = row * 60;
+  float thread_data = -FLT_MAX;
+  for (int expert = threadIdx.x; expert < 60; expert += TPB) {
+    thread_data = max(toFloat(input[row_offset + expert]), thread_data);
+  }
+  const float max_value =
+      FloatReduce(float_storage).Reduce(thread_data, CubMaxOp());
+  if (threadIdx.x == 0) row_max = max_value;
+  __syncthreads();
+
+  thread_data = 0.f;
+  for (int expert = threadIdx.x; expert < 60; expert += TPB) {
+    thread_data += expf(toFloat(input[row_offset + expert]) - row_max);
+  }
+  const float sum = FloatReduce(float_storage).Reduce(thread_data, CubAddOp());
+  if (threadIdx.x == 0) inverse_sum = 1.f / sum;
+  __syncthreads();
+
+  for (int expert = threadIdx.x; expert < 60; expert += TPB) {
+    float probability =
+        expf(toFloat(input[row_offset + expert]) - row_max) * inverse_sum;
+    if (isnan(probability) || isinf(probability)) probability = 0.f;
+    probabilities[expert] = probability;
+  }
+  __syncthreads();
+
+  cub::ArgMax arg_max;
+#pragma unroll
+  for (int rank = 0; rank < 4; ++rank) {
+    Kvp thread_kvp(0, -1.f);
+    for (int expert = threadIdx.x; expert < 60; expert += TPB) {
+      Kvp candidate(expert, probabilities[expert]);
+#pragma unroll
+      for (int prior = 0; prior < rank; ++prior) {
+        if (indices[row * 4 + prior] == expert) candidate = thread_kvp;
+      }
+      thread_kvp = arg_max(candidate, thread_kvp);
+    }
+    const Kvp result = KvpReduce(kvp_storage).Reduce(thread_kvp, arg_max);
+    if (threadIdx.x == 0) {
+      const int out = row * 4 + rank;
+      output[out] = probabilities[result.key];
+      indices[out] = is_padding != nullptr && is_padding[row] ? -1 : result.key;
+      source_rows[out] = rank * num_rows + row;
+    }
+    __syncthreads();
+  }
+}
+#endif
+
 // ====================== TopK softmax things ===============================
 
 /*
@@ -858,6 +923,82 @@ void topk_softmax(
         STD_TORCH_CHECK(false, "Unsupported gating_output data type: ", gating_output.scalar_type());
     }
 }
+
+#ifndef USE_ROCM
+void topk_softmax_a100(
+    torch::stable::Tensor& topk_weights,
+    torch::stable::Tensor& topk_indices,
+    torch::stable::Tensor& token_expert_indices,
+    torch::stable::Tensor& gating_output,
+    std::optional<torch::stable::Tensor> is_padding) {
+  const int num_tokens = gating_output.size(0);
+  STD_TORCH_CHECK(gating_output.is_cuda() && gating_output.is_contiguous() &&
+                      gating_output.scalar_type() ==
+                      torch::headeronly::ScalarType::BFloat16,
+                  "gating_output must be contiguous CUDA bfloat16");
+  STD_TORCH_CHECK(gating_output.dim() == 2 && gating_output.size(1) == 60 &&
+                      num_tokens > 0 && num_tokens <= 64,
+                  "expected gating_output shape [M, 60] with 0 < M <= 64");
+  STD_TORCH_CHECK(topk_weights.is_cuda() && topk_indices.is_cuda() &&
+                      token_expert_indices.is_cuda() &&
+                      topk_weights.is_contiguous() &&
+                      topk_indices.is_contiguous() &&
+                      token_expert_indices.is_contiguous() &&
+                      topk_weights.get_device_index() ==
+                          gating_output.get_device_index() &&
+                      topk_indices.get_device_index() ==
+                          gating_output.get_device_index() &&
+                      token_expert_indices.get_device_index() ==
+                          gating_output.get_device_index() &&
+                      topk_weights.scalar_type() ==
+                          torch::headeronly::ScalarType::Float &&
+                      topk_indices.scalar_type() ==
+                          torch::headeronly::ScalarType::Int &&
+                      token_expert_indices.scalar_type() ==
+                          torch::headeronly::ScalarType::Int,
+                  "expected float32 weights and int32 indices");
+  STD_TORCH_CHECK(topk_weights.dim() == 2 &&
+                      topk_weights.size(0) == num_tokens &&
+                      topk_weights.size(1) == 4 &&
+                      topk_indices.dim() == 2 &&
+                      topk_indices.size(0) == num_tokens &&
+                      topk_indices.size(1) == 4 &&
+                      token_expert_indices.dim() == 2 &&
+                      token_expert_indices.size(0) == num_tokens &&
+                      token_expert_indices.size(1) == 4,
+                  "expected output shape [M, 4]");
+
+  const bool* is_padding_ptr = nullptr;
+  if (is_padding.has_value()) {
+    const torch::stable::Tensor& is_padding_tensor = is_padding.value();
+    STD_TORCH_CHECK(is_padding_tensor.scalar_type() ==
+                            torch::headeronly::ScalarType::Bool &&
+                        is_padding_tensor.is_cuda() &&
+                        is_padding_tensor.get_device_index() ==
+                            gating_output.get_device_index() &&
+                        is_padding_tensor.dim() == 1 &&
+                        is_padding_tensor.size(0) == num_tokens &&
+                        is_padding_tensor.is_contiguous(),
+                    "is_padding must be a contiguous bool tensor of shape [M]");
+    is_padding_ptr = is_padding_tensor.const_data_ptr<bool>();
+  }
+
+  torch::stable::accelerator::DeviceGuard guard(
+      gating_output.get_device_index());
+  const cudaDeviceProp* device_prop = get_device_prop();
+  STD_TORCH_CHECK(device_prop->major == 8 && device_prop->minor == 0,
+                  "topk_softmax_a100 requires SM80");
+  const cudaStream_t stream =
+      get_current_cuda_stream(gating_output.get_device_index());
+  vllm::moe::topkSoftmaxA100<256><<<num_tokens, 256, 0, stream>>>(
+      reinterpret_cast<const __nv_bfloat16*>(
+          gating_output.const_data_ptr()),
+      topk_weights.mutable_data_ptr<float>(),
+      topk_indices.mutable_data_ptr<int>(),
+      token_expert_indices.mutable_data_ptr<int>(), num_tokens,
+      is_padding_ptr);
+}
+#endif
 
 void topk_sigmoid(
     torch::stable::Tensor& topk_weights,                // [num_tokens, topk]
