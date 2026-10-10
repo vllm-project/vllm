@@ -43,15 +43,34 @@
 /vllm/entrypoints/openai/models @chaunceyjiang @DarkLight1337
 /vllm/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
 /vllm/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
+/vllm/entrypoints/pooling @noooop @DarkLight1337
 /vllm/entrypoints/rl @aoshen02
 /vllm/entrypoints/scale_out @noooop @DarkLight1337
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
-/vllm/entrypoints/pooling @noooop @DarkLight1337
 /vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
+
+/tests/entrypoints @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
+/tests/entrypoints/anthropic @mgoin @DarkLight1337
+/tests/entrypoints/cohere @DarkLight1337
+/tests/entrypoints/cli @hmellor @mgoin @DarkLight1337
+/tests/entrypoints/openai/chat_completion @chaunceyjiang @DarkLight1337
+/tests/entrypoints/openai/completion @chaunceyjiang @DarkLight1337
+/tests/entrypoints/openai/models @chaunceyjiang @DarkLight1337
+/tests/entrypoints/openai/parser @aarnphm @chaunceyjiang @sfeng33
+/tests/entrypoints/openai/responses @aarnphm @chaunceyjiang @sfeng33
+/tests/entrypoints/pooling @noooop @DarkLight1337
+/tests/entrypoints/rl @robertgshaw2-redhat @njhill @aarnphm @NickLucche @AndreasKaratzas @aoshen02
+/tests/entrypoints/scale_out @noooop @DarkLight1337
+/tests/entrypoints/speech_to_text/realtime @njhill
+/tests/entrypoints/speech_to_text @NickLucche
+/tests/entrypoints/serve/sagemaker @DarkLight1337
+/tests/entrypoints/serve @njhill
+/tests/entrypoints/llm @DarkLight1337
+/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm @arpera
 
 # Rust Frontend
 /rust/ @BugenZhao @njhill
@@ -68,6 +87,12 @@
 /vllm/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /vllm/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 /vllm/parser @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+
+/tests/tokenizers_ @DarkLight1337 @njhill
+/tests/renderers @DarkLight1337 @njhill
+/tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
+/tests/tool_use @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 # vLLM V1
 /vllm/v1/attention @LucasWilkinson @MatthewBonanni
@@ -106,7 +131,6 @@
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
 /tests/evals @mgoin @vadiklyutiy @AndreasKaratzas
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
@@ -114,7 +138,6 @@
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
 /tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
-/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm @arpera
 /tests/v1/structured_output @mgoin @aarnphm @arpera
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /tests/lora @jeejeelee
@@ -124,9 +147,6 @@
 /tests/v1/kv_offload @ApostaC @orozery
 /tests/v1/simple_kv_offload @ivanium
 /tests/v1/determinism @yewentao256
-/tests/reasoning @aarnphm @chaunceyjiang @sfeng33 @bbrowning
-/tests/tool_parsers @aarnphm @chaunceyjiang @sfeng33 @bbrowning
-/tests/tool_use @aarnphm @chaunceyjiang @sfeng33 @bbrowning
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
@@ -228,15 +248,12 @@ mkdocs.yaml @hmellor
 /examples/pooling @noooop
 /docs/models/pooling_models @noooop
 /tests/models/*/pooling* @noooop
-/tests/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/model_executor/layers/pooler @noooop
 
 # Reinforcement learning
 /vllm/distributed/weight_transfer @aoshen02
-/vllm/entrypoints/rl @njhill @aoshen02
 /tests/distributed/test_weight_transfer.py @aoshen02
-/tests/entrypoints/rl @DarkLight1337 @robertgshaw2-redhat @njhill @aarnphm @NickLucche @AndreasKaratzas @aoshen02
 /tests/v1/worker/test_gpu_worker_weight_transfer.py @aoshen02
 /examples/rl @aoshen02
 /docs/training/rlhf.md @aoshen02
