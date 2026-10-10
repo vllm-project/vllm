@@ -183,6 +183,7 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
+    eagle_tokens_per_chunk: tuple[int, ...] = ()
 
     @classmethod
     def from_spec(
@@ -341,6 +342,11 @@ class SchedulerOffloadConfig(NamedTuple):
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
             dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            eagle_tokens_per_chunk=tuple(
+                sorted(
+                    {c.tokens_per_chunk for c in kv_group_configs if c.is_eagle_group}
+                )
+            ),
         )
 
 
@@ -1537,7 +1543,7 @@ class OffloadingConnectorScheduler:
                 ),
                 extra_retained_tokens=0,
             )
-        return group_config.manager_cls.reachable_block_mask(
+        block_mask = group_config.manager_cls.reachable_block_mask(
             start_block=start_chunk_idx * blocks_per_chunk,
             end_block=end_chunk_idx * blocks_per_chunk,
             alignment_tokens=self.config.alignment_tokens,
@@ -1552,6 +1558,43 @@ class OffloadingConnectorScheduler:
                 else None
             ),
         )
+        if (
+            block_mask is None
+            or final_segment_end_chunk_idx is None
+            or not isinstance(kv_cache_spec, SlidingWindowSpec)
+        ):
+            return block_mask
+
+        chunk_sizes = (
+            (group_config.tokens_per_chunk,)
+            if group_config.is_eagle_group
+            else self.config.eagle_tokens_per_chunk
+        )
+        for eagle_chunk_size in chunk_sizes:
+            horizon_tokens = final_segment_end_chunk_idx * group_config.tokens_per_chunk
+            if self.config.alignment_tokens is not None:
+                horizon_tokens = min(
+                    horizon_tokens,
+                    round_down(horizon_tokens, self.config.alignment_tokens)
+                    + eagle_chunk_size,
+                )
+            horizon_tokens = round_down(horizon_tokens, eagle_chunk_size)
+            if not group_config.is_eagle_group:
+                horizon_tokens = max(0, horizon_tokens - eagle_chunk_size)
+            # The drafter needs the peek chunk in addition to its replay window.
+            peek = int(group_config.is_eagle_group)
+            window = group_config.load_window_size_in_chunks(
+                horizon_tokens - peek * group_config.tokens_per_chunk
+            )
+            assert window is not None
+            end = cdiv(horizon_tokens, group_config.tokens_per_chunk)
+            start = max(start_chunk_idx, end - window - peek)
+            for chunk_idx in range(start, min(end_chunk_idx, end)):
+                offset = (chunk_idx - start_chunk_idx) * blocks_per_chunk
+                block_mask[offset : offset + blocks_per_chunk] = [
+                    True
+                ] * blocks_per_chunk
+        return block_mask
 
     def _final_swa_alignment_blocks(
         self, group_config: GroupOffloadConfig
@@ -1631,9 +1674,9 @@ class OffloadingConnectorScheduler:
                     and self.config.retention_interval is None
                     and final_swa_alignment_blocks is not None
                 )
-                if (
-                    self.config.retention_interval is not None
-                    or group_config.is_eagle_group
+                if self.config.retention_interval is not None or (
+                    group_config.is_eagle_group
+                    and num_offloadable_tokens > prompt_offloadable_tokens
                 ):
                     store_horizon_chunks = None
                 elif req.is_finished():
