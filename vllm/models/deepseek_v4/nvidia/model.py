@@ -73,7 +73,11 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import (
+    register_derived_buffer,
+    set_derived_buffer,
+    set_weight_attrs,
+)
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -1101,7 +1105,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
-        self.hc_attn_fn_broadcast: torch.Tensor | None = None
+        register_derived_buffer(self, "hc_attn_fn_broadcast")
+        self._hc_broadcast_enabled = False
         self.hc_ffn_fn = nn.Parameter(
             torch.empty(
                 (mix_hc, hc_dim),
@@ -1184,6 +1189,16 @@ class DeepseekV4DecoderLayer(nn.Module):
                 hidden_size=self.hidden_size,
                 hc_mult=self.hc_mult,
             )
+
+    def _refresh_hc_broadcast(self) -> None:
+        broadcast = (
+            self.hc_attn_fn.detach().view(-1, self.hc_mult, self.hidden_size).sum(dim=1)
+        )
+        set_derived_buffer(self, "hc_attn_fn_broadcast", broadcast)
+
+    def post_weights_reload(self) -> None:
+        if self._hc_broadcast_enabled:
+            self._refresh_hc_broadcast()
 
     def forward(
         self,
@@ -1696,15 +1711,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             return
         layer = self.layers[self.start_layer]
         if isinstance(layer, DeepseekV4DecoderLayer):
-            broadcast = (
-                layer.hc_attn_fn.detach()
-                .view(-1, layer.hc_mult, layer.hidden_size)
-                .sum(dim=1)
-            )
-            if layer.hc_attn_fn_broadcast is None:
-                layer.hc_attn_fn_broadcast = broadcast
-            else:
-                layer.hc_attn_fn_broadcast.copy_(broadcast)
+            layer._hc_broadcast_enabled = True
+            layer._refresh_hc_broadcast()
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
