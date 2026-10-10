@@ -270,9 +270,22 @@ class CoreEngineProcManager:
 
         from vllm.v1.engine.core import EngineCoreProc
 
+        # Engines see EOF on these pipes once this process exits.
+        self._death_writers: list[connection.Connection] = []
+        death_readers: list[connection.Connection] = []
+        for _ in range(local_engine_count):
+            death_reader, death_writer = context.Pipe(duplex=False)
+            death_readers.append(death_reader)
+            self._death_writers.append(death_writer)
+        if context.get_start_method() == "fork":
+            # Forked engines inherit every write end; tell them which to close.
+            common_kwargs["inherited_fds"] = [
+                writer.fileno() for writer in self._death_writers
+            ]
+
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
-        for index in range(local_engine_count):
+        for index, death_reader in enumerate(death_readers):
             local_index = local_start_index + index
             global_index = start_index + index
 
@@ -283,7 +296,11 @@ class CoreEngineProcManager:
                     target=EngineCoreProc.run_engine_core,
                     name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
-                    | {"dp_rank": global_index, "local_dp_rank": local_index},
+                    | {
+                        "dp_rank": global_index,
+                        "local_dp_rank": local_index,
+                        "death_pipe": death_reader,
+                    },
                 )
             )
 
@@ -328,6 +345,8 @@ class CoreEngineProcManager:
                     ):
                         proc.start()
         finally:
+            for death_reader in death_readers:
+                death_reader.close()
             # Kill other procs if not all are running.
             if self.finished_procs():
                 self.shutdown()
@@ -346,6 +365,8 @@ class CoreEngineProcManager:
                     process_timeout,
                 )
             shutdown(self.processes, timeout=process_timeout)
+            for writer in self._death_writers:
+                writer.close()
 
     def monitor_engine_liveness(self) -> None:
         """Monitor engine core process liveness."""

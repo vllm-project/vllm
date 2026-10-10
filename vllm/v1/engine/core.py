@@ -45,7 +45,12 @@ from vllm.utils.gc_utils import (
 )
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.system_utils import (
+    decorate_logs,
+    kill_process_tree,
+    monitor_parent_death,
+    set_process_title,
+)
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -105,6 +110,7 @@ logger = init_logger(__name__)
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
+PARENT_DEATH_SHUTDOWN_TIMEOUT_S = 15.0
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1142,6 +1148,7 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        self.parent_exited = False
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -1385,9 +1392,42 @@ class EngineCoreProc(EngineCore):
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
+        death_pipe = kwargs.pop("death_pipe", None)
+        # Close write ends of death pipes inherited under fork.
+        for fd in kwargs.pop("inherited_fds", []):
+            try:
+                os.close(fd)
+            except OSError as e:
+                logger.warning("Error closing inherited fd %d: %s", fd, e)
+
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
         clean_shutdown = False
+
+        def on_parent_death():
+            logger.warning(
+                "[shutdown] EngineCore: parent process exited, shutting down"
+            )
+            if engine_core is not None:
+                engine_core.parent_exited = True
+                engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+                # Clients other than the dead parent, e.g. API servers in
+                # multi-API-server mode, would otherwise wait forever.
+                engine_core.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
+                time.sleep(PARENT_DEATH_SHUTDOWN_TIMEOUT_S)
+                logger.warning(
+                    "[shutdown] EngineCore: still alive %ss after parent death, "
+                    "force-killing process tree",
+                    PARENT_DEATH_SHUTDOWN_TIMEOUT_S,
+                )
+            try:
+                kill_process_tree(os.getpid())
+            finally:
+                # Still exit if a child vanishes mid-walk and the call raises.
+                os.kill(os.getpid(), signal.SIGKILL)
+
+        monitor_parent_death(death_pipe, on_parent_death, name="EngineCoreDeathMonitor")
         try:
             parallel_config: ParallelConfig = vllm_config.parallel_config
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
@@ -1515,6 +1555,8 @@ class EngineCoreProc(EngineCore):
                     # Freeze the surviving graph to skip another slow cyclic-GC
                     # scan during finalization; process exit reclaims it.
                     gc.freeze()
+            if death_pipe is not None:
+                death_pipe.close()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
@@ -1617,7 +1659,9 @@ class EngineCoreProc(EngineCore):
             return True
 
         if self.shutdown_state == EngineShutdownState.REQUESTED:
-            shutdown_timeout = self.vllm_config.shutdown_timeout
+            shutdown_timeout = (
+                0 if self.parent_exited else self.vllm_config.shutdown_timeout
+            )
             mode = "abort" if shutdown_timeout == 0 else "drain"
 
             logger.info(
