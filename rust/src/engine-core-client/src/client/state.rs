@@ -26,6 +26,7 @@ struct TrackedRequest {
     sender: OutputSender,
     engine_id: EngineId,
     lora: Option<LoraRequestState>,
+    admission_stats_generation: Option<u64>,
 }
 
 /// Frontend-side view of one LoRA request's scheduling phase.
@@ -73,6 +74,8 @@ struct EngineRoutingState {
     /// Added to the snapshot so each admission raises the routing score before
     /// the next snapshot arrives. Only tracked once a snapshot exists.
     admitted_since_stats: usize,
+    /// Identifies admissions made after the latest scheduler snapshot.
+    stats_generation: u64,
 }
 
 impl EngineRoutingState {
@@ -90,10 +93,19 @@ impl EngineRoutingState {
     }
 
     /// Record one request admitted to this engine.
-    fn record_admission(&mut self) {
+    fn record_admission(&mut self) -> Option<u64> {
         self.inflight += 1;
         if self.last_scheduler_stats.is_some() {
             self.admitted_since_stats += 1;
+            return Some(self.stats_generation);
+        }
+        None
+    }
+
+    fn record_removal(&mut self, admission_stats_generation: Option<u64>) {
+        self.inflight -= 1;
+        if admission_stats_generation == Some(self.stats_generation) {
+            self.admitted_since_stats -= 1;
         }
     }
 
@@ -102,6 +114,10 @@ impl EngineRoutingState {
     fn apply_scheduler_counts(&mut self, next: EngineLoadSnapshot) {
         self.last_scheduler_stats = Some(next);
         self.admitted_since_stats = 0;
+        self.stats_generation = self
+            .stats_generation
+            .checked_add(1)
+            .expect("scheduler stats generation overflow");
     }
 }
 
@@ -161,20 +177,21 @@ impl RequestRegistry {
         if lora.is_some() {
             self.active_lora_requests += 1;
         }
+        let state = self
+            .routing_per_engine
+            .get_mut(&engine_id)
+            .expect("request registry must track all known engines");
+        let admission_stats_generation = state.record_admission();
+
         self.requests.insert(
             request_id,
             TrackedRequest {
                 sender: tx,
                 engine_id: engine_id.clone(),
                 lora,
+                admission_stats_generation,
             },
         );
-
-        let state = self
-            .routing_per_engine
-            .get_mut(&engine_id)
-            .expect("request registry must track all known engines");
-        state.record_admission();
 
         Ok((engine_id, rx))
     }
@@ -367,7 +384,7 @@ impl RequestRegistry {
         self.routing_per_engine
             .get_mut(&tracked.engine_id)
             .expect("request registry must track all known engines")
-            .inflight -= 1;
+            .record_removal(tracked.admission_stats_generation);
         Some((tracked.sender, tracked.engine_id))
     }
 
@@ -1075,6 +1092,41 @@ mod tests {
             chosen.push(engine.engine_index().unwrap());
         }
         expect_test::expect!["[2, 5, 2]"].assert_eq(&format!("{chosen:?}"));
+    }
+
+    #[test]
+    fn registry_finished_requests_do_not_route_live_work_to_a_busier_engine() {
+        let mut registry = RequestRegistry::new(
+            &[0, 1].map(|rank| connected_engine(EngineId::from_engine_index(rank))),
+        );
+        registry.apply_scheduler_counts(
+            0,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 0,
+            },
+        );
+        registry.apply_scheduler_counts(
+            1,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 1,
+            },
+        );
+
+        let mut finished_routes = Vec::new();
+        for request_id in ["finished-1", "finished-2"].map(String::from) {
+            let (engine_id, _) = registry.register(request_id.clone(), None, None).unwrap();
+
+            finished_routes.push(engine_id.engine_index());
+            drop(registry.finish_many([&request_id]));
+        }
+
+        let (live_engine, _) = registry.register("live-request".into(), None, None).unwrap();
+        expect_test::expect!["([Some(0), Some(0)], Some(0))"].assert_eq(&format!(
+            "{:?}",
+            (finished_routes, live_engine.engine_index())
+        ));
     }
 
     #[test]
