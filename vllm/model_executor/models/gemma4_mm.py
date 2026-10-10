@@ -1020,6 +1020,7 @@ class Gemma4ForConditionalGeneration(
     SupportsEncoderCudaGraph,
 ):
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+    supports_encoder_tp_data = True
     # Gemma4 clamps mm_prefix bidirectional ranges to the sliding window
     # in-kernel (HF's (causal OR blockwise) AND sliding_window). The model
     # runner reads this to keep image bidirectional ranges that exceed the
