@@ -1951,6 +1951,37 @@ class QuantKeyScheme:
         layer.register_parameter(name, p)
 
 
+def _reconcile_nvfp4_shard_global_scales(layer) -> None:
+    """Put fused NVFP4 shards on one shared (max) global weight scale.
+
+    Kernels take a single global scale per fused layer, but each shard (e.g.
+    gate/up or q/k/v) is quantized with its own. Each smaller shard's e4m3
+    block scales are multiplied by ``gs_shard / gs_max`` (<= 1, so they cannot
+    overflow), which keeps its effective dequant scale within e4m3 rounding.
+    """
+    gs = layer.weight_scale_2.detach().float().reshape(-1)
+    widths = getattr(layer, "logical_widths", None)
+    if (
+        widths is None
+        or len(widths) != gs.numel()
+        or sum(widths) != layer.weight_scale.shape[0]
+    ):
+        logger.warning_once(
+            "In NVFP4 linear, the global weight scale differs across "
+            "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
+            "likely reduce accuracy. Consider a checkpoint with the same "
+            "global NVFP4 scale for fused weights."
+        )
+        return
+    gs_max = gs.max()
+    block_scale = layer.weight_scale.detach().float()
+    start = 0
+    for width, shard_gs in zip(widths, gs):
+        block_scale[start : start + width] *= shard_gs / gs_max
+        start += width
+    layer.weight_scale.data.copy_(block_scale.to(layer.weight_scale.dtype))
+
+
 class KNvfp4Static(QuantKeyScheme):
     """NVFP4 weight scheme (W4A4 and W4A16 share it). Weight-role only today."""
 
@@ -2019,12 +2050,7 @@ class KNvfp4Static(QuantKeyScheme):
                 "ignore list."
             )
         if torch.unique(layer.weight_scale_2).numel() != 1:
-            logger.warning_once(
-                "In NVFP4 linear, the global weight scale differs across "
-                "parallel layers (e.g. q_proj, k_proj, v_proj). This will "
-                "likely reduce accuracy. Consider a checkpoint with the same "
-                "global NVFP4 scale for fused weights."
-            )
+            _reconcile_nvfp4_shard_global_scales(layer)
         # Raw max, no reciprocation — Marlin/cutlass want ModelOpt's amax/2688.
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)

@@ -1027,3 +1027,49 @@ def test_modelopt_fp8_pb_wo_rejects_non_128_input():
         scheme.create_weights(
             torch.nn.Module(), mo.WEIGHT, mo.CkptCtx(), shapes, Mock()
         )
+
+
+def _nvfp4_scheme_layer(gs: list[float], widths: list[int], in_blocks: int = 4):
+    layer = torch.nn.Module()
+    rows = sum(widths)
+    scale = (torch.arange(rows * in_blocks, dtype=torch.float32) % 7 + 1).reshape(
+        rows, in_blocks
+    )
+    layer.register_parameter(
+        "weight_scale",
+        torch.nn.Parameter(scale.to(torch.float8_e4m3fn), requires_grad=False),
+    )
+    layer.register_parameter(
+        "weight_scale_2", torch.nn.Parameter(torch.tensor(gs), requires_grad=False)
+    )
+    layer.logical_widths = widths
+    return layer
+
+
+def test_nvfp4_linear_reconciles_fused_shard_global_scales():
+    """Fused shards keep their own effective dequant scale under a shared max."""
+    from vllm.model_executor.layers.quantization.modelopt import WEIGHT, KNvfp4Static
+
+    gs = [0.002, 0.005]  # e.g. gate, up with different per-tensor amax
+    layer = _nvfp4_scheme_layer(gs, [8, 8])
+    before = layer.weight_scale.float() * torch.repeat_interleave(
+        torch.tensor(gs), torch.tensor([8, 8])
+    ).unsqueeze(1)
+
+    KNvfp4Static().process(layer, WEIGHT)
+
+    assert layer.weight_global_scale.item() == torch.tensor(gs).max().item()
+    after = layer.weight_scale.float() * layer.weight_global_scale
+    # Within e4m3 rounding of the rescaled block scales (3 mantissa bits).
+    torch.testing.assert_close(after, before, rtol=2**-3, atol=0)
+    # The shard that already holds the max keeps its block scales bit-exact.
+    torch.testing.assert_close(after[8:], before[8:], rtol=0, atol=0)
+
+
+def test_nvfp4_linear_shared_global_scale_is_untouched():
+    from vllm.model_executor.layers.quantization.modelopt import WEIGHT, KNvfp4Static
+
+    layer = _nvfp4_scheme_layer([0.004, 0.004], [8, 8])
+    expected = layer.weight_scale.detach().clone()
+    KNvfp4Static().process(layer, WEIGHT)
+    assert torch.equal(layer.weight_scale.view(torch.uint8), expected.view(torch.uint8))
