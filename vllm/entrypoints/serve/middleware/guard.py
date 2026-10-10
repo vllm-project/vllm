@@ -56,6 +56,7 @@ def _build_guard_config() -> "SecurityConfig":
         # depend on a Redis server being reachable.
         "enable_redis": False,
         "passive_mode": envs.VLLM_GUARD_PASSIVE_MODE,
+        "enable_rate_limit_auto_ban": envs.VLLM_GUARD_RATE_LIMIT_AUTO_BAN,
         "blacklist": _csv(envs.VLLM_GUARD_BLOCKED_IPS),
         "blocked_user_agents": list(_csv(envs.VLLM_GUARD_BLOCKED_USER_AGENTS)),
         "trusted_proxies": _csv(envs.VLLM_GUARD_TRUSTED_PROXIES),
@@ -75,6 +76,11 @@ def _build_guard_config() -> "SecurityConfig":
             else None
         ),
         "enforce_https": envs.VLLM_GUARD_ENFORCE_HTTPS,
+        # Behind a TLS-terminating proxy, enforce_https must read the
+        # forwarded scheme or every request looks like plain HTTP.
+        "trust_x_forwarded_proto": (
+            envs.VLLM_GUARD_TRUST_X_FORWARDED_PROTO or envs.VLLM_GUARD_ENFORCE_HTTPS
+        ),
     }
 
     if allowed_ips := _csv(envs.VLLM_GUARD_ALLOWED_IPS):
