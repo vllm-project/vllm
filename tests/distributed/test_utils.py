@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import socket
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -139,3 +141,21 @@ def test_stateless_process_group(worker):
     for p in processes:
         assert not p.exitcode
     print("All processes finished.")
+
+
+def test_graph_capture_reuses_stream(monkeypatch, request):
+    from vllm.distributed import parallel_state
+
+    group = SimpleNamespace(graph_capture=contextlib.nullcontext)
+    for name in ("get_tp_group", "get_pp_group", "get_dp_group"):
+        monkeypatch.setattr(parallel_state, name, lambda: group)
+    monkeypatch.setattr(torch.cuda, "Stream", lambda device: object())
+    parallel_state.get_graph_capture_stream.cache_clear()
+    request.addfinalizer(parallel_state.get_graph_capture_stream.cache_clear)
+
+    device = torch.device("cuda:0")
+    with parallel_state.graph_capture(device) as first:
+        pass
+    with parallel_state.graph_capture(device) as second:
+        pass
+    assert first.stream is second.stream

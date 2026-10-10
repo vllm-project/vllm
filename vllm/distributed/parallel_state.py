@@ -32,6 +32,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import cache
 from math import gcd
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Any, Protocol
@@ -1680,6 +1681,13 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+@cache
+def get_graph_capture_stream(device: torch.device) -> torch.cuda.Stream:
+    """The stream all graph_capture() calls on device share."""
+    # One per device: every new stream pins its own 32 MiB cuBLAS workspace.
+    return torch.cuda.Stream(device=device)
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """`graph_capture` is a context manager which should surround the code that
@@ -1694,7 +1702,7 @@ def graph_capture(device: torch.device):
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    context = GraphCaptureContext(get_graph_capture_stream(device))
     with (
         get_tp_group().graph_capture(context),
         get_pp_group().graph_capture(context),
