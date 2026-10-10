@@ -227,7 +227,17 @@ impl SchedulerLogStatsAccumulator {
 }
 
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SleepResourceLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub resource: &'static str,
+    pub state: &'static str,
+}
+
 pub struct SchedulerMetrics {
+    pub sleep_resource_state: Family<SleepResourceLabels, U64Gauge>,
+    pub fully_awake: Family<EngineLabels, U64Gauge>,
     // Scheduler state gauges.
     pub scheduler_running: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
@@ -285,6 +295,18 @@ impl SchedulerMetrics {
     /// Register the scheduler-oriented metric families into the shared
     /// registry.
     pub(crate) fn register(registry: &mut Registry) -> Self {
+        let sleep_resource_state = Family::default();
+        registry.register(
+            "vllm:engine_sleep_resource_state",
+            "Confirmed engine resource state; unknown follows a failed memory RPC.",
+            sleep_resource_state.clone(),
+        );
+        let fully_awake = Family::default();
+        registry.register(
+            "vllm:engine_fully_awake",
+            "One when scheduling is running and all tracked resources are resident.",
+            fully_awake.clone(),
+        );
         // Scheduler state gauges.
         let scheduler_running = Family::default();
         registry.register(
@@ -534,6 +556,8 @@ impl SchedulerMetrics {
         );
 
         Self {
+            sleep_resource_state,
+            fully_awake,
             scheduler_running,
             scheduler_waiting,
             scheduler_waiting_by_reason,

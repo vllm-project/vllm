@@ -132,6 +132,7 @@ class LLMEngine:
                 aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
+            self._record_sleep_snapshot()
 
         if not multiprocess_mode:
             # for v0 compatibility
@@ -357,7 +358,11 @@ class LLMEngine:
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
-                    mm_cache_stats=self.renderer.stat_mm_cache(),
+                    mm_cache_stats=(
+                        None
+                        if outputs.scheduler_stats.sleep_state_only
+                        else self.renderer.stat_mm_cache()
+                    ),
                 )
                 if outputs.outputs:
                     self.do_log_stats_with_interval()
@@ -417,25 +422,45 @@ class LLMEngine:
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
         if level >= 1:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
-
-        if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, level)
+        try:
+            self.engine_core.sleep(level, mode)
+        finally:
+            if self.logger_manager is not None:
+                self._record_sleep_snapshot()
 
     def release_kv_cache_memory(self) -> None:
         self.renderer.clear_mm_cache()
-        self.engine_core.release_kv_cache_memory()
-
-        if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, 0)
+        try:
+            self.engine_core.release_kv_cache_memory()
+        finally:
+            if self.logger_manager is not None:
+                self._record_sleep_snapshot()
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
-        fully_awake = self.engine_core.wake_up(tags)
+        try:
+            return self.engine_core.wake_up(tags)
+        finally:
+            if self.logger_manager is not None:
+                self._record_sleep_snapshot()
 
-        if self.logger_manager is not None and fully_awake:
-            self.logger_manager.record_sleep_state(0, 0)
+    def _record_sleep_snapshot(self) -> None:
+        from vllm.v1.metrics.stats import EngineSleepState
 
-        return fully_awake
+        if self.logger_manager is None:
+            return
+        try:
+            snapshot = self.engine_core.get_sleep_state()
+            state = EngineSleepState(
+                scheduler_paused=snapshot["scheduler_paused"],
+                weights=snapshot["weights"],
+                kv_cache=snapshot["kv_cache"],
+            )
+        except Exception:
+            logger.warning(
+                "Unable to refresh engine sleep-state metrics", exc_info=True
+            )
+            return
+        self.logger_manager.record_sleep_snapshot(state, 0)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()

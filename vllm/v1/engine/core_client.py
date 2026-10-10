@@ -210,6 +210,9 @@ class EngineCoreClient(ABC):
     def wake_up(self, tags: list[str] | None = None) -> bool:
         raise NotImplementedError
 
+    def get_sleep_state(self) -> dict:
+        raise NotImplementedError
+
     def is_sleeping(self) -> bool:
         raise NotImplementedError
 
@@ -440,6 +443,9 @@ class InprocClient(EngineCoreClient):
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.engine_core.wake_up(tags)
+
+    def get_sleep_state(self) -> dict:
+        return self.engine_core.get_sleep_state()
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -1075,6 +1081,9 @@ class SyncMPClient(MPClient):
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.call_utility("wake_up", tags)
+
+    def get_sleep_state(self) -> dict:
+        return self.call_utility("get_sleep_state")
 
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")

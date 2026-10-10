@@ -9,7 +9,8 @@ use vllm_metrics::{
     CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
     LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
     MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
-    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
+    SchedulerLogStatsAccumulator, SchedulerMetrics, SleepResourceLabels, U64Counter, U64Gauge,
+    WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
@@ -48,6 +49,8 @@ pub(crate) struct SchedulerStatsRecorder {
 struct SchedulerStatsHandles {
     // Base labels reused for dynamic child labels.
     labels: EngineLabels,
+    sleep_resource_state: Family<SleepResourceLabels, U64Gauge>,
+    fully_awake: Family<EngineLabels, U64Gauge>,
 
     // Scheduler state gauges.
     scheduler_running: U64Gauge,
@@ -153,6 +156,8 @@ fn resolve_scheduler_stats_handles(
     };
 
     SchedulerStatsHandles {
+        sleep_resource_state: metrics.sleep_resource_state.clone(),
+        fully_awake: metrics.fully_awake.clone(),
         scheduler_running: metrics.scheduler_running.get_or_create_owned(&labels),
         scheduler_waiting: metrics.scheduler_waiting.get_or_create_owned(&labels),
         scheduler_waiting_capacity: metrics
@@ -220,6 +225,40 @@ fn resolve_scheduler_stats_handles(
 
 /// Record scheduler-stats values through pre-resolved metric handles.
 fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &SchedulerStats) {
+    if let Some(state) = &stats.sleep_state {
+        for (resource, states) in [
+            ("scheduler", &["running", "paused"][..]),
+            ("weights", &["resident", "offloaded", "discarded", "unknown"][..]),
+            ("kv_cache", &["resident", "released", "unknown"][..]),
+        ] {
+            let current = match resource {
+                "scheduler" => {
+                    if state.scheduler_paused { "paused" } else { "running" }
+                }
+                "weights" => &state.weights,
+                "kv_cache" => &state.kv_cache,
+                _ => unreachable!(),
+            };
+            for &value in states {
+                handles
+                    .sleep_resource_state
+                    .get_or_create(&SleepResourceLabels {
+                        model_name: handles.labels.model_name.clone(),
+                        engine: handles.labels.engine,
+                        resource,
+                        state: value,
+                    })
+                    .set(u64::from(current == value));
+            }
+        }
+        handles
+            .fully_awake
+            .get_or_create(&handles.labels)
+            .set(u64::from(state.fully_awake()));
+    }
+    if stats.sleep_state_only {
+        return;
+    }
     // Scheduler state gauges.
     handles.scheduler_running.set(stats.num_running_reqs);
     handles
@@ -439,6 +478,32 @@ mod tests {
         KvConnectorStats, MooncakeOperation, MooncakeRecord, MooncakeStats, MooncakeStatus,
         MultiConnectorStats, NixlStats, SchedulerStats,
     };
+
+    #[test]
+    fn sleep_snapshots_preserve_unrelated_gauges_and_other_engines() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        let other = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 1);
+        handles.scheduler_running.set(7);
+        handles.kv_cache_usage.set(0.25);
+        assert!(!metrics.render().unwrap().contains("vllm:engine_fully_awake{"));
+        other.fully_awake.get_or_create(&other.labels).set(1);
+        let stats = SchedulerStats {
+            sleep_state: Some(crate::protocol::stats::EngineSleepState {
+                scheduler_paused: true,
+                weights: "resident".into(),
+                kv_cache: "released".into(),
+            }),
+            sleep_state_only: true,
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+        assert_eq!(handles.scheduler_running.get(), 7);
+        assert_eq!(handles.kv_cache_usage.get(), 0.25);
+        assert_eq!(other.fully_awake.get_or_create(&other.labels).get(), 1);
+        assert_eq!(handles.fully_awake.get_or_create(&handles.labels).get(), 0);
+        assert!(metrics.render().unwrap().contains("resource=\"weights\",state=\"resident\"} 1"));
+    }
 
     fn names(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|name| (*name).to_string()).collect()

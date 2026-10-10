@@ -845,6 +845,8 @@ class OutputProcessor:
             self.admission_stats.set_num_requests(self.get_num_unfinished_requests())
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+        if scheduler_stats is not None and scheduler_stats.sleep_state_only:
+            return
         self.lora_states.update_scheduler_stats(scheduler_stats)
 
     def do_tracing(

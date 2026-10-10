@@ -125,6 +125,7 @@ class Executor(ABC):
         self.observability_config = vllm_config.observability_config
         self._init_executor()
         self.sleeping_tags: set[str] = set()
+        self.sleep_resource_states = {"weights": "resident", "kv_cache": "resident"}
         self.kv_output_aggregator: KVOutputAggregator | None = None
         self.ec_output_aggregator: ECOutputAggregator | None = None
 
@@ -377,14 +378,33 @@ class Executor(ABC):
 
     @property
     def is_sleeping(self) -> bool:
-        return bool(self.sleeping_tags)
+        return not self.all_resources_resident
+
+    @property
+    def all_resources_resident(self) -> bool:
+        return (
+            self.sleep_resource_states["weights"] == "resident"
+            and self.sleep_resource_states["kv_cache"] == "resident"
+        )
 
     def sleep(self, level: int = 1):
+        self._check_sleep_resource_states()
+        if self.sleeping_tags and self.sleeping_tags != SLEEP_TAGS:
+            raise RuntimeError(
+                "Cannot sleep while executor resources are partially awake"
+            )
         if "weights" in self.sleeping_tags:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        try:
+            self.collective_rpc("sleep", kwargs=dict(level=level))
+        except BaseException:
+            self.sleep_resource_states.update(weights="unknown", kv_cache="unknown")
+            raise
+        self.sleep_resource_states.update(
+            weights="offloaded" if level == 1 else "discarded", kv_cache="released"
+        )
         time_after_sleep = time.perf_counter()
         self.sleeping_tags |= SLEEP_TAGS
         logger.info(
@@ -392,6 +412,12 @@ class Executor(ABC):
         )
 
     def wake_up(self, tags: list[str] | None = None):
+        if tags == []:
+            return
+        if tags is not None and not set(tags) <= SLEEP_TAGS:
+            logger.warning("Invalid wake tags: %s", tags)
+            return
+        self._check_sleep_resource_states()
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
@@ -403,20 +429,32 @@ class Executor(ABC):
                     )
                     return
         time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+        affected_tags = set(tags) if tags is not None else set(self.sleeping_tags)
+        try:
+            self.collective_rpc("wake_up", kwargs=dict(tags=tags))
+        except BaseException:
+            for tag in affected_tags & self.sleep_resource_states.keys():
+                self.sleep_resource_states[tag] = "unknown"
+            raise
+        for tag in affected_tags & self.sleep_resource_states.keys():
+            self.sleep_resource_states[tag] = "resident"
         time_after_wakeup = time.perf_counter()
         logger.info(
             "It took %.6f seconds to wake up tags %s.",
             time_after_wakeup - time_before_wakeup,
             tags if tags is not None else self.sleeping_tags,
         )
-        if tags:
-            for tag in tags:
-                self.sleeping_tags.remove(tag)
-        else:
-            self.sleeping_tags.clear()
+        self.sleeping_tags.difference_update(affected_tags)
+
+    def _check_sleep_resource_states(self) -> None:
+        if "unknown" in self.sleep_resource_states.values():
+            raise RuntimeError(
+                "Executor resource state is unknown after a failed memory RPC; "
+                "rebuild the engine before further sleep, wake or discard operations"
+            )
 
     def discard(self, tags: tuple[str, ...]) -> None:
+        self._check_sleep_resource_states()
         tags_to_discard = set(tags) - self.sleeping_tags
         if not tags_to_discard:
             logger.warning("Tags %s are already sleeping.", tags)
@@ -424,8 +462,16 @@ class Executor(ABC):
         time_before_discard = time.perf_counter()
         try:
             self.collective_rpc("discard", args=(tuple(tags_to_discard),))
-        finally:
-            self.sleeping_tags |= tags_to_discard
+        except BaseException:
+            for tag in tags_to_discard & self.sleep_resource_states.keys():
+                self.sleep_resource_states[tag] = "unknown"
+            raise
+        else:
+            for tag in tags_to_discard & self.sleep_resource_states.keys():
+                self.sleep_resource_states[tag] = (
+                    "discarded" if tag == "weights" else "released"
+                )
+        self.sleeping_tags |= tags_to_discard
         time_after_discard = time.perf_counter()
         logger.info(
             "It took %.6f seconds to discard tags %s.",

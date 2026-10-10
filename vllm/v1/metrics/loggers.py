@@ -29,6 +29,7 @@ from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     KV_FETCH_STAGES,
     CachingMetrics,
+    EngineSleepState,
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
@@ -74,7 +75,12 @@ class StatLoggerBase(ABC):
     def log(self):  # noqa
         pass
 
+    def record_sleep_snapshot(self, state: EngineSleepState, engine_idx: int):  # noqa
+        """Receive engine state events in place of the legacy callback."""
+        pass
+
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
+        """Legacy callback, no longer dispatched for engine-originated state events."""
         pass
 
 
@@ -455,6 +461,12 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
             engine_idx=engine_idx,
         )
 
+    def record_sleep_snapshot(self, state: EngineSleepState, engine_idx: int):
+        if engine_idx in self.per_engine_stat_loggers:
+            self.per_engine_stat_loggers[engine_idx].record_sleep_snapshot(
+                state, engine_idx
+            )
+
     def log(self):
         for per_engine_stat_logger in self.per_engine_stat_loggers.values():
             per_engine_stat_logger.log()
@@ -609,6 +621,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         # Setting default values
         self.record_sleep_state()
+
+        gauge_resource_state = self._gauge_cls(
+            name="vllm:engine_sleep_resource_state",
+            documentation=(
+                "Confirmed engine resource state; unknown follows a failed memory RPC."
+            ),
+            labelnames=labelnames + ["resource", "state"],
+            multiprocess_mode="mostrecent",
+        )
+        self._sleep_resource_metric = gauge_resource_state
+        self._sleep_model_name = model_name
+        self.gauge_sleep_resource_state: dict[tuple[str, str], dict[int, Gauge]] = {}
+        gauge_fully_awake = self._gauge_cls(
+            name="vllm:engine_fully_awake",
+            documentation=(
+                "One when scheduling is running and all tracked resources are resident."
+            ),
+            labelnames=labelnames,
+            multiprocess_mode="mostrecent",
+        )
+        self._fully_awake_metric = gauge_fully_awake
+        self._sleep_labelvalues = per_engine_labelvalues
+        self.gauge_fully_awake: dict[int, Gauge] = {}
+        # Create new state series only after the first confirmed engine snapshot.
 
         gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
@@ -1276,6 +1312,43 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     finished_request.max_tokens_param
                 )
 
+    def record_sleep_snapshot(self, state: EngineSleepState, engine_idx: int):
+        if engine_idx not in self.gauge_fully_awake:
+            for resource, states in {
+                "scheduler": ("running", "paused"),
+                "weights": ("resident", "offloaded", "discarded", "unknown"),
+                "kv_cache": ("resident", "released", "unknown"),
+            }.items():
+                for value in states:
+                    self.gauge_sleep_resource_state.setdefault((resource, value), {})[
+                        engine_idx
+                    ] = self._sleep_resource_metric.labels(
+                        engine=engine_idx,
+                        model_name=self._sleep_model_name,
+                        resource=resource,
+                        state=value,
+                    )
+            self.gauge_fully_awake[engine_idx] = self._fully_awake_metric.labels(
+                *self._sleep_labelvalues[engine_idx]
+            )
+        current = {
+            "scheduler": "paused" if state.scheduler_paused else "running",
+            "weights": state.weights,
+            "kv_cache": state.kv_cache,
+        }
+        for (resource, value), gauges in self.gauge_sleep_resource_state.items():
+            if engine_idx in gauges:
+                gauges[engine_idx].set(int(current[resource] == value))
+        self.gauge_fully_awake[engine_idx].set(int(state.fully_awake))
+        # Keep the legacy series, but clear stale flags after partial wakes.
+        self.gauge_engine_sleep_state["awake"][engine_idx].set(int(state.fully_awake))
+        self.gauge_engine_sleep_state["weights_offloaded"][engine_idx].set(
+            int(state.weights == "offloaded")
+        )
+        self.gauge_engine_sleep_state["discard_all"][engine_idx].set(
+            int(state.weights == "discarded" and state.kv_cache == "released")
+        )
+
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1
         discard_all = 0
@@ -1322,6 +1395,7 @@ class StatLoggerManager:
     ):
         self.engine_indexes = engine_idxs if engine_idxs else [0]
         self.stat_loggers: list[AggregateStatLoggerBase] = []
+        self._last_sleep_snapshots: dict[int, EngineSleepState] = {}
         stat_logger_factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
             stat_logger_factories.extend(custom_stat_loggers)
@@ -1371,6 +1445,10 @@ class StatLoggerManager:
     ):
         if engine_idx is None:
             engine_idx = 0
+        if scheduler_stats is not None and scheduler_stats.sleep_state_only:
+            if scheduler_stats.sleep_state is not None:
+                self.record_sleep_snapshot(scheduler_stats.sleep_state, engine_idx)
+            return
         for stat_logger in self.stat_loggers:
             stat_logger.record(
                 scheduler_stats,
@@ -1378,6 +1456,16 @@ class StatLoggerManager:
                 mm_cache_stats=mm_cache_stats,
                 engine_idx=engine_idx,
             )
+
+    def record_sleep_snapshot(self, state: EngineSleepState, engine_idx: int):
+        snapshots = getattr(self, "_last_sleep_snapshots", None)
+        if snapshots is None:
+            snapshots = self._last_sleep_snapshots = {}
+        if snapshots.get(engine_idx) == state:
+            return
+        for logger in self.stat_loggers:
+            logger.record_sleep_snapshot(state, engine_idx)
+        snapshots[engine_idx] = state
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         for logger in self.stat_loggers:

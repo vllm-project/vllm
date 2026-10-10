@@ -334,6 +334,71 @@ pub struct SchedulerStats {
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
+    #[serde(default)]
+    pub sleep_state: Option<EngineSleepState>,
+    #[serde(default)]
+    pub sleep_state_only: bool,
+}
+
+/// Engine-originated snapshot; absence preserves compatibility with older engines.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EngineSleepState {
+    pub scheduler_paused: bool,
+    pub weights: String,
+    pub kv_cache: String,
+}
+
+impl EngineSleepState {
+    pub fn fully_awake(&self) -> bool {
+        !self.scheduler_paused && self.weights == "resident" && self.kv_cache == "resident"
+    }
+}
+
+#[cfg(test)]
+mod sleep_state_tests {
+    use super::{EngineSleepState, SchedulerStats};
+
+    #[test]
+    fn fully_awake_requires_running_scheduler_and_resident_resources() {
+        for paused in [false, true] {
+            for weights in ["resident", "offloaded", "discarded", "unknown"] {
+                for kv_cache in ["resident", "released", "unknown"] {
+                    let state = EngineSleepState {
+                        scheduler_paused: paused,
+                        weights: weights.into(),
+                        kv_cache: kv_cache.into(),
+                    };
+                    assert_eq!(
+                        state.fully_awake(),
+                        !paused && weights == "resident" && kv_cache == "resident"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn older_scheduler_stats_have_no_sleep_snapshot() {
+        let mut value = serde_json::to_value(SchedulerStats::default()).unwrap();
+        value.as_object_mut().unwrap().remove("sleep_state");
+        value.as_object_mut().unwrap().remove("sleep_state_only");
+        let decoded: SchedulerStats = serde_json::from_value(value).unwrap();
+        assert!(decoded.sleep_state.is_none());
+        assert!(!decoded.sleep_state_only);
+    }
+
+    #[test]
+    fn partial_snapshot_round_trip() {
+        let state = EngineSleepState {
+            scheduler_paused: true,
+            weights: "resident".into(),
+            kv_cache: "released".into(),
+        };
+        let decoded: EngineSleepState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(decoded, state);
+        assert!(!decoded.fully_awake());
+    }
 }
 
 #[cfg(test)]

@@ -220,6 +220,27 @@ KV_FETCH_STAGES = (
 
 
 @dataclass
+class EngineSleepState:
+    """Last confirmed executor resources and current scheduler state.
+
+    Unknown means a memory RPC failed and residency cannot be confirmed.
+    Fully awake requires running scheduling and confirmed resource residency.
+    """
+
+    scheduler_paused: bool = False
+    weights: str = "resident"
+    kv_cache: str = "resident"
+
+    @property
+    def fully_awake(self) -> bool:
+        return (
+            not self.scheduler_paused
+            and self.weights == "resident"
+            and self.kv_cache == "resident"
+        )
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -253,6 +274,9 @@ class SchedulerStats:
     cudagraph_stats: CUDAGraphStat | None = None
 
     perf_stats: PerfStats | None = None
+
+    sleep_state: EngineSleepState | None = None
+    sleep_state_only: bool = False
 
 
 @dataclass

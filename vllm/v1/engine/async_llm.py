@@ -891,7 +891,12 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            mm_cache_stats=renderer.stat_mm_cache(),
+                            mm_cache_stats=(
+                                None
+                                if outputs.scheduler_stats is not None
+                                and outputs.scheduler_stats.sleep_state_only
+                                else renderer.stat_mm_cache()
+                            ),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -965,6 +970,7 @@ class AsyncLLM(EngineClient):
                 draining. Set to ``False`` to preserve cache for faster resume.
 
         """
+        self._run_output_handler()
         if wait_for_inflight_requests:
             warnings.warn(
                 "The `wait_for_inflight_requests` parameter in "
@@ -987,6 +993,7 @@ class AsyncLLM(EngineClient):
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
+        self._run_output_handler()
         await self.engine_core.resume_scheduler_async()
 
     async def is_paused(self) -> bool:
@@ -1154,27 +1161,19 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        self._run_output_handler()
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.sleep_async(level, mode)
 
-        if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, level)
-
     async def release_kv_cache_memory(self) -> None:
+        self._run_output_handler()
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.release_kv_cache_memory_async()
 
-        if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, 0)
-
     async def wake_up(self, tags: list[str] | None = None) -> bool:
-        fully_awake = await self.engine_core.wake_up_async(tags)
-
-        if self.logger_manager is not None and fully_awake:
-            self.logger_manager.record_sleep_state(0, 0)
-
-        return fully_awake
+        self._run_output_handler()
+        return await self.engine_core.wake_up_async(tags)
 
     async def checkpoint_prepare(self) -> None:
         await self.collective_rpc("checkpoint_prepare")

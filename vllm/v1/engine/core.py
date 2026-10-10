@@ -83,6 +83,7 @@ from vllm.v1.engine.utils import (
     get_physical_gpu_ids_for_local_dp_rank,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.executor.abstract import SLEEP_TAGS
 from vllm.v1.fault_tolerance.engine_core_sentinel import (
     FT_UTILITY_METHOD,
     EngineCoreSentinel,
@@ -93,7 +94,11 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
     is_full_attention_spec,
 )
-from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
+from vllm.v1.metrics.stats import (
+    EngineSleepState,
+    SchedulerIterationDetails,
+    SchedulerStats,
+)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
@@ -932,6 +937,7 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self._publish_sleep_state()
         self._finish_pause(clear_cache)
 
         return None
@@ -939,6 +945,19 @@ class EngineCore:
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
+        self._publish_sleep_state()
+
+    def get_sleep_state(self) -> dict[str, Any]:
+        resources = self.model_executor.sleep_resource_states
+        return {
+            "scheduler_paused": self.is_scheduler_paused(),
+            "weights": resources["weights"],
+            "kv_cache": resources["kv_cache"],
+        }
+
+    def _publish_sleep_state(self) -> None:
+        # In-process callers read the snapshot directly.
+        pass
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
@@ -966,7 +985,10 @@ class EngineCore:
         # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
         if pause_future is None:
-            model_executor.sleep(level)
+            try:
+                model_executor.sleep(level)
+            finally:
+                self._publish_sleep_state()
             return None
 
         future = Future[Any]()
@@ -974,9 +996,13 @@ class EngineCore:
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                result = model_executor.sleep(level)
             except Exception as e:
+                self._publish_sleep_state()
                 future.set_exception(e)
+            else:
+                self._publish_sleep_state()
+                future.set_result(result)
 
         logger.info("Waiting for in-flight requests to complete before sleeping...")
         pause_future.add_done_callback(pause_complete)
@@ -989,22 +1015,33 @@ class EngineCore:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
 
         Returns:
-            Whether all executor memory is resident again (fully awake).
+            Whether scheduling is running and all executor memory is resident.
 
         """
+        if tags is not None and (
+            not tags or not set(tags) <= SLEEP_TAGS | {"scheduling"}
+        ):
+            return (
+                not self.is_scheduler_paused()
+                and self.model_executor.all_resources_resident
+            )
+
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
 
         if tags is None or tags:
-            self.model_executor.wake_up(tags)
+            try:
+                self.model_executor.wake_up(tags)
+            finally:
+                self._publish_sleep_state()
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        fully_awake = not self.model_executor.is_sleeping
+        fully_awake = self.model_executor.all_resources_resident
         if fully_awake:
             self.resume_scheduler()
-        return fully_awake
+        return fully_awake and not self.is_scheduler_paused()
 
     def release_kv_cache_memory(self) -> None:
         """Discard KV cache physical memory. Requires a completed pause
@@ -1019,12 +1056,15 @@ class EngineCore:
             raise RuntimeError(
                 "release_kv_cache_memory() requires a completed pause first"
             )
-        if self.model_executor.is_sleeping:
+        if not self.model_executor.all_resources_resident:
             raise RuntimeError(
                 "release_kv_cache_memory() requires all executor memory to be resident"
             )
         self._reset_caches()
-        self.model_executor.discard(("kv_cache",))
+        try:
+            self.model_executor.discard(("kv_cache",))
+        finally:
+            self._publish_sleep_state()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1233,6 +1273,7 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
+            self._publish_sleep_state()
 
     @contextmanager
     def _perform_handshakes(
@@ -1659,6 +1700,24 @@ class EngineCoreProc(EngineCore):
 
         return True
 
+    def _publish_sleep_state(self) -> None:
+        if not getattr(self, "log_stats", False):
+            return
+        snapshot = self.get_sleep_state()
+        stats = SchedulerStats(
+            sleep_state=EngineSleepState(
+                scheduler_paused=snapshot["scheduler_paused"],
+                weights=snapshot["weights"],
+                kv_cache=snapshot["kv_cache"],
+            ),
+            sleep_state_only=True,
+        )
+        # All frontends see each engine's snapshot, including while idle.
+        for client_index in range(len(self.addresses.outputs)):
+            self.output_queue.put_nowait(
+                (client_index, EngineCoreOutputs(scheduler_stats=stats))
+            )
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -2081,6 +2140,7 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self._publish_sleep_state()
 
         if self._pause_complete():
             self._finish_pause(clear_cache)
