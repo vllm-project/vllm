@@ -432,6 +432,16 @@ def test_streaming_invalid_name_string_is_never_announced():
     assert _stream_required_tool_calls(text, _fixed_len_deltas(text, 4)) == []
 
 
+def test_streaming_single_closed_tool_without_parameters_is_not_announced():
+    """A length-1 array whose sole object closes before a "parameters" key is
+    incomplete (no args value started), so nothing is announced and the scan
+    must not crash on the single-element array."""
+    text = '[{"name": "f"}]'
+    assert _stream_required_tool_calls(text, _fixed_len_deltas(text, 4)) == []
+    # The whole array in one delta must behave identically.
+    assert _stream_required_tool_calls(text, [text]) == []
+
+
 def test_streaming_tool_call_idx_increments_per_started_call():
     """kimi_k2 ids number the calls started in one delta consecutively."""
     text = json.dumps(TWO_CALLS)
