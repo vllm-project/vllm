@@ -357,14 +357,15 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         log_probs: FlatLogprobs | list[dict[int, Logprob]],
         request: SpeechToTextRequest,
         segment_class: type[SpeechToTextSegment],
+        chunk_duration_s: float,
         start_time: float = 0,
     ) -> list[SpeechToTextSegment]:
         """Convert tokens to verbose segments.
 
         This method expects the model to produce
         timestamps as tokens (similar to Whisper).
-        If the tokens do not include timestamp information,
-        the segments may not be generated correctly.
+        Without timestamp tokens, the decoded text is returned as a single
+        segment spanning the actual audio chunk.
 
         Note: No_speech_prob field is not supported
         in this implementation and will be None. See docs for details.
@@ -373,6 +374,29 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         init_token = self.tokenizer.encode("<|0.00|>", add_special_tokens=False)[0]
         if tokens[-1] == self.tokenizer.eos_token_id:
             tokens = tokens[:-1]
+
+        if tokens and all(token < init_token for token in tokens):
+            text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+            if not text:
+                return []
+            text_bytes = text.encode("utf-8")
+            return [
+                segment_class(
+                    id=0,
+                    seek=int(start_time),
+                    start=start_time,
+                    end=start_time + chunk_duration_s,
+                    temperature=request.temperature,
+                    text=text,
+                    compression_ratio=len(text_bytes) / len(zlib.compress(text_bytes)),
+                    tokens=list(tokens),
+                    avg_logprob=sum(
+                        log_probs[idx][token].logprob
+                        for idx, token in enumerate(tokens)
+                    )
+                    / len(tokens),
+                )
+            ]
 
         tokens_with_start = (init_token,) + tokens
         segments: list[SpeechToTextSegment] = []
@@ -620,6 +644,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request=request,
                         start_time=start_time,
                         log_probs=op.outputs[0].logprobs,
+                        chunk_duration_s=(
+                            chunk_start_offsets[idx + 1]
+                            if idx + 1 < len(chunk_start_offsets)
+                            else duration_s
+                        )
+                        - start_time,
                     )
 
                     chunk_segment_parts[idx].extend(segments)
