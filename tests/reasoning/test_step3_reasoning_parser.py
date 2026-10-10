@@ -25,3 +25,13 @@ def test_count_reasoning_tokens_stops_at_think_end(step3_parser):
 def test_count_reasoning_tokens_without_think_end(step3_parser):
     """Step3 treats output as reasoning until </think> appears."""
     assert step3_parser.count_reasoning_tokens([11, 12, 13]) == 3
+
+
+def test_is_reasoning_end_ignores_think_end_in_prompt_history(step3_parser):
+    """A </think> from an earlier turn must not end the reasoning of the
+    current turn, whose prompt ends with a fresh <think>."""
+    start = step3_parser.vocab["<think>"]
+    end = step3_parser.think_end_token_id
+    assert step3_parser.is_reasoning_end([11, end, 12, start, 13]) is False
+    assert step3_parser.is_reasoning_end([11, end, 12, start, 13, end]) is True
+    assert step3_parser.is_reasoning_end([11, 12, end]) is True
