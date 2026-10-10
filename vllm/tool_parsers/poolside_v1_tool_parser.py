@@ -16,7 +16,7 @@ from typing import Any
 
 import partial_json_parser.core.complete
 import regex as re
-from openai.types.responses import ToolChoiceFunction
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -171,7 +171,12 @@ class PoolsideV1ToolParser(ToolParser):
         if request.tools:
             tc = request.tool_choice
             if tc == "required" or isinstance(
-                tc, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
+                tc,
+                (
+                    ChatCompletionNamedToolChoiceParam,
+                    ToolChoiceFunction,
+                    ToolChoiceCustom,
+                ),
             ):
                 request.skip_special_tokens = False
                 return request
