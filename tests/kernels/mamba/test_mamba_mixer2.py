@@ -90,49 +90,75 @@ def mixer2_gated_norm_tensor_parallel(
     with ensure_current_vllm_config():
         initialize_model_parallel(tensor_model_parallel_size=world_size)
 
-    # create random weights an inputs
-    weight = torch.rand((hidden_size,), dtype=dtype, device=device)
-    hidden_states = torch.randn(batch_size, seq_len, hidden_size)
-    gate_states = torch.randn(batch_size, seq_len, hidden_size)
+    # Spawned workers need the config during module construction and execution.
+    with ensure_current_vllm_config():
+        # create random weights an inputs
+        weight = torch.rand((hidden_size,), dtype=dtype, device=device)
+        hidden_states = torch.randn(batch_size, seq_len, hidden_size)
+        gate_states = torch.randn(batch_size, seq_len, hidden_size)
 
-    # create gated-norm with TP
-    mixer = Mixer2RMSNormGated(
-        full_hidden_size=hidden_size,
-        full_n_groups=n_groups,
-    )
-    mixer.weight.weight_loader(mixer.weight, weight)  # load
-
-    # create gated-norm without TP to compute reference
-    # - utilize mock patching to disable TP when
-    with (
-        unittest.mock.patch(
-            "vllm.model_executor.layers.mamba.mamba_mixer2."
-            "get_tensor_model_parallel_world_size",
-            return_value=1,
-        ),
-        unittest.mock.patch(
-            "vllm.model_executor.layers.mamba.mamba_mixer2."
-            "get_tensor_model_parallel_rank",
-            return_value=0,
-        ),
-    ):
-        mixer_single_gpu = Mixer2RMSNormGated(
+        # create gated-norm with TP
+        mixer = Mixer2RMSNormGated(
             full_hidden_size=hidden_size,
             full_n_groups=n_groups,
         )
-    # assign weight to single-gpu mixer
-    mixer_single_gpu.weight.data = weight
+        mixer.weight.weight_loader(mixer.weight, weight)  # load
 
-    # generate and compare
-    N = hidden_size // world_size
-    output = mixer(
-        hidden_states[..., local_rank * N : (local_rank + 1) * N],
-        gate_states[..., local_rank * N : (local_rank + 1) * N],
+        # create gated-norm without TP to compute reference
+        # - utilize mock patching to disable TP when
+        with (
+            unittest.mock.patch(
+                "vllm.model_executor.layers.mamba.mamba_mixer2."
+                "get_tensor_model_parallel_world_size",
+                return_value=1,
+            ),
+            unittest.mock.patch(
+                "vllm.model_executor.layers.mamba.mamba_mixer2."
+                "get_tensor_model_parallel_rank",
+                return_value=0,
+            ),
+        ):
+            mixer_single_gpu = Mixer2RMSNormGated(
+                full_hidden_size=hidden_size,
+                full_n_groups=n_groups,
+            )
+        # assign weight to single-gpu mixer
+        mixer_single_gpu.weight.data = weight
+
+        # generate and compare
+        N = hidden_size // world_size
+        output = mixer(
+            hidden_states[..., local_rank * N : (local_rank + 1) * N],
+            gate_states[..., local_rank * N : (local_rank + 1) * N],
+        )
+        ref_output = mixer_single_gpu(hidden_states, gate_states)
+        torch.testing.assert_close(
+            output,
+            ref_output[..., local_rank * N : (local_rank + 1) * N],
+            atol=5e-3,
+            rtol=1e-3,
+        )
+
+
+@pytest.mark.parametrize("tp_rank", range(8))
+@pytest.mark.parametrize("scalar_shape", [(), (1,)])
+def test_mamba_sharded_loader_replicates_per_tensor_scale(
+    tp_rank, scalar_shape, monkeypatch
+):
+    """Every TP rank receives the full scalar, including scalar-shaped checkpoints."""
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+        mamba_v2_sharded_weight_loader,
     )
-    ref_output = mixer_single_gpu(hidden_states, gate_states)
-    torch.testing.assert_close(
-        output,
-        ref_output[..., local_rank * N : (local_rank + 1) * N],
-        atol=5e-3,
-        rtol=1e-3,
+    from vllm.model_executor.parameter import PerTensorScaleParameter
+
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: tp_rank
     )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 8
+    )
+    param = PerTensorScaleParameter(data=torch.empty(1), weight_loader=lambda: None)
+    loaded = torch.full(scalar_shape, 0.25)
+    loader = mamba_v2_sharded_weight_loader([(64, 0, 1), (64, 32, 4)], 8, tp_rank)
+    loader(param, loaded)
+    torch.testing.assert_close(param.data, torch.tensor([0.25]))
