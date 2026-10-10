@@ -964,6 +964,90 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     )
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("chunked_local", [False, True], ids=["swa", "chunked-local"])
+@pytest.mark.parametrize(
+    ("apply_admission_cap", "release_producer"),
+    [
+        pytest.param(True, False, id="admission-shared-hits"),
+        pytest.param(True, True, id="admission-evictable-hits"),
+        pytest.param(False, False, id="allocation-shared-hits"),
+        # test_evictable_cached_blocks_not_double_allocated exercises the shared
+        # base class's uncapped eviction accounting through SWA.
+    ],
+)
+def test_admission_accounts_for_prefix_hits(
+    chunked_local, apply_admission_cap, release_producer
+):
+    """Admission must count only the free capacity consumed by prefix reuse."""
+    block_size = 16
+    spec_cls = ChunkedLocalAttentionSpec if chunked_local else SlidingWindowSpec
+    window_config = (
+        {"attention_chunk_size": 4 * block_size}
+        if chunked_local
+        else {"sliding_window": 2 * block_size}
+    )
+    spec = spec_cls(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        **window_config,
+    )
+    # One null block, two shared prefix blocks, and one free block.
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=block_size)
+    manager_cls = (
+        ChunkedLocalAttentionManager if chunked_local else SlidingWindowManager
+    )
+    manager = manager_cls(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+        max_admission_blocks_per_request=3,
+    )
+    # Two blocks into a four-block chunk: both managers retain two real blocks
+    # after 64 nulls. At 64 blocks, chunked-local would skip the entire prefix.
+    prefix_tokens = 66 * block_size
+    total_tokens = prefix_tokens + block_size
+    manager.add_local_computed_blocks(
+        "producer", [], 0, num_external_computed_tokens=prefix_tokens
+    )
+    manager.allocate_external_computed_blocks("producer", 0, prefix_tokens)
+    cached_blocks = list(manager.req_to_blocks["producer"])
+    if release_producer:
+        manager.free("producer")
+    expected_consumed = 3 if release_producer else 1
+    free_before = pool.get_num_free_blocks()
+    assert free_before == expected_consumed
+
+    predicted = manager.get_num_blocks_to_allocate(
+        request_id="consumer",
+        num_tokens=total_tokens,
+        new_computed_blocks=cached_blocks,
+        total_computed_tokens=prefix_tokens,
+        num_local_computed_tokens=prefix_tokens,
+        num_tokens_main_model=total_tokens,
+        apply_admission_cap=apply_admission_cap,
+    )
+    manager.add_local_computed_blocks(
+        "consumer", cached_blocks, prefix_tokens, num_external_computed_tokens=0
+    )
+    new_blocks = manager.allocate_new_blocks("consumer", total_tokens, total_tokens)
+
+    expected_ref_cnt = 1 if release_producer else 2
+    assert all(
+        block.ref_cnt == expected_ref_cnt
+        for block in cached_blocks
+        if not block.is_null
+    )
+    assert len(new_blocks) == 1
+    consumed = free_before - pool.get_num_free_blocks()
+    assert consumed == expected_consumed
+    assert predicted == consumed
+
+
 def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
     """In forward steps, `get_num_blocks_to_allocate` must return exactly what
     `allocate_new_blocks` will pull; otherwise `block_pool.get_new_blocks`

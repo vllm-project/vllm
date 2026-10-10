@@ -211,20 +211,11 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        if apply_admission_cap and self.max_admission_blocks_per_request is not None:
-            # Recycling-aware specs (SWA, chunked-local) cap the per-request
-            # reservation here so admission matches the startup pool sizer
-            # (`SlidingWindowSpec.max_admission_blocks_per_request` / its
-            # chunked-local counterpart). `remove_skipped_blocks` runs from
-            # `allocate_slots` before each chunk's `get_num_blocks_to_allocate`,
-            # so per-request peak real-held blocks <= this cap, which keeps
-            # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
-            # Drift between the two would re-introduce the deadlock from
-            # issue #39734 or, worse, mid-prefill OOM.
-            num_required_blocks = min(
-                num_required_blocks, self.max_admission_blocks_per_request
-            )
-        num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
+        req_blocks = self.req_to_blocks.get(request_id, ())
+        num_req_blocks = len(req_blocks)
+        admission_cap = (
+            self.max_admission_blocks_per_request if apply_admission_cap else None
+        )
 
         if request_id in self.num_cached_block:
             # Fast-path: a running request won't have any new prefix-cache hits.
@@ -232,32 +223,45 @@ class SingleTypeKVCacheManager(ABC):
             # NOTE: With speculative decoding, request's blocks may be allocated
             # for draft tokens which are later rejected. In this case,
             # num_required_blocks may be smaller than num_req_blocks.
-            return max(num_required_blocks - num_req_blocks, 0)
+            if admission_cap is None:
+                return max(num_required_blocks - num_req_blocks, 0)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
-        num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
         # Number of whole blocks that are skipped by the attention window.
         # If nothing is skipped, this is 0.
         num_skipped_blocks = num_skipped_tokens // self.block_size
-        # We need blocks for the non-skipped suffix. If there are still
-        # local-computed blocks inside the window, they contribute to the
-        # required capacity; otherwise, skipped blocks dominate.
-        num_new_blocks = max(
-            num_required_blocks - max(num_skipped_blocks, num_local_computed_blocks),
-            0,
-        )
-
         # Among the `new_computed_blocks`, the first `num_skipped_blocks` worth
         # of blocks are skipped; `num_req_blocks` of those may already be in
         # `req_to_blocks`, so only skip the remainder from `new_computed_blocks`.
         num_skipped_new_computed_blocks = max(0, num_skipped_blocks - num_req_blocks)
+        effective_hits = new_computed_blocks[num_skipped_new_computed_blocks:]
+
+        if admission_cap is None:
+            # Allocation uses logical positions, including skipped blocks.
+            num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
+            num_new_blocks = max(
+                num_required_blocks
+                - max(num_skipped_blocks, num_local_computed_blocks),
+                0,
+            )
+        else:
+            # Match the recycling-aware pool sizer using real blocks, not
+            # logical positions padded with nulls (see issue #39734).
+            num_live_blocks = min(
+                max(num_required_blocks - num_skipped_blocks, 0), admission_cap
+            )
+            num_held_blocks = 0
+            for block in reversed(req_blocks):
+                if block.is_null:
+                    break
+                num_held_blocks += 1
+            num_hit_blocks = sum(not block.is_null for block in effective_hits)
+            num_new_blocks = max(num_live_blocks - num_held_blocks - num_hit_blocks, 0)
 
         # If a computed block is an eviction candidate (in the free queue and
         # ref_cnt == 0), it will be removed from the free queue when touched by
         # the allocated request, so we must count it in the free-capacity check.
-        num_evictable_blocks = self._get_num_evictable_blocks(
-            new_computed_blocks[num_skipped_new_computed_blocks:]
-        )
+        num_evictable_blocks = self._get_num_evictable_blocks(effective_hits)
         if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
             # Reserve the extra block that allocate_new_blocks pulls for the
             # partial-hit CoW redirect.

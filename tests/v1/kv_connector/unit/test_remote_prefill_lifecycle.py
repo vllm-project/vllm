@@ -887,3 +887,57 @@ def test_deferred_lookup_does_not_block_parked_load():
         scheduler_output = scheduler.schedule()
         assert req_a.status == RequestStatus.RUNNING
         assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+def test_async_load_reserves_sliding_window_blocks_for_inflight():
+    """A parked long-context load still needs sliding-window blocks for each
+    prefill chunk it has left, so its reservation must count them.
+
+    Each load keeps only the window's blocks of its sliding-window group, the
+    rest of the group being null placeholders. If the reservation compares the
+    group's cap to that placeholder-padded length, it counts no sliding-window
+    blocks, both loads are admitted, and the free pool ends up smaller than one
+    chunk of the head's prefill; with nothing running, no block is ever freed.
+    """
+    BLOCK_SIZE = 16
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_num_batched_tokens=BLOCK_SIZE * 16
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=160,
+        kv_cache_config=make_kv_cache_config(
+            BLOCK_SIZE, swa_enabled=True, sw_size=BLOCK_SIZE * 2, num_blocks=160
+        ),
+    )
+    reqs = [
+        create_request(
+            request_id=i,
+            block_size=BLOCK_SIZE,
+            num_tokens=BLOCK_SIZE * 80,
+            do_remote_prefill=True,
+            max_tokens=1,
+        )
+        for i in (1, 2)
+    ]
+    for req in reqs:
+        scheduler.add_request(req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        return_value=(BLOCK_SIZE * 64, True),
+    ):
+        scheduler_output = scheduler.schedule()
+
+    loading = {
+        req.request_id
+        for req in reqs
+        if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    }
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output([], finished_recving=loading),
+    )
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.num_scheduled_tokens
