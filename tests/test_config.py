@@ -4135,6 +4135,8 @@ def test_hc_sp_model_support(enabled, supported, is_cuda, tp_size, pp_size, erro
         enable_hc_sp=enabled,
         tensor_parallel_size=tp_size,
         pipeline_parallel_size=pp_size,
+        # Avoid backend auto-detection in this config-only test.
+        distributed_executor_backend="mp",
     )
     with (
         patch("vllm.config.model.current_platform.is_cuda", return_value=is_cuda),
