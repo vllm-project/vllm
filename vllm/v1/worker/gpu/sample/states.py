@@ -24,6 +24,9 @@ class SamplingStates:
         self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.min_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.seeds = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
+        self.synthetic_acceptance_lengths = np.full(
+            max_num_reqs, -1.0, dtype=np.float64
+        )
         # Tracks whether `seed` was set explicitly by the user, so callers
         # can fall back from RNG paths that don't honor per-request seeds.
         self.seeds_set = np.zeros(max_num_reqs, dtype=bool)
@@ -50,6 +53,10 @@ class SamplingStates:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
         self.min_p.np[req_idx] = min_p
+        length = (sampling_params.extra_args or {}).get(
+            "synthetic_acceptance_length", -1.0
+        )
+        self.synthetic_acceptance_lengths[req_idx] = 0.0 if length is None else length
 
         seed = sampling_params.seed
         self.seeds_set[req_idx] = seed is not None

@@ -1183,6 +1183,29 @@ class SamplingParams(
         self,
         speculative_config: SpeculativeConfig | None,
     ) -> None:
+        if self.extra_args and "synthetic_acceptance_length" in self.extra_args:
+            length = self.extra_args["synthetic_acceptance_length"]
+            if speculative_config is None:
+                raise VLLMValidationError(
+                    "synthetic_acceptance_length requires speculative decoding."
+                )
+            if speculative_config.rejection_sample_method == "block":
+                raise VLLMValidationError(
+                    "synthetic_acceptance_length is not supported "
+                    "with block verification."
+                )
+            n = speculative_config.num_speculative_tokens
+            if length is not None and (
+                isinstance(length, bool)
+                or not isinstance(length, (int, float))
+                or not 1 <= length <= n + 1
+            ):
+                raise VLLMValidationError(
+                    "synthetic_acceptance_length must be null or a number "
+                    f"in [1, {n + 1}].",
+                    parameter="synthetic_acceptance_length",
+                    value=length,
+                )
         if speculative_config is None:
             return
 

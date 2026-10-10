@@ -1095,12 +1095,13 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
 ########################### Tests for Synthetic Rejection Sampling #########
 
 
-def _make_synthetic_sampler(rates: list[float]) -> RejectionSampler:
+def _make_synthetic_sampler(rates: list[float] | None) -> RejectionSampler:
     mock_sampler = Mock(spec=Sampler)
     mock_sampler.logprobs_mode = "raw_logprobs"
     spec_config = Mock()
-    spec_config.rejection_sample_method = "synthetic"
+    spec_config.rejection_sample_method = "standard" if rates is None else "synthetic"
     spec_config.synthetic_acceptance_rates = rates
+    spec_config.num_speculative_tokens = 2 if rates is None else len(rates)
     return RejectionSampler(mock_sampler, spec_config, torch.device(DEVICE_TYPE))
 
 
@@ -1151,6 +1152,33 @@ def test_synthetic_all_rejected(all_greedy: bool):
     for row in result:
         assert row[0] != PLACEHOLDER_TOKEN_ID
         assert (row[1:] == PLACEHOLDER_TOKEN_ID).all()
+
+
+@pytest.mark.parametrize("all_greedy", [True, False])
+@pytest.mark.parametrize("rates", [None, [1.0, 1.0]])
+def test_request_synthetic_acceptance_switches_without_changing_default(
+    all_greedy, rates
+):
+    sampler = _make_synthetic_sampler(rates)
+    metadata = _make_sampling_metadata(all_greedy)
+    spec_tokens = [[1, 2], [3]]
+    for length, expected in [
+        (0.0, [[10, -1, -1], [30, -1, -1]]),
+        (3.0, [[1, 2, 50], [3, 40, -1]]),
+        (1.0, [[10, -1, -1], [30, -1, -1]]),
+        (
+            -1.0,
+            [[10, -1, -1], [30, -1, -1]]
+            if rates is None
+            else [[1, 2, 50], [3, 40, -1]],
+        ),
+    ]:
+        metadata.synthetic_acceptance_length = length
+        logits = create_logits_tensor([[10, 20, 50], [30, 40]])
+        spec_metadata = create_spec_decode_metadata(spec_tokens, logits)
+        mock_sampler_output(sampler, torch.tensor([50, 40], device=DEVICE_TYPE))
+        output = sampler(spec_metadata, None, logits, metadata)
+        assert output.sampled_token_ids.tolist() == expected
 
 
 def test_placeholder_draft_token_rejected_random(rejection_sampler):

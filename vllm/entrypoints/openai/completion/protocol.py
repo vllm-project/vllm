@@ -235,11 +235,13 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
+    vllm_xargs: (
+        dict[str, str | int | float | bool | None | list[str | int | float]] | None
+    ) = Field(
         default=None,
         description=(
-            "Additional request parameters with (list of) string or "
-            "numeric values, used by custom extensions."
+            "Additional request parameters with string, numeric, boolean, null, "
+            "or lists of string or numeric values, used by custom extensions."
         ),
     )
 

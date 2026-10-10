@@ -54,6 +54,9 @@ def _make_rejection_sampler(
     rejection_sampler.synthetic_conditional_rates = None
     rejection_sampler.use_block_verification = False
     rejection_sampler.watermark_key = None
+    if not hasattr(sampler, "sampling_states"):
+        sampler.sampling_states = SimpleNamespace()
+    sampler.sampling_states.synthetic_acceptance_lengths = np.full(16, -1.0)
     return rejection_sampler
 
 
@@ -65,6 +68,61 @@ def test_iter_request_chunks_preserves_request_boundaries():
         (2, 3),
         (3, 4),
     ]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+@pytest.mark.parametrize("synthetic_default", [False, True])
+def test_request_synthetic_acceptance_switches_across_chunked_batches(
+    temperature, synthetic_default
+):
+    device = torch.device("cuda")
+    input_batch = _make_input_batch(
+        np.array([0, 4, 8], dtype=np.int32),
+        np.array([3, 1], dtype=np.int32),
+        device,
+    )
+    sampler = SimpleNamespace(
+        logprobs_mode="raw_logprobs",
+        return_sampling_mask=False,
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(
+                gpu=torch.full((4,), temperature, device=device)
+            ),
+            seeds=SimpleNamespace(
+                gpu=torch.arange(4, dtype=torch.int64, device=device)
+            ),
+        ),
+        use_fp64_gumbel=False,
+        apply_sampling_params=lambda logits, *_: logits,
+    )
+    rejection_sampler = _make_rejection_sampler(sampler, 3)
+    if synthetic_default:
+        rejection_sampler.synthetic_conditional_rates = torch.ones(3, device=device)
+    logits = torch.full((8, 8), -float("inf"), device=device)
+    logits[:, 7] = 0.0
+    drafts = torch.ones(8, dtype=torch.int64, device=device)
+    positions = torch.arange(8, device=device)
+    for length, expected_count in [
+        (0.0, 1),
+        (4.0, 4),
+        (1.0, 1),
+        (-1.0, 4 if synthetic_default else 1),
+    ]:
+        sampler.sampling_states.synthetic_acceptance_lengths[[3, 1]] = length
+        sampled, counts, _, _ = rejection_sampler._verify_in_chunks(
+            logits, input_batch, None, drafts, positions, 4, -1
+        )
+        assert counts.tolist() == [expected_count, expected_count]
+        if expected_count == 4:
+            assert sampled[:, :3].tolist() == [[1, 1, 1], [1, 1, 1]]
+        else:
+            assert sampled[:, 0].tolist() == [7, 7]
+    sampler.sampling_states.synthetic_acceptance_lengths[[3, 1]] = [1.0, 4.0]
+    with pytest.raises(AssertionError, match="same synthetic_acceptance_length"):
+        rejection_sampler._verify_in_chunks(
+            logits, input_batch, None, drafts, positions, 4, -1
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
