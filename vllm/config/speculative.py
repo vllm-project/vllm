@@ -466,6 +466,34 @@ class SpeculativeConfig:
     draft logits to shared tokens only (TLI algorithm). Requires
     method='draft_model'."""
 
+    draft_token_map: str | None = None
+    """Path to a list of target token ids that the drafter may propose
+    (FR-Spec). The drafter's shared lm_head is restricted to these rows, which
+    cuts its cost per draft token; the target still verifies with the full
+    vocabulary, so outputs follow the usual speculative decoding guarantees.
+    Accepts SGLang's `--speculative-token-map` file (`.pt`) or a JSON list.
+    EOS ids are always included. A quantized lm_head keeps its checkpoint
+    format for the listed rows (any format indexed by output row) and, for
+    dynamic rows, must be ModelOpt NVFP4. Requires an MTP drafter with a
+    full-vocabulary lm_head, and Model Runner V2."""
+
+    draft_token_map_dynamic_rows: int = Field(default=0, ge=0)
+    """Extra draft tokens picked per draft token on top of `draft_token_map`.
+    Rows outside the list are scored with a low-rank projection of the lm_head
+    and the best ones get exact logits, which recovers acceptance on traffic the
+    static list misses (e.g. other languages). 0 disables it. Requires
+    `draft_token_map` and tensor parallel size 1."""
+
+    draft_token_map_dynamic_rank: int = Field(default=256, ge=1)
+    """Rank of the lm_head projection that scores the dynamic draft rows."""
+
+    draft_token_map_quantization: Literal["fp8", "nvfp4"] | None = None
+    """Weight-only quantization of the draft vocabulary's lm_head rows, both
+    the listed and the dynamic ones: "fp8" keeps one scale per row, "nvfp4" one
+    E4M3 scale per 16 weights. The dynamic rows' scorer is then stored in fp8.
+    Only the acceptance length can change. Requires `draft_token_map` and an
+    lm_head that is not quantized in the checkpoint."""
+
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer, required
@@ -1854,6 +1882,20 @@ class SpeculativeConfig:
                 "use_heterogeneous_vocab currently only supports greedy draft "
                 "sampling. Set draft_sample_method='greedy' (the default) or "
                 "omit it."
+            )
+
+        if self.draft_token_map is None and (
+            self.draft_token_map_dynamic_rows > 0
+            or self.draft_token_map_quantization is not None
+        ):
+            raise ValueError(
+                "draft_token_map_dynamic_rows and draft_token_map_quantization "
+                "require draft_token_map."
+            )
+
+        if self.draft_token_map is not None and self.method != "mtp":
+            raise ValueError(
+                f"draft_token_map requires method 'mtp', got {self.method!r}."
             )
 
         if not self.use_heterogeneous_vocab:

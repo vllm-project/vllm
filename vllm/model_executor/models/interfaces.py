@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from vllm.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
+    from vllm.model_executor.layers.draft_vocab import DraftVocab
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -1528,6 +1529,7 @@ class LocalArgmaxMixin:
         ``self.logits_processor``: LogitsProcessor
         ``self.lm_head``: ParallelLMHead
         ``self.draft_id_to_target_id`` (optional): nn.Parameter
+        ``self.draft_vocab`` (optional): DraftVocab, used instead when present
     """
 
     logits_processor: "LogitsProcessor"
@@ -1535,6 +1537,9 @@ class LocalArgmaxMixin:
 
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Vocab-parallel argmax with optional D2T remapping."""
+        draft_vocab: DraftVocab | None = getattr(self, "draft_vocab", None)
+        if draft_vocab is not None:
+            return draft_vocab.get_top_tokens(self.lm_head, hidden_states)
         top = self.logits_processor.get_top_tokens(
             self.lm_head,
             hidden_states,
