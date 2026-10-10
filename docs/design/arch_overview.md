@@ -131,6 +131,79 @@ A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
 For CPU resource sizing recommendations, see
 [CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
 
+## Scheduler
+
+The scheduler runs inside the **Engine Core Process** and is responsible for
+deciding which requests execute each step. Its source is in
+[vllm/v1/core/sched/scheduler.py](../../vllm/v1/core/sched/scheduler.py).
+
+The V1 scheduler is **token-budget-based**: at each step it holds a fixed
+`max_num_scheduled_tokens` budget and fills it greedily across both running and
+waiting requests. There is no separate "prefill phase" or "decode phase":
+each request has a `num_computed_tokens` counter that advances toward
+`num_tokens_with_spec`. This unified view handles chunked prefills, prefix
+caching, and speculative decoding within a single scheduling loop.
+
+### Scheduling Policies
+
+Two policies are supported via `--scheduling-policy`:
+
+-   **FCFS** (default): requests are scheduled first-come, first-served. When
+    the KV cache is exhausted, the last-admitted running request is preempted.
+-   **Priority**: requests carry an integer `priority` field. When the KV cache
+    is exhausted, the running request with the lowest priority (highest
+    `priority` value, then latest arrival time) is preempted.
+
+### Preemption
+
+When the KV cache is exhausted and a request cannot be allocated new blocks,
+the scheduler **preempts** a lower-priority running request:
+
+1.  Its KV cache blocks are freed immediately.
+2.  `num_computed_tokens` is reset to `0`. When the request is re-admitted, it
+    recomputes only the missing tokens (no KV swap to CPU), and the scheduler
+    may immediately restore progress via prefix caching or externally matched
+    KV tokens.
+3.  The request is re-queued with `PREEMPTED` status:
+    - Under **FCFS**, it is prepended to the front of the waiting queue, so it
+      is re-admitted before any later-arriving requests.
+    - Under **Priority**, it is reinserted into the priority queue ordered by
+      `(priority, arrival_time)`, so newly arrived higher-priority requests
+      may still be scheduled first.
+
+!!! note
+    vLLM V1 does not swap KV cache to CPU memory. Preempted requests
+    recompute missing tokens but may skip cached prefixes. Prefix caching
+    makes this inexpensive for requests that share a common prompt prefix.
+
+### Async Scheduling
+
+`AsyncScheduler`
+([vllm/v1/core/sched/async_scheduler.py](../../vllm/v1/core/sched/async_scheduler.py))
+is a thin subclass of `Scheduler` that overlaps CPU scheduling with GPU
+execution: while the GPU executes step *N*, the CPU speculatively schedules
+step *N+1*.
+
+Each scheduled decode step adds one or more **output placeholders**
+(`num_output_placeholders`) to the request, one for the main token plus any
+speculative (draft/spec) tokens the GPU is producing but has not yet
+returned.
+
+Every preemption (`_preempt_request`), not only a forced prefix-cache reset,
+resets `num_output_placeholders` to `0` and marks any in-flight output as
+**stale** by setting `num_stale_output_tokens` to the request's
+`num_in_flight_tokens`. By default these stale tokens are still delivered
+once the GPU returns them (dropping them would perturb spec-decode
+acceptance), they just no longer advance the reset counters;
+`update_from_output` drains the stale share step by step as it arrives.
+
+A caller can instead request that stale output be dropped by passing
+`drop_stale_output=True` to `_preempt_request`. `reset_prefix_cache` (with
+`reset_running_requests=True`) does this for every running request before
+returning them to the waiting queue, since its same-step preempt-and-resume
+would otherwise deliver tokens out of order. Regular KV-exhaustion
+preemption does not set `drop_stale_output`, so its stale output is kept.
+
 ## LLM Engine
 
 The `LLMEngine` and `AsyncLLMEngine` classes are central to the functioning of
