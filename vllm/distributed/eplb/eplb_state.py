@@ -1375,6 +1375,8 @@ def _commit_eplb_maps_for_layer(
     if PIN_MEMORY:
         src = src.pin_memory()
     dst.copy_(src, non_blocking=True)
+    # Load recorded under the old map belongs to whichever expert used to be there.
+    model_state.expert_load_window[:, layer].zero_()
 
 
 def _commit_eplb_maps(
@@ -1413,6 +1415,8 @@ def _commit_eplb_maps(
     if PIN_MEMORY:
         src = src.pin_memory()
     dst.copy_(src, non_blocking=True)
+    # Load recorded under the old map belongs to whichever expert used to be there.
+    model_state.expert_load_window.zero_()
 
 
 def _move_to_workspace(
