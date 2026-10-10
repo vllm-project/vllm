@@ -598,11 +598,19 @@ def allocate_kv_cache(
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
         layer_name = tensor.layers[0]
-        group_id, group = next(
-            (group_id, group)
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
-            if layer_name in group.layer_names
+        match = next(
+            (
+                (group_id, group)
+                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+                if layer_name in group.layer_names
+            ),
+            None,
         )
+        if match is None:
+            raise RuntimeError(
+                f"KV cache tensor layer {layer_name!r} is not in any KV cache group."
+            )
+        group_id, group = match
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = spec.kv_cache_specs[layer_name]

@@ -1865,6 +1865,100 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_get_kv_cache_config_skips_empty_projected_uniform_group():
+    remote_spec = new_kv_cache_spec(num_kv_heads=4)
+    local_spec = new_kv_cache_spec(num_kv_heads=2)
+    remote_group_spec = UniformTypeKVCacheSpecs(
+        block_size=remote_spec.block_size,
+        kv_cache_specs={"remote.layer": remote_spec},
+    )
+    groups = kv_cache_utils._project_kv_cache_groups_to_worker(
+        [
+            KVCacheGroupSpec(["remote.layer"], remote_group_spec),
+            KVCacheGroupSpec(["local.layer"], local_spec),
+        ],
+        {"local.layer": local_spec},
+    )
+    assert groups[0].layer_names == []
+    assert groups[0].kv_cache_spec is remote_group_spec
+
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=CacheConfig(),
+    )
+    # Pin the layout instead of depending on platform-specific resolution.
+    config.cache_config.kv_cache_layout = "LBNHC"
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=local_spec.page_size_bytes * 4
+    )
+
+    assert cache_config.num_blocks == 4
+    (tensor,) = cache_config.kv_cache_tensors
+    assert tensor.layers == ["local.layer"]
+    assert tensor.offset == 0
+    assert tensor.size == local_spec.page_size_bytes * 4
+
+
+def test_allocate_kv_cache_rejects_tensor_outside_groups():
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    spec = new_kv_cache_spec()
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=spec.page_size_bytes,
+                layers=["remote.layer"],
+                layer_stride=spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["local.layer"], spec)],
+    )
+
+    with pytest.raises(
+        RuntimeError, match="KV cache tensor layer 'remote.layer' is not in any"
+    ):
+        allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.LBNHC)
+
+
+def test_get_kv_cache_configs_empty_pp_group_replans_to_min_blocks():
+    local_spec = new_kv_cache_spec()
+    remote_spec = MambaSpec(block_size=16, shapes=((32,),), dtypes=(torch.float32,))
+    # A real ModelConfig would load a Hugging Face config for this CPU-only test.
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
+        cache_config=CacheConfig(),
+        model_config=SimpleNamespace(max_model_len=16, original_max_model_len=16),
+        scheduler_config=SchedulerConfig(max_model_len=16, is_encoder_decoder=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=2,
+        ),
+        speculative_config=None,
+        num_prefill_lookahead_tokens=1,
+    )
+    config.cache_config.kv_cache_layout = "BLHNC"
+
+    configs = get_kv_cache_configs(
+        config,
+        [{"local.layer": local_spec}, {"remote.layer": remote_spec}],
+        [local_spec.page_size_bytes * 4, remote_spec.page_size_bytes * 8],
+    )
+
+    assert [cache.num_blocks for cache in configs] == [4, 4]
+    tensor_layers = [
+        [tensor.layers for tensor in cache.kv_cache_tensors] for cache in configs
+    ]
+    assert tensor_layers == [[["local.layer"]], [["remote.layer"]]]
+    assert any(
+        not group.layer_names
+        and isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for group in configs[1].kv_cache_groups
+    )
+
+
 @pytest.mark.parametrize("sliding_window", [None, 256])
 @pytest.mark.parametrize("disable_hybrid", [False, True])
 @pytest.mark.parametrize("pcp_size", [1, 4])
