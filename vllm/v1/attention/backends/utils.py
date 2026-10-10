@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -980,6 +981,23 @@ def reorder_batch_to_split_decodes_and_prefills(
             dst = next_dst
 
     return True
+
+
+def set_triton_ptr_range(region: torch.Tensor, *views: torch.Tensor) -> None:
+    """Bound the bytes Triton kernels may access through ``views``.
+
+    Triton's AMD backend uses 32-bit buffer addressing only for pointer
+    arguments within 2 GiB. It checks ``ptr_range()`` first and otherwise the
+    size of the whole storage, so views into one large allocation (such as a
+    layer of the KV cache) lose it. Each view gets the distance from its
+    ``data_ptr()`` to the end of ``region``; kernels must not access past it.
+    """
+    if region.numel() == 0:
+        return
+    last = sum((n - 1) * stride for n, stride in zip(region.shape, region.stride()))
+    region_end = region.data_ptr() + (last + 1) * region.element_size()
+    for view in views:
+        view.ptr_range = functools.partial(int, region_end - view.data_ptr())
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
