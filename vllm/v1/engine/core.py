@@ -1036,8 +1036,9 @@ class EngineCore:
     ) -> None:
         """Reserve a drained engine on every external-launcher physical rank.
 
-        Call after synchronous generation has returned on all ranks, using the
-        same request and serialized calls, as required by offline SPMD. This
+        After consuming synchronous generation on all ranks, call step() once
+        more to drain pending scheduler completion cleanup. Use the same request
+        and serialized calls, as required by offline SPMD. This
         prepares a future full IPC refit; it does not rebuild or load weights.
         A collective rejection leaves the old layout and pause state intact.
         Transport failures keep admission closed because consensus is unknown.

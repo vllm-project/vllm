@@ -22,6 +22,9 @@ class LayoutCheckpoint:
         head_dim = getattr(config, "head_dim", None) or hidden // heads
         kv_heads = getattr(config, "num_key_value_heads", heads)
         intermediate = config.intermediate_size
+        self._heads = heads
+        self._kv_heads = kv_heads
+        self._intermediate = intermediate
         self.shapes: dict[str, tuple[int, ...]] = {
             "model.embed_tokens.weight": (config.vocab_size, hidden),
             "model.norm.weight": (hidden,),
@@ -69,6 +72,21 @@ class LayoutCheckpoint:
             self.shapes.update({prefix + name: shape for name, shape in shapes.items()})
         self.received: set[str] = set()
 
+    def validate_tensor_parallel_size(self, tp_size: int) -> None:
+        """Reject target partitioning that the Llama constructors cannot build."""
+        if self._heads % tp_size:
+            raise ValueError("Attention heads must be divisible by target TP")
+        if self._kv_heads >= tp_size:
+            kv_divisible = self._kv_heads % tp_size == 0
+        else:
+            kv_divisible = tp_size % self._kv_heads == 0
+        if not kv_divisible:
+            raise ValueError(
+                "KV heads cannot be partitioned or replicated at target TP"
+            )
+        if self._intermediate % tp_size:
+            raise ValueError("intermediate_size must be divisible by target TP")
+
     def validate_model_parameters(self, names: set[str]) -> None:
         """Reject a model variant with parameters absent from this HF schema."""
         expected = set()
@@ -88,6 +106,18 @@ class LayoutCheckpoint:
         """Check full tensor metadata and canonicalize tied names before loading."""
         if not isinstance(payload, dict):
             raise ValueError("Layout refit requires a rank-local IPC payload dict")
+        unexpected = payload.keys() - {
+            "names",
+            "dtype_names",
+            "shapes",
+            "ipc_handles",
+            "ipc_handles_pickled",
+            "tensor_sizes",
+        }
+        if unexpected:
+            raise ValueError(
+                f"Unexpected IPC metadata keys: {sorted(unexpected, key=str)}"
+            )
         names = payload.get("names")
         dtypes = payload.get("dtype_names")
         shapes = payload.get("shapes")
