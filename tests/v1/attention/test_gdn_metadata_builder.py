@@ -5,6 +5,7 @@ reclassification of non-spec decodes as prefills when spec decodes exist.
 Covers the fix for https://github.com/vllm-project/vllm/issues/34845.
 """
 
+import dataclasses
 from dataclasses import dataclass
 
 import pytest
@@ -457,6 +458,54 @@ def test_checkpoint_metadata_preserves_non_spec_order(
     torch.testing.assert_close(
         actual.checkpoint.state_indices, torch.tensor(slots, dtype=torch.int32)
     )
+
+
+def _assert_metadata_equal(actual, expected, path: str = "") -> None:
+    for field in dataclasses.fields(expected):
+        name = f"{path}{field.name}"
+        _assert_value_equal(
+            getattr(actual, field.name), getattr(expected, field.name), name
+        )
+
+
+def _assert_value_equal(got, want, name: str) -> None:
+    if isinstance(want, torch.Tensor):
+        assert isinstance(got, torch.Tensor), f"{name}: {type(got).__name__}"
+        torch.testing.assert_close(got.cpu(), want.cpu(), rtol=0, atol=0, msg=name)
+    elif dataclasses.is_dataclass(want) and not isinstance(want, type):
+        assert got is not None, name
+        _assert_metadata_equal(got, want, f"{name}.")
+    elif isinstance(want, (tuple, list)):
+        assert isinstance(got, (tuple, list)) and len(got) == len(want), name
+        for i, (g, w) in enumerate(zip(got, want)):
+            _assert_value_equal(g, w, f"{name}[{i}]")
+    elif isinstance(want, dict):
+        assert isinstance(got, dict) and got.keys() == want.keys(), name
+        for key, w in want.items():
+            _assert_value_equal(got[key], w, f"{name}[{key!r}]")
+    else:
+        assert not isinstance(got, torch.Tensor), f"{name}: tensor vs {want!r}"
+        assert got == want, name
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_update_block_table_matches_fresh_build(num_spec):
+    """update_block_table() must agree with build() on the target group's block
+    table in every field, so that a per-group field added later cannot stay
+    pointed at the source group the way checkpoint.state_indices did."""
+    src, common, kwargs = _create_checkpoint_builder_and_batch(num_spec)
+    dst, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    ref, _, _ = _create_checkpoint_builder_and_batch(num_spec)
+    other_table = common.block_table_tensor + 100
+    other = common.replace(block_table_tensor=other_table)
+    dst.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        other_table, other.seq_lens, dst.kv_cache_spec, "align"
+    )
+
+    actual = dst.update_block_table(
+        src.build(0, common, **kwargs), other_table, other.slot_mapping
+    )
+    _assert_metadata_equal(actual, ref.build(0, other, **kwargs))
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
