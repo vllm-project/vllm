@@ -17,6 +17,10 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 _CPUWNA16_SUPPORTED_QUANT_TYPES = (scalar_types.uint4, scalar_types.uint4b8)
 
 
+def _has_cpu_gemm_wna16() -> bool:
+    return hasattr(getattr(torch.ops, "_C", None), "cpu_gemm_wna16")
+
+
 class CPUWNA16LinearKernel(MPLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
@@ -27,33 +31,50 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         if not current_platform.is_cpu():
             return False, "CPUWNA16 only supported on CPU"
 
+        if not _has_cpu_gemm_wna16():
+            return (
+                False,
+                (
+                    "torch.ops._C.cpu_gemm_wna16 is not registered; CPU WNA16 "
+                    "requires a build with WNA16 CPU support"
+                ),
+            )
+
         if c.weight_type not in _CPUWNA16_SUPPORTED_QUANT_TYPES:
             return (
                 False,
-                f"Quant type ({c.weight_type}) not supported by "
-                "CPUWNA16, supported types are: "
-                f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}",
+                (
+                    f"Quant type ({c.weight_type}) not supported by "
+                    "CPUWNA16, supported types are: "
+                    f"{_CPUWNA16_SUPPORTED_QUANT_TYPES}"
+                ),
             )
 
         if c.group_size != -1 and c.group_size % 2 != 0:
             return (
                 False,
-                f"Group size ({c.group_size}) not supported by "
-                "CPUWNA16, supported group sizes are multiples of 2",
+                (
+                    f"Group size ({c.group_size}) not supported by "
+                    "CPUWNA16, supported group sizes are multiples of 2"
+                ),
             )
 
         if c.partition_weight_shape[0] % 32 != 0:
             return (
                 False,
-                f"Input size ({c.partition_weight_shape[0]}) not supported by "
-                "CPUWNA16, supported sizes are multiples of 32",
+                (
+                    f"Input size ({c.partition_weight_shape[0]}) not supported by "
+                    "CPUWNA16, supported sizes are multiples of 32"
+                ),
             )
 
         if c.partition_weight_shape[1] % 32 != 0:
             return (
                 False,
-                f"Output size ({c.partition_weight_shape[1]}) not supported by "
-                "CPUWNA16, supported sizes are multiples of 32",
+                (
+                    f"Output size ({c.partition_weight_shape[1]}) not supported by "
+                    "CPUWNA16, supported sizes are multiples of 32"
+                ),
             )
 
         return True, None
