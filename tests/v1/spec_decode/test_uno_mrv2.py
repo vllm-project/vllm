@@ -197,7 +197,7 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
         uno_mask_token_id=1000, uno_noise_seed=42
     )
     proposer.input_buffers = InputBuffers(4, 8, torch.device("cpu"))
-    proposer.sample_idx_mapping = torch.empty(8, dtype=torch.int32)
+    proposer.sample_idx_mapping = torch.empty(8, dtype=torch.int64)
     proposer.draft_tokens = torch.empty((4, 2), dtype=torch.int64)
     proposer.block_tables = SimpleNamespace(
         slot_mappings=torch.empty((1, 8), dtype=torch.int64),
@@ -281,7 +281,7 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
         uno_mask_token_id=1000, uno_noise_seed=42
     )
     proposer.input_buffers = InputBuffers(4, 32, torch.device("cpu"))
-    proposer.sample_idx_mapping = torch.empty(32, dtype=torch.int32)
+    proposer.sample_idx_mapping = torch.empty(32, dtype=torch.int64)
     proposer.draft_tokens = torch.empty((4, k), dtype=torch.int64)
     proposer.block_tables = SimpleNamespace(
         slot_mappings=torch.empty((1, 32), dtype=torch.int64),
@@ -415,7 +415,7 @@ def _cpu_uno_proposer(
     )
     rows = max(32, max_num_seqs * k)
     proposer.input_buffers = InputBuffers(max_num_seqs, rows, torch.device("cpu"))
-    proposer.sample_idx_mapping = torch.empty(rows, dtype=torch.int32)
+    proposer.sample_idx_mapping = torch.empty(rows, dtype=torch.int64)
     proposer.draft_tokens = torch.empty((max_num_seqs, k), dtype=torch.int64)
     proposer.block_tables = SimpleNamespace(
         slot_mappings=torch.empty((1, rows), dtype=torch.int64),
@@ -1880,7 +1880,7 @@ def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
     max_reqs, k, vocab, num_sms = 16, 8, 151936, 82
     buffers = InputBuffers(max_reqs, 2048, torch.device("cpu"))
     slot_mapping = torch.empty(2048, dtype=torch.int64)
-    sample_idx = torch.empty(max_reqs * k, dtype=torch.int32)
+    sample_idx = torch.empty(max_reqs * k, dtype=torch.int64)
     block_table = torch.empty((max_reqs, 256), dtype=torch.int32)
     assert UNO_PREPARE_RUNTIME_SCALARS == (
         "step",

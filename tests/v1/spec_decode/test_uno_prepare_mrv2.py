@@ -91,7 +91,7 @@ def _batch(k: int, scenario: str, device: torch.device):
     buffers = InputBuffers(max_reqs, max_tokens, device)
     slot_mapping = torch.full((max_tokens,), 12345, dtype=torch.int64, device=device)
     sample_idx_mapping = torch.full(
-        (max_tokens,), 12345, dtype=torch.int32, device=device
+        (max_tokens,), 12345, dtype=torch.int64, device=device
     )
     return SimpleNamespace(
         buffers=buffers,
@@ -250,7 +250,7 @@ def test_fused_uno_covers_large_graph_padding_capacity():
     case.buffers = InputBuffers(5, 8192, torch.device("cuda"))
     case.slot_mapping = torch.full((8192,), 12345, dtype=torch.int64, device="cuda")
     case.sample_idx_mapping = torch.full(
-        (8192,), 12345, dtype=torch.int32, device="cuda"
+        (8192,), 12345, dtype=torch.int64, device="cuda"
     )
     cpu = _cpu_clone(case)
     _run_reference(cpu, 4, 37)
@@ -343,7 +343,7 @@ def test_uno_prepare_specialization_ignores_dynamic_target_view_lengths(
     device = torch.device("cpu")
     buffers = InputBuffers(4, 2048, device)
     slot_mapping = torch.empty(2048, dtype=torch.int64, device=device)
-    sample_idx_mapping = torch.empty(2048, dtype=torch.int32, device=device)
+    sample_idx_mapping = torch.empty(2048, dtype=torch.int64, device=device)
     block_table = torch.empty((4, 256), dtype=torch.int32, device=device)
     warmup = SimpleNamespace(
         query_start_loc=torch.empty(num_reqs + 1, dtype=torch.int32, device=device),
@@ -442,6 +442,32 @@ def test_fused_uno_rejects_non_native_next_prefill_layout_on_cpu():
     case = _batch(4, "reorder", torch.device("cpu"))
     case.next_prefill_tokens = torch.zeros(5, 2, dtype=torch.int32)
     with pytest.raises(ValueError, match="next_prefill_tokens"):
+        prepare_uno_inputs_fused(
+            case.buffers,
+            case.slot_mapping,
+            case.sample_idx_mapping,
+            case.input_batch,
+            case.num_sampled,
+            case.num_rejected,
+            case.last_sampled,
+            case.next_prefill_tokens,
+            case.seeds,
+            case.block_table,
+            4,
+            4,
+            case.max_model_len,
+            29,
+            100_003,
+            37,
+        )
+
+
+def test_fused_uno_rejects_int32_sample_idx_mapping_on_cpu():
+    # The sample index mapping holds request-state slots, which MRV2 keeps in
+    # int64 so that slot * stride cannot wrap; an int32 buffer is refused.
+    case = _batch(4, "reorder", torch.device("cpu"))
+    case.sample_idx_mapping = case.sample_idx_mapping.to(torch.int32)
+    with pytest.raises(ValueError, match="sample_idx_mapping must be int64"):
         prepare_uno_inputs_fused(
             case.buffers,
             case.slot_mapping,

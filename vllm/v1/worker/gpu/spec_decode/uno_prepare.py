@@ -195,7 +195,7 @@ def _prepare_uno_inputs_kernel(
     # sampling.  Padding must remain -1 so gumbel writes cannot use stale rows.
     tl.store(
         out_sample_idx_mapping_ptr + row,
-        tl.where(active & state_valid, state_idx, -1).to(tl.int32),
+        tl.where(active & state_valid, state_idx, -1).to(tl.int64),
         mask=row < SAMPLE_CAP,
     )
 
@@ -414,6 +414,10 @@ def prepare_uno_inputs_fused(
     warmup and a real request to reuse the same specialization.
     """
     state_capacity = seeds.numel()
+    if sample_idx_mapping.dtype != torch.int64:
+        # Request-slot index mappings are int64 in MRV2: an int32 slot times
+        # a per-request stride wraps past 2**31 rows of state.
+        raise ValueError("sample_idx_mapping must be int64")
     if (
         last_sampled.ndim != 2
         or last_sampled.shape[1] != 1

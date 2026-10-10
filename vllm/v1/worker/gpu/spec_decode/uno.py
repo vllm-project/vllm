@@ -583,7 +583,7 @@ class UnoSpeculator(DraftModelSpeculator):
         )
         self._lora_hook: Callable[[tuple[int, int] | None], None] | None = None
         self.sample_idx_mapping = torch.full(
-            (self.max_num_reqs * self.k,), -1, dtype=torch.int32, device=device
+            (self.max_num_reqs * self.k,), -1, dtype=torch.int64, device=device
         )
         self.sample_col = torch.arange(self.k, dtype=torch.int32, device=device).repeat(
             self.max_num_reqs
