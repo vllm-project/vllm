@@ -35,6 +35,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
@@ -54,6 +55,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.tpsp import TPSPContext, TPSPOpsGroup, tpsp_shard_residual
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -77,6 +80,8 @@ from .utils import (
     maybe_prefix,
     spec_decode_needs_target_embed,
 )
+
+logger = init_logger(__name__)
 
 
 class LlamaMLP(nn.Module):
@@ -115,10 +120,12 @@ class LlamaMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
+    def forward(self, x, tpsp_active: bool = False):
         x, _ = self.gate_up_proj(x)
         x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
-        x, _ = self.down_proj(x)
+        # TPSP fuses down_proj with the following residual/norm step.
+        if not tpsp_active:
+            x, _ = self.down_proj(x)
         return x
 
 
@@ -225,13 +232,16 @@ class LlamaAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        tpsp_active: bool = False,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
+        # TPSP fuses o_proj with the following residual/norm step.
+        if not tpsp_active:
+            attn_output, _ = self.o_proj(attn_output)
+        return attn_output
 
     def _init_rotary_emb(
         self,
@@ -249,6 +259,8 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
+    tpsp_context: TPSPContext
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -315,19 +327,43 @@ class LlamaDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        *,
+        next_norm: RMSNorm | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
+        tpsp_active = next_norm is not None
+        residual_is_full = residual is None
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-        else:
+        elif not tpsp_active:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
-        # Fully Connected
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            tpsp_active=tpsp_active,
+        )
+        if tpsp_active:
+            if residual_is_full:
+                residual = tpsp_shard_residual(residual)
+            backend = self.tpsp_context.backend
+            hidden_states, residual = backend.fused_gemm_rs_norm_ag(
+                self.tpsp_context.handles["o_proj"],
+                hidden_states,
+                self.self_attn.o_proj,
+                residual,
+                self.post_attention_layernorm,
+            )
+            hidden_states = self.mlp(hidden_states, tpsp_active=True)
+            return backend.fused_gemm_rs_norm_ag(
+                self.tpsp_context.handles["down_proj"],
+                hidden_states,
+                self.mlp.down_proj,
+                residual,
+                next_norm,
+            )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        return self.mlp(hidden_states), residual
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Get quantization config for this layer. Override in subclasses."""
@@ -399,9 +435,50 @@ class LlamaModel(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
+        self.tpsp_requested = False
+        self.tpsp_context: TPSPContext | None = None
+        self.max_tpsp_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def _maybe_profile_tpsp(self) -> None:
+        if not self.tpsp_requested or self.tpsp_context is not None:
+            return
+
+        if (backend_cls := current_platform.get_tpsp_backend_cls()) is None:
+            logger.warning("TPSP using regular forward: no fused backend")
+            self.tpsp_requested = False
+            return
+
+        from vllm.distributed.parallel_state import get_tp_group
+
+        first_layer = self.layers[0]
+        backend = backend_cls(
+            get_tp_group().device_group.group_name,
+            first_layer.self_attn.o_proj.weight.device,
+        )
+        ops_groups = [
+            TPSPOpsGroup(
+                "o_proj",
+                first_layer.self_attn.o_proj,
+                first_layer.post_attention_layernorm,
+            ),
+            TPSPOpsGroup(
+                "down_proj",
+                first_layer.mlp.down_proj,
+                self.layers[1].input_layernorm,
+            ),
+        ]
+        context = backend.profile(ops_groups, self.max_tpsp_batched_tokens)
+        if context is not None:
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                layer.tpsp_context = context
+        else:
+            self.tpsp_requested = False
+        self.tpsp_context = context
 
     def forward(
         self,
@@ -411,6 +488,8 @@ class LlamaModel(nn.Module, EagleModelMixin):
         inputs_embeds: torch.Tensor | None = None,
         **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        self._maybe_profile_tpsp()
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -422,6 +501,10 @@ class LlamaModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        context = self.tpsp_context
+        tpsp_active = context is not None and context.profile.is_active(
+            hidden_states.size(0)
+        )
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []
@@ -433,9 +516,23 @@ class LlamaModel(nn.Module, EagleModelMixin):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, **extra_layer_kwargs
-            )
+            if tpsp_active:
+                next_norm = (
+                    self.layers[idx + 1].input_layernorm
+                    if idx + 1 < self.end_layer
+                    else self.norm
+                )
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                    next_norm=next_norm,
+                    **extra_layer_kwargs,
+                )
+            else:
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, **extra_layer_kwargs
+                )
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
@@ -449,7 +546,8 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 }
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if not tpsp_active:
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
@@ -470,6 +568,7 @@ class LlamaForCausalLM(
     SupportsEagle3,
     SupportsQuant,
 ):
+    tpsp_capable = True
     hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper
     # LoRA specific attributes
     packed_modules_mapping = {
@@ -519,6 +618,16 @@ class LlamaForCausalLM(
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        if vllm_config.model_config.enable_tpsp:
+            if not type(self).__dict__.get("tpsp_capable", False):
+                raise ValueError(f"TPSP is not supported by {type(self).__name__}")
+            if (
+                vllm_config.quant_config is not None
+                or vllm_config.lora_config is not None
+            ):
+                raise ValueError("TPSP does not support quantization or LoRA")
+            self.model.tpsp_requested = True
+            self.model.do_not_compile = True
 
     def _init_model(
         self,

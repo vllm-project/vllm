@@ -1132,6 +1132,20 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _verify_tpsp_compatibility(self) -> None:
+        if self.model_config is None or not self.model_config.enable_tpsp:
+            return
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError("--enable-tpsp requires pipeline_parallel_size=1.")
+        if self.speculative_config is not None and (
+            self.speculative_config.use_eagle()
+            or self.speculative_config.uses_extract_hidden_states()
+        ):
+            raise ValueError(
+                "--enable-tpsp is incompatible with speculative decoding "
+                "methods requiring target hidden states."
+            )
+
     def _verify_aux_output_compatibility(self) -> None:
         """Reject configurations unsupported by enabled auxiliary outputs."""
         if not self.aux_output_config.enabled:
@@ -1441,6 +1455,7 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        self._verify_tpsp_compatibility()
         self._resolve_and_verify_engram_config()
 
         self._check_supports_watermarking()

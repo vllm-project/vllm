@@ -611,6 +611,7 @@ class EngineArgs:
     model_class_overrides: dict[str, str] = get_field(
         ModelConfig, "model_class_overrides"
     )
+    enable_tpsp: bool = ModelConfig.enable_tpsp
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
@@ -1001,6 +1002,7 @@ class EngineArgs:
         model_group.add_argument(
             "--model-class-overrides", **model_kwargs["model_class_overrides"]
         )
+        model_group.add_argument("--enable-tpsp", **model_kwargs["enable_tpsp"])
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
             "--generation-config", **model_kwargs["generation_config"]
@@ -1957,6 +1959,7 @@ class EngineArgs:
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             model_class_overrides=self.model_class_overrides,
+            enable_tpsp=self.enable_tpsp,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
