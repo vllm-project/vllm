@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod convert;
+mod render;
 mod types;
 mod validate;
 
@@ -11,7 +12,6 @@ use std::result::Result;
 use std::sync::Arc;
 
 use asynk_strim_attr::{TryYielder, try_stream};
-use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
@@ -22,7 +22,7 @@ use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::dtype::TensorDtype;
-use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
+use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_llm::{
@@ -30,6 +30,7 @@ use vllm_llm::{
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
+use self::render::{ChoiceLogprobs, generate_response};
 use self::types::{
     GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
     GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
@@ -121,8 +122,17 @@ pub async fn generate(
         return sse_response(sse_stream, api_server_options.sse_keep_alive_interval);
     }
 
-    let collected = match raw_stream.collect_output().instrument(request_span.clone()).await {
-        Ok(collected) => collected,
+    let result = match collect_response(
+        raw_stream,
+        prepared.request_id,
+        api_server_options,
+        prepared.options,
+        mm_placeholders,
+    )
+    .instrument(request_span.clone())
+    .await
+    {
+        Ok(result) => result,
         Err(error) => {
             return server_error!(
                 "failed to collect raw generate response: {}",
@@ -132,18 +142,64 @@ pub async fn generate(
         }
     };
 
-    let response = match collect_generate(
-        collected,
-        prepared.request_id,
-        api_server_options,
-        prepared.options,
-        mm_placeholders,
-    ) {
-        Ok(response) => response,
-        Err(error) => return error.into_response(),
-    };
+    match result {
+        // In the request span so the body render task inherits it.
+        Ok((response, logprobs)) => request_span.in_scope(|| generate_response(response, logprobs)),
+        Err(error) => error.into_response(),
+    }
+}
 
-    Json(response).into_response()
+/// Collect a non-streaming raw generate request into the response (without
+/// output logprobs) and its output logprobs (outer error: the engine stream
+/// failed).
+async fn collect_response(
+    raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>> + Send,
+    request_id: String,
+    api_server_options: ApiServerOptions,
+    options: ResponseOptions,
+    mm_placeholders: Option<MultiModalPlaceholders>,
+) -> vllm_llm::Result<Result<(GenerateResponse, ChoiceLogprobs), ApiError>> {
+    let mut collected = raw_stream.collect_output().await?;
+    let logprobs = output_logprobs(collected.logprobs.take(), options.logprobs);
+    Ok(logprobs.and_then(|logprobs| {
+        let response = collect_generate(
+            collected,
+            request_id,
+            api_server_options,
+            options,
+            mm_placeholders,
+        )?;
+        Ok((response, logprobs))
+    }))
+}
+
+/// Validate collected output logprobs for rendering.
+fn output_logprobs(
+    logprobs: Option<Logprobs>,
+    requested: Option<i32>,
+) -> Result<ChoiceLogprobs, ApiError> {
+    let Some(requested) = requested else {
+        return Ok(ChoiceLogprobs::None);
+    };
+    let logprobs = logprobs.ok_or_else(|| {
+        ApiError::server_error(
+            "raw generate response requested logprobs but generation returned none".to_string(),
+        )
+    })?;
+    // The body is rendered after the status line, so reject empty rows here.
+    if logprobs.positions.iter().any(|position| position.entries.is_empty()) {
+        return Err(empty_position_error());
+    }
+    Ok(ChoiceLogprobs::Generate {
+        positions: logprobs.positions,
+        requested,
+    })
+}
+
+fn empty_position_error() -> ApiError {
+    ApiError::server_error(
+        "raw generate logprobs position unexpectedly had no token candidates".to_string(),
+    )
 }
 
 #[try_stream]
@@ -273,6 +329,8 @@ async fn generate_chunk_stream(
     Ok(())
 }
 
+/// Build the non-streaming response except the choice's output logprobs, which
+/// the caller takes out of `collected` beforehand and renders separately.
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
@@ -285,22 +343,13 @@ fn collect_generate(
         include_usage: _,
         // Ignored: continuous usage is a streaming-only option.
         include_continuous_usage: _,
-        logprobs: output_logprobs,
+        // Ignored: output logprobs are rendered by `render.rs`.
+        logprobs: _,
         include_prompt_logprobs,
         return_token_ids,
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
-    let logprobs = if let Some(requested) = output_logprobs {
-        let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
-            ApiError::server_error(
-                "raw generate response requested logprobs but generation returned none".to_string(),
-            )
-        })?;
-        Some(raw_logprobs_to_generate(logprobs, requested)?)
-    } else {
-        None
-    };
     let prompt_logprobs = if include_prompt_logprobs {
         match collected.prompt_logprobs.as_ref() {
             Some(prompt_logprobs) => Some(raw_prompt_logprobs_to_maps(prompt_logprobs)),
@@ -332,7 +381,7 @@ fn collect_generate(
         request_id,
         choices: vec![GenerateResponseChoice {
             index: 0,
-            logprobs,
+            logprobs: None,
             finish_reason: Some(finish_reason),
             token_ids: collected.token_ids,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
@@ -409,24 +458,14 @@ fn position_to_generate_logprobs_content(
     position: &PositionLogprobs,
     requested: i32,
 ) -> Result<GenerateLogProbsContent, ApiError> {
-    let chosen = position.entries.first().ok_or_else(|| {
-        ApiError::server_error(
-            "raw generate logprobs position unexpectedly had no token candidates".to_string(),
-        )
-    })?;
+    let chosen = position.entries.first().ok_or_else(empty_position_error)?;
 
-    // One pass: the first entry of each token id wins, as in Python's dict. The
-    // sampled token is the only one the engine can list twice.
     let mut seen = HashSet::with_capacity(position.entries.len());
     Ok(GenerateLogProbsContent {
         token_id: chosen.token_id,
         logprob: clamp_logprob(chosen.logprob),
         rank: wire_rank(chosen.rank),
-        top_logprobs: position
-            .entries
-            .iter()
-            .filter(|entry| seen.insert(entry.token_id))
-            .take(usize::try_from(requested).map_or(usize::MAX, |n| n.max(1)))
+        top_logprobs: top_logprob_entries(position, requested, &mut seen)
             .map(|entry| GenerateLogProb {
                 token_id: entry.token_id,
                 logprob: clamp_logprob(entry.logprob),
@@ -434,6 +473,23 @@ fn position_to_generate_logprobs_content(
             })
             .collect(),
     })
+}
+
+/// The engine entries of `position` that go into `top_logprobs`; `seen` is
+/// scratch space, reusable across positions.
+fn top_logprob_entries<'a>(
+    position: &'a PositionLogprobs,
+    requested: i32,
+    seen: &'a mut HashSet<u32>,
+) -> impl Iterator<Item = &'a TokenLogprob> {
+    // One pass: the first entry of each token id wins, as in Python's dict. The
+    // sampled token is the only one the engine can list twice.
+    seen.clear();
+    position
+        .entries
+        .iter()
+        .filter(|entry| seen.insert(entry.token_id))
+        .take(usize::try_from(requested).map_or(usize::MAX, |n| n.max(1)))
 }
 
 /// The engine reports rank 0 for a sampled token whose logprob is NaN (no value
@@ -535,7 +591,7 @@ mod tests {
 
     use futures::{TryStreamExt as _, stream};
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
-    use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+    use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_llm::GeneratePromptInfo;
 
@@ -1115,5 +1171,298 @@ mod tests {
             None,
         )
         .expect_err("multi-token prompt without payload is an engine failure");
+    }
+
+    fn tricky_positions() -> Vec<PositionLogprobs> {
+        vec![
+            position(&[(0, -0.0, 1), (0, -0.0, 1), (9, -1e-7, 2)]),
+            position(&[
+                (151_935, f32::NEG_INFINITY, 77),
+                (3, f32::NAN, 1),
+                (u32::MAX, -1e30, 2),
+            ]),
+            position(&[
+                (42, f32::INFINITY, 0),
+                (7, -12.345_678, 1),
+                (42, f32::INFINITY, 2),
+            ]),
+            position(&[
+                (1, f32::MIN_POSITIVE / 8.0, 1),
+                (100, -9999.0, 1),
+                (1000, -10000.5, 2),
+            ]),
+            position(&[(8, -0.5, 1)]),
+        ]
+    }
+
+    fn collected_output(
+        logprobs: Option<Vec<PositionLogprobs>>,
+        finish_reason: FinishReason,
+    ) -> CollectedGenerateOutput {
+        let token_ids = logprobs
+            .as_ref()
+            .map(|positions| positions.iter().map(|p| p.entries[0].token_id).collect())
+            .unwrap_or_else(|| vec![5, 6]);
+        CollectedGenerateOutput {
+            request_id: "raw-1".to_string(),
+            prompt_token_ids: vec![11, 22],
+            prompt_logprobs: Some(Logprobs {
+                positions: vec![position(&[(22, -0.5, 1), (23, f32::NAN, 2)])],
+            }),
+            prompt_token_id_logprobs: None,
+            token_ids,
+            logprobs: logprobs.map(|positions| Logprobs { positions }),
+            finish_reason,
+            usage: TokenUsage::default(),
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            sampling_mask: None,
+            spec_decode_metrics: None,
+        }
+    }
+
+    /// The streamed body and the serde reference (the response with
+    /// `raw_logprobs_to_generate` output, as `axum::Json` sent it before).
+    async fn render_with_reference(
+        mut collected: CollectedGenerateOutput,
+        request_id: &str,
+        options: ResponseOptions,
+        mm_placeholders: Option<MultiModalPlaceholders>,
+    ) -> (String, String) {
+        let logprobs = output_logprobs(collected.logprobs.take(), options.logprobs)
+            .unwrap_or_else(|_| panic!("valid logprobs"));
+        let mut response = collect_generate(
+            collected,
+            request_id.to_string(),
+            ApiServerOptions::default(),
+            options,
+            mm_placeholders,
+        )
+        .expect("response");
+        if let ChoiceLogprobs::Generate {
+            positions,
+            requested,
+        } = &logprobs
+        {
+            let logprobs = Logprobs {
+                positions: positions.clone(),
+            };
+            let logprobs = raw_logprobs_to_generate(&logprobs, *requested).expect("convert");
+            response.choices[0].logprobs =
+                Some(serde_json::value::to_raw_value(&logprobs).unwrap());
+        }
+        // Serialized from the same value (map iteration order included).
+        let expected = serde_json::to_vec(&response).expect("serialize reference");
+        response.choices[0].logprobs = None;
+
+        let response = generate_response(response, logprobs);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        let actual = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        (
+            String::from_utf8(actual.to_vec()).unwrap(),
+            String::from_utf8(expected).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn direct_render_is_byte_identical_to_serde_reference() {
+        // Several body chunks.
+        let many: Vec<PositionLogprobs> = (0..5000_u32)
+            .map(|i| PositionLogprobs {
+                entries: (0..9_u32)
+                    .map(|j| TokenLogprob {
+                        token_id: i * 131 + j * 7919,
+                        logprob: -(i as f32) * 0.037 - j as f32 * 1.25e-3,
+                        rank: j.max(1),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let logprobs = |requested| ResponseOptions {
+            logprobs: Some(requested),
+            include_prompt_logprobs: true,
+            ..Default::default()
+        };
+        let mut everything = collected_output(
+            Some(tricky_positions()),
+            FinishReason::Stop(Some(StopReason::TokenId(7))),
+        );
+        everything.prompt_token_id_logprobs =
+            Some(WireNdArray::from_f32(vec![1, 2], vec![-0.5, f32::NAN]).unwrap());
+        everything.kv_transfer_params = Some(serde_json::json!({"a": [1, "x"], "b": null}));
+        everything.ec_transfer_params = Some(serde_json::json!({"c": 1.5}));
+        everything.sampling_mask = Some(SamplingMask {
+            rows: vec![vec![0, 1], vec![], vec![42], vec![1], vec![8]],
+        });
+        everything.spec_decode_metrics = Some(RequestSpecDecodeMetrics {
+            num_spec_tokens: 2,
+            histogram: vec![1, 0, 2],
+            num_draft_tokens: 6,
+            per_step_accepted: vec![1, 2],
+            per_step_drafted: vec![2, 2],
+        });
+        let placeholders = MultiModalPlaceholders::from([
+            (
+                "image".to_string(),
+                vec![PlaceholderRangeInfo {
+                    offset: 1,
+                    length: 4,
+                }],
+            ),
+            ("audio".to_string(), Vec::new()),
+        ]);
+        let cases = [
+            (
+                collected_output(Some(tricky_positions()), FinishReason::Abort),
+                "raw-1",
+                logprobs(2),
+                None,
+            ),
+            (
+                collected_output(Some(tricky_positions()), FinishReason::Length),
+                "top-0",
+                ResponseOptions {
+                    include_prompt_logprobs: false,
+                    ..logprobs(0)
+                },
+                None,
+            ),
+            (
+                collected_output(Some(tricky_positions()), FinishReason::Repetition(None)),
+                "all",
+                logprobs(-1),
+                None,
+            ),
+            (
+                everything,
+                "quote\"back\\slash\u{1}\u{e9}",
+                ResponseOptions {
+                    return_token_ids: true,
+                    ..logprobs(1)
+                },
+                Some(placeholders),
+            ),
+            (
+                collected_output(Some(many), FinishReason::stop_eos()),
+                "many",
+                logprobs(8),
+                None,
+            ),
+            (
+                collected_output(Some(Vec::new()), FinishReason::Abort),
+                "empty-positions",
+                logprobs(5),
+                None,
+            ),
+            (
+                collected_output(None, FinishReason::stop_eos()),
+                "no-logprobs",
+                ResponseOptions::default(),
+                None,
+            ),
+        ];
+        for (collected, request_id, options, mm_placeholders) in cases {
+            let (actual, expected) =
+                render_with_reference(collected, request_id, options, mm_placeholders).await;
+            assert_eq!(actual, expected, "request_id={request_id}");
+        }
+    }
+
+    /// Logprobs go to the first choice; other choices serialize as usual.
+    #[tokio::test]
+    async fn direct_render_with_several_choices_is_byte_identical_to_serde_reference() {
+        let rows = tricky_positions();
+        let mut response = collect_generate(
+            collected_output(None, FinishReason::Abort),
+            "choices".to_string(),
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+            None,
+        )
+        .expect("response");
+        let mut second = response.choices[0].clone();
+        second.index = 1;
+        second.finish_reason = Some("stop".to_string());
+        response.choices.push(second);
+        let reference = raw_logprobs_to_generate(
+            &Logprobs {
+                positions: rows.clone(),
+            },
+            2,
+        )
+        .expect("convert");
+        response.choices[0].logprobs = Some(serde_json::value::to_raw_value(&reference).unwrap());
+        let expected = serde_json::to_vec(&response).expect("serialize reference");
+        response.choices[0].logprobs = None;
+
+        let response = generate_response(
+            response,
+            ChoiceLogprobs::Generate {
+                positions: rows,
+                requested: 2,
+            },
+        );
+        let actual = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(
+            String::from_utf8(actual.to_vec()).unwrap(),
+            String::from_utf8(expected).unwrap()
+        );
+    }
+
+    fn step(
+        token_ids: Vec<u32>,
+        positions: Option<Vec<PositionLogprobs>>,
+        finish_reason: Option<FinishReason>,
+    ) -> vllm_llm::Result<GenerateOutput> {
+        let mut output = stream_output(None, token_ids, finish_reason);
+        output.logprobs = positions.map(|positions| Logprobs { positions });
+        Ok(output)
+    }
+
+    /// An empty row fails the request with a 500 (non-streaming and streaming).
+    #[tokio::test]
+    async fn empty_logprobs_row_fails_the_request() {
+        let empty_row = || {
+            vec![
+                step(vec![1], Some(vec![position(&[(1, -0.1, 1)])]), None),
+                step(
+                    vec![2],
+                    Some(vec![PositionLogprobs { entries: vec![] }]),
+                    Some(FinishReason::Length),
+                ),
+            ]
+        };
+        let options = ResponseOptions {
+            logprobs: Some(1),
+            ..Default::default()
+        };
+        let error = collect_response(
+            stream::iter(empty_row()),
+            "probe".to_string(),
+            ApiServerOptions::default(),
+            options,
+            None,
+        )
+        .await
+        .expect("stream")
+        .err()
+        .expect("empty row");
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let streamed: Result<Vec<_>, _> = generate_chunk_stream(
+            stream::iter(empty_row()),
+            "probe".to_string(),
+            ApiServerOptions::default(),
+            options,
+            None,
+        )
+        .try_collect()
+        .await;
+        assert!(streamed.is_err());
     }
 }

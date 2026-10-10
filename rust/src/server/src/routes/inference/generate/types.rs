@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
@@ -69,7 +70,8 @@ impl Normalizable for GenerateRequest {}
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
-    pub logprobs: Option<GenerateLogProbs>,
+    /// The serialized `GenerateLogProbs`; `render.rs` streams it into the body.
+    pub logprobs: Option<Box<RawValue>>,
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,

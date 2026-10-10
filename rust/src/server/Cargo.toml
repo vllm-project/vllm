@@ -10,6 +10,7 @@ asynk-strim-attr.workspace = true
 auto_enums.workspace = true
 axum.workspace = true
 base64.workspace = true
+bytes.workspace = true
 educe.workspace = true
 futures.workspace = true
 http-body.workspace = true
@@ -25,7 +26,7 @@ prost-types.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_with.workspace = true
 sha2.workspace = true
 socket2.workspace = true
@@ -57,7 +58,6 @@ vllm-text.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 async-openai = { workspace = true, features = ["full"] }
-bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
 prost.workspace = true
