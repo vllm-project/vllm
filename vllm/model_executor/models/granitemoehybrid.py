@@ -445,6 +445,9 @@ class GraniteMoeHybridModel(nn.Module):
         expert_params_mapping = self.get_expert_mapping()
 
         def _load(n, p):
+            # Skip layers on other devices.
+            if is_pp_missing_parameter(n, self):
+                return
             param = params_dict[n]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, p)
