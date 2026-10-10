@@ -24,6 +24,7 @@ from tests.v1.attention.utils import (
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.config import (
+    AttentionConfig,
     CUDAGraphMode,
     HiSparseConfig,
     SpeculativeConfig,
@@ -85,6 +86,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
+    get_prefill_workspace_size,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.index_group import (
@@ -93,6 +95,7 @@ from vllm.v1.attention.backends.mla.index_group import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
+    get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.backends.utils import (
@@ -1285,6 +1288,24 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
 def test_split_prefill_chunks(seq_lens, max_buf, expected):
     out = split_prefill_chunks(seq_lens, max_buf)
     assert out == expected
+
+
+@pytest.mark.parametrize("factor", [2, 5, 16])
+def test_indexer_prefill_buffer_fits_flashmla_sparse_workspace(factor):
+    max_model_len = 1 << 20
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=max_model_len),
+        attention_config=AttentionConfig(sparse_mla_prefill_workspace_factor=factor),
+    )
+
+    workspace_rows = get_prefill_workspace_size(vllm_config)
+    indexer_rows = get_max_prefill_buffer_size(vllm_config)
+
+    assert workspace_rows == factor * max_model_len
+    # The indexer K buffer (132 bytes per row) shares the FlashMLA sparse prefill
+    # workspace (576 bf16 per row) and must still hold a whole request.
+    assert max_model_len <= indexer_rows
+    assert indexer_rows * 132 <= workspace_rows * 576 * 2
 
 
 @pytest.mark.parametrize(
