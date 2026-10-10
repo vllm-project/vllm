@@ -1568,6 +1568,29 @@ class Scheduler(SchedulerInterface):
             return None
         return new_block_ids_to_zero or None
 
+    def _reclaim_request_kv(self, request: Request, timestamp: float) -> None:
+        """Free a request's blocks and invalidate its computed-token state.
+
+        Shared by preemption and by reset_prefix_cache, which must also
+        reclaim requests that hold blocks outside `running` (parked streaming
+        sessions, block-holding waiting requests). The request keeps its token
+        history; those tokens only need recomputing.
+        """
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.request_finished(request)
+        self._free_request_blocks(request)
+        self.encoder_cache_manager.free(request)
+        self._inflight_prefills.discard(request)
+        # Stash the materialized frontier before zeroing so a parked session's
+        # resume fold does not have to guess it back.
+        request.reclaimed_frontier = request.num_computed_tokens
+        request.num_computed_tokens = 0
+        if request.spec_token_ids:
+            request.spec_token_ids = []
+        request.num_preemptions += 1
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
     ) -> None:
@@ -1584,15 +1607,8 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
-        if self.aux_output_connector is not None:
-            self.aux_output_connector.request_finished(request)
-        self._free_request_blocks(request)
-        self.encoder_cache_manager.free(request)
-        self._inflight_prefills.discard(request)
+        self._reclaim_request_kv(request, timestamp)
         request.status = RequestStatus.PREEMPTED
-        request.num_computed_tokens = 0
-        if request.spec_token_ids:
-            request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
         # still delivered on return (dropping them would perturb spec-decode
         # acceptance) but must not mutate the reset counters; each step drains
@@ -1605,9 +1621,6 @@ class Scheduler(SchedulerInterface):
         )
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
-        request.num_preemptions += 1
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
@@ -1657,6 +1670,17 @@ class Scheduler(SchedulerInterface):
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
         num_computed_tokens = session.num_computed_tokens
+        if num_computed_tokens == 0:
+            # Blocks were reclaimed while the session was parked (e.g. by a
+            # prefix-cache reset): the history is still valid, only its KV is
+            # gone. Fold at the frontier the reclaim recorded, so no already
+            # dropped tokens are resurrected; fall back to the legacy guess
+            # when the reclaim predates the field.
+            frontier = session.reclaimed_frontier
+            num_computed_tokens = (
+                frontier if frontier is not None else session.num_tokens - 1
+            )
+            session.reclaimed_frontier = None
         kept_output_tokens = session._all_token_ids[
             session.num_prompt_tokens : num_computed_tokens
         ]
@@ -2847,6 +2871,17 @@ class Scheduler(SchedulerInterface):
         is no running requests taking KV cache.
         """
         if reset_running_requests:
+            # A waiting request still expecting a remote KV transfer cannot be
+            # reclaimed; fail before any state is touched rather than after the
+            # running drain has already moved everything.
+            if any(
+                request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                for request in self.kv_holding_waiting
+            ):
+                raise RuntimeError(
+                    "Failed to reset KV cache due to the presence of requests "
+                    "waiting for remote KV transfer, which is not supported yet."
+                )
             # For logging.
             timestamp = time.monotonic()
             # Invalidate all the current running requests KV's by pushing them to
@@ -2863,6 +2898,37 @@ class Scheduler(SchedulerInterface):
             # not scheduled in the prior step. They will be flushed from the
             # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
+
+            # Requests holding blocks outside `running` would also keep the
+            # reset below from succeeding. Parked streaming sessions
+            # (WAITING_FOR_STREAMING_REQ) and block-holding waiting requests
+            # are reclaimed the same way as preemptions; their history tokens
+            # survive and are recomputed on resume. Requests waiting for remote
+            # KV transfer cannot be reclaimed and still fail the reset below.
+            holders = [
+                request
+                for request in self.kv_holding_waiting
+                if request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
+            ]
+            self.kv_holding_waiting.remove_requests(holders)
+            for request in holders:
+                parked = request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+                self._reclaim_request_kv(request, timestamp)
+                # Both flavors free KV blocks: announce the reset for each so
+                # the KV-offload connector drops its in-flight state for them.
+                self.reset_preempted_req_ids.add(request.request_id)
+                if parked:
+                    # Still waiting for the next chunk; it just no longer
+                    # holds blocks. Keep the blocked-status accounting honest
+                    # through the shared enqueue instead of discarding it.
+                    self._enqueue_waiting_request(request)
+                else:
+                    self.deferred_waiting.discard(request)
+                    request.status = RequestStatus.PREEMPTED
+                    request.drop_stale_output = True
+                    request.num_stale_output_tokens = request.num_in_flight_tokens
+                    request.num_output_placeholders = 0
+                    self.waiting.add_request(request)
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
         if reset_running_requests and not reset_successful:

@@ -166,6 +166,9 @@ class Request:
         # Drop the stale output instead, for same-step preempt + resume
         # (reset_prefix_cache).
         self.drop_stale_output = False
+        # The materialized frontier recorded when this request's KV blocks were
+        # reclaimed while parked; read once by the streaming resume fold.
+        self.reclaimed_frontier: int | None = None
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them
