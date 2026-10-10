@@ -143,7 +143,11 @@ class LoRAModel:
             module_name, is_lora_a = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
             )
-            if module_name in modules_to_save_names:
+            is_full_module = tensor_name.split(".")[-2] not in ("lora_A", "lora_B")
+            if (
+                is_full_module
+                and module_name.partition(".")[0] in modules_to_save_names
+            ):
                 full_parameters.setdefault(module_name, {})[
                     tensor_name.split(".")[-1]
                 ] = tensor.to(device=device)
@@ -183,7 +187,7 @@ class LoRAModel:
                 weight=weight,
                 bias=parameters.get("bias"),
             )
-        if len(modules_to_save) > 1:
+        if len({name.partition(".")[0] for name in modules_to_save}) > 1:
             raise ValueError(
                 "Only one full classification module is supported per "
                 f"adapter, received {sorted(modules_to_save)}."

@@ -268,6 +268,14 @@ def qwen3_guard_new_zealand_lora_files():
 
 
 @pytest.fixture(scope="session")
+def bge_reranker_lora_files():
+    return hf_api().snapshot_download(
+        repo_id="minhnv7/bge-reranker-v2m3-lora",
+        allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
+    )
+
+
+@pytest.fixture(scope="session")
 def skywork_qwen3_reward_lora_files():
     return hf_api().snapshot_download(
         repo_id="AmirMohseni/skywork-qwen3-0.6b-reward-lora",

@@ -9,6 +9,7 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import (
     BgeM3Pooler,
     BOSEOSFilter,
@@ -100,9 +101,18 @@ class RobertaClassificationHead(nn.Module):
         super().__init__()
         config = model_config.hf_config
         head_dtype = model_config.head_dtype
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size, dtype=head_dtype)
-        self.out_proj = nn.Linear(
-            config.hidden_size, config.num_labels, dtype=head_dtype
+        # ReplicatedLinear so that LoRA adapters can replace the head weights.
+        self.dense = ReplicatedLinear(
+            config.hidden_size,
+            config.hidden_size,
+            params_dtype=head_dtype,
+            return_bias=False,
+        )
+        self.out_proj = ReplicatedLinear(
+            config.hidden_size,
+            config.num_labels,
+            params_dtype=head_dtype,
+            return_bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -282,6 +292,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding, Support
 
     is_pooling_model = True
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
+    lora_classifier_modules = ("classifier.dense", "classifier.out_proj")
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "emb_ln": "embeddings.LayerNorm",

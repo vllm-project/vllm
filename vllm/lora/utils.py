@@ -148,8 +148,9 @@ def from_layer_classification(
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: PreTrainedConfig | None = None,
+    variable_num_labels: bool = True,
 ) -> ClassificationHeadWithLoRA:
-    instance_layer = ClassificationHeadWithLoRA(layer)
+    instance_layer = ClassificationHeadWithLoRA(layer, variable_num_labels)
     instance_layer.create_lora_weights(max_loras, lora_config, model_config)
     return instance_layer
 
@@ -212,6 +213,10 @@ def parse_fine_tuned_lora_name(
         elif parts[-2] in ["score", "classifier"]:
             new_name = parts[-2]
             return new_name, False
+        # Heads made of several linears, e.g. RoBERTa's classifier.dense and
+        # classifier.out_proj.
+        elif len(parts) >= 3 and parts[-3] in ["score", "classifier"]:
+            return ".".join(parts[-3:-1]), False
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[start_index:-1])
