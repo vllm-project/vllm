@@ -5,7 +5,10 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
 
 parser_name = "hunyuan_a13b"
 START_REASONING = "<think>\n"
@@ -166,3 +169,46 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+class _HunyuanReasoningOnlyParser(DelegatingParser):
+    reasoning_parser_cls = HunyuanA13BReasoningParser
+    tool_parser_cls = None
+
+
+def test_delegating_streaming_strips_answer_end():
+    """Regression for #58127: DelegatingParser must not leak </answer>.
+
+    ``is_reasoning_end`` flips True when the answer section starts so structured
+    output can constrain content, but the closing ``\\n</answer>`` must still be
+    consumed by the Hunyuan state machine instead of passthrough.
+    """
+    text = f"{START_REASONING}ink{START_RESPONSE}answer{END_RESPONSE}"
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    parser = _HunyuanReasoningOnlyParser(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    for tid in token_ids:
+        delta_text = tokenizer.decode([tid])
+        delta = parser.parse_delta(
+            delta_text,
+            [tid],
+            request,
+            finished=False,
+        )
+        if delta and delta.reasoning:
+            reasoning_parts.append(delta.reasoning)
+        if delta and delta.content:
+            content_parts.append(delta.content)
+
+    reasoning = "".join(reasoning_parts)
+    content = "".join(content_parts)
+    assert reasoning == "ink"
+    assert content == "answer"
+    assert "</answer>" not in content
+    assert END_RESPONSE not in content
