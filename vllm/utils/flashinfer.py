@@ -11,8 +11,7 @@ import importlib
 import importlib.util
 import os
 import shutil
-from collections.abc import Callable, Iterator
-from contextvars import ContextVar
+from collections.abc import Callable
 from typing import Any, NoReturn
 
 import requests
@@ -27,24 +26,6 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
-_bf16_autotune_buckets: ContextVar[tuple[int, ...] | None] = ContextVar(
-    "flashinfer_bf16_autotune_buckets", default=None
-)
-
-
-@contextlib.contextmanager
-def autotune_bf16_only(
-    tuning_buckets: tuple[int, ...], *, skip_ops: set[str] | None = None
-) -> Iterator[None]:
-    """Tune BF16 calls with bounded buckets, outside full-model autotuning."""
-    token = _bf16_autotune_buckets.set(tuning_buckets)
-    try:
-        with autotune(tune_mode=False, skip_ops=skip_ops):
-            yield
-    finally:
-        _bf16_autotune_buckets.reset(token)
-
-
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -54,21 +35,14 @@ def flashinfer_bf16_mm(
 ) -> torch.Tensor:
     from flashinfer import mm_bf16
 
-    tuning_buckets = _bf16_autotune_buckets.get()
-    tuning = (
-        autotune(tune_mode=True, tuning_buckets=tuning_buckets)
-        if tuning_buckets is not None
-        else contextlib.nullcontext()
+    return mm_bf16(
+        a,
+        b,
+        bias=bias,
+        pdl=pdl,
+        out_dtype=torch.bfloat16,
+        backend=backend,
     )
-    with tuning:
-        return mm_bf16(
-            a,
-            b,
-            bias=bias,
-            pdl=pdl,
-            out_dtype=torch.bfloat16,
-            backend=backend,
-        )
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -1091,47 +1065,6 @@ def flashinfer_scaled_fp4_mm(
     )
 
 
-def flashinfer_scaled_fp4_mm_out(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    block_scale_a: torch.Tensor,
-    block_scale_b: torch.Tensor,
-    alpha: torch.Tensor,
-    out: torch.Tensor,
-    out_dtype: torch.dtype | None,
-    use_8x4_sf_layout: bool,
-    backend: str,
-) -> torch.Tensor:
-    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
-    assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
-    assert a.stride(-1) == 1
-    assert a.shape[1] == b.shape[0]
-    assert out.shape == (a.shape[0], b.shape[1])
-    assert out.device.type == "cuda"
-
-    if backend in ("cutlass", "cudnn"):
-        if block_scale_a.dtype != torch.uint8:
-            block_scale_a = block_scale_a.view(torch.uint8)
-        if block_scale_b.dtype != torch.uint8:
-            block_scale_b = block_scale_b.view(torch.uint8)
-
-    from flashinfer import mm_fp4 as flashinfer_mm_fp4_
-
-    flashinfer_mm_fp4_(
-        a,
-        b,
-        block_scale_a,
-        block_scale_b,
-        alpha,
-        out_dtype or out.dtype,
-        out=out,
-        block_size=16,
-        use_8x4_sf_layout=use_8x4_sf_layout,
-        backend=backend,
-    )
-    return out
-
-
 def flashinfer_scaled_fp8_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1160,38 +1093,6 @@ def flashinfer_scaled_fp8_mm(
     if bias is not None:
         output = output + bias
     return output
-
-
-def flashinfer_scaled_fp8_mm_out(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    scale_a: torch.Tensor,
-    scale_b: torch.Tensor,
-    out: torch.Tensor,
-    out_dtype: torch.dtype | None = None,
-) -> torch.Tensor:
-    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
-    assert a.shape[1] == b.shape[0]
-    assert out.shape == (a.shape[0], b.shape[1])
-    assert scale_a.numel() == 1 and scale_b.numel() == 1
-    assert a.dtype == torch.float8_e4m3fn and b.dtype == torch.float8_e4m3fn
-    assert out.device.type == "cuda"
-    assert a.is_contiguous()
-
-    from flashinfer import bmm_fp8 as bmm_fp8_
-
-    bmm_fp8_(
-        a.unsqueeze(0),
-        # FlashInfer expects the weight in the same column-major view layout
-        # consumed by flashinfer_scaled_fp8_mm, so keep the transposed view.
-        b.unsqueeze(0),
-        scale_a,
-        scale_b,
-        out_dtype or out.dtype,
-        out.unsqueeze(0),
-        "auto",
-    )
-    return out
 
 
 def flashinfer_quant_nvfp4_8x4_sf_layout(
@@ -1295,7 +1196,6 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
-    "autotune_bf16_only",
     "has_flashinfer_bf16_gemm",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
@@ -1337,9 +1237,7 @@ __all__ = [
     "use_trtllm_attention",
     "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",
-    "flashinfer_scaled_fp4_mm_out",
     "flashinfer_scaled_fp8_mm",
-    "flashinfer_scaled_fp8_mm_out",
     "flashinfer_quant_nvfp4_8x4_sf_layout",
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",

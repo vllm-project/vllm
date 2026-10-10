@@ -144,7 +144,9 @@ class ServingRender(BaseServing):
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
-            features=self._extract_mm_features(engine_input),
+            features=self._extract_mm_features(
+                engine_input, include_mm_kwargs=request.return_mm_kwargs
+            ),
             sampling_params=params,
             model=request.model,
             reasoning_ended=reasoning_ended,
@@ -169,6 +171,7 @@ class ServingRender(BaseServing):
         chat_req = AnthropicServingMessages.to_chat_completion_request(
             request, merge_inline_system=self._merge_inline_system
         )
+        chat_req.return_mm_kwargs = request.return_mm_kwargs
         return await self.render_chat_request(chat_req)
 
     async def render_completion_request(
@@ -217,7 +220,9 @@ class ServingRender(BaseServing):
                 GenerateRequest(
                     request_id=request_id,
                     token_ids=token_ids,
-                    features=self._extract_mm_features(engine_input),
+                    features=self._extract_mm_features(
+                        engine_input, include_mm_kwargs=request.return_mm_kwargs
+                    ),
                     sampling_params=params,
                     model=request.model,
                     stream=bool(request.stream),
@@ -277,7 +282,9 @@ class ServingRender(BaseServing):
         return GenerateRequest(
             request_id=request.request_id,
             token_ids=list(token_ids),
-            features=self._extract_mm_features(engine_input),
+            features=self._extract_mm_features(
+                engine_input, include_mm_kwargs=request.return_mm_kwargs
+            ),
             sampling_params=params,
             model=request.model,
             reasoning_parser_kwargs=self._reasoning_parser_kwargs(request),
@@ -328,8 +335,11 @@ class ServingRender(BaseServing):
     def _extract_mm_features(
         self,
         engine_input: EngineInput,
+        *,
+        include_mm_kwargs: bool = True,
     ) -> MultiModalFeatures | None:
         return extract_mm_features(
             engine_input,
             metadata_fields_for=self._placeholder_metadata_fields,
+            include_mm_kwargs=include_mm_kwargs,
         )

@@ -117,18 +117,21 @@ If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
 
     This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
-In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
+Wheels are published an hour or two after a commit lands on `main`. If the wheel for
+your merge-base with upstream `main` is not available yet, the installer uses the
+nearest older commit that has one, searching up to 20 commits back. It stops with an
+error if compiled sources or build configuration (`csrc/`, `cmake/`, `CMakeLists.txt`,
+`pyproject.toml`, `vllm/_custom_ops.py`) changed between that commit and your
+merge-base, and warns if `rust/` or `setup.py` did. This is a source-level check, not
+a guarantee of binary compatibility.
 
-```bash
-export VLLM_PRECOMPILED_WHEEL_COMMIT=nightly
-export VLLM_USE_PRECOMPILED=1
-uv pip install --editable .
-```
+Setting `VLLM_PRECOMPILED_WHEEL_LOCATION` or a full SHA in
+`VLLM_PRECOMPILED_WHEEL_COMMIT` skips this search and check.
 
 There are more environment variables to control the behavior of Python-only build:
 
 - `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
-- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
+- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit to download the pre-compiled wheel from. Must be a full 40-character SHA.
 - `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu130`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
@@ -140,13 +143,8 @@ You can find more information about vLLM's wheels in [Install the latest code](#
 #### Full build (with compilation) {#full-build}
 
 !!! note "Compiler requirement"
-    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
-    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
-    ```bash
-    sudo apt-get install -y gcc-11 g++-11
-    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
-        --slave /usr/bin/g++ g++ /usr/bin/g++-11
-    ```
+    Building from source requires GCC/G++ ≥ 13 ([#58158](https://github.com/vllm-project/vllm/issues/58158)).
+    Ubuntu 24.04, the base of the default vLLM image, ships GCC 13 by default.
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
@@ -438,6 +436,11 @@ mode on VR200 and R100.
 BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
+
+Set `BUILD_NIXL=true` to build NIXL from source. NIXL's release wheels do not
+include the NIXL EP extension for the PyTorch nightly used by the Rubin build.
+The build uses the NIXL version pinned in `requirements/kv_connectors.txt` and
+replaces the NIXL packages installed from the KV-connector requirements.
 
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
 `nvidia/cuda:13.4.1-base-ubuntu24.04` image. Set `NCCL_VERSION` to 2.32.3 or

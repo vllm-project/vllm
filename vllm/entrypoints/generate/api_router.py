@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
+
+logger = init_logger(__name__)
 
 
 def register_generate_api_routers(app: FastAPI):
@@ -52,6 +55,12 @@ def register_generate_api_routers(app: FastAPI):
     from .generative_scoring.api_router import register_generative_scoring_api_router
 
     register_generative_scoring_api_router(app)
+
+    from .structured_decisions.api_router import (
+        register_structured_decisions_api_router,
+    )
+
+    register_structured_decisions_api_router(app)
 
 
 async def init_generate_state(
@@ -219,4 +228,34 @@ async def init_generate_state(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
+    )
+
+    from .structured_decisions.serving import ServingStructuredDecisions
+    from .structured_decisions.strategies import ReadContext, select_read_strategy
+
+    strategy = None
+    if "generate" in supported_tasks:
+        try:
+            strategy_cls = select_read_strategy(engine_client.model_config)
+            strategy = strategy_cls(
+                ReadContext(
+                    engine_client=engine_client,
+                    online_renderer=state.online_renderer,
+                    chat_template=resolved_chat_template,
+                    chat_template_content_format=args.chat_template_content_format,
+                    default_chat_template_kwargs=default_chat_template_kwargs,
+                )
+            )
+        except ValueError as e:
+            # Info, since every model without a read strategy lands here.
+            logger.info("/v1/systemone is disabled: %s", e)
+            strategy = None
+    state.serving_structured_decisions = (
+        ServingStructuredDecisions(
+            state.openai_serving_models,
+            strategy,
+            request_logger=request_logger,
+        )
+        if strategy is not None
+        else None
     )
