@@ -2626,6 +2626,26 @@ class VllmConfig:
                         compile_range_end,
                     )
 
+        pass_config = compilation_config.pass_config
+        if (
+            pass_config.fuse_xpu_moe_shared
+            and self.model_config is not None
+            and self.model_config.dtype not in (torch.float16, torch.bfloat16)
+        ):
+            # The fused kernel supports FP16/BF16 activations; disable it
+            # here so no unused compile range is added.
+            logger.warning_once(
+                "XPU MoE + shared-expert fusion requires float16 or bfloat16 "
+                "activations; "
+                "got %s. The fusion will be disabled.",
+                self.model_config.dtype,
+            )
+            pass_config.fuse_xpu_moe_shared = False
+        if pass_config.fuse_xpu_moe_shared:
+            max_token_num = pass_config.xpu_moe_shared_fusion_max_token_num
+            if compile_range_end is not None and max_token_num < compile_range_end:
+                computed_compile_ranges_endpoints.append(max_token_num)
+
         if compilation_config.pass_config.fuse_qk_norm_rope_kvcache:
             max_token_num = (
                 compilation_config.pass_config.rope_kvcache_fusion_max_token_num

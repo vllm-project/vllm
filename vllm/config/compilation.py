@@ -140,6 +140,12 @@ class PassConfig:
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
+    # XPU specific fusions
+    fuse_xpu_moe_shared: bool = False
+    """Fuse routed and shared experts for XPU decode."""
+    xpu_moe_shared_fusion_max_token_num: int = 8
+    """Largest compile-range end for the XPU MoE fusion."""
+
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
@@ -291,6 +297,9 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_qk_norm_rope_kvcache = False
+        if self.fuse_xpu_moe_shared and not current_platform.is_xpu():
+            logger.warning_once("XPU MoE fusion requires XPU; disabling the pass.")
+            self.fuse_xpu_moe_shared = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "
@@ -819,6 +828,25 @@ class CompilationConfig:
 
         factors["pass_config"] = self.pass_config.compute_hash()
         factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
+        if current_platform.is_xpu() and self.pass_config.fuse_xpu_moe_shared:
+            # AOT restoration bypasses the post-grad pass manager's UUID.
+            import torch
+
+            from vllm.compilation.passes.fusion.xpu_fusion import (
+                _xpu_moe_shared_fused_available,
+            )
+
+            available = _xpu_moe_shared_fused_available()
+            factors["xpu_moe_shared_op"] = (
+                str(torch.ops._xpu_C.moe_shared_fused_decode_interface.default._schema)
+                if available
+                else "missing"
+            )
+            root = Path(__file__).resolve().parents[1]
+            sources = ["_xpu_ops.py", "compilation/passes/fusion/xpu_fusion.py"]
+            factors["xpu_moe_shared_sources"] = hash_factors(
+                {name: (root / name).read_text() for name in sources}
+            )
         return hash_factors(factors)
 
     def __repr__(self) -> str:
