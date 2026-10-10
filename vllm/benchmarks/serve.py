@@ -53,6 +53,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (
+    calculate_concurrency,
     convert_to_pytorch_benchmark_format,
     redact_sensitive_namespace,
     write_to_json,
@@ -353,7 +354,7 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
-    # Max output tokens per second and concurrent requests at that peak
+    # Peak output tokens per second and peak concurrent requests
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
@@ -691,7 +692,6 @@ def calculate_metrics(
         # Create second buckets (ceiling to ensure we capture all time)
         duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
         tokens_per_second = np.zeros(duration_seconds)
-        concurrent_requests_per_second = np.zeros(duration_seconds)
 
         for i, output in enumerate(successful_outputs):
             # Calculate token generation timestamp using
@@ -708,20 +708,19 @@ def calculate_metrics(
                 if 0 <= second_bucket < duration_seconds:
                     tokens_per_second[second_bucket] += 1
 
-            # Track concurrent requests for each second this request was active
-            request_start_second = int(output.start_time - min_start_time)
-            request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
+        max_concurrent_requests, concurrency_times, concurrency_levels = (
+            calculate_concurrency(
+                (
+                    (output.start_time, output.start_time + output.latency)
+                    for output in successful_outputs
+                ),
+                min_start_time,
             )
+        )
 
-            for second in range(request_start_second, request_end_second + 1):
-                concurrent_requests_per_second[second] += 1
-
-        # Find the maximum tokens per second and corresponding
-        # concurrent requests
+        # Find the maximum tokens per second.
         if len(tokens_per_second) > 0:
             max_output_tokens_per_s = float(np.max(tokens_per_second))
-            max_concurrent_requests = int(np.max(concurrent_requests_per_second))
 
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
@@ -732,11 +731,12 @@ def calculate_metrics(
                 tokens_per_second,
                 title="Output tokens per second",
             )
-            fig.plot(
-                np.arange(len(concurrent_requests_per_second)),
-                concurrent_requests_per_second,
-                title="Concurrent requests per second",
-            )
+            if concurrency_times:
+                fig.plot(
+                    np.asarray(concurrency_times),
+                    np.asarray(concurrency_levels),
+                    title="Concurrent requests",
+                )
             fig.show()
         else:
             print("tip: install termplotlib and gnuplot to plot the metrics")
