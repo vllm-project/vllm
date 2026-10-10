@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops import triton_unified_attention as triton_ua
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
     compute_tile_loop_bounds,
@@ -35,6 +36,48 @@ NUM_BLOCKS = [32768, 2048]
 # 0: use 2D kernel for decode
 # 8: use 3D kernel for decode
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
+
+
+@pytest.mark.parametrize(
+    ("is_gfx1100", "max_seqlen_q", "nq_per_kv", "expected"),
+    [
+        (True, 512, 4, (64, 16, True)),
+        (True, 8192, 5, (64, 12, True)),
+        (True, 8192, 7, (64, 9, True)),
+        (True, 512, 16, (64, 4, True)),
+        (True, 511, 4, (16, 4, False)),
+        (True, 8192, 17, (32, 1, False)),
+        (False, 8192, 4, (16, 4, False)),
+    ],
+)
+def test_select_query_block(
+    monkeypatch: pytest.MonkeyPatch,
+    is_gfx1100: bool,
+    max_seqlen_q: int,
+    nq_per_kv: int,
+    expected: tuple[int, int, bool],
+) -> None:
+    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: is_gfx1100)
+    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: False)
+    assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv) == expected
+
+
+@pytest.mark.parametrize(
+    ("max_seqlen_q", "nq_per_kv", "expected"),
+    [
+        (8192, 6, (64, 10, True)),
+        (511, 6, (16, 2, False)),
+    ],
+)
+def test_select_query_block_gfx1151(
+    monkeypatch: pytest.MonkeyPatch,
+    max_seqlen_q: int,
+    nq_per_kv: int,
+    expected: tuple[int, int, bool],
+) -> None:
+    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: False)
+    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: True)
+    assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv) == expected
 
 
 @triton.jit
@@ -179,6 +222,81 @@ def ref_paged_attn(
         start_idx += query_len
 
     return torch.cat(outputs, dim=0)
+
+
+@pytest.mark.parametrize("num_query_heads", [4, 5, 6, 7])
+@torch.inference_mode()
+def test_tuned_long_prefill_matches_dense_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    num_query_heads: int,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: True)
+    monkeypatch.setattr(triton_ua, "_is_gfx1151", lambda: False)
+
+    query_len, kv_len = 512, 1024
+    num_kv_heads, head_size, block_size = 1, 128, 16
+    num_blocks = kv_len // block_size
+    scale = head_size**-0.5
+    device = torch.device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    query = torch.randn(
+        query_len,
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    key_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    cu_seqlens_q = torch.tensor([0, query_len], dtype=torch.int32, device=device)
+    seqused_k = torch.tensor([kv_len], dtype=torch.int32, device=device)
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device)[None]
+
+    assert triton_ua._select_query_block(query_len, num_query_heads) == (
+        64,
+        64 // num_query_heads,
+        True,
+    )
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=query_len,
+        seqused_k=seqused_k,
+        max_seqlen_k=kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        kv_quant_mode=KVQuantMode.NONE,
+    )
+
+    expected = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        [query_len],
+        [kv_len],
+        block_table,
+        scale,
+    )
+    torch.testing.assert_close(output, expected, atol=1.5e-2, rtol=1e-2)
 
 
 @torch.inference_mode()
