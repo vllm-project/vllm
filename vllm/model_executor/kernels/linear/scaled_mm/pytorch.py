@@ -34,6 +34,12 @@ def _rocm_torch_fp8_scaled_mm_supported() -> bool:
     return on_gfx942() or on_gfx950() or on_gfx12x() or on_gfx1250()
 
 
+def _rocm_rowwise_fp8_scaled_mm_slower_on_rdna4() -> bool:
+    from vllm.platforms.rocm import on_rdna4
+
+    return on_rdna4()
+
+
 def _supports_torch_fp8_scaled_mm() -> bool:
     if current_platform.is_cpu():
         return True
@@ -133,10 +139,8 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import on_rdna4
-
-        if on_rdna4():
-            return False, "not supported on RDNA4."
+        if _rocm_rowwise_fp8_scaled_mm_slower_on_rdna4():
+            return False, "is slower than ChannelWise on RDNA4."
 
         if not _supports_torch_fp8_scaled_mm():
             return False, "requires platform with torch FP8 scaled-MM support."

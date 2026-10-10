@@ -6,9 +6,7 @@ Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
 
 import inspect
-import sys
 from abc import ABC
-from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -117,15 +115,17 @@ def test_rowwise_torch_fp8_scaled_mm_rdna4_support(
     monkeypatch.setattr(
         pytorch_scaled_mm, "_supports_torch_fp8_scaled_mm", lambda: True
     )
-    rocm_module = ModuleType("vllm.platforms.rocm")
-    rocm_module.on_rdna4 = lambda: is_rdna4
-    monkeypatch.setitem(sys.modules, "vllm.platforms.rocm", rocm_module)
+    monkeypatch.setattr(
+        pytorch_scaled_mm,
+        "_rocm_rowwise_fp8_scaled_mm_slower_on_rdna4",
+        lambda: is_rdna4,
+    )
 
     supported, reason = RowWiseTorchFP8ScaledMMLinearKernel.is_supported()
 
     assert supported is not is_rdna4
     if is_rdna4:
-        assert reason == "not supported on RDNA4."
+        assert reason == "is slower than ChannelWise on RDNA4."
     else:
         assert reason is None
 
