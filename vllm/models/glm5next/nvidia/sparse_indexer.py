@@ -409,9 +409,10 @@ def sparse_attn_indexer_kpool(
 
         if row_shard is not None:
             # The k-pool expansion appends the request's incomplete tail
-            # (index_kpool - 1 entries) after the logical top-k history; those
-            # columns are part of the attention index and are exchanged too.
-            row_shard.exchange_topk(topk_indices_buffer, topk_tokens + index_kpool - 1)
+            # (index_kpool - 1 entries) after the logical top-k history; the
+            # in-place exchange ships the full tile-padded row width, so those
+            # columns travel with the top-k at no extra cost.
+            row_shard.exchange_topk(topk_indices_buffer)
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode

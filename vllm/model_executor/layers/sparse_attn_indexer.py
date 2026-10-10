@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+from typing import cast
+
 import torch
 import torch.distributed as dist
 
@@ -15,6 +17,9 @@ from vllm.distributed import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tp_group,
+)
+from vllm.distributed.device_communicators.cuda_communicator import (
+    CudaCommunicator,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -46,9 +51,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV32IndexerMetadata,
-)
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -352,13 +355,26 @@ class PrefillRowShard:
         lo, hi = start - chunk.token_start, end - chunk.token_start
         return start, end, chunk.cu_seqlen_ks[lo:hi], chunk.cu_seqlen_ke[lo:hi]
 
-    def exchange_topk(self, topk_buffer: torch.Tensor, width: int) -> None:
-        """Gather per-rank final indices back into global row order."""
-        # The local input must outlive the async PyNCCL gather's enqueued copy.
-        local = topk_buffer[self.start : self.stop, :width].contiguous()
+    def exchange_topk(self, topk_buffer: torch.Tensor) -> None:
+        """Gather per-rank final indices back into global row order, in place.
+
+        Every rank's rows already occupy its slice of the buffer, so the
+        grouped PyNCCL broadcasts write each root's slice straight into the
+        destination rows: no gather output, no staging copy, and nothing
+        extra for the profiling run to account for. Both slices are taken
+        at the buffer's full (tile-padded) row width, where they are
+        contiguous; padded columns ship garbage and stay masked downstream
+        exactly like local rows. ``tp_prefill_row_sharding_supported``
+        guarantees the TP group runs a CUDA communicator with PyNCCL
+        enabled whenever a shard exists.
+        """
+        pynccl = cast(CudaCommunicator, get_tp_group().device_communicator).pynccl_comm
+        assert pynccl is not None and not pynccl.disabled
         end = self.num_decode_tokens + sum(self.sizes)
-        topk_buffer[self.num_decode_tokens : end, :width] = get_tp_group().all_gatherv(
-            local, dim=0, sizes=self.sizes
+        pynccl.all_gatherv(
+            topk_buffer[self.num_decode_tokens : end],
+            topk_buffer[self.start : self.stop],
+            sizes=self.sizes,
         )
 
 
@@ -696,7 +712,7 @@ def sparse_attn_indexer(
 
         if row_shard is not None:
             # Rows are already fully ranked, so this is a layout gather.
-            row_shard.exchange_topk(topk_indices_buffer, topk_tokens)
+            row_shard.exchange_topk(topk_indices_buffer)
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
