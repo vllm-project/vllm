@@ -40,7 +40,6 @@ from vllm.lora.utils import (
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
-    SupportsMultiModal,
     is_pooling_model,
     supports_multimodal,
 )
@@ -58,9 +57,6 @@ DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
 
 
 class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
-
-
-class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):

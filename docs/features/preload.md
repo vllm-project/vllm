@@ -50,6 +50,26 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 The daemon itself must load from disk; passing `--load-format ipc_cache` to
 `vllm preload` is an error.
 
+## Preloading the FlashInfer autotune cache
+
+FlashInfer has several implementations of each operation and chooses between
+them by benchmarking. vLLM runs that pass during kernel warmup and persists the
+result per rank in the on-disk FlashInfer autotune cache (under
+`VLLM_CACHE_ROOT`, or `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR`), so a later engine
+with the same configuration loads the tuned configs instead of profiling again.
+Normally the first serving engine pays for the pass, and on a large MoE model it
+dominates what is left of the startup time once the weights come from the
+daemon.
+
+Unless FlashInfer autotune is disabled (`--no-enable-flashinfer-autotune`),
+`vllm preload` pays it at preload time: each daemon runs the autotune pass in
+place — profiling dummy runs against the shard it already holds — after
+loading and before binding its socket, then writes the cache:
+
+```bash
+vllm preload --model /path/to/model --tensor-parallel-size 4
+```
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
@@ -164,8 +184,14 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
 - **Platform**: CUDA and ROCm only; other platforms raise
   `UnsupportedPlatformForIPCError` even when `fallback` is enabled, since it
   is a permanent misconfiguration rather than a transient daemon outage.
-- **Parallelism**: tensor, expert and data parallelism are supported;
-  launching the daemon with pipeline parallelism is rejected.
+- **Parallelism**: tensor, expert, pipeline and data parallelism are
+  supported, including across nodes.
+- **Autotune preloading**: tuning runs across the daemon's world group,
+  including across nodes and DP ranks. With model-based speculative decoding
+  both daemon groups skip it (the target cannot run the drafter's dummy
+  passes, and a table tuned on the draft model would key on the draft's
+  config, which no engine looks up), so those deployments' first engine
+  tunes and fills the cache instead.
 - **Quantization**: every quantization method in the model must declare
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise

@@ -373,9 +373,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tasks.extend(PoolingRunner.get_supported_tasks(self.model))
         return tuple(tasks)
 
-    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+    def load_model(
+        self,
+        load_dummy_weights: bool = False,
+        *args,
+        model: nn.Module | None = None,
+        **kwargs,
+    ) -> None:
         time_before_load = time.perf_counter()
-        if load_dummy_weights:
+        if model is None and load_dummy_weights:
             self.load_config.load_format = "dummy"
         self.eplb.prepare_load()
         eplb_models_added = False
@@ -385,7 +391,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Capture warmup providers selected while constructing the model.
             with self.jit_warmup_registry.activate():
-                self.model = model_loader.load_model(
+                self.model = model or model_loader.load_model(
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
