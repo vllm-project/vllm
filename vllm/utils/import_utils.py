@@ -524,6 +524,11 @@ def has_nixl_ep() -> bool:
     return _has_module("nixl_ep")
 
 
+def has_nvshmem4py() -> bool:
+    """Whether the optional `nvshmem4py` package (`nvshmem.core`) is available."""
+    return _has_module_spec("nvshmem") and _has_module("nvshmem.core")
+
+
 def has_moonep() -> bool:
     """Whether the optional `moonep` package is available."""
     return _has_module("moonep")

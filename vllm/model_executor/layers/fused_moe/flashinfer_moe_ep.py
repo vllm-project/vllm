@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import _import_deep_gemm
+from vllm.utils.import_utils import has_nvshmem4py
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
@@ -159,6 +160,11 @@ def flashinfer_moe_ep_unsupported_reasons(
         unsupported.append("dual batch overlap")
     if spec.kernel == "deep_gemm" and vllm_config.parallel_config.enable_eplb:
         unsupported.append("EPLB")
+    if spec.kernel == "cutedsl" and not has_nvshmem4py():
+        unsupported.append(
+            "running without a usable nvshmem4py (nvshmem.core; pip install "
+            "nvshmem4py-cu12 or nvshmem4py-cu13 to match torch's CUDA)"
+        )
     return tuple(unsupported)
 
 

@@ -178,6 +178,7 @@ def megakernel_host(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(
         FlashInferMoeEpExperts, "_supports_current_device", staticmethod(lambda: True)
     )
+    monkeypatch.setattr(fi_ep, "has_nvshmem4py", lambda: True)
     return config
 
 
@@ -209,6 +210,20 @@ def test_megakernel_reports_its_own_constraints(megakernel_host):
         _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
     )
     assert reason.endswith("EPLB")
+
+
+def test_only_cutedsl_requires_nvshmem4py(
+    megakernel_host, monkeypatch: pytest.MonkeyPatch
+):
+    """Only CuTeDSL bootstraps NVSHMEM, so only it is rejected without nvshmem4py."""
+    monkeypatch.setattr(fi_ep, "has_nvshmem4py", lambda: False)
+    supported, reason = _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_CUTEDSL), kNvfp4Static, kNvfp4Dynamic
+    )
+    assert not supported and "nvshmem4py" in reason
+    assert _is_supported(
+        _megakernel_moe(FLASHINFER_MOE_EP_DEEP_GEMM), kMxfp4Static, None
+    ) == (True, "")
 
 
 def test_megakernels_are_oracle_backends():
