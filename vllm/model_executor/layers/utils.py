@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
+    is_flashinfer_bf16_gemm_supported,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -101,15 +102,12 @@ class _FlashInferBf16Backend:
     can_implement: _FlashInferBf16RuntimeCheck
 
 
-def _can_use_flashinfer_cutedsl_bf16(
+def _bf16_mm_shape_supported(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> bool:
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ):
-        return False
+    """Shape and layout constraints shared by every FlashInfer BF16 mm backend."""
     if x.ndim < 1 or weight.ndim != 2:
         return False
     if (
@@ -145,11 +143,47 @@ def _can_use_flashinfer_cutedsl_bf16(
     )
 
 
+def _can_use_flashinfer_cutedsl_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        return False
+    return _bf16_mm_shape_supported(x, weight, bias)
+
+
+# Output width below which flashinfer beats cuBLAS (swept on GB10, K=5120);
+# by N=512 flashinfer is 2-4x slower.
+_FLASHINFER_BF16_MAX_N = 128
+
+
+def _can_use_flashinfer_cudnn_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if not current_platform.is_cuda():
+        return False
+    if weight.shape[0] > _FLASHINFER_BF16_MAX_N:
+        return False
+    return _bf16_mm_shape_supported(x, weight, bias)
+
+
 _FLASHINFER_BF16_BACKENDS = {
     "flashinfer_cutedsl": _FlashInferBf16Backend(
         flashinfer_backend="cute-dsl",
         is_supported=is_flashinfer_cutedsl_bf16_gemm_supported,
         can_implement=_can_use_flashinfer_cutedsl_bf16,
+    ),
+    # cute-dsl is sm_10x only, but the cudnn backend also covers sm_12x, where
+    # cuBLAS drops to a 16x16-tiled kernel for narrow N at 2-4 tokens.
+    "flashinfer_cudnn": _FlashInferBf16Backend(
+        flashinfer_backend="cudnn",
+        is_supported=lambda: is_flashinfer_bf16_gemm_supported("cudnn"),
+        can_implement=_can_use_flashinfer_cudnn_bf16,
     ),
 }
 
