@@ -240,7 +240,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
         requests to this per-layer FA3/FA4 selection. For other configurations,
         force FA4 for all layers to avoid the mixed
         FA3+FA4 penalty.
-        When FA4 is not available, fall back to Triton.
+        When FA4 is not available, fall back to Triton, or to FlashInfer for a
+        plain Gemma4 with an NVFP4 KV cache, which Triton cannot read.
         """
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
@@ -282,11 +283,18 @@ class Gemma4Config(VerifyAndUpdateConfig):
                         head_dims,
                     )
         elif vllm_config.attention_config.backend is None:
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            backend = AttentionBackendEnum.TRITON_ATTN
+            if (
+                vllm_config.cache_config.cache_dtype == "nvfp4"
+                and MODELS_CONFIG_MAP.get(model_config.architecture) is Gemma4Config
+            ):
+                backend = AttentionBackendEnum.FLASHINFER
+            vllm_config.attention_config.backend = backend
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "%s. FA4 not available, forcing TRITON_ATTN backend.",
+                "%s. FA4 not available, forcing %s backend.",
                 head_dims,
+                backend.name,
             )
 
 
