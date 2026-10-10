@@ -584,7 +584,9 @@ class MooncakeStoreScheduler:
             if not block_ids:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
-            pool.touch([pool.blocks[block_id] for block_id in block_ids])
+            pool.touch(
+                [pool.blocks[block_id] for block_id in block_ids], record_access=False
+            )
 
     def register_finished_partial_tail(
         self,
@@ -649,7 +651,10 @@ class MooncakeStoreScheduler:
         store_job_id = self._next_store_job_id
         self._next_store_job_id += 1
         self._pinned_saves[store_job_id] = (pinned_block_ids, self._num_workers)
-        pool.touch([pool.blocks[block_id] for block_id in pinned_block_ids])
+        pool.touch(
+            [pool.blocks[block_id] for block_id in pinned_block_ids],
+            record_access=False,
+        )
 
         req_meta.store_job_id = store_job_id
         self._finished_partial_tail_metas[request.request_id] = req_meta

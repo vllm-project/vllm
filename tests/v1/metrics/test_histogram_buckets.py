@@ -18,6 +18,7 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import KVCacheEvictionEvent, SchedulerStats
 
 pytestmark = pytest.mark.cpu_test
 
@@ -129,6 +130,11 @@ DEFAULT_BUCKET_SNAPSHOTS: dict[str, list[float]] = {
         600,
         1200,
         1800,
+        3600,
+        7200,
+        14400,
+        28800,
+        86400,
     ],
 }
 
@@ -315,5 +321,31 @@ def test_prometheus_logger_applies_overrides():
         assert set(found) == set(METRIC_FAMILIES)
         for metric_name, family in METRIC_FAMILIES.items():
             assert found[metric_name] == overridden[family], metric_name
+    finally:
+        unregister_vllm_metrics()
+
+
+def test_kv_residency_long_lifetimes():
+    config = build_logger_config(ObservabilityConfig(kv_cache_metrics=True))
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0])
+        logger.record(
+            SchedulerStats(
+                kv_cache_eviction_events=[KVCacheEvictionEvent(5400.0, 3600.0, (5.0,))]
+            ),
+            None,
+            engine_idx=0,
+        )
+        samples = {
+            (sample.name, sample.labels.get("le")): sample.value
+            for metric in prometheus_client.REGISTRY.collect()
+            if metric.name.startswith("vllm:kv_block_")
+            for sample in metric.samples
+        }
+        assert samples[("vllm:kv_block_lifetime_seconds_sum", None)] == 5400.0
+        assert samples[("vllm:kv_block_lifetime_seconds_bucket", "1800.0")] == 0.0
+        assert samples[("vllm:kv_block_lifetime_seconds_bucket", "7200.0")] == 1.0
+        assert samples[("vllm:kv_block_idle_before_evict_seconds_sum", None)] == 3600.0
+        assert samples[("vllm:kv_block_reuse_gap_seconds_count", None)] == 1.0
     finally:
         unregister_vllm_metrics()

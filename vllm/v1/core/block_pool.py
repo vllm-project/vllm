@@ -684,6 +684,8 @@ class BlockPool:
             self._notify_reuse(ret)
 
         # In order to only iterate the list once, we duplicated code a bit
+        # Each allocation restarts sampling, including reuse of never-cached
+        # blocks whose previous lifetime emitted no eviction event.
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
@@ -723,6 +725,10 @@ class BlockPool:
             block.ref_cnt -= 1
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
+                # The final pin release starts idle time; the eviction sample
+                # is deferred until the cached content is actually removed.
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_freed(block)
                 released.append(block)
         self.free_block_queue.append_n(released)
 
@@ -737,25 +743,28 @@ class BlockPool:
             True if the block is evicted, False otherwise.
 
         """
-        # Clean up metrics tracking first to prevent leaks
-        if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(block)
-
         evicted_hashes = self._remove_cached_block_hashes(block)
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        # Only actual prefix-cache evictions belong in residency histograms;
+        # never-cached working blocks return above without an observation.
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(block)
         self._emit_block_removed_events(evicted_hashes)
         return True
 
-    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    def touch(
+        self, blocks: Sequence[KVCacheBlock], *, record_access: bool = True
+    ) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
 
         Args:
             blocks: A list of blocks to touch.
+            record_access: Record a prefix reuse. False for transfer-only pins.
 
         """
         for block in blocks:
@@ -764,8 +773,12 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            # Any new reference ends idle time, including transfer-only pins.
+            # record_access controls whether it also counts as prefix reuse.
             if self.metrics_collector:
-                self.metrics_collector.on_block_accessed(block)
+                self.metrics_collector.on_block_accessed(
+                    block, record_access=record_access
+                )
 
     def is_block_writable(self, block: KVCacheBlock) -> bool:
         """Return whether a block can be mutated by its sole owner."""
@@ -790,6 +803,10 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
+                # Zero references starts an idle interval. Cached KV
+                # can still serve prefix hits until it is actually evicted.
+                if self.metrics_collector:
+                    self.metrics_collector.on_block_freed(block)
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)
@@ -855,6 +872,7 @@ class BlockPool:
         for block in self.blocks:
             block.reset_hash()
 
+        # A cache reset discards tracking without emitting per-block evictions.
         if self.metrics_collector:
             self.metrics_collector.reset()
 
