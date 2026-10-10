@@ -212,3 +212,85 @@ def test_silu_block_quant_int32_offset_overflow(default_vllm_config):
     )
     assert torch.equal(scales[-1:], expected_scales)
     assert torch.equal(out[-1:], expected_out)
+
+
+def ref_silu_and_mul_per_token_quant(
+    output: torch.Tensor,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    scale_ub: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference implementation: unfused SiLU+Mul then group quantization."""
+    hidden = x.shape[-1] // 2
+    gate, up = x.split(hidden, dim=-1)
+    silu_out = F.silu(gate) * up
+
+    return torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+        output, silu_out, scale, scale_ub
+    )
+
+
+@pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)
+@pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device_idx", CUDA_DEVICES)
+@torch.inference_mode()
+def test_silu_and_mul_per_token_quant(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    has_scale_ub: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device_idx: str,
+) -> None:
+    """Test SiLU+Mul+Block Quantization kernel correctness."""
+    print("new test")
+    torch.accelerator.set_device_index(device_idx)
+    device = f"cuda:{device_idx}"
+    torch.random.manual_seed(seed)
+    torch.set_default_device(device)
+
+    quant_dtype = current_platform.fp8_dtype()
+
+    if has_scale_ub:
+        pytest.skip("Scale upper bound not yet supported")
+
+    scale = 1 / hidden_size
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device) * scale
+
+    ref_out = torch.empty((num_tokens, hidden_size), device=device, dtype=quant_dtype)
+    ref_scales = torch.empty(num_tokens, device=device, dtype=torch.float32)
+
+    # Reference implementation
+    ref_silu_and_mul_per_token_quant(ref_out, x, ref_scales, None)
+
+    # Fused kernel implementation
+    ops_out, ops_scales = ops.silu_and_mul_per_token_quant(x, quant_dtype, None)
+
+    # Check for NaN/Inf
+    assert not torch.isnan(ops_out.float()).any(), "Kernel output contains NaN"
+    assert not torch.isinf(ops_out.float()).any(), "Kernel output contains Inf"
+    assert not torch.isnan(ops_scales).any(), "Kernel scales contain NaN"
+    assert not torch.isinf(ops_scales).any(), "Kernel scales contain Inf"
+
+    # Check dtypes
+    assert ref_out.dtype == quant_dtype
+    assert ops_out.dtype == quant_dtype
+
+    # Check scales match
+    torch.testing.assert_close(ref_scales, ops_scales, rtol=1e-5, atol=1e-5)
+
+    # Check output correctness via dequantized values
+    ref_deq = ref_out.to(dtype=torch.float32).t() * ref_scales
+    ops_deq = ops_out.to(dtype=torch.float32).t() * ops_scales
+    torch.testing.assert_close(ref_deq, ops_deq, atol=5e-2, rtol=5e-2)
+
+    # opcheck
+    output = torch.empty(num_tokens, hidden_size, device=device, dtype=quant_dtype)
+    scales = torch.empty(num_tokens, device=device, dtype=torch.float32)
+    opcheck(
+        torch.ops._C.silu_and_mul_per_token_quant,
+        (output, x, scales, None),
+    )
