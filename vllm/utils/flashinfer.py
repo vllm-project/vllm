@@ -8,6 +8,7 @@ Users of vLLM should always import **only** these wrappers.
 import contextlib
 import functools
 import importlib
+import importlib.metadata
 import importlib.util
 import os
 import shutil
@@ -16,6 +17,7 @@ from typing import Any, NoReturn
 
 import requests
 import torch
+from packaging.version import Version
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -98,10 +100,58 @@ def has_flashinfer() -> bool:
             "FlashInfer kernels are disabled: flashinfer-cubin is not installed "
             "and nvcc (CUDA_HOME, CUDA_PATH, PATH or /usr/local/cuda) or ninja "
             "(PATH) is missing. Set CUDA_HOME to a CUDA toolkit and put ninja on "
-            "PATH, or run `flashinfer download-kernels`."
+            "PATH, or run `vllm download-kernels`."
         )
         return False
     return True
+
+
+def _installed_version(distribution: str) -> str | None:
+    try:
+        return Version(importlib.metadata.version(distribution)).public
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def has_flashinfer_jit_cache_wheels() -> bool:
+    """Return whether FlashInfer publishes flashinfer-jit-cache for the installed
+    PyTorch's CUDA version, which it does from CUDA 12.9."""
+    cuda_version = torch.version.cuda
+    return cuda_version is not None and Version(cuda_version) >= Version("12.9")
+
+
+def warn_if_flashinfer_kernels_missing() -> None:
+    """Warn on Hopper and newer GPUs when FlashInfer's precompiled kernels are
+    missing or were installed for another FlashInfer version."""
+    if not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+        and has_flashinfer()
+    ):
+        return
+    flashinfer_version = _installed_version("flashinfer-python")
+    packages = []
+    if not envs.VLLM_HAS_FLASHINFER_CUBIN:
+        packages.append("flashinfer-cubin")
+    if has_flashinfer_jit_cache_wheels():
+        packages.append("flashinfer-jit-cache")
+    installed = {name: _installed_version(name) for name in packages}
+    if flashinfer_version is None or all(
+        version == flashinfer_version for version in installed.values()
+    ):
+        return
+    logger.warning_once(
+        "FlashInfer's precompiled kernels are missing or do not match "
+        "flashinfer-python %s (%s). FlashInfer then downloads and compiles "
+        "kernels at startup, which can take several minutes, or fails to import "
+        "mismatched ones. Run `vllm download-kernels` in this Python environment "
+        "to install them.",
+        flashinfer_version,
+        ", ".join(
+            f"{name} {version or 'not installed'}"
+            for name, version in installed.items()
+        ),
+    )
 
 
 @functools.cache
@@ -1243,4 +1293,6 @@ __all__ = [
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
     "is_flashinfer_cudnn_fp8_prefill_attn_supported",
+    "has_flashinfer_jit_cache_wheels",
+    "warn_if_flashinfer_kernels_missing",
 ]

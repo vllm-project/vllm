@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,run-batch,preload}
+vllm {chat,complete,serve,launch,bench,collect-env,download-kernels,run-batch,preload}
 ```
 
 ## serve
@@ -187,6 +187,21 @@ Start collecting environment information.
 ```bash
 vllm collect-env
 ```
+
+## download-kernels
+
+Install the precompiled kernels that vLLM's dependencies would otherwise download
+or compile at startup. Run it after installing or upgrading vLLM. It currently
+installs FlashInfer's kernels and does nothing when FlashInfer is not installed.
+
+```bash
+vllm download-kernels
+
+# Print the install commands without running them
+vllm download-kernels --dry-run
+```
+
+See [vllm download-kernels](./download-kernels.md) for the full reference of all available arguments.
 
 ## run-batch
 
