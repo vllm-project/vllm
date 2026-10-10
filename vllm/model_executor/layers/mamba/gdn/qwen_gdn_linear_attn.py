@@ -981,14 +981,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return mixed_qkv_out, z_out, b_out, a_out
 
-    def rearrange_mixed_qkv(self, mixed_qkv):
-        """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
+    def rearrange_mixed_qkv(self, mixed_qkv, *, contiguous: bool = True):
+        """Split packed qkv into (1, seq, heads, dim) tensors.
 
         The original code used ``rearrange(x, "l (h d) -> 1 l h d", d=...)``
         followed by ``.contiguous()`` on each tensor.  This version flattens
         all three splits into a single buffer via ``torch.cat`` so that
         torch.compile emits one Triton copy kernel instead of three separate
         contiguous() calls.
+
+        With ``contiguous=False``, return strided views of ``mixed_qkv``
+        instead. Use it only for a consumer that accepts strided input.
         """
         if mixed_qkv is None:
             return None, None, None
@@ -999,6 +1002,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         v_dim = self.value_dim // self.tp_size
 
         query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
+        if not contiguous:
+            return (
+                query.view(1, seq_len, q_dim // self.head_k_dim, self.head_k_dim),
+                key.view(1, seq_len, k_dim // self.head_k_dim, self.head_k_dim),
+                value.view(1, seq_len, v_dim // self.head_v_dim, self.head_v_dim),
+            )
 
         fused = torch.cat(
             [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
@@ -1637,7 +1646,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        # The recurrent update below makes its own contiguous q/k/v copies.
+        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(
+            mixed_qkv_spec, contiguous=False
+        )
 
         # Split mixed non-spec-decode+prefill to process independently
         split_non_spec = (
@@ -1695,7 +1707,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             beta_non_spec = beta_non_spec.unsqueeze(0)
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
-                mixed_qkv_non_spec
+                mixed_qkv_non_spec, contiguous=False
             )
             g_non_spec = None
             beta_non_spec = None
@@ -1730,7 +1742,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2.2: Process non-spec-decode part
         if split_non_spec:
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
-                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+                mixed_qkv_non_spec[:num_decode_tokens],  # type: ignore[index]
+                contiguous=False,
             )
             core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
                 A_log=self.A_log,

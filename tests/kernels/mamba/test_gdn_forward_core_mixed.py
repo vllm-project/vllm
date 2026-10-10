@@ -12,6 +12,7 @@ bit-identical outputs and states against the reference op sequence.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import types
 from unittest.mock import patch
 
@@ -66,6 +67,13 @@ BATCHES = {
         [SPEC_TOKENS, 2, 64, 37],
         [NUM_SPEC, 1, -1, -1],
     ),
+}
+# Batches whose recurrent-update q/k/v come from rearrange_mixed_qkv.
+RECURRENT_BATCHES = {
+    "spec-decodes-then-prefills": BATCHES["spec-decodes-then-prefills"],
+    "spec-decodes": ([128, 90], [SPEC_TOKENS, 2], [NUM_SPEC, 1]),
+    "decodes-then-prefills": ([128, 90, 200], [1, 1, 37], [-1, -1, -1]),
+    "decodes": ([128, 90], [1, 1], [-1, -1]),
 }
 
 
@@ -266,3 +274,36 @@ def test_spec_token_slices_match_gathers() -> None:
 
     for sliced, gathered in zip(*results):
         torch.testing.assert_close(sliced, gathered, atol=0, rtol=0)
+
+
+def _rearrange_mixed_qkv_copies(layer, mixed_qkv, *, contiguous):
+    return QwenGatedDeltaNetAttention.rearrange_mixed_qkv(layer, mixed_qkv)
+
+
+@pytest.mark.parametrize("batch_name", RECURRENT_BATCHES)
+@torch.inference_mode()
+def test_strided_qkv_views_match_contiguous_copies(batch_name: str) -> None:
+    """The recurrent update gives bit-identical results for the strided q/k/v
+    views and for the contiguous q/k/v copies of rearrange_mixed_qkv."""
+    torch.manual_seed(0)
+    seq_lens, query_lens, draft_tokens = RECURRENT_BATCHES[batch_name]
+    vllm_config = _make_vllm_config()
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    metadata = _build_metadata(vllm_config, batch, draft_tokens)
+
+    num_tokens = batch.compute_num_tokens()
+    kv_cache, weights, mixed_qkvz, b, a = _make_inputs(metadata, num_tokens)
+    results = []
+    for contiguous in (False, True):
+        step_kv_cache = tuple(state.clone() for state in kv_cache)
+        layer = _build_layer(vllm_config, step_kv_cache, weights)
+        if contiguous:
+            # Ignore the call site's contiguous=False: copy as before.
+            layer.rearrange_mixed_qkv = functools.partial(
+                _rearrange_mixed_qkv_copies, layer
+            )
+        out = _run_forward_core(layer, metadata, mixed_qkvz, b, a, num_tokens)
+        results.append((out, *step_kv_cache))
+
+    for strided, copied in zip(*results):
+        torch.testing.assert_close(strided, copied, atol=0, rtol=0)
