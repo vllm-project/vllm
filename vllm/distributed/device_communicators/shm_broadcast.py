@@ -7,7 +7,6 @@ import os
 import pickle
 import shutil
 import sys
-import threading
 import time
 import weakref
 from contextlib import contextmanager
@@ -35,6 +34,7 @@ import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.spinloop import memory_fence
 from vllm.utils.cpu_resource_utils import check_cgroup_memory_available
 from vllm.utils.network_utils import (
     get_ip,
@@ -44,7 +44,6 @@ from vllm.utils.network_utils import (
 )
 
 logger = init_logger(__name__)
-
 
 SPINLOOP_EXT_ENABLED = False
 if envs.VLLM_USE_SPINLOOP_EXT:
@@ -73,32 +72,6 @@ SHM_READER_RECHECK_INTERVAL_MS = 5000
 
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
-
-
-# Memory fence for cross-process shared memory visibility.
-# Required for correct producer-consumer synchronization when using
-# shared memory without locks.
-_memory_fence_lock = threading.Lock()
-
-
-def memory_fence():
-    """Full memory barrier for shared memory synchronization.
-
-    Ensures all prior memory writes are visible to other processes before
-    any subsequent reads. This is critical for lock-free producer-consumer
-    patterns using shared memory.
-
-    Implementation acquires and immediately releases a lock. Python's
-    threading.Lock provides sequentially consistent memory barrier semantics
-    across all major platforms (POSIX, Windows). This is a lightweight
-    operation (~20ns) that guarantees:
-    - All stores before the barrier are visible to other threads/processes
-    - All loads after the barrier see the latest values
-    """
-    # Lock acquire/release provides full memory barrier semantics.
-    # Using context manager ensures lock release even on exceptions.
-    with _memory_fence_lock:
-        pass
 
 
 def to_bytes_big(value: int, size: int) -> bytes:
@@ -726,7 +699,6 @@ class MessageQueue:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
 
                 def check():
-                    memory_fence()
                     read_count = sum(metadata_buffer[1:])
                     written_flag = metadata_buffer[0]
                     return not (written_flag and read_count != self.buffer.n_reader)
@@ -759,6 +731,9 @@ class MessageQueue:
                 # found a block that is either
                 # (1) not written
                 # (2) read by all readers
+
+                # Acquire the readers' completion stores before reusing the slot.
+                memory_fence()
 
                 # mark the block as not written
                 metadata_buffer[0] = 0
@@ -844,7 +819,6 @@ class MessageQueue:
             while True:
 
                 def check():
-                    memory_fence()
                     read_flag = metadata_buffer[self.local_reader_rank + 1]
                     written_flag = metadata_buffer[0]
                     return not (not written_flag or read_flag)
@@ -877,17 +851,16 @@ class MessageQueue:
 
                     continue
                 # found a block that is not read by this reader
+                # Acquire the writer's payload stores after observing its flag.
+                memory_fence()
                 # let caller read from the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
                     try:
                         yield buf
                     finally:
-                        # caller has read from the buffer; set the read flag.
-                        metadata_buffer[self.local_reader_rank + 1] = 1
-                        # Memory fence ensures the read flag is visible to the writer.
-                        # Without this, writer may not see our read completion and
-                        # could wait indefinitely for all readers to finish.
+                        # Publish completion only after all payload reads finish.
                         memory_fence()
+                        metadata_buffer[self.local_reader_rank + 1] = 1
                         next_idx = self.current_idx + 1
                         self.current_idx = next_idx % self.buffer.max_chunks
                         self._spin_condition.record_read()

@@ -1531,8 +1531,9 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
+ext_modules.append(CMakeExtension(name="vllm.spinloop"))
+
 if not _is_xpu():
-    ext_modules.append(CMakeExtension(name="vllm.spinloop"))
     ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 
 if _is_hip():

@@ -1,5 +1,7 @@
 #include <Python.h>
 
+#include <atomic>
+
 extern "C" {
 
 #include <stdbool.h>
@@ -180,9 +182,16 @@ static PyObject* method_spinloop(PyObject* self, PyObject* args,
   Py_RETURN_FALSE;
 }
 
+static PyObject* method_memory_fence(PyObject* self, PyObject* args) {
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  Py_RETURN_NONE;
+}
+
 static PyMethodDef spinloop_methods[] = {
     {"spinloop", (PyCFunction)method_spinloop, METH_VARARGS | METH_KEYWORDS,
      "Wait for store with callback"},
+    {"memory_fence", method_memory_fence, METH_NOARGS,
+     "Issue a sequentially consistent CPU memory fence"},
     {NULL, NULL, 0, NULL}};
 
 static struct PyModuleDef spinloop_module = {
