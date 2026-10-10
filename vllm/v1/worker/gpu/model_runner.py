@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import replace
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.inplace import reload_weights
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
@@ -557,22 +559,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None
         return speculator.model
 
-    def reload_weights(self, *args, **kwargs) -> None:
-        # TODO(Wentao): Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    def update_config(self, *args, **kwargs) -> None:
-        # TODO(Wentao): Use full version instead of import when fully migrated to v2
-        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
-
-        GPUModelRunnerV1.update_config(self, *args, **kwargs)  # type: ignore[arg-type]
-
-        # v2 reads config via self.vllm_config (e.g. in load_model), so keep it
-        # in sync with the attributes the v1 helper just replaced.
-        self.vllm_config.model_config = self.model_config
-        self.vllm_config.load_config = self.load_config
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        """Reload weights in place."""
+        vllm_config = self.vllm_config
+        model = self.get_model()
+        reload_weights(
+            vllm_config, model, weights_iterator, weights_path, is_checkpoint_format
+        )
+        self.reset_lora_state()
+        self.reset_encoder_cache()
+        self.reset_mm_cache()
 
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
