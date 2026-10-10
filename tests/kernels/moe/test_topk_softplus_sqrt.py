@@ -81,32 +81,11 @@ def _torch_topk_softplus_sqrt(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
-@pytest.mark.parametrize("has_hash_routing", [False, True])
-@pytest.mark.parametrize(
-    "backend,expected_experts",
-    [
-        ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
-        ("aiter", "AiterExperts"),
-        ("triton_unfused", "UnfusedOAITritonExperts"),
-    ],
-)
-def test_hash_routing_backend_selection(
-    dist_init,
-    default_vllm_config,
-    monkeypatch,
-    has_hash_routing,
-    backend,
-    expected_experts,
-):
-    """Hash tables must reach backend selection; modular AITER remains eligible."""
+def _dsv4_moe_config(monkeypatch, default_vllm_config, has_hash_routing, backend):
     from dataclasses import replace
 
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-        select_deepseek_v4_mxfp4_moe_backend,
-    )
     from vllm.platforms import rocm
 
     # Exercise both native MX and monolithic AITER selection on any ROCm device.
@@ -130,14 +109,63 @@ def test_hash_routing_backend_selection(
         ),
         prefix="hash_routing_selection",
     )
-    config = replace(layer.routed_experts.moe_config, moe_backend=backend)
+    return layer, replace(layer.routed_experts.moe_config, moe_backend=backend)
 
-    if has_hash_routing and backend == "aiter_triton_mxfp4_bf16":
-        with pytest.raises(ValueError, match="hash routing"):
-            select_deepseek_v4_mxfp4_moe_backend(config)
-    else:
-        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
-        assert experts_cls.__name__ == expected_experts
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+@pytest.mark.parametrize("has_hash_routing", [False, True])
+@pytest.mark.parametrize(
+    "backend,expected_experts",
+    [
+        ("aiter_triton_mxfp4_bf16", "AiterW4A16ExpertsMonolithic"),
+        ("aiter", "AiterExperts"),
+        ("triton_unfused", "UnfusedOAITritonExperts"),
+    ],
+)
+def test_hash_routing_backend_selection(
+    dist_init,
+    default_vllm_config,
+    monkeypatch,
+    has_hash_routing,
+    backend,
+    expected_experts,
+):
+    """Hash tables reach backend selection and hash-capable kernels."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    layer, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, has_hash_routing, backend
+    )
+    _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    assert experts_cls.__name__ == expected_experts
+    # Monolithic kernels route internally, so they read the table from the layer.
+    assert (layer.routed_experts.hash_indices_table is not None) == has_hash_routing
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
+def test_hash_routing_rejects_monolithic_without_support(
+    dist_init, default_vllm_config, monkeypatch
+):
+    """A monolithic kernel that does not implement hash routing is rejected."""
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+        AiterW4A16ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+
+    monkeypatch.setattr(
+        AiterW4A16ExpertsMonolithic,
+        "_supports_hash_routing",
+        staticmethod(lambda: False),
+    )
+    _, config = _dsv4_moe_config(
+        monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
+    )
+    with pytest.raises(ValueError, match="hash routing"):
+        select_deepseek_v4_mxfp4_moe_backend(config)
 
 
 def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():
