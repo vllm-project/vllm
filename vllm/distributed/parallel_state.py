@@ -623,14 +623,14 @@ class GroupCoordinator:
         )
 
     def create_single_reader_mq_broadcasters(
-        self, reader_rank_in_group=0, blocking=False
+        self, reader_rank_in_group=0, blocking=False, *, max_chunks: int = 6
     ):
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
         return MessageQueue.create_from_process_group_single_reader(
             self.cpu_group,
             1 << 22,
-            6,
+            max_chunks,
             reader_rank=self.ranks[reader_rank_in_group],
             blocking=blocking,
         )
