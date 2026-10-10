@@ -289,6 +289,18 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 head_dims,
             )
 
+        if (
+            vllm_config.cache_config.cache_dtype == "nvfp4"
+            and current_platform.is_device_capability_family(120)
+            and vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER
+            and model_config.is_mm_prefix_lm
+        ):
+            raise ValueError(
+                "Gemma4 NVFP4 KV on FlashInfer currently supports text-only "
+                "serving. Use --language-model-only; multimodal-prefix "
+                "support requires the native FlashInfer mm-prefix adapter."
+            )
+
 
 class EmbeddingGemma2ModelConfig(Gemma4Config):
     @staticmethod
