@@ -7,7 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, cast
 
 import vllm.envs as envs
 from vllm import TokensPrompt
@@ -32,7 +32,12 @@ from vllm.exceptions import (
     VLLMClientError,
     VLLMValidationError,
 )
-from vllm.inputs import EngineInput, PromptType
+from vllm.inputs import (
+    DecoderOnlyEngineInput,
+    EncoderDecoderInput,
+    EngineInput,
+    PromptType,
+)
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -628,9 +633,32 @@ class AsyncLLM(EngineClient):
                     else:
                         sp = sampling_params
                     # TODO(nick): Avoid re-validating reused sampling parameters
+                    prompt = input_chunk.prompt
+                    if isinstance(prompt, list):
+                        # Copy so session updates never mutate the caller's
+                        # list object (see issue #54215).
+                        prompt = list(prompt)
+                    elif isinstance(prompt, dict) and isinstance(
+                        prompt.get("prompt_token_ids"), list
+                    ):
+                        prompt = copy(cast(DecoderOnlyEngineInput, prompt))
+                        prompt["prompt_token_ids"] = list(prompt["prompt_token_ids"])
+                    elif (
+                        isinstance(prompt, dict)
+                        and isinstance(
+                            decoder_prompt := prompt.get("decoder_prompt"), dict
+                        )
+                        and isinstance(decoder_prompt.get("prompt_token_ids"), list)
+                    ):
+                        prompt = copy(cast(EncoderDecoderInput, prompt))
+                        decoder_input = copy(prompt["decoder_prompt"])
+                        decoder_input["prompt_token_ids"] = list(
+                            decoder_input["prompt_token_ids"]
+                        )
+                        prompt["decoder_prompt"] = decoder_input
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
-                        prompt=input_chunk.prompt,
+                        prompt=prompt,
                         params=sp,
                         resumable=True,
                         **inputs,  # type: ignore[arg-type]
