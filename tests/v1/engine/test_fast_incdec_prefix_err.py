@@ -10,6 +10,52 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 # ruff: noqa: E501
 
 
+def _make_request(prompt_token_ids):
+    return EngineCoreRequest(
+        request_id="test",
+        external_req_id="test-ext",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(skip_special_tokens=True),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def test_fast_inc_detok_prompt_prime_cap_preserves_output(monkeypatch):
+    """Capping the DecodeStream prompt-prime window must not change the decoded
+    output text: only a short trailing context matters for incremental decoding.
+    """
+    import vllm.v1.engine.detokenizer as detok_mod
+
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-1b-it")
+    # Prompt longer than the cap so the trailing-window truncation is exercised.
+    prompt_token_ids = [107, 4606, 236787, 107] * 200
+    out_tokens = [236840, 107, 138, 236782, 107, 140, 236775, 6265, 1083, 623]
+    request = _make_request(prompt_token_ids)
+
+    def decode_all():
+        detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)
+        assert detokenizer.__class__.__name__ == "FastIncrementalDetokenizer"
+        text = ""
+        for i, token_id in enumerate(out_tokens):
+            detokenizer.update([token_id], False)
+            text += detokenizer.get_next_output_text(
+                i == len(out_tokens) - 1, delta=True
+            )
+        return text
+
+    monkeypatch.setattr(detok_mod, "MAX_PROMPT_PRIME_TOKENS", 10**9)
+    full_prime_output = decode_all()
+    monkeypatch.setattr(detok_mod, "MAX_PROMPT_PRIME_TOKENS", 128)
+    capped_prime_output = decode_all()
+
+    assert capped_prime_output == full_prime_output
+
+
 def test_fast_inc_detok_invalid_utf8_err_case():
     """Test edge case where tokenizer can produce non-monotonic,
     invalid UTF-8 output, which breaks the internal state of
