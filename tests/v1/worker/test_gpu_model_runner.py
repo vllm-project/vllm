@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -63,6 +64,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
@@ -1045,13 +1047,22 @@ def test_update_states_pp_async_multi_request_keeps_rank_state_consistent(
         )
 
 
+def _update_config(model_runner: GPUModelRunner, overrides: dict) -> None:
+    # Apply overrides via the worker without constructing a full worker.
+    worker = object.__new__(Worker)
+    worker.vllm_config = model_runner.vllm_config
+    worker.model_runner = model_runner
+    worker.update_config(overrides)
+
+
 def test_update_config(model_runner):
     # Simple update
-    model_runner.update_config({"load_config": {"load_format": "dummy"}})
+    _update_config(model_runner, {"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
+    assert model_runner.vllm_config.load_config is model_runner.load_config
     # Raise error on non-existing config
     with pytest.raises(ValueError, match="do_not_exist_config"):
-        model_runner.update_config({"do_not_exist_config": "dummy"})
+        _update_config(model_runner, {"do_not_exist_config": "dummy"})
 
 
 def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
@@ -1059,12 +1070,14 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     # model_runner_2 loads dummy weights first then load real weights inplace
     model_runner.load_model()
     original_load_format = model_runner_2.load_config.load_format
-    model_runner_2.update_config({"load_config": {"load_format": "dummy"}})
+    _update_config(model_runner_2, {"load_config": {"load_format": "dummy"}})
     model_runner_2.load_model()  # Initial model loading with dummy weights
     assert str(model_runner.get_model().state_dict()) != str(
         model_runner_2.get_model().state_dict()
     )
-    model_runner_2.update_config({"load_config": {"load_format": original_load_format}})
+    _update_config(
+        model_runner_2, {"load_config": {"load_format": original_load_format}}
+    )
     model_runner_2.reload_weights()  # Load real weights inplace
     assert str(model_runner.get_model().state_dict()) == str(
         model_runner_2.get_model().state_dict()
@@ -1083,26 +1096,34 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     # silently re-streams the original checkpoint.
     loader = Mock()
     loader.get_all_weights.return_value = iter(())
-    monkeypatch.setattr(gpu_model_runner_module, "get_model_loader", lambda _: loader)
-    monkeypatch.setattr(gpu_model_runner_module, "initialize_layerwise_reload", Mock())
-    monkeypatch.setattr(gpu_model_runner_module, "finalize_layerwise_reload", Mock())
+    monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: loader)
+    monkeypatch.setattr(reload_inplace_module, "initialize_layerwise_reload", Mock())
+    monkeypatch.setattr(reload_inplace_module, "finalize_layerwise_reload", Mock())
 
-    runner = Mock(lora_config=None)
-    runner.model_config = SimpleNamespace(
-        model="/tmp/pulled-config-files",
-        model_weights="s3://bucket/original",
-        revision="abc123",
-        quantization=None,
+    vllm_config = SimpleNamespace(
+        lora_config=None,
+        load_config=SimpleNamespace(load_format="runai_streamer"),
+        model_config=SimpleNamespace(
+            model="/tmp/pulled-config-files",
+            model_weights="s3://bucket/original",
+            revision="abc123",
+            quantization=None,
+        ),
     )
-    runner.get_model.return_value.named_parameters.return_value = []
-    runner.get_model.return_value.load_weights.return_value = None
+    model = Mock()
+    model.named_parameters.return_value = []
+    model.load_weights.return_value = None
 
-    GPUModelRunner.reload_weights(runner, weights_path="org/new-model")
-
-    loader.get_all_weights.assert_called_once_with(
-        runner.model_config, runner.get_model.return_value
+    reload_inplace_module.reload_weights(
+        vllm_config,
+        model,
+        weights_iterator=None,
+        weights_path="org/new-model",
+        is_checkpoint_format=True,
     )
-    cfg = runner.model_config
+
+    loader.get_all_weights.assert_called_once_with(vllm_config.model_config, model)
+    cfg = vllm_config.model_config
     assert (cfg.model, cfg.model_weights, cfg.revision) == ("org/new-model", "", None)
 
 
