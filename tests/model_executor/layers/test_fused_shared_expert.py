@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
@@ -1134,6 +1135,40 @@ def test_online_fp8_shared_expert_rejects_quark_mxfp4_fse() -> None:
         False,
         "online shared-expert quantization keys do not match the routed expert keys",
     )
+
+
+@pytest.mark.parametrize(
+    ("exclude", "expected"),
+    [
+        ([], True),
+        (["lm_head", "model.embed_tokens"], True),
+        (["*.shared_experts.*"], False),
+        (["model.layers.0.mlp.experts"], False),
+        (["model.layers.0.mlp.experts", "*.shared_experts.*"], True),
+    ],
+)
+def test_modelopt_mxfp8_shared_expert_fse_compatibility(
+    exclude: list[str], expected: bool
+) -> None:
+    """MiniMax-M3 ships MXFP8, whose exclude list decides FSE compatibility."""
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=exclude,
+        ),
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_experts",
+    )
+
+    assert compatible is expected
+    if expected:
+        assert reason is None
+    else:
+        assert reason == (
+            "MXFP8 excludes routed and shared experts inconsistently at "
+            "model.layers.0.mlp.shared_experts"
+        )
 
 
 def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
