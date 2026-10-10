@@ -47,6 +47,7 @@ from vllm.transformers_utils.processor import get_video_processor_cls_name_from_
 
 from .utils import (
     create_edit_list_trimmed_video,
+    create_live_webm_video,
     create_long_gop_video,
     create_video_from_image,
 )
@@ -951,6 +952,22 @@ def test_video_backend_handles_edit_list_trimmed_video(
         qwen_frames, qwen_metadata = Qwen2VLVideoBackend.load_bytes(video_data)
         assert qwen_metadata["total_num_frames"] == num_visible
         assert qwen_frames.shape[0] >= 4
+
+
+def test_opencv_counts_frames_when_video_metadata_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """OpenCV should scan a stream when its container has no frame count."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+        video_data = create_live_webm_video(num_frames=20, fps=10)
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        frames, metadata = loader.load_bytes(video_data, backend="opencv")
+
+        assert frames.shape[0] == 20
+        assert metadata["total_num_frames"] == 20
+        assert metadata["duration"] == pytest.approx(2.0)
 
 
 # ============================================================================
