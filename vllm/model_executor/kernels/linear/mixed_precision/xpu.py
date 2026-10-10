@@ -186,7 +186,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
 
         # Free the original unpacked int8 weight (still registered as "weight")
         # to avoid double-storing both int8 [N, K] and int32 [N, K/8] in memory.
-        layer.register_parameter("weight", None)
+        delattr(layer, "weight")
 
     def apply_weights(
         self,
