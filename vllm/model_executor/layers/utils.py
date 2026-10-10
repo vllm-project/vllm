@@ -11,6 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.parallel_state import in_graph_capture
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
@@ -329,6 +330,25 @@ def rocm_unquantized_gemm_impl(
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
+
+    # Graph capture only, warmup included: the warmup run before each capture
+    # takes the same path, so aiter's kernel JIT happens there, not in capture.
+    if (
+        (in_graph_capture() or torch.cuda.is_current_stream_capturing())
+        and skinny_operands_compatible
+        and rocm_aiter_ops.has_tuned_decode_gemm(n, m, k, x.dtype, bias is not None)
+    ):
+        from aiter.tuned_gemm import tgemm
+
+        # The decode kernels take any activation row stride >= K, e.g. a column
+        # slice of a fused projection output, but need adjacent K elements.
+        x_view = x.reshape(-1, x.size(-1))
+        if x_view.stride(-1) != 1 or (
+            x_view.size(0) > 1 and x_view.stride(0) < x_view.size(-1)
+        ):
+            x_view = x_view.contiguous()
+        out = tgemm.mm(x_view, weight, bias)
+        return out.reshape(*x.shape[:-1], weight.shape[0])
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM

@@ -2443,6 +2443,30 @@ class rocm_aiter_ops:
         return cls.is_linear_enabled() and on_gfx950()
 
     @classmethod
+    def has_tuned_decode_gemm(
+        cls, n: int, m: int, k: int, dtype: torch.dtype, has_bias: bool
+    ) -> bool:
+        """Return True if aiter has a tuned decode-GEMM row for this exact shape.
+
+        The tuned config is keyed by gfx and cu_num, so no architecture check
+        is needed.
+        """
+        if not cls.is_linear_enabled():
+            return False
+        if dtype not in [torch.float16, torch.bfloat16]:
+            return False
+        try:
+            from aiter.tuned_gemm import (
+                get_GEMM_A16W16_config,
+                is_flydsl_decode_config,
+            )
+
+            cfg = get_GEMM_A16W16_config(n, m, k, has_bias, str(dtype), str(dtype))
+        except ImportError:  # aiter absent, or too old to have decode rows
+            return False
+        return is_flydsl_decode_config(cfg)
+
+    @classmethod
     def get_aiter_allreduce(cls):
         """Return the TP device communicator's AITER custom-allreduce if it has
         one, return None otherwise
