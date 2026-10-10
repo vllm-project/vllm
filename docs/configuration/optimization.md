@@ -66,6 +66,20 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
+Decode-heavy workloads with many small prefill chunks can optionally defer those
+chunks until there is enough prefill work to batch together:
+
+```bash
+vllm serve MODEL \
+    --min-prefill-chunk-tokens 512 \
+    --max-prefill-chunk-delay-steps 16
+```
+
+While decode requests are runnable, smaller text prefill chunks are deferred
+until their combined size reaches the threshold or their delay limit. This can
+improve GPU utilization at the cost of TTFT under sparse arrivals. The feature
+is disabled by default (`--min-prefill-chunk-tokens 0`).
+
 !!! warning
     When chunked prefill is disabled, `max_num_batched_tokens` must be greater than `max_model_len`.  
     In that case, if `max_num_batched_tokens < max_model_len`, vLLM may crash at server start‑up.
