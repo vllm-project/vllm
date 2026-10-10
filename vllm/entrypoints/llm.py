@@ -595,8 +595,36 @@ class LLM(
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
 
+            Worker RPCs run below the engine layer: they cannot see or
+            update scheduler-owned state such as the prefix KV cache. For
+            weight updates, prefer [reload_weights][vllm.LLM.reload_weights],
+            which also invalidates caches derived from the old weights.
+
         """
         return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
+
+    def reload_weights(self, weights_path: str | None = None) -> None:
+        """Reload model weights and invalidate caches derived from them.
+
+        Unlike a direct [collective_rpc][vllm.LLM.collective_rpc] worker
+        RPC, this also resets the prefix KV, encoder, and multi-modal
+        caches computed with the old weights.
+
+        Args:
+            weights_path: Path to checkpoint-format weights with the same
+                architecture, config, and tokenizer as the loaded model.
+                If ``None``, workers reload the checkpoint path they
+                currently hold (a prior reload may have changed it).
+
+        Note:
+            The engine must be idle and awake, and ``data_parallel_size``
+            must be 1 (tensor parallelism is supported). The call fails
+            closed: an in-flight request raises before any effect, and a
+            failed reload or cache reset pauses the engine until it is
+            rebuilt.
+
+        """
+        self.llm_engine.reload_weights(weights_path)
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """Run a function directly on the model inside each worker,

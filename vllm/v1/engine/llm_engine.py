@@ -490,6 +490,11 @@ class LLMEngine:
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
+    def reload_weights(self, weights_path: str | None = None) -> None:
+        self.engine_core.reload_weights(weights_path)
+        self.renderer._join_mm_warmup()
+        self.renderer.clear_mm_cache()
+
     def set_weight_version(self, weight_version: str) -> None:
         self.engine_core.set_weight_version(weight_version)
 

@@ -15,6 +15,7 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+from vllm import SamplingParams
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -1188,6 +1189,35 @@ def test_kv_scale_reload(vllm_runner):
         )[0]
 
     assert reloaded_perp < 10
+
+
+def test_reload_weights_invalidates_prefix_cache(vllm_runner):
+    """Prefix KV cached under the old weights must not be served after a
+    reload: the first post-reload request must miss, the next must hit."""
+    prefix = "The quick brown fox jumps over the lazy dog. " * 50
+    prompt = prefix + "The capital of France is"
+    params = SamplingParams(temperature=0.0, max_tokens=1)
+
+    with vllm_runner(
+        model_name="Qwen/Qwen3-0.6B",
+        enable_prefix_caching=True,
+        max_model_len=1024,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.7,
+    ) as runner:
+        llm = runner.llm
+
+        llm.generate([prompt], params, use_tqdm=False)
+        hit = llm.generate([prompt], params, use_tqdm=False)[0].num_cached_tokens
+        assert (hit or 0) > 0, "prefix cache must be warm before the reload"
+
+        mul_model = "inference-optimization/Qwen3-0.6B-debug-multiply"
+        llm.reload_weights(weights_path=mul_model)
+
+        fresh = llm.generate([prompt], params, use_tqdm=False)[0]
+        assert fresh.num_cached_tokens == 0, "old-weight KV served after reload"
+        rewarmed = llm.generate([prompt], params, use_tqdm=False)[0].num_cached_tokens
+        assert (rewarmed or 0) > 0, "prefix cache must re-populate"
 
 
 @pytest.mark.parametrize(

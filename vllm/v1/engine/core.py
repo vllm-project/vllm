@@ -220,6 +220,7 @@ class EngineCore:
             logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
+        self._weights_reload_failed = False
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
@@ -506,6 +507,8 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+        if self._weights_reload_failed:
+            raise RuntimeError("Weight reload failed. Rebuild the engine.")
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -938,6 +941,8 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        if self._weights_reload_failed:
+            raise RuntimeError("Weight reload failed. Rebuild the engine.")
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
@@ -1066,6 +1071,48 @@ class EngineCore:
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
+
+    def reload_weights(self, weights_path: str | None = None) -> None:
+        """Reload weights and invalidate scheduler-owned caches derived from them."""
+        if self._weights_reload_failed:
+            raise RuntimeError("Weight reload failed. Rebuild the engine.")
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            raise RuntimeError("reload_weights() supports one data-parallel rank only.")
+        # get_request_counts() is pause-state independent and excludes finished
+        # requests awaiting cleanup, which are safe to reload after. Connector
+        # push/cleanup work is not, so has_requests() only gates that case.
+        has_connector = (
+            self.scheduler.get_kv_connector() is not None
+            or self.scheduler.get_ec_connector() is not None
+        )
+        if any(self.scheduler.get_request_counts()) or (
+            has_connector and self.scheduler.has_requests()
+        ):
+            raise RuntimeError(
+                "Cannot reload weights while requests are in flight: their KV cache "
+                "was computed with the old weights. Drain or abort all requests first."
+            )
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "Cannot reload weights while the engine is sleeping: "
+                "weight memory is not resident."
+            )
+        try:
+            # A completed generate leaves outputless batches queued; drain
+            # them so the reload starts from a quiesced pipeline.
+            while self.batch_queue:
+                self.step_with_batch_queue()
+            # Idle-device promise: in-flight kernels must not race the weight mutation.
+            self.model_executor.collective_rpc("synchronize_device")
+            self.model_executor.collective_rpc(
+                "reload_weights", kwargs={"weights_path": weights_path}
+            )
+            self._reset_caches()
+        except BaseException:
+            # Fail closed: pause; the flag blocks resume, retry, and new requests.
+            self._weights_reload_failed = True
+            self.scheduler.set_pause_state(PauseState.PAUSED_ALL)
+            raise
 
     def set_weight_version(self, weight_version: str) -> None:
         self._weight_version = weight_version

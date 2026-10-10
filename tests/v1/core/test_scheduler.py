@@ -1747,6 +1747,7 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
     core.model_executor = Mock(is_sleeping=False)
     core.mm_receiver_cache = None
     core.batch_queue = None
+    core._weights_reload_failed = False
 
     assert core.pause_scheduler(mode="keep", clear_cache=False) is None
     assert scheduler.running == [running]
