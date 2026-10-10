@@ -255,6 +255,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         ):
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
+            self._reqs_save_state.pop(request.request_id, None)
             return False, None
 
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
