@@ -89,39 +89,41 @@ def fused_topk(
 
     M, _ = hidden_states.size()
 
+    # AITER's topk_softmax / topk_sigmoid write 32-bit expert ids regardless of
+    # the dtype of the buffer they are handed. Allocating `indices_type` here
+    # would leave the upper half of every 64-bit slot holding whatever
+    # torch.empty returned, so allocate what the kernel writes and widen after
+    # it has filled the buffer. Callers that ask for int64 (e.g.
+    # DeepEPV2PrepareAndFinalize.topk_indices_dtype) index with these ids, and
+    # the uninitialised halves show up there as out-of-range experts.
+    use_rocm_aiter = rocm_aiter_ops.is_fused_moe_enabled()
+    ids_dtype = (
+        torch.int32 if (use_rocm_aiter or indices_type is None) else indices_type
+    )
+
     topk_weights = torch.empty(
         M, topk, dtype=torch.float32, device=hidden_states.device
     )
-    topk_ids = torch.empty(
-        M,
-        topk,
-        dtype=torch.int32 if indices_type is None else indices_type,
-        device=hidden_states.device,
-    )
+    topk_ids = torch.empty(M, topk, dtype=ids_dtype, device=hidden_states.device)
     token_expert_indices = torch.empty(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
     if scoring_func == "softmax":
-        topk_func = dispatch_topk_softmax_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
-        )
-        topk_weights, topk_ids = topk_func(
-            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
-        )
-
-        return topk_weights, topk_ids, token_expert_indices
+        topk_func = dispatch_topk_softmax_func(use_rocm_aiter=use_rocm_aiter)
     elif scoring_func == "sigmoid":
-        topk_func = dispatch_topk_sigmoid_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
-        )
-        topk_weights, topk_ids = topk_func(
-            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
-        )
-
-        return topk_weights, topk_ids, token_expert_indices
+        topk_func = dispatch_topk_sigmoid_func(use_rocm_aiter=use_rocm_aiter)
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    topk_weights, topk_ids = topk_func(
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+    )
+
+    if indices_type is not None and topk_ids.dtype != indices_type:
+        topk_ids = topk_ids.to(dtype=indices_type)
+
+    return topk_weights, topk_ids, token_expert_indices
 
 
 class FusedTopKRouter(BaseRouter):
