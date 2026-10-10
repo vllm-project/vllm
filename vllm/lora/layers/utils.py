@@ -48,29 +48,30 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     if hasattr(base_layer, "routed_experts"):
         base_layer = base_layer.routed_experts
 
-    # unquantizedLinear
-    if hasattr(base_layer, "weight"):
+    # unquantizedLinear (weight can be None after repacking, e.g.
+    # XPUW4A8IntLinearKernel registers weight=None and keeps weight_packed)
+    if getattr(base_layer, "weight", None) is not None:
         return base_layer.weight.device
     # Compressed Tensor
-    elif hasattr(base_layer, "weight_packed"):
+    if getattr(base_layer, "weight_packed", None) is not None:
         return base_layer.weight_packed.device
     # GPTQ/AWQ
-    elif hasattr(base_layer, "qweight"):
+    if getattr(base_layer, "qweight", None) is not None:
         return base_layer.qweight.device
     # INC WNA16 (AutoRound)
-    elif hasattr(base_layer, "ark_linear"):
-        return base_layer.ark_linear.qweight.device
+    ark_linear = getattr(base_layer, "ark_linear", None)
+    if ark_linear is not None and getattr(ark_linear, "qweight", None) is not None:
+        return ark_linear.qweight.device
     # MoE layer
-    elif hasattr(base_layer, "w2_weight"):
+    if getattr(base_layer, "w2_weight", None) is not None:
         return base_layer.w2_weight.device
     # MoE Compressed Tensor
-    elif hasattr(base_layer, "w2_weight_packed"):
+    if getattr(base_layer, "w2_weight_packed", None) is not None:
         return base_layer.w2_weight_packed.device
     # MoE GPTQ/AWQ/GGUF
-    elif hasattr(base_layer, "w2_qweight"):
+    if getattr(base_layer, "w2_qweight", None) is not None:
         return base_layer.w2_qweight.device
-    else:
-        raise ValueError(f"Unsupported base layer: {base_layer}")
+    raise ValueError(f"Unsupported base layer: {base_layer}")
 
 
 def _not_fully_sharded_can_replace(can_replace):
