@@ -749,25 +749,15 @@ class TestPackedIpcRoundtrip:
             )
 
 
-# --- Unit Tests: scalar (0-dim) tensors ---
-
-
-@pytest.mark.parametrize(
-    "dtype",
-    [torch.float32, torch.float16, torch.bfloat16],
-)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_pack_unpack_scalar(dtype):
-    """Test a 0-dim tensor round-trips alongside a regular one."""
+    """Preserve scalar shape, dtype and value alongside a matrix on CPU."""
     params = [
         ("weight", torch.randn(2, 3, dtype=dtype)),
         ("scale", torch.tensor(1.5, dtype=dtype)),
     ]
 
-    chunk = pack_tensors(
-        iter(params),
-        lambda item: item[1],
-        buffer_size_bytes=1024,
-    )
+    chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
     assert chunk is not None
 
     result = unpack_tensor(
@@ -778,25 +768,8 @@ def test_pack_unpack_scalar(dtype):
         chunk.tensor_sizes,
     )
 
-    for (expected_name, expected), (name, actual) in zip(params, result):
+    for (expected_name, expected), (name, actual) in zip(params, result, strict=True):
         assert name == expected_name
         assert actual.shape == expected.shape
-        torch.testing.assert_close(actual, expected)
-
-
-def test_unpack_scalar():
-    """Test unpack_tensor restores a 0-dim shape."""
-    packed = torch.tensor([1.5], dtype=torch.float32).view(torch.uint8)
-
-    result = unpack_tensor(
-        packed,
-        names=["scale"],
-        shapes=[[]],
-        dtypes=[torch.float32],
-        tensor_sizes=[packed.numel()],
-    )
-
-    name, tensor = result[0]
-    assert name == "scale"
-    assert tensor.shape == torch.Size([])
-    assert tensor.item() == 1.5
+        assert actual.dtype == expected.dtype
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
