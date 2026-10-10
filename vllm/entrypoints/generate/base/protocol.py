@@ -27,13 +27,13 @@ StopParam: TypeAlias = (
     str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
 )
 
+_CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 # `top_logprobs` is nullable in the OpenAI spec; null means the same as omitted.
 TopLogprobsParam: TypeAlias = Annotated[
     int,
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
 
-_CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
 
 
@@ -235,7 +235,10 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
         StructuredOutputsParams,
         check_json_nesting,
     )
-    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+    from vllm.v1.structured_output.backend_xgrammar import (
+        XgrammarUnsupportedJsonFeaturesError,
+        validate_xgrammar_grammar,
+    )
 
     if isinstance(payload, str) and not payload:
         raise VLLMValidationError(
@@ -244,14 +247,22 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
         )
 
     if isinstance(payload, str):
-        # Raised here so the error is not reported as a malformed tag below
+        # Raised here so the error is not reported as a malformed tag below.
         check_json_nesting(payload, structural_tag=True)
+
     try:
         validate_xgrammar_grammar(
             SamplingParams(
                 structured_outputs=StructuredOutputsParams(structural_tag=payload)
             )
         )
+    except XgrammarUnsupportedJsonFeaturesError:
+        # The tag is well-formed; only its nested JSON schemas use features
+        # xgrammar does not support. That is a backend-capability concern,
+        # not a malformed request: let it through so the engine's `auto`
+        # backend selection can fall back to another backend. Rejecting it
+        # here would make the fallback unreachable from the OpenAI API.
+        pass
     except (TypeError, ValueError, VLLMValidationError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",
