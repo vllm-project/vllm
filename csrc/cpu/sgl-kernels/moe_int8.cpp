@@ -138,27 +138,7 @@ struct tinygemm_kernel_vnni {
       int64_t lda,
       int64_t ldb,
       int64_t ldc) {
-    TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
-  }
-};
-
 #if defined(CPU_CAPABILITY_AVX512)
-template <int BLOCK_M, int BLOCK_N>
-struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
-  static inline void apply(
-      const uint8_t* __restrict__ A,
-      const int8_t* __restrict__ B0,
-      const int8_t* __restrict__ B1,
-      at::BFloat16* __restrict__ C,
-      const float* __restrict__ As,
-      const float* __restrict__ Bs0,
-      const float* __restrict__ Bs1,
-      const int32_t* __restrict__ Bcomp0,
-      const int32_t* __restrict__ Bcomp1,
-      int64_t K,
-      int64_t lda,
-      int64_t ldb,
-      int64_t ldc) {
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
     static_assert(COLS % 2 == 0);
@@ -227,6 +207,8 @@ struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
     };
     Unroll<ROWS * COLS>{}(scalec);
 
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
     auto storec = [&](auto i) {
       constexpr int row = i / COLS;
       constexpr int col = i % COLS;
@@ -239,15 +221,16 @@ struct tinygemm_kernel_vnni<at::BFloat16, BLOCK_M, BLOCK_N> {
         x0 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x0), y0);
         x1 = _mm512_mul_ps(_mm512_rcp14_silu_ps(x1), y1);
 
-        _mm512_storeu_si512(
-            reinterpret_cast<__m512i*>((C + row * ldc + col * 16)),
-            (__m512i)(_mm512_cvtne2ps_pbh(__m512(x1), __m512(x0))));
+        bVec out_vec = convert_from_float_ext<scalar_t>(fVec(x0), fVec(x1));
+        out_vec.store(C + row * ldc + col * 16);
       }
     };
     Unroll<ROWS * COLS>{}(storec);
+#else
+    TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
+#endif
   }
 };
-#endif
 
 #define LAUNCH_TINYGEMM_KERNEL_VNNI(MB_SIZE, NB_SIZE)      \
   tinygemm_kernel_vnni<scalar_t, MB_SIZE, NB_SIZE>::apply( \
@@ -329,24 +312,7 @@ struct tinygemm_kernel_vnni2 {
       int64_t lda,
       int64_t ldb,
       int64_t ldc) {
-    TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
-  }
-};
-
 #if defined(CPU_CAPABILITY_AVX512)
-template <int BLOCK_M, int BLOCK_N>
-struct tinygemm_kernel_vnni2<at::BFloat16, BLOCK_M, BLOCK_N> {
-  static inline void apply(
-      const uint8_t* __restrict__ A,
-      const int8_t* __restrict__ B,
-      float* __restrict__ C,
-      const float* __restrict__ As,
-      const float* __restrict__ Bs,
-      const int32_t* __restrict__ Bcomp,
-      int64_t K,
-      int64_t lda,
-      int64_t ldb,
-      int64_t ldc) {
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
     static_assert(COLS % 2 == 0);
@@ -406,9 +372,11 @@ struct tinygemm_kernel_vnni2<at::BFloat16, BLOCK_M, BLOCK_N> {
       _mm512_storeu_ps(reinterpret_cast<__m512*>(C + row * ldc + col * 16), x);
     };
     Unroll<ROWS * COLS>{}(storec);
+#else
+    TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
+#endif
   }
 };
-#endif
 
 #define LAUNCH_TINYGEMM_KERNEL_VNNI2(MB_SIZE, NB_SIZE)      \
   tinygemm_kernel_vnni2<scalar_t, MB_SIZE, NB_SIZE>::apply( \
@@ -522,9 +490,6 @@ void fused_experts_int8_kernel_impl(
   const int64_t stride_e = 2 * N * packed_K;
   const int64_t stride_n = packed_K;
 
-  int64_t avg_M = std::max(int64_t(1), M * topk / E);
-  const bool use_brgemm = can_use_brgemm<int8_t>(avg_M);
-
   // here we only parallel on half of 2N to fuse silu_and_mul with gemm
   parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     // get local pointers
@@ -532,6 +497,7 @@ void fused_experts_int8_kernel_impl(
     uint8_t* __restrict__ A = A_tmp + tid * BLOCK_M * K;
     int32_t* __restrict__ C0 = reinterpret_cast<int32_t*>(C_tmp) + tid * 2 * BLOCK_M * BLOCK_N;
     int32_t* __restrict__ C1 = C0 + BLOCK_M * BLOCK_N;
+    bool use_brgemm = false;
 
     alignas(64) float As[BLOCK_M];
 
@@ -548,6 +514,11 @@ void fused_experts_int8_kernel_impl(
       const float* __restrict__ Bs1 = w1s + expert_id * 2 * N + nb_lower * BLOCK_N;
 
       int64_t m_size = offsets[mb + 1] - offsets[mb];
+      if (m_size == 0) {
+        return;
+      }
+      const bool brg = can_use_brgemm<int8_t>(m_size, n_size);
+      use_brgemm |= brg;
 
       if (nb_offset == 0) {
         // 1.a load A
@@ -559,7 +530,7 @@ void fused_experts_int8_kernel_impl(
         }
       }
 
-      if (use_brgemm) {
+      if (brg) {
         // 1.b gemm: C0 = A @ B0
         at::native::cpublas::brgemm(
             /* M     */ m_size,
@@ -640,10 +611,16 @@ void fused_experts_int8_kernel_impl(
     int tid = get_thread_num();
     float* __restrict__ C = C_tmp + tid * 2 * BLOCK_M * BLOCK_N;
     int32_t* __restrict__ C32 = reinterpret_cast<int32_t*>(C + BLOCK_M * BLOCK_N);
+    bool use_brgemm = false;
 
     loop_2d<int8_t>(mb0, mb1, nb0, nb1, BLOCK_N * IC, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
       int64_t m_size = offsets[mb + 1] - offsets[mb];
+      if (m_size == 0) {
+        return;
+      }
       int64_t n_size = std::min(OC - nb * BLOCK_N, BLOCK_N);
+      const bool brg = can_use_brgemm<int8_t>(m_size, n_size);
+      use_brgemm |= brg;
 
       // A ptr from ic1 of [M * topk, N] in sorted order
       // so as to avoid copy A to tmp buffer again
@@ -657,7 +634,7 @@ void fused_experts_int8_kernel_impl(
       const float* __restrict__ Bs = w2s + expert_id * K + nb * BLOCK_N;
 
       // 2.a gemm: C = A @ B
-      if (use_brgemm) {
+      if (brg) {
         at::native::cpublas::brgemm(
             /* M     */ m_size,
             /* N     */ n_size,
