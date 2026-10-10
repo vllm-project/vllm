@@ -1364,6 +1364,11 @@ def ensure_current_vllm_config():
             yield
 
 
+def _test_rendezvous_path(token: int | str) -> str:
+    """File store shared by every rank of one multi_process_parallel run."""
+    return f"{tempfile.gettempdir()}/vllm_dist_test_{token}"
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -1382,8 +1387,18 @@ def init_test_distributed_environment(
         set_current_vllm_config,
     )
     from vllm.platforms import current_platform
+    from vllm.utils.network_utils import aiter_requires_tcp_store
 
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    # get_open_port() closes its probe socket before the ranks bind, leaving
+    # the port unreserved, so prefer a file store as the executors do. This
+    # runs in every Ray worker, so the path must come from the shared token
+    # rather than a per-call uuid4(), or each rank would get its own file.
+    if aiter_requires_tcp_store():
+        distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    else:
+        distributed_init_method = (
+            f"file://{_test_rendezvous_path(distributed_init_port)}"
+        )
     backend = current_platform.dist_backend
 
     if data_parallel_size > 1:
@@ -1490,6 +1505,8 @@ def multi_process_parallel(
         ray.get(refs)
     finally:
         ray.shutdown()
+        # All ranks are gone, so the file store has no readers left.
+        Path(_test_rendezvous_path(distributed_init_port)).unlink(missing_ok=True)
 
 
 def assert_rocm_custom_allreduce_backend_state(
