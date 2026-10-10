@@ -47,7 +47,13 @@ from vllm.v1.attention.selector import get_attn_backend
 
 logger = init_logger(__name__)
 
-_SPARSE_LAYER_TYPES = ("sparse_attention", "sparse", "deepseek_sparse_attention")
+_SPARSE_LAYER_TYPES = (
+    "sparse_attention",
+    "sparse",
+    "indexed_attention",
+    # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
+    "deepseek_sparse_attention",
+)
 _WEIGHT_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 

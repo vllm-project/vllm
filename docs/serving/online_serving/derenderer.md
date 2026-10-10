@@ -23,6 +23,10 @@ endpoints.
 
 The derender step needs more than the engine's `token_ids`. It also consumes the original `chat_request`/`completion_request` and `prompt_tokens` carried over from the render step (see [Request format](#request-format)) so the tool and reasoning parsers have the context they need. The chat streaming path additionally needs `prompt_token_ids` (see [Streaming cost](#streaming-cost)) when a parser is configured.
 
+All derender endpoints also accept an optional `prompt_token_ids` (the `token_ids` of the `GenerateRequest` returned by `/render`). It's used to seed detokenization from the end of the prompt, the same way the engine does. Without it, the first output token is decoded as if it started a new sequence. On SentencePiece tokenizers (Llama-2, Phi-3) that drops its leading space compared to `/v1/chat/completions` and `/v1/completions`. If it's omitted, derender falls back to the generate response's `prompt_token_ids` (set when the `GenerateRequest` has `return_token_ids`), then to decoding without prompt context.
+
+Seeding only reads the last few IDs (7 today), so a suffix of the prompt is enough and a long prompt doesn't need to travel back to derender. The exception is streaming chat with a tool or reasoning parser configured. There the parser also reads `prompt_token_ids` to decide whether the prompt left reasoning open and it can look back to any point in the prompt. In this case, send the full list (see [Streaming cost](#streaming-cost)).
+
 ## API Reference
 
 - Chat Completions Derender API (`/v1/chat/completions/derender`)
@@ -35,6 +39,8 @@ The derender step needs more than the engine's `token_ids`. It also consumes the
 ## Request format
 
 Each request wraps the engine's `GenerateResponse`(s) together with the caller metadata needed to reconstruct the final response without a GPU.
+
+Only `output_mode: "tokens"` responses are accepted which is the default. A response from a request with `output_mode: "text"` gets a 400 because its text is already detokenized with stop strings removed. Responses without `output_mode`, from older servers, are treated as `tokens`.
 
 `/v1/chat/completions/derender`:
 
@@ -96,9 +102,10 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **`n > 1` is N streams.** Generate interleaves chunks for different choices and tags each with its `index`. Keep one `stream_state` per index and send each chunk with the state for its index. Each index gets its own `role` delta on its first chunk.
 - **Send every chunk through, including the last ones.** The finish reason usually arrives with the final tokens. A chunk with a `finish_reason` and no tokens is accepted too and flushes any buffered tool call arguments. With `stream_options: {"include_usage": true}`, generate ends with a usage only chunk (`choices: []`). Send it through derender like any other chunk to get the usage chunk for the response. `usage.prompt_tokens` is the request's `prompt_tokens` if set, otherwise the generate chunk's.
 - **Send the same context on every call.** `chat_request` and `prompt_token_ids` aren't kept between calls, so they go with every chunk including the usage chunk. Both are required when a tool or reasoning parser is configured. `prompt_token_ids` is the `token_ids` of the `GenerateRequest` returned by `/render`.
+- **Send `prompt_token_ids` on the first chunk, even without a parser.** It seeds detokenization so the first token's leading space matches the coupled endpoint (see [Request format](#request-format)). Later chunks already carry that context in `stream_state`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.
 
-Streaming derender resolves `logprobs` on the plain detokenization path, including `token_id:N` placeholders, same as the non-streaming endpoints (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
+`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Streaming derender does the same per chunk on the plain detokenization path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
 
 ## Streaming cost
 
@@ -110,7 +117,7 @@ When a tool or reasoning parser is configured, parser internal state (buffered m
 
 - **Transport**: `output_token_ids` and `output_chunk_lens` round-trip in full in both directions on every call. `output_chunk_lens` has one entry per chunk, which is one per token without speculative decoding. This means O(n) bytes per chunk, O(n²) bytes over a full generation. Bounded by `max_model_len`. `prompt_token_ids` is sent in full on every call too and it isn't trimmed as `output_token_ids` grows. This means that for most of a stream it dominates the per chunk payload. A 100k token prompt with 1k tokens of output means `prompt_token_ids` is ~99% of the request body on every chunk.
 - **Compute**: replay is O(n) `parse_delta` calls per chunk (O(n²) per generation). `parse_delta` itself is O(n) for parsers that re-scan accumulated text (e.g. Hermes tool-call JSON, DeepSeek-R1 reasoning). The per-generation cost is O(n³) character work, not O(n²). This is a deliberately minimal first implementation with no caching layer.
-- The parser path also requires `prompt_token_ids` so `parse_delta` can settle whether the prompt left reasoning open or not. Since parser state can't be carried across calls, it re-scans the full prompt once per chunk.
+- The parser path also requires `prompt_token_ids` so `parse_delta` can settle whether the prompt left reasoning open or not. Since parser state can't be carried across calls, it re-scans the full prompt once per chunk. Send the full list and not a suffix because the last reasoning marker can be anywhere in the prompt.
 - Replay runs off the event loop on the renderer's executor (`renderer_num_workers`, default `1`). Size it for the expected number of concurrent parser configured streams.
 
 `output_token_ids` and `prompt_token_ids` are both bounded by `max_model_len` but callers streaming long reasoning traces through a parser configured model should expect materially more state transport and CPU cost than the plain detokenization path.
@@ -122,7 +129,7 @@ Streaming derender is stateless on the server side: all mutable state lives in t
 - `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
 - `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
 
-When a streamed `GenerateResponseStreamChoice` carries `logprobs`, the `token_id:N` placeholders are resolved per chunk and the resolved logprobs are attached to the corresponding streamed choice — for chat as `ChatCompletionLogProbs`, for completions converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
+When a streamed `GenerateTokensStreamChoice` carries `logprobs`, the integer `token_id`s are decoded per chunk and the resolved logprobs are attached to the corresponding streamed choice. For chat it is as `ChatCompletionLogProbs` and for completions it is converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
 
 ## Example
 
@@ -153,7 +160,7 @@ with httpx.Client(timeout=60.0) as client:
     generate_request = client.post(
         f"{RENDER}/v1/chat/completions/render", json=chat_request
     ).json()
-    prompt_tokens = len(generate_request["token_ids"])
+    prompt_token_ids = generate_request["token_ids"]
 
     # 2. Generate: token IDs -> token IDs (token-in / token-out engine)
     generate_response = client.post(
@@ -166,7 +173,8 @@ with httpx.Client(timeout=60.0) as client:
         json={
             "model": MODEL,
             "generate_response": generate_response,
-            "prompt_tokens": prompt_tokens,
+            "prompt_tokens": len(prompt_token_ids),
+            "prompt_token_ids": prompt_token_ids,
             "chat_request": chat_request,
         },
     ).json()

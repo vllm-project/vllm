@@ -44,8 +44,8 @@ class DraftWatermarker:
             dtype=torch.int64,
             device=device,
         )
+        self.prompt_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         self.all_token_ids: torch.Tensor | None = None
-        self.prompt_lens: torch.Tensor | None = None
         self.total_lens: torch.Tensor | None = None
 
     def prepare(
@@ -60,7 +60,7 @@ class DraftWatermarker:
         self.contexts[:num_reqs].copy_(contexts)
         self.enabled[:num_reqs].copy_(enabled)
         self.all_token_ids = all_token_ids
-        self.prompt_lens = prompt_lens
+        self.prompt_lens.copy_(prompt_lens)
         self.total_lens = total_lens
 
     def _sampling_state(
@@ -79,7 +79,6 @@ class DraftWatermarker:
         if self.deduplicate_contexts == "none":
             return steps, enabled
         assert self.all_token_ids is not None
-        assert self.prompt_lens is not None
         assert self.total_lens is not None
         enabled = draft_watermarking_mask(
             self.all_token_ids,

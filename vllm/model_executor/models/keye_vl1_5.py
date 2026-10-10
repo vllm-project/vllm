@@ -75,7 +75,7 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
 
 def get_num_patches(
     grid_thw: torch.Tensor, num_frames: list[int] | torch.Tensor
-) -> list[int]:
+) -> torch.Tensor:
     """Return num_patches per video.
 
     Args:
@@ -84,7 +84,7 @@ def get_num_patches(
         num_frames: List or tensor indicating the number of frames per video
 
     Returns:
-        List of ints representing the number of patches for each video
+        Tensor of the number of patches for each video
 
     Examples:
         >>> # Suppose there are 2 videos with a total of 3 grids
@@ -538,12 +538,11 @@ class KeyeVL1_5ForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
-            return KeyeVL1_5ImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
-            )
+        return KeyeVL1_5ImageEmbeddingInputs(
+            type="image_embeds",
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
+        )
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -564,13 +563,12 @@ class KeyeVL1_5ForConditionalGeneration(
                 num_frames=num_frames,
             )
 
-        if video_embeds is not None:
-            return KeyeVL1_5VideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-                num_frames=num_frames,
-            )
+        return KeyeVL1_5VideoEmbeddingInputs(
+            type="video_embeds",
+            video_embeds=video_embeds,
+            video_grid_thw=video_grid_thw,
+            num_frames=num_frames,
+        )
 
     def _process_video_input(
         self, video_input: KeyeVL1_5VideoInputs

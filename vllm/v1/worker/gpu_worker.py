@@ -12,13 +12,13 @@ from fnmatch import filter as fnmatch_filter
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
-import numpy as np
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
+from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -73,6 +73,7 @@ from vllm.profiler.wrapper import (
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.flashinfer import warn_if_flashinfer_kernels_missing
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
@@ -97,7 +98,6 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -498,6 +498,7 @@ class Worker(WorkerBase):
 
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
+            warn_if_flashinfer_kernels_missing()
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
@@ -532,6 +533,8 @@ class Worker(WorkerBase):
             self.device,
             num_ubatches,
             _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+            # Scratch holds no state across steps: discard it on sleep.
+            alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
         if self.rank == 0:
@@ -613,7 +616,10 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            with set_current_vllm_config(self.vllm_config):
+                self.model_runner.profile_run(
+                    randomize_inputs=self.randomize_dummy_inputs
+                )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -649,6 +655,7 @@ class Worker(WorkerBase):
             # limit are never split, so they stay releasable. Exits before
             # memory_profiling measures, restoring the original limit.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
@@ -816,10 +823,15 @@ class Worker(WorkerBase):
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
 
-        # Adopt the engine core's layout; workers spawned after resolution
-        # (e.g. elastic EP scale-up) only see it through the config.
+        # Adopt the engine core's layout and prefix-cache granularity; workers
+        # spawned after resolution (e.g. elastic EP scale-up) only see them
+        # through the config.
         if kv_cache_config.kv_cache_layout is not None:
             record_kv_cache_layout(self.cache_config, kv_cache_config.kv_cache_layout)
+        self.cache_config.hash_block_size = kv_cache_config.hash_block_size
+        self.cache_config.cache_hit_alignment_tokens = (
+            kv_cache_config.cache_hit_alignment_tokens
+        )
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
@@ -839,10 +851,17 @@ class Worker(WorkerBase):
         if mem_pool_context is None:
             mem_pool_context = self._maybe_get_memory_pool_context(tag="kv_cache")
 
-        self.model_runner.initialize_kv_cache(
-            kv_cache_config,
-            kv_cache_allocation_context=mem_pool_context,
+        # Offload KV-init state, except on XPU, whose outermost pool would win.
+        runtime_pool = (
+            nullcontext()
+            if current_platform.is_xpu()
+            else self._maybe_get_memory_pool_context(tag="runtime")
         )
+        with runtime_pool:
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config,
+                kv_cache_allocation_context=mem_pool_context,
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
@@ -1007,7 +1026,9 @@ class Worker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        set_random_seed(
+            self.model_config.seed, self.parallel_config.data_parallel_index
+        )
 
         # Eagerly trigger inductor's once-per-process lazy inits during
         # warmup (rather than on a later compile cache-miss at runtime).
@@ -1257,45 +1278,10 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        all_gather_tensors = {}
-        compilation_config = self.vllm_config.compilation_config
-        parallel_config = self.vllm_config.parallel_config
-
-        if (
-            parallel_config.pipeline_parallel_size > 1
-            and compilation_config.pass_config.enable_sp
-            and forward_pass
-        ):
-            # currently only supported by V1 GPUModelRunner
-            assert not self.use_v2_model_runner
-            num_scheduled_tokens_np = np.array(
-                list(scheduler_output.num_scheduled_tokens.values()),
-                dtype=np.int32,
-            )
-            # TODO(lucas): This is pretty gross; ideally we should only ever call
-            # `_determine_batch_execution_and_padding` once (will get called again
-            # in `execute_model`) but this requires a larger refactor of PP.
-            _, batch_desc, _, _, _ = (
-                self.model_runner._determine_batch_execution_and_padding(
-                    num_tokens=num_scheduled_tokens,
-                    num_reqs=len(num_scheduled_tokens_np),
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    max_num_scheduled_tokens=num_scheduled_tokens_np.max(),
-                    use_cascade_attn=False,  # TODO(lucas): Handle cascade attention
-                )
-            )
-            all_gather_tensors = {
-                "residual": not is_residual_scattered_for_sp(
-                    self.vllm_config, batch_desc.num_tokens
-                )
-            }
-
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
-                    all_gather_tensors=all_gather_tensors,
                 )
             )
             assert tensor_dict is not None
@@ -1333,7 +1319,6 @@ class Worker(WorkerBase):
         handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=get_tp_group(),
-            all_gather_tensors=all_gather_tensors,
         )
         self._pp_send_work = handles[1:]
 
@@ -1344,7 +1329,14 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1355,6 +1347,8 @@ class Worker(WorkerBase):
             )
 
         if is_start:
+            validate_profile_prefix(profile_prefix)
+
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1366,9 +1360,6 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            if self.profiler_config.profiler == "proton" and self.profiler is not None:
-                self.profiler.set_output_name(trace_name)
-
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
                 self.profiler = create_worker_profiler(
@@ -1377,7 +1368,11 @@ class Worker(WorkerBase):
                     local_rank=self.local_rank,
                 )
 
-            self.profiler.start()
+            self.profiler.set_output_name(trace_name)
+            self.profiler.start(
+                delay_iterations=delay_iterations,
+                max_iterations=max_iterations,
+            )
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")

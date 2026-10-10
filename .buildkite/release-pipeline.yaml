@@ -339,7 +339,8 @@ steps:
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
               --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.4 \
-              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --build-arg FINAL_BASE_IMAGE=nvidia/cuda:13.4.1-base-ubuntu24.04 \
+              --build-arg NCCL_VERSION=2.32.3 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -354,6 +355,10 @@ steps:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          # TODO(arpera):
+          # Remove BUILD_NIXL=true once NIXL has a wheel built against torch 2.15
+          # For details: https://github.com/vllm-project/vllm/pull/60090
+          # Tracking issue report: https://github.com/ai-dynamo/nixl/issues/2297
           - |
             DOCKER_BUILDKIT=1 docker buildx build --load \
               $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134) \
@@ -365,11 +370,13 @@ steps:
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
               --build-arg INSTALL_RUBIN_PRERELEASE=true \
+              --build-arg BUILD_NIXL=true \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
               --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.4 \
-              --build-arg FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04 \
+              --build-arg FINAL_BASE_IMAGE=nvidia/cuda:13.4.1-base-ubuntu24.04 \
+              --build-arg NCCL_VERSION=2.32.3 \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
@@ -1074,6 +1081,38 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
+
+  - trigger: "perf-eval"
+    label: "Trigger perf-eval (CUDA)"
+    key: trigger-perf-eval-cuda
+    if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
+    depends_on:
+      - build-release-image-x86
+    async: true
+    soft_fail: true
+    build:
+      branch: "main"
+      message: "(NIGHTLY=${NIGHTLY:-0}) Evaluate vLLM $BUILDKITE_COMMIT (CUDA)"
+      env:
+        NIGHTLY: 1 # run all perf-eval workloads
+        VLLM_COMMIT: "$BUILDKITE_COMMIT"
+        VLLM_IMAGE_CUDA: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
+
+  - trigger: "perf-eval"
+    label: "Trigger perf-eval (ROCm)"
+    key: trigger-perf-eval-rocm
+    if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
+    depends_on:
+      - build-rocm-release-image
+    async: true
+    soft_fail: true
+    build:
+      branch: "main"
+      message: "(NIGHTLY=${NIGHTLY:-0}) Evaluate vLLM $BUILDKITE_COMMIT (ROCm)"
+      env:
+        NIGHTLY: 1 # run all perf-eval workloads
+        VLLM_COMMIT: "$BUILDKITE_COMMIT"
+        VLLM_IMAGE_ROCM: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
 
   # =============================================================================
   # ROCk Release Pipeline (x86_64 only)

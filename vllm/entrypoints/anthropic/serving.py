@@ -31,9 +31,10 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicOutputConfig,
     AnthropicStreamEvent,
     AnthropicThinkingConfig,
+    AnthropicTool,
+    AnthropicToolChangeDefinition,
     AnthropicUsage,
 )
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
@@ -52,6 +53,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
 from vllm.renderers.online_renderer import OnlineRenderer
 
@@ -611,6 +613,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
@@ -630,8 +633,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         ``display`` is intentionally ignored: suppressing reasoning would mark
         it ended for structured outputs and drop it from multi-turn history.
         """
-        if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return
         thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
         if thinking is None:
             return
@@ -652,8 +653,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> None:
         """Handle output configuration such as output format and effort."""
-        if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            return
         output_config: AnthropicOutputConfig | None = anthropic_request.output_config
         if output_config and output_config.format and output_config.format.json_schema:
             req.response_format = ResponseFormat(
@@ -711,17 +710,63 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
     @classmethod
+    def _resolve_tools(
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> list[AnthropicTool] | None:
+        """Apply tool_addition/tool_removal blocks in ``messages`` to ``tools``.
+
+        Chat templates see a single tool list, so this resolves the tools in
+        effect at the end of the conversation: a tool added by reference is no
+        longer deferred, a tool added by value is declared, and a removed tool
+        is dropped.
+        """
+        changes = [
+            block
+            for msg in anthropic_request.messages
+            if not isinstance(msg.content, str)
+            for block in msg.content
+            if block.type in ("tool_addition", "tool_removal")
+        ]
+        if not changes:
+            return anthropic_request.tools
+
+        tools = {tool.name: tool for tool in anthropic_request.tools or []}
+        removed: set[str] = set()
+        for block in changes:
+            change = block.tool
+            assert change is not None
+            if isinstance(change, AnthropicToolChangeDefinition):
+                name = change.definition.name
+                tools[name] = change.definition
+            else:
+                name = change.name
+                if name not in tools:
+                    raise ValueError(
+                        f"{block.type} references tool {name!r}, "
+                        "which is not declared in tools"
+                    )
+                if block.type == "tool_addition":
+                    tools[name] = tools[name].model_copy(update={"defer_loading": None})
+            if block.type == "tool_removal":
+                removed.add(name)
+            else:
+                removed.discard(name)
+        return [tool for name, tool in tools.items() if name not in removed]
+
+    @classmethod
     def _convert_tools(
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         req: ChatCompletionRequest,
     ) -> None:
         """Convert Anthropic tools to OpenAI format."""
-        if anthropic_request.tools is None:
+        anthropic_tools = cls._resolve_tools(anthropic_request)
+        if anthropic_tools is None:
             return
 
         tools = []
-        for tool in anthropic_request.tools:
+        for tool in anthropic_tools:
             tools.append(
                 ChatCompletionToolsParam.model_validate(
                     {
@@ -1189,9 +1234,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
+        disabled_thinking_effort: AnthropicDisabledThinkingEffort = "none"
+        if request.thinking is not None and request.thinking.type == "disabled":
+            disabled_thinking_effort = await self._get_disabled_thinking_effort()
         chat_req = self.to_chat_completion_request(
             request,
             merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=disabled_thinking_effort,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):

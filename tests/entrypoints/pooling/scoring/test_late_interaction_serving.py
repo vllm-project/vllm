@@ -49,10 +49,60 @@ def _query_key(context: PoolingServeContext) -> str:
 
 
 @pytest.mark.asyncio
-async def test_colliding_request_ids_use_distinct_query_cache_keys(
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("failed_stage", ["query", "doc"])
+async def test_flash_late_interaction_cleans_up_queries_on_failure(
+    failed_stage: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     serving = object.__new__(ServingScores)
+    serving.io_processor = Mock()
+    serving.engine_client = Mock(abort=AsyncMock(), collective_rpc=AsyncMock())
+
+    context = _make_context()
+    monkeypatch.setattr(serving, "_init_ctx", AsyncMock(return_value=context))
+    monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
+
+    async def encode_queries(ctx):
+        ctx.late_interaction_query_keys = ["query-key"]
+        if failed_stage == "query":
+            raise RuntimeError("query failed")
+
+    async def encode_docs(ctx):
+        ctx.late_interaction_doc_keys = ["doc-key"]
+        if failed_stage == "doc":
+            raise RuntimeError("doc failed")
+
+    monkeypatch.setattr(
+        serving,
+        "_flash_late_interaction_encode_queries",
+        AsyncMock(side_effect=encode_queries),
+    )
+    monkeypatch.setattr(
+        serving,
+        "_flash_late_interaction_encode_docs",
+        AsyncMock(side_effect=encode_docs),
+    )
+
+    with pytest.raises(RuntimeError, match=f"{failed_stage} failed"):
+        await serving.flash_late_interaction()
+
+    expected_doc_keys = [] if failed_stage == "query" else ["doc-key"]
+    serving.engine_client.abort.assert_awaited_once_with(
+        ["query-key", *expected_doc_keys]
+    )
+    serving.engine_client.collective_rpc.assert_awaited_once_with(
+        "release_late_interaction_query_cache",
+        args=(["query-key"],),
+    )
+
+
+@pytest.mark.asyncio
+async def test_colliding_request_ids_use_distinct_late_interaction_keys(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = object.__new__(ServingScores)
+    serving.engine_client = Mock(abort=AsyncMock(), collective_rpc=AsyncMock())
     prepare_generators = AsyncMock()
     monkeypatch.setattr(serving, "_prepare_generators", prepare_generators)
     monkeypatch.setattr(serving, "_collect_batch", AsyncMock())
@@ -68,9 +118,24 @@ async def test_colliding_request_ids_use_distinct_query_cache_keys(
     first_doc_key = _query_key(prepared_contexts[1])
     second_query_key = _query_key(prepared_contexts[2])
     second_doc_key = _query_key(prepared_contexts[3])
+    first_doc_request_ids = prepared_contexts[1].prompt_request_ids
+    second_doc_request_ids = prepared_contexts[3].prompt_request_ids
 
     assert first_query_key == first_doc_key
     assert second_query_key == second_doc_key
     assert first_query_key != second_query_key
     assert "caller-controlled-id" not in first_query_key
     assert "caller-controlled-id" not in second_query_key
+    assert first_doc_request_ids is not None
+    assert second_doc_request_ids is not None
+    assert first.late_interaction_doc_keys == first_doc_request_ids
+    assert second.late_interaction_doc_keys == second_doc_request_ids
+    assert first_doc_request_ids != second_doc_request_ids
+    assert all("caller-controlled-id" not in key for key in first_doc_request_ids)
+    assert all("caller-controlled-id" not in key for key in second_doc_request_ids)
+
+    assert first.late_interaction_query_keys is not None
+    await serving._cleanup_flash_late_interaction(first)
+    serving.engine_client.abort.assert_awaited_once_with(
+        [*first.late_interaction_query_keys, *first_doc_request_ids]
+    )

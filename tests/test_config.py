@@ -47,6 +47,7 @@ from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
+from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
@@ -502,6 +503,17 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
         )
 
 
+def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+        )
+
+
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
@@ -639,21 +651,14 @@ def test_no_hisparse_connector_keeps_attention_config_unset(monkeypatch):
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
-    from vllm.config.vllm import (
-        ROCM_DEFAULT_MRV1_ARCHITECTURES,
-        default_breakable_cudagraph_architectures,
-    )
+    paths and off breakable cudagraphs by default."""
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     # The lookup is lru_cached against a fixed platform.
     default_breakable_cudagraph_architectures.cache_clear()
     try:
-        assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-
         breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
@@ -662,64 +667,8 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         # supports uniform-batch CUDA graphs, so it must opt in or the
         # default FULL_AND_PIECEWISE serve path cannot start.
         assert "DeepseekV41ForCausalLM" in breakable_architectures
-
-        # The carve-out takes effect via the runner-selection property
-        # (warning_once args must be hashable for its lru_cache).
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-        config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
-            attention_config=AttentionConfig(),
-        )
-        config._get_v1_model_runner_unsupported_features = lambda: []
-        assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
-
-
-def test_rocm_mrv1_default_yields_to_v1_unsupported_config(monkeypatch):
-    """The ROCm V1 default is a speed preference, not a capability claim.
-
-    DSpark runs only on V2, so pinning DeepSeek V4 to V1 would fail config
-    validation instead of serving it. With nothing V1 refuses, it still holds.
-    """
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architectures=["DeepseekV4ForCausalLM"], is_diffusion=False
-        ),
-        attention_config=AttentionConfig(),
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1,
-            pipeline_parallel_size=1,
-            enable_batch_sharded_sampling=False,
-        ),
-        scheduler_config=SimpleNamespace(async_scheduling=False),
-        speculative_config=None,
-    )
-    config._dflash_needs_multi_kv_group = lambda: False
-    config._is_dflash_candidate_draft = lambda: False
-    config._get_v2_model_runner_unsupported_features = lambda: []
-    # The real predicate, so the test also pins where dspark lands in it.
-    config._get_v1_model_runner_unsupported_features = lambda: (
-        VllmConfig._get_v1_model_runner_unsupported_features(config)
-    )
-
-    assert VllmConfig.use_v2_model_runner.fget(config) is False
-
-    config.speculative_config = SimpleNamespace(
-        method="dspark", enable_adaptive_verification=False
-    )
-    assert VllmConfig.use_v2_model_runner.fget(config) is True
-
-    # Yielding is not the same as selecting V2: the later checks still run, so
-    # a config neither runner can serve lands on V1 and fails validation there.
-    config._get_v2_model_runner_unsupported_features = lambda: ["sequence parallelism"]
-    assert VllmConfig.use_v2_model_runner.fget(config) is False
 
 
 @pytest.mark.parametrize(
@@ -831,7 +780,6 @@ def test_breakable_cudagraph_platform_default(
         ("bi-off", 2048, (16, 8), 6144, 1, False),
         ("opt-out", 2048, (16, 8), 6144, 1, False),
         ("eager", 2048, (16, 8), 6144, 1, False),
-        ("sp", 2048, (16, 8), 6144, 1, False),
         ("fp16", 2048, (16, 8), 6144, 1, False),
         ("quantized", 2048, (16, 8), 6144, 1, False),
         ("untuned", 4096, (32, 32), 11008, 1, False),
@@ -874,11 +822,7 @@ def test_batch_invariant_breakable_cudagraph(
         get_num_kv_heads=lambda pc: heads[1],
     )
     config.parallel_config = SimpleNamespace(tensor_parallel_size=tp)
-    config.compilation_config = (
-        CompilationConfig(pass_config=PassConfig(enable_sp=True))
-        if case == "sp"
-        else CompilationConfig()
-    )
+    config.compilation_config = CompilationConfig()
     try:
         assert config._maybe_enable_breakable_cudagraph() is expected
         if expected:
@@ -910,18 +854,43 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     assert hf_config.architectures == [expected_architecture]
 
 
-def test_v2_model_runner_supports_extract_hidden_states():
+@pytest.mark.parametrize("method", ["extract_hidden_states", "ngram", "ngram_gpu"])
+def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
         SimpleNamespace(
-            method="extract_hidden_states",
+            method=method,
             parallel_drafting=False,
             enable_adaptive_verification=False,
         ),
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+@pytest.mark.parametrize("use_heterogeneous_vocab", [False, True])
+def test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1(
+    use_heterogeneous_vocab,
+):
+    """The V2 draft-model speculator exchanges token ids with the target
+    without a vocab mapping, so a heterogeneous-vocab (TLI) draft must stay on
+    V1, where VocabMapping translates them."""
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="draft_model",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+            use_heterogeneous_vocab=use_heterogeneous_vocab,
+        ),
+    )
+
+    expected = ["heterogeneous-vocabulary draft models"]
+    assert config._get_v2_model_runner_unsupported_features() == (
+        expected if use_heterogeneous_vocab else []
+    )
 
 
 def test_v2_model_runner_supports_custom_logits_processors():
@@ -1035,7 +1004,6 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         "FakeAttentionBackend",
         uniform_decode_query_len=4,
         use_v2_model_runner=use_v2_model_runner,
-        tensor_parallel_size=1,
     )
 
     assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
@@ -1118,7 +1086,6 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
             "FakeAttentionBackend",
             uniform_decode_query_len=1,
             use_v2_model_runner=True,
-            tensor_parallel_size=1,
             kv_cache_config=kv_cache_config,
             max_num_reqs=256,
         )
@@ -1131,7 +1098,6 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
         "FakeAttentionBackend",
         uniform_decode_query_len=1,
         use_v2_model_runner=True,
-        tensor_parallel_size=1,
         kv_cache_config=kv_cache_config,
         max_num_reqs=256,
         is_profiling=True,
@@ -3373,8 +3339,6 @@ def test_vllm_config_explicit_overrides():
     take precedence over callable defaults, across different models and
     optimization levels.
     """
-    from vllm.config.compilation import PassConfig
-
     quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
     moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
     regular_model = ModelConfig("Qwen/Qwen1.5-7B")
@@ -3508,6 +3472,12 @@ def test_scheduler_config_init():
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
+
+
+def test_scheduler_config_rejects_zero_max_num_scheduled_tokens():
+    """A zero token budget never schedules anything, so generation would hang."""
+    with pytest.raises(ValidationError, match="max_num_scheduled_tokens"):
+        SchedulerConfig.default_factory(max_num_scheduled_tokens=0)
 
 
 @pytest.mark.parametrize(
@@ -3670,7 +3640,7 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
     )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "Target-only watermarking leaves accepted draft tokens" in caplog_vllm.text
 
@@ -3691,7 +3661,7 @@ def test_speculative_watermarking_without_context_dedup_does_not_warn(
 
     caplog_vllm.clear()
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "dedup" not in caplog_vllm.text.lower()
 
@@ -3712,7 +3682,7 @@ def test_speculative_context_dedup_logs_no_unsupported_warning(
 
     caplog_vllm.clear()
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "dedup" not in caplog_vllm.text.lower()
 
@@ -3730,7 +3700,7 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
     )
 
     with pytest.raises(ValueError, match="'gumbel'.*allow_target_only_watermarking"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
@@ -3748,7 +3718,7 @@ def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
     )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "The configured alpha=0.25 is not used" in caplog_vllm.text
 
@@ -3774,7 +3744,7 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
         )
 
     with caplog_vllm.at_level(logging.WARNING):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
     assert "is not used" not in caplog_vllm.text
 
@@ -3790,7 +3760,7 @@ def test_dual_key_gumbel_requires_probabilistic_drafting():
     )
 
     with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
@@ -3804,7 +3774,7 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
         parallel_drafting=False,
     )
 
-    config._check_watermarking_unsupported()
+    config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_supports_dspark():
@@ -3817,7 +3787,7 @@ def test_dual_key_gumbel_supports_dspark():
         parallel_drafting=True,
     )
 
-    config._check_watermarking_unsupported()
+    config._check_supports_watermarking()
 
 
 def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
@@ -3831,7 +3801,7 @@ def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
     )
 
     with pytest.raises(ValueError, match="autoregressive model-based"):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
 @pytest.mark.parametrize(
@@ -3855,17 +3825,40 @@ def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match
     config.speculative_config = SimpleNamespace(**values)
 
     with pytest.raises(ValueError, match=match):
-        config._check_watermarking_unsupported()
+        config._check_supports_watermarking()
 
 
-def test_gumbel_watermark_rejects_beam_search():
-    with pytest.raises(ValueError, match="Beam search is not supported"):
-        _watermarked_vllm_config()._check_watermarking_unsupported(beam_search=True)
+def test_gumbel_watermark_disables_beam_search_watermarking(caplog_vllm):
+    enabled = _watermarked_vllm_config()._check_supports_watermarking(
+        BeamSearchParams(beam_width=2, max_tokens=1)
+    )
+
+    assert not enabled
+    assert "beam search requests will run without watermarking" in caplog_vllm.text
+
+
+def test_gumbel_watermark_allows_unwatermarked_beam_search():
+    _watermarked_vllm_config()._check_supports_watermarking(
+        BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
+    )
+
+
+def test_unwatermarked_beam_does_not_bypass_engine_incompatibilities():
+    config = _watermarked_vllm_config()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="Speculative decoding with watermarking"):
+        config._check_supports_watermarking(
+            BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
+        )
 
 
 def test_gumbel_watermark_rejects_custom_sampler():
     with pytest.raises(ValueError, match="custom samplers are not supported"):
-        _watermarked_vllm_config()._check_watermarking_unsupported(custom_sampler=True)
+        _watermarked_vllm_config()._check_supports_watermarking(custom_sampler=True)
 
 
 def test_watermark_key_must_fit_in_64_bits():
@@ -4165,3 +4158,47 @@ def test_revision_resolved_for_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    ("layer_types", "expected_attention"),
+    [
+        # Qwen3-Next / Qwen3.5 spell their attention layers "full_attention".
+        (["linear_attention", "full_attention"], 1),
+        # GLM-5.3-Flash and Qwen4-Exp use sparse attention, which still caches
+        # every token and so must count as attention.
+        (["linear_attention", "deepseek_sparse_attention"], 1),
+        (["linear_attention", "qwen_sparse_attention"], 1),
+        (["linear_attention", "linear_attention"], 0),
+    ],
+)
+def test_hybrid_layer_counts_sparse_attention_as_attention(
+    layer_types, expected_attention
+):
+    """Sparse-attention layer types consume a full attention KV cache."""
+    model_config = object.__new__(ModelConfig)
+    model_config.hf_config = SimpleNamespace()
+    model_config.hf_text_config = SimpleNamespace(layer_types=layer_types)
+    model_config.model_arch_config = SimpleNamespace(text_model_type="glm5_next")
+
+    parallel_config = SimpleNamespace()
+    with (
+        patch.object(ModelConfig, "is_hybrid", True),
+        patch.object(ModelConfig, "has_noops", False),
+        patch.object(ModelConfig, "is_attention_free", False),
+        patch.object(
+            ModelConfig,
+            "get_layers_start_end_indices",
+            return_value=(0, len(layer_types)),
+        ),
+    ):
+        assert (
+            model_config.get_num_layers_by_block_type(parallel_config, "attention")
+            == expected_attention
+        )
+        assert (
+            model_config.get_num_layers_by_block_type(
+                parallel_config, "linear_attention"
+            )
+            == len(layer_types) - expected_attention
+        )

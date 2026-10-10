@@ -527,6 +527,9 @@ class SingleWriterShmObjectStorage:
             self.id_index: dict[int, str] = {}
             # Writer flag to track in-use status: monotonic_id -> count
             self.writer_flag: dict[int, int] = {}
+            # Items touch() keeps from being freed until they are looked up
+            # or release_touches() is called
+            self._touched: set[int] = set()
         else:
             if reader_lock is None:
                 raise ValueError("Lock must be provided for readers.")
@@ -540,6 +543,7 @@ class SingleWriterShmObjectStorage:
             self.key_index.clear()
             self.id_index.clear()
             self.writer_flag.clear()
+            self._touched.clear()
             logger.debug("Object storage cleared and reinitialized.")
 
     def copy_to_buffer(
@@ -664,7 +668,12 @@ class SingleWriterShmObjectStorage:
         """Get the cached object by key if it exists."""
         address, monotonic_id = self.key_index[key]
         self.increment_writer_flag(monotonic_id)
+        self._touched.discard(monotonic_id)
         return address, monotonic_id
+
+    def release_touches(self) -> None:
+        """Stop protecting touched items that were not looked up."""
+        self._touched.clear()
 
     def get_signature(self, key: str) -> list[int]:
         """Sign the handle of a cached object so readers can verify it."""
@@ -756,10 +765,11 @@ class SingleWriterShmObjectStorage:
         monotonic_id: int = 0,
         signature: list[int] | None = None,
     ) -> None:
-        """Touch an existing cached item to update its eviction status.
+        """Touch an existing cached item.
 
-        For writers (ShmObjectStoreSenderCache): Increment writer_flag
-        For readers (ShmObjectStoreReceiverCache): Increment reader_count
+        For writers (ShmObjectStoreSenderCache): Protect the item from
+        eviction until get_cached or release_touches
+        For readers (ShmObjectStoreReceiverCache): Validate the handle
 
         Args:
             key: String key of the object to touch
@@ -771,25 +781,12 @@ class SingleWriterShmObjectStorage:
         if self._reader_lock is None:
             if key not in self.key_index:
                 return None
-            address, monotonic_id = self.key_index[key]
-            # Writer side: increment writer_flag to raise eviction threshold
-            self.increment_writer_flag(monotonic_id)
+            self._touched.add(self.key_index[key][1])
         else:
             # Reject forged handles before dereferencing the supplied address.
             self.verify_signature(key, address, monotonic_id, signature)
-            with (
-                self._reader_lock,
-                self.ring_buffer.access_buf(address) as (data_view, buf_metadata),
-            ):
+            with self.ring_buffer.access_buf(address) as (_, buf_metadata):
                 self._validate_monotonic_id(address, monotonic_id, buf_metadata)
-                reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
-
-                # NOTE(Long):
-                # Avoid increasing flag on newly added item (sync with sender)
-                # Since when a new item is added
-                # pre-touch has no effect on writer side
-                if reader_count >= self.n_readers:
-                    self.increment_reader_flag(data_view[: self.flag_bytes])
 
     def close(self) -> None:
         """Close the shared memory."""
@@ -823,6 +820,8 @@ class SingleWriterShmObjectStorage:
         """Default is_free function that checks if the first 4 bytes are zero.
         This indicates that the buffer is free.
         """
+        if id in self._touched:
+            return False
         reader_count = int.from_bytes(buf[0:4], "little", signed=True)
         writer_count = self.writer_flag[id]
         return reader_count >= writer_count * self.n_readers

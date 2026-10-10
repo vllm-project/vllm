@@ -23,9 +23,11 @@ from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.buckets import histogram_buckets
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
+    KV_FETCH_STAGES,
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
@@ -292,6 +294,13 @@ class LoggingStatLogger(StatLoggerBase):
             log_parts.append("Deferred: %d reqs")
             log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
 
+        kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
+        if any(kv_fetch.values()):
+            log_parts.append(
+                "KV fetch: %d waiting to start, %d in progress, %d completed waiting"
+            )
+            log_args.extend(kv_fetch.get(stage, 0) for stage in KV_FETCH_STAGES)
+
         if self.num_preemptions > 0:
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
@@ -393,6 +402,10 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.num_skipped_waiting_reqs += (
                 last_scheduler_stats.num_skipped_waiting_reqs
             )
+            engine_kv_fetch = last_scheduler_stats.num_kv_fetch_reqs_by_stage
+            total_kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
+            for stage, num_reqs in engine_kv_fetch.items():
+                total_kv_fetch[stage] = total_kv_fetch.get(stage, 0) + num_reqs
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )
@@ -546,6 +559,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_waiting_by_reason[waiting_reason] = create_metric_per_engine(
                 gauge_waiting_by_reason, per_engine_labelvalues_with_reason
             )
+
+        self.gauge_kv_fetch_by_stage: dict[str, dict[int, Gauge]] = {}
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
+            gauge_kv_fetch_by_stage = self._gauge_cls(
+                name="vllm:num_requests_kv_fetch_by_stage",
+                documentation=(
+                    "Number of waiting requests by async KV load stage. "
+                    "Stage labels: 'waiting_to_start' = needs an async KV load "
+                    "that has not started; 'in_progress' = load started and not "
+                    "yet reported finished; 'completed_waiting' = load finished, "
+                    "request not running yet."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames + ["stage"],
+            )
+            for stage in KV_FETCH_STAGES:
+                per_engine_labelvalues_with_stage = {
+                    idx: labelvalues + [stage]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                }
+                self.gauge_kv_fetch_by_stage[stage] = create_metric_per_engine(
+                    gauge_kv_fetch_by_stage, per_engine_labelvalues_with_stage
+                )
 
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
@@ -727,6 +764,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_prompt_tokens_cached = create_metric_per_engine(
             counter_prompt_tokens_cached, per_engine_labelvalues
         )
+
+        self.counter_prompt_tokens_cached_by_source = self._counter_cls(
+            name="vllm:prompt_tokens_cached_by_source",
+            documentation=(
+                "Prefix-cache hit tokens by the cache tier that supplied them: "
+                "device (local HBM), host (offloaded to DRAM), disk, p2p "
+                "(transferred from another vLLM instance) or "
+                "external_unspecified. Counted at admission; sums to "
+                "vllm:prefix_cache_hits + vllm:external_prefix_cache_hits."
+            ),
+            labelnames=labelnames + ["source"],
+        )
+        for source in CacheHitSource:
+            for labelvalues in per_engine_labelvalues.values():
+                self.counter_prompt_tokens_cached_by_source.labels(
+                    *labelvalues, source.value
+                )
 
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
@@ -1074,6 +1128,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_waiting_by_reason[WAITING_REASON_DEFERRED][engine_idx].set(
                 scheduler_stats.num_skipped_waiting_reqs
             )
+            for stage, gauges in self.gauge_kv_fetch_by_stage.items():
+                gauges[engine_idx].set(
+                    scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)
+                )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
@@ -1083,13 +1141,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.prefix_cache_stats.hits
             )
 
-            if scheduler_stats.connector_prefix_cache_stats is not None:
+            labelvalues = self.per_engine_labelvalues[engine_idx]
+            self.counter_prompt_tokens_cached_by_source.labels(
+                *labelvalues, CacheHitSource.DEVICE.value
+            ).inc(scheduler_stats.prefix_cache_stats.hits)
+
+            connector_stats = scheduler_stats.connector_prefix_cache_stats
+            if connector_stats is not None:
                 self.counter_connector_prefix_cache_queries[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.queries
+                    connector_stats.queries
                 )
                 self.counter_connector_prefix_cache_hits[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.hits
+                    connector_stats.hits
                 )
+                for tier, num_tokens in connector_stats.hits_by_source.items():
+                    self.counter_prompt_tokens_cached_by_source.labels(
+                        *labelvalues, tier.value
+                    ).inc(num_tokens)
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(

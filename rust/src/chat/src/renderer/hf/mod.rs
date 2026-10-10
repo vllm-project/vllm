@@ -324,6 +324,8 @@ struct TemplateToolDefinition {
     parameters: JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defer_loading: Option<bool>,
 }
 
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
@@ -604,6 +606,7 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
                 description: tool.description.clone(),
                 parameters: tool.parameters.clone(),
                 strict: tool.strict,
+                defer_loading: tool.defer_loading,
             },
         })
         .collect()
@@ -649,6 +652,7 @@ mod tests {
                     description: None,
                     parameters: serde_json::json!({"type": "object"}),
                     strict: None,
+                    defer_loading: None,
                 }]),
             ),
             ChatMessage::user("hello"),
@@ -1020,6 +1024,7 @@ mod tests {
                     "required": ["city"],
                 }),
                 strict: Some(true),
+                defer_loading: None,
             }]),
         )]);
 
@@ -1419,6 +1424,7 @@ mod tests {
                 "required": ["city"],
             }),
             strict: None,
+            defer_loading: None,
         }];
         request.tool_context = crate::request::ResolvedToolContext::new(
             &request.messages,
@@ -1445,6 +1451,7 @@ mod tests {
             description: Some("Get weather".to_string()),
             parameters: serde_json::json!({"type": "object"}),
             strict: None,
+            defer_loading: None,
         }];
         request.tool_context = crate::request::ResolvedToolContext::new(
             &request.messages,
@@ -1472,12 +1479,21 @@ mod tests {
                 description: None,
                 parameters: Value::Null,
                 strict: None,
+                defer_loading: None,
             },
             ChatTool {
                 name: "with_strict".to_string(),
                 description: Some("description".to_string()),
                 parameters: serde_json::json!({"type": "object"}),
                 strict: Some(false),
+                defer_loading: None,
+            },
+            ChatTool {
+                name: "deferred".to_string(),
+                description: None,
+                parameters: Value::Null,
+                strict: None,
+                defer_loading: Some(true),
             },
         ];
         request.tool_context = crate::request::ResolvedToolContext::new(
@@ -1498,7 +1514,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "name=\"without_strict\"|description=null|parameters=null|;name=\"with_strict\"|description=\"description\"|parameters={\"type\": \"object\"}|strict=false|;"
+            "name=\"without_strict\"|description=null|parameters=null|;name=\"with_strict\"|description=\"description\"|parameters={\"type\": \"object\"}|strict=false|;name=\"deferred\"|description=null|parameters=null|defer_loading=true|;"
         );
     }
 

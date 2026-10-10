@@ -18,6 +18,15 @@ from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 logger = init_logger(__name__)
 
 
+@dataclass(frozen=True)
+class RequestError:
+    """A request-level error that does not mark the engine as unhealthy."""
+
+    code: str
+    message: str
+    retryable: bool = False
+
+
 @dataclass
 class SamplingMask:
     """Per-token sampling support sets aligned with completion token IDs.
@@ -118,9 +127,9 @@ class RequestOutput:
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
         prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids, shaped
-            [max(prompt_len - 1 - prompt_logprob_start, 0),
-            len(prompt_logprob_token_ids)]; row i scores them as predictions of
-            prompt token prompt_logprob_start + i + 1.
+            [prompt_len - 1 - prompt_logprob_start, num_ids]; row i holds the
+            logprobs of its own IDs as predictions of prompt token
+            prompt_logprob_start + i + 1, with -inf in padded columns.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -203,6 +212,10 @@ class RequestOutput:
                             completion.sampling_mask.token_ids.extend(
                                 next_completion.sampling_mask.token_ids
                             )
+                        if next_completion.spec_decode_metrics is not None:
+                            completion.spec_decode_metrics = (
+                                next_completion.spec_decode_metrics
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -259,6 +272,7 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
+        error: Structured request-level error information, if the request failed.
 
     """
 
@@ -269,20 +283,25 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids: list[int],
         num_cached_tokens: int,
         finished: bool,
+        *,
+        error: RequestError | None = None,
     ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.finished = finished
         self.outputs = outputs
+        self.error = error
 
     def __repr__(self) -> str:
+        error = f", error={self.error!r}" if self.error is not None else ""
         return (
             f"{type(self).__name__}(request_id={self.request_id!r}, "
             f"outputs={self.outputs!r}, "
             f"prompt_token_ids={self.prompt_token_ids}, "
             f"num_cached_tokens={self.num_cached_tokens}, "
-            f"finished={self.finished})"
+            f"finished={self.finished}"
+            f"{error})"
         )
 
 
@@ -319,12 +338,18 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "EmbeddingRequestOutput":
+        outputs = (
+            EmbeddingOutput([])
+            if request_output.error is not None
+            else EmbeddingOutput.from_base(request_output.outputs)
+        )
         return EmbeddingRequestOutput(
             request_id=request_output.request_id,
-            outputs=EmbeddingOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )
 
 
@@ -362,12 +387,18 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "ClassificationRequestOutput":
+        outputs = (
+            ClassificationOutput([])
+            if request_output.error is not None
+            else ClassificationOutput.from_base(request_output.outputs)
+        )
         return ClassificationRequestOutput(
             request_id=request_output.request_id,
-            outputs=ClassificationOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )
 
 
@@ -402,10 +433,16 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
     def from_base(
         request_output: PoolingRequestOutput,
     ) -> "ScoringRequestOutput":
+        outputs = (
+            ScoringOutput(0.0)
+            if request_output.error is not None
+            else ScoringOutput.from_base(request_output.outputs)
+        )
         return ScoringRequestOutput(
             request_id=request_output.request_id,
-            outputs=ScoringOutput.from_base(request_output.outputs),
+            outputs=outputs,
             prompt_token_ids=request_output.prompt_token_ids,
             num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
+            error=request_output.error,
         )

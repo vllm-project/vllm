@@ -124,9 +124,11 @@ def _index_block_score_kernel(
         order=(1, 0),
     )
     q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
-    # FP8 has no mixed-dtype dot with bf16/fp32. Leave bf16 and fp32 loads
-    # in their stored dtype so fp32 pipeline tests keep full precision.
-    if q.dtype.is_fp8():
+    # A matched fp8 pair (e.g. e4m3 x e4m3) lowers to a native FP8 MMA, so
+    # upcast only when the operands differ: there is no mixed-dtype fp8 MMA,
+    # including across fp8 flavours (fp8e4nv vs fp8e4b8). bf16 and fp32 loads
+    # always stay in their stored dtype.
+    if q.dtype.is_fp8() and q.dtype != ik_cache_ptr.dtype.element_ty:
         q = q.to(tl.bfloat16)
     q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
@@ -162,7 +164,7 @@ def _index_block_score_kernel(
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
         )
-        if k.dtype.is_fp8():
+        if k.dtype.is_fp8() and k.dtype != q.dtype:
             k = k.to(tl.bfloat16)
         qk = tl.dot(q, k, out_dtype=tl.float32)
         # apply causal mask as needed
@@ -378,7 +380,7 @@ def _decode_index_score_kernel(
         mask=q_mask[None, :],
         other=0.0,
     )  # [D,HQ]
-    if q.dtype.is_fp8():
+    if q.dtype.is_fp8() and q.dtype != ik_cache_ptr.dtype.element_ty:
         q = q.to(tl.bfloat16)
     for blk in tl.range(chunk_start_block, chunk_end_block):
         page = tl.load(bt_row + blk).to(tl.int64)
@@ -393,10 +395,10 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        # Upcast only FP8 cache loads. BF16 operands keep FP8 dot
-        # instructions out of the fallback path; FP32 accumulation
-        # preserves score accuracy. BF16/FP32 loads stay as stored.
-        if k.dtype.is_fp8():
+        # Matched fp8 operands keep the native FP8 MMA; any mismatch upcasts,
+        # since no mixed-dtype fp8 MMA exists. FP32 accumulation preserves
+        # score accuracy either way. BF16/FP32 loads stay as stored.
+        if k.dtype.is_fp8() and k.dtype != q.dtype:
             k = k.to(tl.bfloat16)
         kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))

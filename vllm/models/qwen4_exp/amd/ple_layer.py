@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GPU-resident Qwen4Exp position-learning enhancement layers."""
 
-import math
 from collections.abc import Iterable, Sequence
 
 import torch
-import torch.nn.functional as F
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
@@ -23,22 +22,19 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
 )
+from ..common.ops.ple import ple_conv, ple_gate, ple_ngram_ids
 
 logger = init_logger(__name__)
 
@@ -179,7 +175,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         embedding_dim: int,
         ple_dense_layer_id: int,
         max_total_tokens: int,
-        max_num_reqs: int,
         prefix: str,
         layer_name: str,
         *,
@@ -272,55 +267,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             self.ngram_embedding.weight.device,
             self.ngram_embedding.weight.is_pinned(),
         )
-        self.register_buffer(
-            "positions_buffer",
-            torch.arange(max_total_tokens, dtype=torch.int64),
-            persistent=False,
-        )
-        self.register_buffer(
-            "padded_buffer",
-            torch.full(
-                (max_num_reqs, max_total_tokens),
-                self.eos_token_id,
-                dtype=torch.int64,
-            ),
-            persistent=False,
-        )
-
-    @staticmethod
-    def _shift_precompute(
-        tokens: torch.Tensor, eos_token_id: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if tokens.dim() != 2:
-            raise ValueError("tokens must be a 2D tensor")
-        batch_size, seq_len = tokens.shape
-        positions = torch.arange(seq_len, device=tokens.device, dtype=torch.int64)
-        eos_positions = torch.where(tokens == eos_token_id, positions, -1)
-        previous_eos_inclusive = torch.cummax(eos_positions, dim=1).values
-        previous_eos = torch.cat(
-            [
-                eos_positions.new_full((batch_size, 1), -1),
-                previous_eos_inclusive[:, :-1],
-            ],
-            dim=1,
-        )
-        return positions, positions.unsqueeze(0) - previous_eos - 1
-
-    @staticmethod
-    def _shift_apply(
-        tokens: torch.Tensor,
-        positions: torch.Tensor,
-        position_in_segment: torch.Tensor,
-        shift: int,
-        eos_token_id: int,
-    ) -> torch.Tensor:
-        if shift == 0:
-            return tokens
-        source = positions - shift
-        gather_indices = source.clamp_min(0).unsqueeze(0).expand(tokens.shape[0], -1)
-        shifted = tokens.gather(1, gather_indices)
-        valid = (source.unsqueeze(0) >= 0) & (position_in_segment >= shift)
-        return torch.where(valid, shifted, tokens.new_full((), eos_token_id))
 
     def forward(
         self,
@@ -328,64 +274,17 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
-        input_ids = input_ids.reshape(-1).long()
-        query_start_loc = query_start_loc.long()
-        num_reqs = query_start_loc.numel() - 1
-        num_tokens = input_ids.shape[0]
-        if num_tokens > self.positions_buffer.numel():
-            raise ValueError(
-                f"PLE received {num_tokens} tokens, but its workspace supports "
-                f"at most {self.positions_buffer.numel()}"
-            )
-        if num_reqs > self.padded_buffer.shape[0]:
-            raise ValueError(
-                f"PLE received {num_reqs} requests, but its workspace supports "
-                f"at most {self.padded_buffer.shape[0]}"
-            )
-
-        positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs]
-        packed.fill_(self.eos_token_id)
-        request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
-        request_indices.clamp_(max=num_reqs - 1)
-        columns = (positions - query_start_loc[request_indices]).clamp(
-            0, packed.shape[1] - 1
+        input_ids = input_ids.reshape(-1)
+        ngram_ids = input_ids.new_empty(
+            (input_ids.shape[0], self.ngram_heads), dtype=torch.int64
         )
-        packed[request_indices, columns] = input_ids
-        ngram_context = ngram_context[:num_reqs].to(
-            device=input_ids.device, dtype=torch.long
+        torch.ops.vllm.qwen4_exp_amd_ple_ngram_ids(
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            ngram_ids,
+            self.layer_name,
         )
-
-        context = torch.cat([ngram_context, packed], dim=-1)
-        positions_2d, position_in_segment = self._shift_precompute(
-            context, self.eos_token_id
-        )
-        shifted = [context]
-        for shift in range(1, self.ngram_size):
-            shifted.append(
-                self._shift_apply(
-                    context,
-                    positions_2d,
-                    position_in_segment,
-                    shift,
-                    self.eos_token_id,
-                )
-            )
-        adjusted_columns = columns + self.ngram_size - 1
-        id_blocks = []
-        for ngram in range(2, self.ngram_size + 1):
-            start = (ngram - 2) * self.heads_per_ngram
-            end = start + self.heads_per_ngram
-            mixed = shifted[0] * self.layer_multipliers[0]
-            for index in range(1, ngram):
-                mixed = torch.bitwise_xor(
-                    mixed, shifted[index] * self.layer_multipliers[index]
-                )
-            sizes = self.ngram_heads_vocab_sizes[start:end]
-            offsets = self.ngram_heads_offsets[start:end]
-            ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
-            id_blocks.append(ids[request_indices, adjusted_columns])
-        ngram_ids = torch.cat(id_blocks, dim=-1)
         embedding = self.ngram_embedding
         if embedding.supports_prefetch:
             output = ngram_ids.new_empty(
@@ -510,26 +409,21 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             int(config.ple_embed_dim),
             self.ple_dense_layer_id,
             vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.scheduler_config.max_num_seqs,
             f"{prefix}.ple_embedding",
             prefix,
             data_parallel_rank=vllm_config.parallel_config.data_parallel_rank,
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
-        self.key_proj = ReplicatedLinear(
+        # The PLE cache is TP-replicated, so this merged projection is too.
+        self.kv_proj = MergedColumnParallelLinear(
             int(config.ple_embed_dim),
-            self.hc_hidden_size,
+            [self.hc_hidden_size, self.hidden_size],
             bias=False,
+            params_dtype=model_config.dtype,
             quant_config=quant_config,
-            prefix=f"{prefix}.key_proj",
-        )
-        self.value_proj = ReplicatedLinear(
-            int(config.ple_embed_dim),
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.value_proj",
+            prefix=f"{prefix}.kv_proj",
+            disable_tp=True,
         )
         norm_args = (
             self.hc_hidden_size,
@@ -582,355 +476,15 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             num_spec=self.num_spec_tokens,
         )
 
-    def _apply_norm(
-        self, norm: Qwen4ExpPLEGroupedNorm, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        shape = hidden_states.shape
-        return norm(hidden_states.flatten(-2)).reshape(shape)
-
-    def _short_conv_fallback(self, inputs: torch.Tensor) -> torch.Tensor:
-        # Profiling / CUDA graph capture only; conv state is not updated.
-        inputs_t = inputs.transpose(0, 1).unsqueeze(0)
-        output = self.conv1d(inputs_t)[..., : inputs_t.size(-1)]
-        return F.silu(output).squeeze(0).transpose(0, 1)
-
-    def _short_conv_dilated_decode_batched(
-        self,
-        x_d: torch.Tensor,
-        conv_state: torch.Tensor,
-        conv_weights: torch.Tensor,
-        state_indices_tensor_d: torch.Tensor,
-        has_initial_states_d: torch.Tensor | None,
-    ) -> torch.Tensor:
-        state_indices = state_indices_tensor_d.to(
-            device=conv_state.device, dtype=torch.int64
-        )
-        # FULL cudagraph padded decode rows use NULL_BLOCK_ID. Remap them to
-        # slot 0 for a safe gather, then zero output and skip write-back.
-        valid_state = state_indices != NULL_BLOCK_ID
-        state_indices = torch.where(
-            valid_state, state_indices, torch.zeros_like(state_indices)
-        )
-        if has_initial_states_d is None:
-            has_initial_state = valid_state
-        else:
-            if has_initial_states_d.numel() < state_indices_tensor_d.numel():
-                raise ValueError(
-                    "has_initial_states_d size mismatch: "
-                    f"got {has_initial_states_d.numel()}, "
-                    f"need >= {state_indices_tensor_d.numel()}."
-                )
-            has_initial_state = has_initial_states_d[
-                : state_indices_tensor_d.numel()
-            ].to(device=conv_state.device, dtype=torch.bool)
-            has_initial_state = has_initial_state & valid_state
-
-        cached_state = conv_state.index_select(0, state_indices)
-        state = cached_state[..., : self.conv_state_len].to(x_d.dtype)
-        if self.conv_state_len > 0:
-            initial_state = torch.where(
-                has_initial_state.view(-1, 1, 1),
-                state,
-                torch.zeros_like(state),
-            )
-            history = torch.cat((initial_state, x_d.unsqueeze(-1)), dim=-1)
-        else:
-            history = x_d.unsqueeze(-1)
-
-        conv_output = F.conv1d(
-            history,
-            conv_weights.unsqueeze(1).contiguous(),
-            groups=history.size(1),
-            dilation=self.short_conv_dilation,
-        ).squeeze(-1)
-        output = F.silu(conv_output)
-        output = output * valid_state.view(-1, 1).to(output.dtype)
-
-        if self.conv_state_len > 0:
-            next_state = history[..., -self.conv_state_len :]
-            # Padded rows are remapped to the reserved null slot. Preserve its
-            # existing value while writing the new states for valid rows.
-            existing_base_state = cached_state[..., : self.conv_state_len]
-            safe_next_state = torch.where(
-                valid_state.view(-1, 1, 1),
-                next_state.to(conv_state.dtype),
-                existing_base_state,
-            )
-            cached_state[..., : self.conv_state_len] = safe_next_state
-            conv_state.index_copy_(0, state_indices, cached_state)
-
-        return output
-
-    def _short_conv_dilated_prefill_batched(
-        self,
-        x_p: torch.Tensor,
-        metadata: PleShortConvAttentionMetadata,
-        conv_state: torch.Tensor,
-        conv_weights: torch.Tensor,
-        state_indices_tensor_p: torch.Tensor,
-        num_prefills: int,
-        num_decode_tokens: int,
-        num_prefill_tokens: int,
-    ) -> torch.Tensor:
-        query_start_loc_p = metadata.query_start_loc_p
-        if query_start_loc_p is None:
-            raise ValueError("query_start_loc is required for prefill short-conv")
-        # The metadata builder guarantees that the prefill query offsets start
-        # at 0 and end at num_prefill_tokens. Avoid reading those values here,
-        # since doing so would force a device-to-host synchronization.
-        has_initial_states_p = metadata.has_initial_states_p
-        if has_initial_states_p is None:
-            raise ValueError("has_initial_states_p is required for prefill short-conv")
-
-        output = torch.empty_like(x_p)
-        q_starts = query_start_loc_p.to(torch.int64)
-        if state_indices_tensor_p.numel() < num_prefills:
-            raise ValueError(
-                "state_indices_tensor_p size mismatch: "
-                f"got {state_indices_tensor_p.numel()}, "
-                f"need >= {num_prefills}."
-            )
-        if has_initial_states_p.numel() < num_prefills:
-            raise ValueError(
-                "has_initial_states_p size mismatch: "
-                f"got {has_initial_states_p.numel()}, "
-                f"need >= {num_prefills}."
-            )
-        if num_prefills == 0 or x_p.numel() == 0:
-            return output
-        lengths = q_starts[1:] - q_starts[:-1]
-        # Use the CPU-computed packing width from the metadata builder instead
-        # of synchronizing on lengths.max().
-        max_len = metadata.max_prefill_query_len
-        if max_len <= 0:
-            return output
-
-        hidden_size = x_p.shape[1]
-        positions = torch.arange(
-            num_prefill_tokens, device=x_p.device, dtype=torch.int64
-        )
-        req_indices = torch.searchsorted(q_starts[1:], positions, right=True)
-        col_indices = positions - q_starts[req_indices]
-
-        packed_tokens = x_p.new_zeros((num_prefills, max_len, hidden_size))
-        packed_tokens[req_indices, col_indices] = x_p
-        packed_tokens = packed_tokens.transpose(1, 2).contiguous()
-
-        state_indices = state_indices_tensor_p[:num_prefills].to(
-            device=conv_state.device, dtype=torch.int64
-        )
-        valid_state = state_indices != NULL_BLOCK_ID
-        state_indices = torch.where(
-            valid_state, state_indices, torch.zeros_like(state_indices)
-        )
-        has_initial = has_initial_states_p[:num_prefills].to(
-            device=conv_state.device, dtype=torch.bool
-        )
-        if self.conv_state_len > 0:
-            if conv_state.shape[0] == 0:
-                state = conv_state.new_zeros(
-                    (num_prefills, hidden_size, self.conv_state_len),
-                    dtype=x_p.dtype,
-                )
-            else:
-                state = conv_state.index_select(0, state_indices)[
-                    ..., : self.conv_state_len
-                ].to(x_p.dtype)
-            use_initial_mask = (valid_state & has_initial).view(num_prefills, 1, 1)
-            initial_state = torch.where(
-                use_initial_mask,
-                state,
-                torch.zeros_like(state),
-            )
-            history = torch.cat((initial_state, packed_tokens), dim=-1)
-        else:
-            history = packed_tokens
-
-        conv_output = F.conv1d(
-            history,
-            conv_weights.unsqueeze(1).contiguous(),
-            groups=history.size(1),
-            dilation=self.short_conv_dilation,
-        )
-        conv_output = F.silu(conv_output).transpose(1, 2).contiguous()
-
-        token_positions = torch.arange(max_len, device=x_p.device, dtype=torch.int64)
-        valid_tokens = token_positions.view(1, max_len) < lengths.view(num_prefills, 1)
-        valid_output_mask = valid_tokens & valid_state.to(device=x_p.device).view(
-            num_prefills, 1
-        )
-        conv_output.masked_fill_(~valid_output_mask.unsqueeze(-1), 0)
-        output.copy_(conv_output[req_indices, col_indices])
-
-        if self.conv_state_len > 0 and conv_state.shape[0] > 0:
-            state_starts = lengths.to(device=history.device, dtype=torch.int64).view(
-                num_prefills, 1, 1
-            )
-            state_offsets = torch.arange(
-                self.conv_state_len, device=history.device, dtype=torch.int64
-            ).view(1, 1, self.conv_state_len)
-            next_state = history.gather(
-                dim=2,
-                index=(state_starts + state_offsets).expand(-1, history.size(1), -1),
-            )
-            # Write back without a host synchronization. Valid, non-empty rows
-            # receive their new state; padding and zero-length rows keep the
-            # current cache value.
-            existing_state = conv_state.index_select(0, state_indices)
-            existing_base_state = existing_state[..., : self.conv_state_len]
-            update_mask = valid_state & (lengths.to(device=conv_state.device) > 0)
-            safe_next_state = torch.where(
-                update_mask.view(num_prefills, 1, 1),
-                next_state.to(conv_state.dtype),
-                existing_base_state,
-            )
-            existing_state[..., : self.conv_state_len] = safe_next_state
-            conv_state.index_copy_(0, state_indices, existing_state)
-        return output
-
-    def _short_conv_dilated_spec_batched(
-        self,
-        x_spec: torch.Tensor,
-        conv_state: torch.Tensor,
-        conv_weights: torch.Tensor,
-        spec_state_indices_tensor: torch.Tensor,
-        spec_query_start_loc: torch.Tensor,
-        num_accepted_tokens: torch.Tensor,
-        spec_query_len: int,
-    ) -> torch.Tensor:
-        """Dilated short-conv for speculative-decode (MTP) requests.
-
-        Each spec request feeds multiple (draft + 1) query tokens. The conv
-        outputs are computed causally after rolling back the previous draft
-        state by ``num_accepted_tokens - 1``. The current candidate inputs stay
-        in the extended cache for the next forward, matching
-        ``causal_conv1d_update``.
-
-        ``spec_query_len`` (== num_speculative_tokens + 1) is the maximum query
-        length and is a Python int, so no host synchronization is needed; this
-        keeps the path safe for full CUDA-graph capture/replay where the buffers
-        are padded at the request level.
-        """
-        num_reqs = spec_state_indices_tensor.numel()
-        hidden_size = x_spec.size(-1)
-        # Use a fixed packing width instead of synchronizing on lengths.max().
-        max_len = spec_query_len
-        # Full CUDA graphs can pad these buffers. Only the first num_reqs
-        # accepted-token counts belong to actual speculative requests.
-        num_accepted_tokens = num_accepted_tokens[:num_reqs]
-        q_starts = spec_query_start_loc[: num_reqs + 1].to(torch.int64)
-        # Keep the number of real speculative tokens on the device.
-        total_real_tokens = q_starts[num_reqs]
-
-        state_indices = spec_state_indices_tensor.to(
-            device=conv_state.device, dtype=torch.int64
-        )
-        valid_state = state_indices != NULL_BLOCK_ID
-        state_indices = torch.where(
-            valid_state, state_indices, torch.zeros_like(state_indices)
-        )
-        positions = torch.arange(
-            x_spec.size(0), device=x_spec.device, dtype=torch.int64
-        )
-        # Route graph-padded token rows to the discarded dummy request so that
-        # they cannot overwrite real packed data.
-        req_indices = torch.searchsorted(q_starts[1:], positions, right=True)
-        valid_tokens = (positions < total_real_tokens) & (req_indices < num_reqs)
-        clamped_req_indices = req_indices.clamp_max(max(num_reqs - 1, 0))
-        col_indices = (positions - q_starts[clamped_req_indices]).clamp_(0, max_len - 1)
-        pack_req_indices = torch.where(
-            valid_tokens,
-            clamped_req_indices,
-            torch.full_like(req_indices, num_reqs),
-        )
-        pack_col_indices = torch.where(
-            valid_tokens, col_indices, torch.zeros_like(col_indices)
-        )
-
-        # The last request row is the dummy sink for graph padding.
-        packed = x_spec.new_zeros((num_reqs + 1, max_len, hidden_size))
-        packed[pack_req_indices, pack_col_indices] = x_spec
-        packed = packed.transpose(1, 2).contiguous()
-
-        if self.conv_state_len > 0:
-            cached_state = conv_state.index_select(0, state_indices)
-            rollback_offsets = num_accepted_tokens.to(
-                device=conv_state.device, dtype=torch.int64
-            ).sub(1)
-            rollback_offsets = torch.where(
-                valid_state,
-                rollback_offsets.clamp_(0, max_len - 1),
-                torch.zeros_like(rollback_offsets),
-            )
-            state_offsets = torch.arange(
-                self.conv_state_len, device=conv_state.device, dtype=torch.int64
-            ).view(1, 1, self.conv_state_len)
-            rollback_indices = rollback_offsets.view(-1, 1, 1) + state_offsets
-            state = cached_state.gather(
-                2, rollback_indices.expand(-1, hidden_size, -1)
-            ).to(x_spec.dtype)
-            state = torch.where(
-                valid_state.view(num_reqs, 1, 1),
-                state,
-                torch.zeros_like(state),
-            )
-            # Append a zeroed dummy-row state to match the [num_reqs + 1] pack.
-            dummy_state = state.new_zeros((1, hidden_size, self.conv_state_len))
-            state_full = torch.cat((state, dummy_state), dim=0)
-            history = torch.cat((state_full, packed), dim=-1)
-        else:
-            history = packed
-
-        conv_output = F.conv1d(
-            history,
-            conv_weights.unsqueeze(1).contiguous(),
-            groups=history.size(1),
-            dilation=self.short_conv_dilation,
-        )
-        conv_output = F.silu(conv_output).transpose(1, 2).contiguous()
-
-        output = conv_output[pack_req_indices, pack_col_indices]
-        output = output * valid_tokens.view(-1, 1).to(output.dtype)
-
-        # Keep all current candidate inputs in the extended state. On the next
-        # target forward, ``num_accepted_tokens - 1`` selects the rollback
-        # window before processing the newly scheduled tokens.
-        if self.conv_state_len > 0:
-            state_capacity = self.conv_state_len + max_len - 1
-            if conv_state.size(-1) < state_capacity:
-                raise RuntimeError(
-                    "PLE short-conv cache cannot retain speculative tokens: "
-                    f"got {conv_state.size(-1)}, need {state_capacity}."
-                )
-            candidate_state = history[:num_reqs, :, 1 : state_capacity + 1]
-            query_lengths = q_starts[1:] - q_starts[:-1]
-            state_positions = torch.arange(
-                state_capacity, device=history.device, dtype=torch.int64
-            ).view(1, 1, state_capacity)
-            update_lengths = (self.conv_state_len + query_lengths - 1).view(
-                num_reqs, 1, 1
-            )
-            update_mask = valid_state.view(num_reqs, 1, 1) & (
-                state_positions < update_lengths
-            )
-            existing_state = cached_state[..., :state_capacity]
-            next_state = torch.where(
-                update_mask,
-                candidate_state.to(conv_state.dtype),
-                existing_state,
-            )
-            cached_state[..., :state_capacity] = next_state
-            conv_state.index_copy_(0, state_indices, cached_state)
-
-        return output
-
     def _short_conv_dilated_dispatch(
         self,
         inputs: torch.Tensor,
+        residual: torch.Tensor,
+        outer_residual: torch.Tensor,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> None:
         num_prefills = metadata.num_prefills
         num_decodes = metadata.num_decodes
         num_decode_tokens = metadata.num_decode_tokens
@@ -938,110 +492,145 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
         has_spec = metadata.spec_sequence_masks is not None
-        x = inputs[: metadata.num_actual_tokens]
+        has_non_spec = has_prefill or has_decode
+        inputs = inputs[: metadata.num_actual_tokens]
+        residual = residual[: metadata.num_actual_tokens]
+        outer_residual = outer_residual[: metadata.num_actual_tokens]
 
-        # Split spec / non-spec tokens.
-        if has_spec:
-            if has_prefill or has_decode:
-                assert metadata.spec_token_indx is not None
-                assert metadata.non_spec_token_indx is not None
-                x_spec = x.index_select(0, metadata.spec_token_indx.long())
-                x_non_spec = x.index_select(0, metadata.non_spec_token_indx.long())
-            else:
-                x_spec = x
-                x_non_spec = None
-        else:
-            x_spec = None
-            x_non_spec = x
+        spec_token_indices = None
+        non_spec_token_indices = None
+        if has_spec and has_non_spec:
+            assert metadata.spec_token_indx is not None
+            assert metadata.non_spec_token_indx is not None
+            spec_token_indices = metadata.spec_token_indx
+            non_spec_token_indices = metadata.non_spec_token_indx
 
-        spec_output = None
-        # 1. Run the multi-query speculative-decode part.
         if has_spec:
             assert metadata.spec_state_indices_tensor is not None
-            assert metadata.spec_query_start_loc is not None
-            assert metadata.num_accepted_tokens is not None
-            spec_output = self._short_conv_dilated_spec_batched(
-                x_spec=x_spec,
+            query_start_loc = metadata.spec_query_start_loc
+            num_accepted_tokens = metadata.num_accepted_tokens
+            assert query_start_loc is not None
+            assert num_accepted_tokens is not None
+            spec_state_indices = metadata.spec_state_indices_tensor[
+                : metadata.num_spec_decodes
+            ]
+            # Mixed batches stay in their original row order; the kernels map
+            # logical spec/non-spec rows instead of materializing both groups.
+            ple_conv(
+                inputs=inputs,
+                residual=residual,
                 conv_state=conv_state,
                 conv_weights=conv_weights,
-                spec_state_indices_tensor=metadata.spec_state_indices_tensor[
-                    : metadata.num_spec_decodes
-                ],
-                spec_query_start_loc=metadata.spec_query_start_loc,
-                num_accepted_tokens=metadata.num_accepted_tokens,
+                state_indices=spec_state_indices,
+                outer_residual=outer_residual,
+                mode="spec",
+                dilation=self.short_conv_dilation,
+                query_start_loc=query_start_loc,
+                num_accepted_tokens=num_accepted_tokens,
                 spec_query_len=metadata.spec_query_len,
+                token_indices=spec_token_indices,
             )
 
-        # 2. Run regular decode and prefill requests.
-        conv_out_non_spec = None
-        state_indices_tensor = metadata.state_indices_tensor
-        if x_non_spec is not None:
-            assert state_indices_tensor is not None
-            if has_prefill:
-                state_indices_tensor_d, state_indices_tensor_p = torch.split(
-                    state_indices_tensor,
-                    [num_decodes, num_prefills],
-                    dim=0,
+        if not has_non_spec:
+            return
+
+        state_indices = metadata.state_indices_tensor
+        assert state_indices is not None
+        if has_prefill:
+            state_indices_d, state_indices_p = torch.split(
+                state_indices, [num_decodes, num_prefills], dim=0
+            )
+            if non_spec_token_indices is None:
+                inputs_d, inputs_p = torch.split(
+                    inputs, [num_decode_tokens, num_prefill_tokens], dim=0
                 )
-                x_d, x_p = torch.split(
-                    x_non_spec,
+                residual_d, residual_p = torch.split(
+                    residual, [num_decode_tokens, num_prefill_tokens], dim=0
+                )
+                outer_residual_d, outer_residual_p = torch.split(
+                    outer_residual,
                     [num_decode_tokens, num_prefill_tokens],
                     dim=0,
                 )
-                non_spec_parts: list[torch.Tensor] = []
-                if has_decode:
-                    non_spec_parts.append(
-                        self._short_conv_dilated_decode_batched(
-                            x_d=x_d,
-                            conv_state=conv_state,
-                            conv_weights=conv_weights,
-                            state_indices_tensor_d=state_indices_tensor_d,
-                            has_initial_states_d=metadata.has_initial_states_d,
-                        )
-                    )
-                non_spec_parts.append(
-                    self._short_conv_dilated_prefill_batched(
-                        x_p=x_p,
-                        metadata=metadata,
-                        conv_state=conv_state,
-                        conv_weights=conv_weights,
-                        state_indices_tensor_p=state_indices_tensor_p,
-                        num_prefills=num_prefills,
-                        num_decode_tokens=num_decode_tokens,
-                        num_prefill_tokens=num_prefill_tokens,
-                    )
-                )
-                conv_out_non_spec = torch.vstack(non_spec_parts)
+                token_indices_d = None
+                token_indices_p = None
             else:
-                conv_out_non_spec = self._short_conv_dilated_decode_batched(
-                    x_d=x_non_spec,
+                inputs_d = inputs_p = inputs
+                residual_d = residual_p = residual
+                outer_residual_d = outer_residual_p = outer_residual
+                token_indices_d, token_indices_p = torch.split(
+                    non_spec_token_indices,
+                    [num_decode_tokens, num_prefill_tokens],
+                    dim=0,
+                )
+
+            if has_decode:
+                ple_conv(
+                    inputs=inputs_d,
+                    residual=residual_d,
                     conv_state=conv_state,
                     conv_weights=conv_weights,
-                    state_indices_tensor_d=state_indices_tensor[: x_non_spec.size(0)],
-                    has_initial_states_d=metadata.has_initial_states_d,
+                    state_indices=state_indices_d,
+                    outer_residual=outer_residual_d,
+                    mode="decode",
+                    dilation=self.short_conv_dilation,
+                    has_initial_states=metadata.has_initial_states_d,
+                    token_indices=token_indices_d,
                 )
 
-        # 3. Merge both parts back into the original token order.
-        if has_spec and conv_out_non_spec is not None:
-            assert metadata.spec_token_indx is not None
-            assert metadata.non_spec_token_indx is not None
-            assert spec_output is not None
-            output = x.new_empty((metadata.num_actual_tokens, x.size(-1)))
-            output.index_copy_(0, metadata.spec_token_indx, spec_output)
-            output.index_copy_(0, metadata.non_spec_token_indx, conv_out_non_spec)
-            return output
-        elif has_spec:
-            assert spec_output is not None
-            return spec_output
-        if conv_out_non_spec is None:
-            return x
-        return conv_out_non_spec
+            query_start_loc = metadata.query_start_loc_p
+            if query_start_loc is None:
+                raise ValueError("query_start_loc is required for prefill short-conv")
+            has_initial_states = metadata.has_initial_states_p
+            if has_initial_states is None:
+                raise ValueError(
+                    "has_initial_states_p is required for prefill short-conv"
+                )
+            ple_conv(
+                inputs=inputs_p,
+                residual=residual_p,
+                conv_state=conv_state,
+                conv_weights=conv_weights,
+                state_indices=state_indices_p,
+                outer_residual=outer_residual_p,
+                mode="prefill",
+                dilation=self.short_conv_dilation,
+                query_start_loc=query_start_loc,
+                has_initial_states=has_initial_states,
+                token_indices=token_indices_p,
+            )
+        else:
+            num_decode_rows = (
+                non_spec_token_indices.numel()
+                if non_spec_token_indices is not None
+                else inputs.size(0)
+            )
+            ple_conv(
+                inputs=inputs,
+                residual=residual,
+                conv_state=conv_state,
+                conv_weights=conv_weights,
+                state_indices=state_indices[:num_decode_rows],
+                outer_residual=outer_residual,
+                mode="decode",
+                dilation=self.short_conv_dilation,
+                has_initial_states=metadata.has_initial_states_d,
+                token_indices=non_spec_token_indices,
+            )
 
-    def _short_conv(self, inputs: torch.Tensor) -> torch.Tensor:
+    def _short_conv(
+        self,
+        inputs: torch.Tensor,
+        residual: torch.Tensor,
+        outer_residual: torch.Tensor,
+    ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
+        # Profiling omits all metadata or this Mamba entry. Short convolution
+        # is a no-op there, but preserve the outer residual addition.
         if attn_metadata is None:
-            return self._short_conv_fallback(inputs)
+            residual.add_(outer_residual)
+            return
 
         if not isinstance(attn_metadata, dict):
             raise RuntimeError(
@@ -1051,8 +640,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
-            # MRV2 omits Mamba-family metadata during profile warmup.
-            return self._short_conv_fallback(inputs)
+            residual.add_(outer_residual)
+            return
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
                 "Expected PleShortConvAttentionMetadata for layer "
@@ -1061,6 +650,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
 
         conv_state = self.kv_cache[0]
+        # Canonicalize both backend cache layouts to [slot, channel, window].
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         conv_weights = self.conv1d.weight.squeeze(1)
@@ -1074,11 +664,13 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     f"expect at least {state_capacity}."
                 )
             conv_state = conv_state[..., -state_capacity:]
-        return self._short_conv_dilated_dispatch(
-            inputs,
-            layer_attn_metadata,
-            conv_state,
-            conv_weights.to(dtype=inputs.dtype),
+        self._short_conv_dilated_dispatch(
+            inputs=inputs,
+            residual=residual,
+            outer_residual=outer_residual,
+            metadata=layer_attn_metadata,
+            conv_state=conv_state,
+            conv_weights=conv_weights.to(dtype=inputs.dtype),
         )
 
     def forward(
@@ -1097,27 +689,58 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             )
         embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
         embeddings = self.ple_embedding.ngram_embedding.dequantize(
-            embeddings,
-            self.ple_embedding.ngram_embedding.params_dtype,
+            embeddings, hidden_states.dtype
         )
-        key, _ = self.key_proj(embeddings)
-        value, _ = self.value_proj(embeddings)
-        token_count = hidden_states.shape[0]
-        key = key.reshape(token_count, self.hc_count, self.hidden_size)
-        query = hidden_states.reshape(token_count, self.hc_count, self.hidden_size)
-        key = self._apply_norm(self.norm_key, key)
-        query = self._apply_norm(self.norm_query, query)
-        gate = (key * query).sum(dim=-1, keepdim=True) / math.sqrt(self.hidden_size)
-        gate = torch.sigmoid(gate.sign() * gate.abs().clamp_min(1e-6).sqrt())
-        gated_value = gate * value.unsqueeze(-2)
-        normalized = self._apply_norm(self.norm_conv, gated_value).flatten(-2)
-        conv_output = torch.zeros_like(normalized)
+        kv, _ = self.kv_proj(embeddings)
+        key, value = kv.split(self.kv_proj.output_sizes, dim=-1)
+        gated_output, conv_input = ple_gate(
+            key,
+            value,
+            hidden_states,
+            self.norm_key.weight,
+            self.norm_query.weight,
+            self.norm_conv.weight,
+            self.norm_key.eps,
+        )
+        # The short-conv op is a piecewise-graph splitting op: state routing
+        # reads runtime request metadata. It accumulates the convolution and
+        # the outer residual into gated_output.
         torch.ops.vllm.qwen4_exp_ple_short_conv(
-            normalized,
-            conv_output,
+            conv_input,
+            gated_output,
+            hidden_states,
             self.prefix,
         )
-        return gated_value.flatten(-2) + conv_output
+        return gated_output
+
+
+def qwen4_exp_amd_ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Hash the current request layout into n-gram embedding indices.
+
+    The launch sizes its request binary search from the request count, which
+    is symbolic under Dynamo, so it runs outside Inductor's FX graph.
+    """
+    layer = get_forward_context().no_compile_layers[layer_name]
+    if not isinstance(layer, Qwen4ExpPLELayer):
+        raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
+    embedding = layer.ple_embedding
+    ple_ngram_ids(
+        input_ids=input_ids,
+        query_start_loc=query_start_loc,
+        ngram_context=ngram_context,
+        layer_multipliers=embedding.layer_multipliers,
+        ngram_heads_vocab_sizes=embedding.ngram_heads_vocab_sizes,
+        ngram_heads_offsets=embedding.ngram_heads_offsets,
+        eos_token_id=embedding.eos_token_id,
+        heads_per_ngram=embedding.heads_per_ngram,
+        output=output,
+    )
 
 
 def qwen4_exp_amd_ple_ngram_embedding(
@@ -1157,12 +780,19 @@ def qwen4_exp_amd_ple_ngram_embedding_pinned(
 
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
-    output: torch.Tensor,
+    residual: torch.Tensor,
+    outer_residual: torch.Tensor,
     layer_name: str,
 ) -> None:
     layer = get_forward_context().no_compile_layers[layer_name]
-    result = layer._short_conv(inputs)
-    output[: result.shape[0]].copy_(result)
+    layer._short_conv(inputs, residual, outer_residual)
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_amd_ple_ngram_ids",
+    op_func=qwen4_exp_amd_ple_ngram_ids,
+    mutates_args=["output"],
+)
 
 
 direct_register_custom_op(
@@ -1182,7 +812,7 @@ direct_register_custom_op(
 direct_register_custom_op(
     op_name="qwen4_exp_ple_short_conv",
     op_func=qwen4_exp_ple_short_conv,
-    mutates_args=["output"],
+    mutates_args=["residual"],
 )
 
 

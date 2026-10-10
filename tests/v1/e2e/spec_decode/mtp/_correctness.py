@@ -48,16 +48,6 @@ def check_mtp_correctness(
         elif "gemma-4" in model_name:
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "audio": 0}
 
-        if draft_model is not None and "gemma-4" in draft_model:
-            import transformers
-            from packaging.version import Version
-
-            if Version(transformers.__version__) < Version("5.8.0"):
-                pytest.skip(
-                    "Gemma4 MTP assistant requires transformers>=5.8.0, "
-                    f"got {transformers.__version__}"
-                )
-
         with vllm_runner(
             model_name,
             block_size=None,

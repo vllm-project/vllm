@@ -275,7 +275,7 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
 
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
-    return x.to("cpu", non_blocking=True).numpy()
+    return x.to("cpu", non_blocking=True, copy=True).numpy()
 
 
 @contextlib.contextmanager
