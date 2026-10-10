@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -746,6 +747,23 @@ _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL = ComputeGlobalTopkIndicesAndLensKe
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
 
+def _canonicalize_sparse_topk_indices(
+    topk_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Give an unordered sparse top-k set one deterministic reduction order."""
+    # Descending order keeps the -1 sentinel behind every valid index.
+    permutation = torch.empty(
+        topk_indices.shape, dtype=torch.int64, device=topk_indices.device
+    )
+    torch.sort(
+        topk_indices,
+        dim=-1,
+        descending=True,
+        out=(topk_indices, permutation),
+    )
+    return topk_indices
+
+
 def combine_topk_swa_indices(
     topk_indices: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -783,6 +801,13 @@ def combine_topk_swa_indices(
     else:
         combined_indices, combined_lens = out
         combined_indices.fill_(-1)
+
+    if envs.VLLM_BATCH_INVARIANT and topk:
+        # The prefill radix top-k kernel guarantees the selected set but not
+        # its order. FlashMLA consumes indices in-order, so different legal
+        # permutations otherwise change the floating-point reduction and make
+        # repeated runs diverge once the candidate count exceeds ``topk``.
+        topk_indices = _canonicalize_sparse_topk_indices(topk_indices)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
