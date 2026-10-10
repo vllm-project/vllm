@@ -106,7 +106,10 @@ def mary_had_lamb_audio_chunks() -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_multi_chunk_streaming(model_name, mary_had_lamb_audio_chunks):
+@pytest.mark.parametrize("include_logprobs", [False, True])
+async def test_multi_chunk_streaming(
+    model_name, include_logprobs, mary_had_lamb_audio_chunks
+):
     """Test streaming multiple audio chunks before committing."""
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
 
@@ -120,7 +123,10 @@ async def test_multi_chunk_streaming(model_name, mary_had_lamb_audio_chunks):
             event = await receive_event(ws, timeout=30.0)
             assert event["type"] == "session.created"
 
-            await send_event(ws, {"type": "session.update", "model": model_name})
+            session_update = {"type": "session.update", "model": model_name}
+            if include_logprobs:
+                session_update["include"] = ["item.input_audio_transcription.logprobs"]
+            await send_event(ws, session_update)
 
             # Wait for the server to acknowledge the session update.
             try:
@@ -170,6 +176,7 @@ async def test_multi_chunk_streaming(model_name, mary_had_lamb_audio_chunks):
 
             # Collect transcription deltas
             full_text = ""
+            logprobs = []
             done_received = False
 
             while not done_received:
@@ -177,6 +184,10 @@ async def test_multi_chunk_streaming(model_name, mary_had_lamb_audio_chunks):
 
                 if event["type"] == "transcription.delta":
                     full_text += event["delta"]
+                    if include_logprobs:
+                        logprobs.extend(event["logprobs"])
+                    else:
+                        assert event["logprobs"] is None
                 elif event["type"] == "transcription.done":
                     done_received = True
                     assert "text" in event
@@ -197,6 +208,13 @@ async def test_multi_chunk_streaming(model_name, mary_had_lamb_audio_chunks):
                 " it squeaked with quite a flow, and everywhere that Mary went,"
                 " the lamb was sure to go."
             )
+            if include_logprobs:
+                assert logprobs
+                for entry in logprobs:
+                    assert entry["logprob"] <= 0
+                    assert entry["bytes"] == list(
+                        entry["token"].encode("utf-8", errors="replace")
+                    )
 
 
 @pytest.mark.asyncio
@@ -298,7 +316,8 @@ async def test_empty_commit_does_not_crash_engine(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_session_update_invalid_model_returns_error(model_name):
-    """Test that session.update with an invalid model returns an error."""
+    """Test that session.update with an invalid model or include returns an
+    error."""
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
 
     if model_name.startswith("mistralai"):
@@ -319,6 +338,20 @@ async def test_session_update_invalid_model_returns_error(model_name):
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"
             assert "nonexistent-model" in event["error"]
+
+            await send_event(
+                ws,
+                {
+                    "type": "session.update",
+                    "model": model_name,
+                    "include": ["item.input_audio_transcription.bogus"],
+                },
+            )
+
+            event = await receive_event(ws, timeout=10.0)
+            assert event["type"] == "error"
+            assert event["code"] == "invalid_event"
+            assert "include" in event["error"]
 
 
 @pytest.mark.asyncio
