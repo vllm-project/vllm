@@ -10,6 +10,8 @@ import torch
 
 from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.kernels.linear import (
+    CutlassFp8BlockScaledMMKernel,
+    TritonFp8BlockScaledMMKernel,
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -43,7 +45,7 @@ DEEPSEEK_V3_SHAPES = [
 
 
 @default_vllm_config()
-def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
+def build_w8a8_block_fp8_runner(M, N, K, block_size, device, kernel_type):
     """Build runner function for w8a8 block fp8 matmul."""
     factor_for_scale = 1e-2
 
@@ -78,18 +80,20 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
         activation_quant_key=create_fp8_quant_key(
             static=False, group_shape=act_quant_group_shape
         ),
-        out_dtype=torch.get_default_dtype(),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(N, K),
+        force_kernel=kernel_type,
         module_name="build_w8a8_block_fp8_runner",
     )
 
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(B, requires_grad=False)
+    layer.weight_scale_inv = torch.nn.Parameter(Bs, requires_grad=False)
+    linear_op.process_weights_after_loading(layer)
+
     def run():
-        return linear_op.apply(
-            input=A_ref,
-            weight=B,
-            weight_scale=Bs,
-            input_scale=None,
-            bias=None,
-        )
+        return linear_op.apply_weights(layer, A_ref)
 
     return run
 
@@ -129,14 +133,14 @@ def benchmark_tflops(batch_size, provider, N, K, block_size=(128, 128)):
         )
     elif provider == "w8a8-block-fp8-triton":
         run_w8a8_triton = build_w8a8_block_fp8_runner(
-            M, N, K, block_size, device, use_cutlass=False
+            M, N, K, block_size, device, TritonFp8BlockScaledMMKernel
         )
         ms, min_ms, max_ms = vllm_triton.testing.do_bench_cudagraph(
             lambda: run_w8a8_triton(), quantiles=quantiles
         )
     elif provider == "w8a8-block-fp8-cutlass":
         run_w8a8_cutlass = build_w8a8_block_fp8_runner(
-            M, N, K, block_size, device, use_cutlass=True
+            M, N, K, block_size, device, CutlassFp8BlockScaledMMKernel
         )
         ms, min_ms, max_ms = vllm_triton.testing.do_bench_cudagraph(
             lambda: run_w8a8_cutlass(), quantiles=quantiles
