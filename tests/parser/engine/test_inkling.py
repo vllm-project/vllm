@@ -151,12 +151,14 @@ def _collect_reasoning(results) -> str:
     return "".join(d.reasoning for d, _ in results if d and d.reasoning)
 
 
-def _function_tool(name: str = "get_weather") -> ChatCompletionToolsParam:
+def _function_tool(
+    name: str = "get_weather", properties: dict | None = None
+) -> ChatCompletionToolsParam:
     """A real function-tool definition, as a request would carry it."""
     return ChatCompletionToolsParam(
         function=FunctionDefinition(
             name=name,
-            parameters={"type": "object", "properties": {}},
+            parameters={"type": "object", "properties": properties or {}},
         ),
     )
 
@@ -475,6 +477,95 @@ class TestStreaming:
         assert indexed[1]["name"] == "b"
         assert json.loads(indexed[0]["args"]) == {"i": 1}
         assert json.loads(indexed[1]["args"]) == {"i": 2}
+
+
+class TestTruncatedArgsFlush:
+    """Generation that stops inside the args object must still stream valid JSON.
+
+    The converter returns the args span verbatim, so the flush extends the
+    streamed prefix with a span that was cut off mid-value. A span with no
+    completion (a key, a comma, a partial literal or escape) is closed after its
+    last complete value, which the streamed prefix may not have reached. Schema
+    coercion at the flush must likewise leave the streamed prefix intact.
+    """
+
+    @pytest.mark.parametrize(
+        "args, expected",
+        [
+            ('{"s": "hello", "n": 4', {"s": "hello", "n": 4}),
+            ('{"s": "hello", "n": ', {"s": "hello", "n": None}),
+            ('{"s": "hello", "xs": [1, 2', {"s": "hello", "xs": [1, 2]}),
+            ('{"s": "hello", "n', {"s": "hello"}),
+            ('{"s": "hello", "n"', {"s": "hello"}),
+            ('{"s": "hello", ', {"s": "hello"}),
+            ('{"s": "hello", "ok": tr', {"s": "hello"}),
+            ('{"s": "hello", "n": -', {"s": "hello"}),
+            ('{"s": "hello \\u00e', {"s": "hello "}),
+            ('{"n": 42, ', {"n": 42}),
+            ('{"n": 42, "ok": tr', {"n": 42}),
+            ('{"n": 42, "s": "hello", "ok": tr', {"n": 42, "s": "hello"}),
+        ],
+        ids=[
+            "number",
+            "separator",
+            "array",
+            "key",
+            "after_key",
+            "comma",
+            "literal",
+            "sign",
+            "unicode_escape",
+            "comma_after_number",
+            "literal_after_number",
+            "literal_after_string_after_number",
+        ],
+    )
+    @pytest.mark.parametrize("end", ["", END_MESSAGE], ids=["eos", "end_message"])
+    def test_truncated_args_still_stream_valid_json(
+        self, mock_tokenizer, mock_request, args, expected, end
+    ):
+        """EOS, or a block end, inside the part of the args that could not stream."""
+        tool = _function_tool(
+            "f",
+            {
+                "s": {"type": "string"},
+                "n": {"type": "integer"},
+                "xs": {"type": "array", "items": {"type": "integer"}},
+                "ok": {"type": "boolean"},
+            },
+        )
+        parser = InklingParser(mock_tokenizer, [tool])
+        text = f'{TOOL_JSON}{{"name":"f","args":{args}{end}'
+        results = _stream(parser, mock_request, text, 1)
+        assert json.loads(collect_tool_arguments(results)) == expected
+
+    @pytest.mark.parametrize(
+        "args, expected",
+        [
+            ('{"n":"42","s":"a","t":"b"}', {"n": 42, "s": "a", "t": "b"}),
+            ('{"s":"a","n":"42","t":"b"}', {"s": "a", "n": 42, "t": "b"}),
+            ('{"s":"a","t":"b","n":"42"}', {"s": "a", "t": "b", "n": 42}),
+            ('{"s": "\\u00e9", "n": "42", "t": "b"}', {"s": "é", "n": 42, "t": "b"}),
+            ('{\n "s": "a",\n "n": "42",\n "t": "b"\n}', {"s": "a", "n": 42, "t": "b"}),
+        ],
+        ids=["compact_first", "compact_middle", "compact_last", "escape", "newlines"],
+    )
+    def test_coercion_keeps_the_streamed_prefix(
+        self, mock_tokenizer, mock_request, args, expected
+    ):
+        """The flush's coercion must not rewrite text that was already streamed."""
+        tool = _function_tool(
+            "f",
+            {
+                "s": {"type": "string"},
+                "n": {"type": "integer"},
+                "t": {"type": "string"},
+            },
+        )
+        parser = InklingParser(mock_tokenizer, [tool])
+        text = f'{TOOL_JSON}{{"name":"f","args":{args}}}{END_MESSAGE}'
+        results = _stream(parser, mock_request, text, 1)
+        assert json.loads(collect_tool_arguments(results)) == expected
 
 
 class TestPromptSeededState:
