@@ -32,7 +32,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.tool_parsers.utils import find_tool_properties
+from vllm.tool_parsers.utils import _is_json_finite, find_tool_properties
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -94,7 +94,9 @@ def _dsml_arg_converter(
             params[name] = value
         else:
             try:
-                params[name] = json.loads(value)
+                parsed = json.loads(value)
+                # json.loads accepts NaN/Infinity and overflowing exponents.
+                params[name] = parsed if _is_json_finite(parsed) else value
             except (json.JSONDecodeError, ValueError):
                 params[name] = value
         last_end = m.end()
@@ -107,7 +109,9 @@ def _dsml_arg_converter(
                 params[name] = value
             else:
                 with contextlib.suppress(json.JSONDecodeError, ValueError):
-                    params[name] = json.loads(value)
+                    parsed = json.loads(value)
+                    if _is_json_finite(parsed):
+                        params[name] = parsed
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -138,7 +142,11 @@ def _unwrap_wrapper_args(
                 inner = json.loads(inner)
             except json.JSONDecodeError:
                 return args_json
-        if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
+        if (
+            isinstance(inner, dict)
+            and set(inner.keys()).issubset(allowed)
+            and _is_json_finite(inner)
+        ):
             return json.dumps(inner, ensure_ascii=False)
     return args_json
 
