@@ -42,6 +42,22 @@ class PlotFilterBase(ABC):
                 f"Valid operators are: {sorted(PLOT_FILTERS)}",
             )
 
+    def _resolve_target(self, series: "pd.Series") -> bool | float | str:
+        target_lower = self.target.lower()
+        if target_lower in ("true", "false"):
+            import pandas as pd
+
+            s_clean = series.dropna()
+            if pd.api.types.is_bool_dtype(series) or (
+                len(s_clean) > 0 and all(isinstance(x, bool) for x in s_clean)
+            ):
+                return target_lower == "true"
+
+        try:
+            return float(self.target)
+        except ValueError:
+            return self.target
+
     @abstractmethod
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
         """Applies this filter to a DataFrame."""
@@ -52,12 +68,7 @@ class PlotFilterBase(ABC):
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
-        target: float | str
-        try:
-            target = float(self.target)
-        except ValueError:
-            target = self.target
-
+        target = self._resolve_target(df[self.var])
         return df[df[self.var] == target]
 
 
@@ -65,12 +76,7 @@ class PlotEqualTo(PlotFilterBase):
 class PlotNotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
-        target: float | str
-        try:
-            target = float(self.target)
-        except ValueError:
-            target = self.target
-
+        target = self._resolve_target(df[self.var])
         return df[df[self.var] != target]
 
 
