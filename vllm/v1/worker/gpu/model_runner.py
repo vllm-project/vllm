@@ -629,11 +629,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
             dcp_sharded.append(spec.dcp_sharded)
-            sliding_window_reach.append(
-                layer_spec.sliding_window - 1 + layer_spec.extra_retained_tokens
+            reach = (
+                layer_spec.num_retained_tokens
                 if isinstance(layer_spec, SlidingWindowSpec)
-                else 0
+                else None
             )
+            sliding_window_reach.append(0 if reach is None else reach)
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -1556,8 +1557,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_tables = self.block_tables.gather_block_tables(
             input_batch.idx_mapping,
             num_reqs_padded=input_batch.num_reqs_after_padding,
-            query_start_loc=input_batch.query_start_loc,
-            seq_lens=input_batch.seq_lens,
+            num_computed_tokens=self.req_states.num_computed_tokens.gpu,
         )
         # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
         # Kernel pads beyond num_tokens with PAD_SLOT_ID.

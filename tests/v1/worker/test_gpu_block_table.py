@@ -334,24 +334,27 @@ def test_gather_block_tables_nulls_blocks_below_sliding_window():
     )
     full_ids = [list(range(1, 13)), list(range(41, 53))]
     swa_ids = [list(range(21, 33)), list(range(61, 73))]
-    for req in range(2):
+    # Request slots 0 and 2: num_computed_tokens is indexed by slot, like the
+    # block tables, not by batch position.
+    req_slots = [0, 2]
+    for req, slot in enumerate(req_slots):
         block_tables.append_block_ids(
-            req_index=req,
+            req_index=slot,
             new_block_ids=(full_ids[req], swa_ids[req]),
             overwrite=True,
         )
     block_tables.apply_staged_writes()
 
-    idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=device)
-    # Request 0 schedules 5 tokens at positions 145..149; request 1 schedules
-    # none this step, so its first scheduled position is its 120 tokens.
-    query_start_loc = torch.tensor([0, 5, 5], dtype=torch.int32, device=device)
-    seq_lens = torch.tensor([150, 120], dtype=torch.int32, device=device)
+    idx_mapping = torch.tensor(req_slots, dtype=torch.int32, device=device)
+    # Slot 0 has 145 computed tokens, so its first scheduled position is 145;
+    # slot 2 has 120.
+    num_computed_tokens = torch.tensor(
+        [145, 0, 120, 0], dtype=torch.int32, device=device
+    )
     full, swa = block_tables.gather_block_tables(
         idx_mapping,
         num_reqs_padded=3,
-        query_start_loc=query_start_loc,
-        seq_lens=seq_lens,
+        num_computed_tokens=num_computed_tokens,
     )
     torch.accelerator.synchronize()
 
@@ -366,7 +369,7 @@ def test_gather_block_tables_nulls_blocks_below_sliding_window():
     # Only the forward-pass copy changes.
     assert block_tables.block_tables[1].gpu[0, :12].tolist() == swa_ids[0]
 
-    # Without query positions the rows are copied verbatim.
+    # Without num_computed_tokens the rows are copied verbatim.
     _, swa = block_tables.gather_block_tables(idx_mapping, num_reqs_padded=2)
     torch.accelerator.synchronize()
     assert swa[0, :12].tolist() == swa_ids[0]
