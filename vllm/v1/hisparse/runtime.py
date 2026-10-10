@@ -547,11 +547,9 @@ class HiSparsePrefillStagingPlan:
         res_cols = resident_block_table.shape[1]
         res_blocks = torch.where(
             res_pos < res_cols,
-            torch.gather(
-                resident_block_table.to(torch.int64)[rep_row],
-                1,
-                res_pos.clamp(max=max(res_cols - 1, 0)),
-            ),
+            resident_block_table[
+                rep_row[:, None], res_pos.clamp(max=max(res_cols - 1, 0))
+            ].to(torch.int64),
             torch.zeros_like(res_pos),
         )
         offsets = torch.arange(block_size, device=device)
@@ -607,6 +605,9 @@ def build_hisparse_prefill_staging_plan(
         miss_mask=valid_rows.to(torch.int32),
         block_size=block_size,
     )
+
+
+_RESIDENT_COPY_ROWS = 1 << 16
 
 
 def _has_hisparse_ops() -> bool:
@@ -838,13 +839,20 @@ class HiSparseRuntime:
             device=plan.block_table.device,
         )
         if plan.gpu_row_ids is not None and resident_cache is not None:
-            gpu_rows = plan.gpu_row_ids[0].to(torch.long)
-            src = gpu_rows.clamp_min(0)
+            staged_rows = staged.view(-1, row_width)
+            gpu_row_ids = plan.gpu_row_ids[0]
             resident_block_size = resident_cache.shape[1]
-            rows = resident_cache[src // resident_block_size, src % resident_block_size]
-            if rows.dtype != staged.dtype:
-                rows = rows.contiguous().view(staged.dtype)
-            staged.view(-1, row_width).copy_(rows)
+            # Gathering every row at once would allocate a second staged-size
+            # copy of the history.
+            for start in range(0, gpu_row_ids.shape[0], _RESIDENT_COPY_ROWS):
+                src = gpu_row_ids[start : start + _RESIDENT_COPY_ROWS]
+                src = src.clamp_min(0).to(torch.long)
+                rows = resident_cache[
+                    src // resident_block_size, src % resident_block_size
+                ]
+                if rows.dtype != staged.dtype:
+                    rows = rows.contiguous().view(staged.dtype)
+                staged_rows[start : start + rows.shape[0]].copy_(rows)
         torch.ops._C_cache_ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged,
