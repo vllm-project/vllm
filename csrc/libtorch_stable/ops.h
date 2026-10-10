@@ -44,6 +44,11 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 double int8_max);
 
 #ifndef USE_ROCM
+int64_t init_tpsp_p2p(int64_t device_index, int64_t comm_address,
+                      int64_t tp_size, int64_t rank, int64_t max_chunk_rows,
+                      int64_t hidden_size);
+void destroy_tpsp_p2p(int64_t handle);
+
 std::tuple<torch::stable::Tensor, torch::stable::Tensor, torch::stable::Tensor>
 tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     const torch::stable::Tensor& a, const torch::stable::Tensor& b,
@@ -51,10 +56,7 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     const std::optional<torch::stable::Tensor>& projection_bias,
     const std::optional<torch::stable::Tensor>& norm_bias, double eps,
     int64_t norm_kind, int64_t microchunk_rows, int64_t comm_address,
-    int64_t tp_size,
-    const std::optional<torch::stable::Tensor>& local_workspace,
-    const std::vector<int64_t>& workspace_ptrs,
-    const std::optional<torch::stable::Tensor>& signal_one, int64_t rank);
+    int64_t tp_size, int64_t p2p_handle);
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);

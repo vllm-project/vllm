@@ -125,6 +125,8 @@ def _check_tpsp_backend(
                 backend.close()
             return
         assert backend is not None and context is not None
+        if os.environ.get("VLLM_TEST_TPSP_REQUIRE_P2P") == "1":
+            assert context.p2p_handle, "TPSP P2P initialization fell back to NCCL"
         with patch(
             "vllm.distributed.parallel_state.get_tp_group", return_value=tp_group
         ):
@@ -155,10 +157,7 @@ def _check_tpsp_backend(
                 torch.empty((world_size + 1, 64), dtype=torch.bfloat16, device=device),
                 large_norm,
             )
-        if large_context.workspace is not None:
-            assert large_context.workspace.numel() == (
-                4 * world_size * capped_rows * 64 + 3 * world_size * 4
-            )
+        if large_context.p2p_handle:
             with pytest.raises(ValueError, match="P2P workspace capacity"):
                 backend.fused_gemm_rs_norm_ag(
                     large_context,
@@ -174,7 +173,11 @@ def _check_tpsp_backend(
                     large_norm,
                     config=capped_rows + 1,
                 )
+        old_handle = large_context.p2p_handle
         backend.close(large_context)
+        if old_handle:
+            with pytest.raises(RuntimeError, match="Invalid TPSP P2P context"):
+                torch.ops._C.destroy_tpsp_p2p(old_handle)
         for tokens, width in ((1, 64), (5, 2048), (128, 2048), (129, 7168)):
             generator = torch.Generator(device=device).manual_seed(123 + rank)
             a = torch.randn(
@@ -227,11 +230,7 @@ def _check_tpsp_backend(
                     norm,
                     config=64,
                 )
-            assert fused_op.call_args.args[11] is context.workspace
-            assert bool(fused_op.call_args.args[12]) == (context.workspace is not None)
-            assert fused_op.call_args.args[14] == (
-                rank if context.workspace is not None else -1
-            )
+            assert fused_op.call_args.args[11] == context.p2p_handle
             torch.testing.assert_close(
                 gathered,
                 expected,
@@ -245,6 +244,24 @@ def _check_tpsp_backend(
                 rtol=0.02,
                 atol=0.05,
             )
+            if tokens == 1 and context.p2p_handle:
+                p2p_handle = context.p2p_handle
+                context.p2p_handle = 0
+                try:
+                    nccl_gathered, nccl_reduced = backend.fused_gemm_rs_norm_ag(
+                        context, a, projection, local_residual, norm, config=64
+                    )
+                finally:
+                    context.p2p_handle = p2p_handle
+                torch.testing.assert_close(
+                    nccl_gathered, expected, rtol=0.02, atol=0.05
+                )
+                torch.testing.assert_close(
+                    nccl_reduced[:count],
+                    expected_residual[start : start + count],
+                    rtol=0.02,
+                    atol=0.05,
+                )
             if tokens == 129:
                 projection_bias = torch.full_like(weight, 0.125)
                 norm_bias = torch.full_like(weight, 0.25)

@@ -11,7 +11,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <tuple>
 #include <unordered_map>
@@ -311,6 +313,76 @@ struct ChunkBuffers {
   torch::stable::Tensor gathered;
 };
 
+struct TpspP2pContext {
+  int device_index;
+  int rank;
+  int tp_size;
+  int64_t max_chunk_rows;
+  int hidden_size;
+  int64_t slot_bytes;
+  int64_t flag_offset;
+  ncclComm_t comm;
+  void* workspace = nullptr;
+  void* signal_one = nullptr;
+  std::vector<void*> peers;
+
+  void close_peer_mappings() {
+    for (int source = 0; source < tp_size; ++source) {
+      if (source != rank && peers[source]) {
+        STD_CUDA_CHECK(cudaIpcCloseMemHandle(peers[source]));
+        peers[source] = nullptr;
+      }
+    }
+  }
+
+  void free_local() {
+    if (signal_one) {
+      STD_CUDA_CHECK(cudaFree(signal_one));
+      signal_one = nullptr;
+    }
+    if (workspace) {
+      STD_CUDA_CHECK(cudaFree(workspace));
+      workspace = nullptr;
+    }
+  }
+
+  ~TpspP2pContext() {
+    for (int source = 0; source < tp_size; ++source) {
+      if (source != rank && peers[source]) {
+        cudaIpcCloseMemHandle(peers[source]);
+      }
+    }
+    if (signal_one) {
+      cudaFree(signal_one);
+    }
+    if (workspace) {
+      cudaFree(workspace);
+    }
+  }
+};
+
+std::mutex tpsp_context_mutex;
+std::unordered_map<int64_t, std::shared_ptr<TpspP2pContext>> tpsp_contexts;
+int64_t next_tpsp_handle = 1;
+
+bool all_tpsp_ranks_ready(bool ready, ncclComm_t comm, cudaStream_t stream) {
+  int local = ready ? 1 : 0;
+  int global = 0;
+  int* device_status = nullptr;
+  STD_CUDA_CHECK(cudaMalloc(&device_status, 2 * sizeof(int)));
+  auto status =
+      std::unique_ptr<int, decltype(&cudaFree)>(device_status, cudaFree);
+  STD_CUDA_CHECK(cudaMemcpyAsync(device_status, &local, sizeof(int),
+                                 cudaMemcpyHostToDevice, stream));
+  STD_TORCH_CHECK(ncclAllReduce(device_status, device_status + 1, 1, ncclInt32,
+                                ncclMin, comm, stream) == ncclSuccess,
+                  "TPSP P2P readiness exchange failed");
+  STD_CUDA_CHECK(cudaMemcpyAsync(&global, device_status + 1, sizeof(int),
+                                 cudaMemcpyDeviceToHost, stream));
+  STD_CUDA_CHECK(cudaStreamSynchronize(stream));
+  return global != 0;
+}
+
 torch::stable::Tensor make_bf16(const torch::stable::Tensor& a, int64_t rows,
                                 int64_t cols) {
   return torch::stable::empty({rows, cols}, a.scalar_type(), std::nullopt,
@@ -318,6 +390,116 @@ torch::stable::Tensor make_bf16(const torch::stable::Tensor& a, int64_t rows,
 }
 
 }  // namespace
+
+// Initialization and destruction must be called by all ranks in the same order.
+int64_t init_tpsp_p2p(int64_t device_index, int64_t comm_address,
+                      int64_t tp_size, int64_t rank, int64_t max_chunk_rows,
+                      int64_t hidden_size) {
+  STD_TORCH_CHECK(
+      comm_address != 0 && tp_size >= 2 && tp_size <= INT32_MAX && rank >= 0 &&
+          rank < tp_size && max_chunk_rows > 0 && max_chunk_rows <= INT32_MAX &&
+          hidden_size > 0 && hidden_size <= INT32_MAX &&
+          max_chunk_rows <= (std::numeric_limits<int64_t>::max() -
+                             kTpspFlagPhases * tp_size * int64_t(sizeof(int))) /
+                                tp_size / hidden_size /
+                                (kTpspDataRegions * int64_t(sizeof(bf16))),
+      "Invalid TPSP P2P configuration");
+  const torch::stable::accelerator::DeviceGuard guard(device_index);
+  auto stream = get_current_cuda_stream();
+  auto comm = reinterpret_cast<ncclComm_t>(comm_address);
+  auto context = std::make_shared<TpspP2pContext>();
+  context->device_index = device_index;
+  context->rank = rank;
+  context->tp_size = tp_size;
+  context->max_chunk_rows = max_chunk_rows;
+  context->hidden_size = hidden_size;
+  context->comm = comm;
+  context->slot_bytes = max_chunk_rows * hidden_size * sizeof(bf16);
+  context->flag_offset = kTpspDataRegions * tp_size * context->slot_bytes;
+  context->peers.resize(tp_size, nullptr);
+  size_t bytes =
+      context->flag_offset + kTpspFlagPhases * tp_size * sizeof(unsigned int);
+
+  cudaError_t allocated = cudaMalloc(&context->workspace, bytes);
+  if (allocated == cudaSuccess) {
+    allocated = cudaMalloc(&context->signal_one, sizeof(unsigned int));
+  }
+  cudaIpcMemHandle_t own_handle{};
+  bool exported =
+      allocated == cudaSuccess &&
+      cudaIpcGetMemHandle(&own_handle, context->workspace) == cudaSuccess;
+  if (!all_tpsp_ranks_ready(exported, comm, stream)) {
+    context->free_local();
+    return 0;
+  }
+
+  unsigned char* send = nullptr;
+  unsigned char* recv = nullptr;
+  STD_CUDA_CHECK(cudaMalloc(&send, sizeof(own_handle)));
+  auto send_buffer =
+      std::unique_ptr<unsigned char, decltype(&cudaFree)>(send, cudaFree);
+  STD_CUDA_CHECK(cudaMalloc(&recv, tp_size * sizeof(own_handle)));
+  auto recv_buffer =
+      std::unique_ptr<unsigned char, decltype(&cudaFree)>(recv, cudaFree);
+  STD_CUDA_CHECK(cudaMemcpyAsync(send, &own_handle, sizeof(own_handle),
+                                 cudaMemcpyHostToDevice, stream));
+  // Bootstrap IPC mappings over the existing NCCL communicator.
+  STD_TORCH_CHECK(ncclAllGather(send, recv, sizeof(own_handle), ncclUint8, comm,
+                                stream) == ncclSuccess,
+                  "TPSP P2P handle exchange failed");
+  std::vector<cudaIpcMemHandle_t> handles(tp_size);
+  STD_CUDA_CHECK(cudaMemcpyAsync(handles.data(), recv,
+                                 tp_size * sizeof(own_handle),
+                                 cudaMemcpyDeviceToHost, stream));
+  STD_CUDA_CHECK(cudaStreamSynchronize(stream));
+  context->peers[rank] = context->workspace;
+  bool mapped = true;
+  for (int source = 0; source < tp_size; ++source) {
+    if (source != rank &&
+        cudaIpcOpenMemHandle(&context->peers[source], handles[source],
+                             cudaIpcMemLazyEnablePeerAccess) != cudaSuccess) {
+      context->peers[source] = nullptr;
+      mapped = false;
+      break;
+    }
+  }
+  // An inaccessible peer (including one on another host) falls back on
+  // every rank, not only on the rank where opening the handle failed.
+  if (!all_tpsp_ranks_ready(mapped, comm, stream)) {
+    context->close_peer_mappings();
+    all_tpsp_ranks_ready(true, comm, stream);
+    context->free_local();
+    return 0;
+  }
+  STD_CUDA_CHECK(cudaMemsetAsync(context->workspace, 0, bytes, stream));
+  unsigned int one = 1;
+  STD_CUDA_CHECK(cudaMemcpyAsync(context->signal_one, &one, sizeof(one),
+                                 cudaMemcpyHostToDevice, stream));
+  all_tpsp_ranks_ready(true, comm, stream);
+  std::lock_guard<std::mutex> lock(tpsp_context_mutex);
+  int64_t handle = next_tpsp_handle++;
+  tpsp_contexts.emplace(handle, std::move(context));
+  return handle;
+}
+
+void destroy_tpsp_p2p(int64_t handle) {
+  std::shared_ptr<TpspP2pContext> context;
+  {
+    std::lock_guard<std::mutex> lock(tpsp_context_mutex);
+    auto it = tpsp_contexts.find(handle);
+    STD_TORCH_CHECK(it != tpsp_contexts.end(), "Invalid TPSP P2P context");
+    context = it->second;
+  }
+  const torch::stable::accelerator::DeviceGuard guard(context->device_index);
+  STD_CUDA_CHECK(cudaDeviceSynchronize());
+  // Peers must finish their writes before any rank frees its workspace.
+  all_tpsp_ranks_ready(true, context->comm, get_current_cuda_stream());
+  context->close_peer_mappings();
+  all_tpsp_ranks_ready(true, context->comm, get_current_cuda_stream());
+  context->free_local();
+  std::lock_guard<std::mutex> lock(tpsp_context_mutex);
+  tpsp_contexts.erase(handle);
+}
 
 // Project all tokens, reduce to local shards, normalize, then gather the
 // normalized result. Return the local residual and normalized shards as well.
@@ -328,10 +510,7 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     const std::optional<torch::stable::Tensor>& projection_bias,
     const std::optional<torch::stable::Tensor>& norm_bias, double eps,
     int64_t norm_kind, int64_t microchunk_rows, int64_t comm_address,
-    int64_t tp_size,
-    const std::optional<torch::stable::Tensor>& local_workspace,
-    const std::vector<int64_t>& workspace_ptrs,
-    const std::optional<torch::stable::Tensor>& signal_one, int64_t rank) {
+    int64_t tp_size, int64_t p2p_handle) {
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(
       a.is_cuda() && b.is_cuda() && weight.is_cuda() && residual.is_cuda(),
@@ -366,7 +545,7 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
   }
   STD_TORCH_CHECK(a.size(1) == b.size(0) && b.size(1) == weight.size(0) &&
                       tp_size >= 2 && microchunk_rows > 0 &&
-                      (comm_address != 0 || local_workspace) && eps > 0,
+                      comm_address != 0 && eps > 0,
                   "Invalid TPSP shape or configuration");
   int64_t tokens = a.size(0);
   int64_t width = a.size(1);
@@ -386,7 +565,8 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
   ncclComm_t comm = reinterpret_cast<ncclComm_t>(comm_address);
   int64_t max_chunk = std::min(rows, microchunk_rows);
   int64_t num_chunks = (rows + max_chunk - 1) / max_chunk;
-  bool p2p = local_workspace.has_value();
+  bool p2p = p2p_handle != 0;
+  std::shared_ptr<TpspP2pContext> p2p_context;
   bf16* local_inbox = nullptr;
   bf16* local_gather = nullptr;
   unsigned int* local_flags = nullptr;
@@ -394,46 +574,28 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
   int64_t slot_bytes = 0;
   int64_t flag_offset = 0;
   if (p2p) {
-    int64_t flag_bytes =
-        kTpspFlagPhases * tp_size * int64_t(sizeof(unsigned int));
-    STD_TORCH_CHECK(
-        rank >= 0 && rank < tp_size && signal_one &&
-            workspace_ptrs.size() == tp_size &&
-            local_workspace->scalar_type() == ScalarType::Byte &&
-            signal_one->scalar_type() == ScalarType::Int &&
-            local_workspace->is_contiguous() && signal_one->is_contiguous() &&
-            local_workspace->device() == a.device() &&
-            signal_one->device() == a.device() &&
-            local_workspace->numel() >=
-                kTpspDataRegions * tp_size * max_chunk * hidden * sizeof(bf16) +
-                    flag_bytes &&
-            (local_workspace->numel() - flag_bytes) %
-                    (kTpspDataRegions * tp_size) ==
-                0,
-        "Invalid TPSP P2P workspace");
-    auto* local_base =
-        reinterpret_cast<char*>(local_workspace->mutable_data_ptr());
-    slot_bytes =
-        (local_workspace->numel() - flag_bytes) / (kTpspDataRegions * tp_size);
-    flag_offset = kTpspDataRegions * tp_size * slot_bytes;
+    {
+      std::lock_guard<std::mutex> lock(tpsp_context_mutex);
+      auto it = tpsp_contexts.find(p2p_handle);
+      STD_TORCH_CHECK(it != tpsp_contexts.end(), "Invalid TPSP P2P context");
+      p2p_context = it->second;
+    }
+    STD_TORCH_CHECK(p2p_context->device_index == a.get_device_index() &&
+                        p2p_context->tp_size == tp_size &&
+                        p2p_context->hidden_size == hidden &&
+                        max_chunk <= p2p_context->max_chunk_rows &&
+                        p2p_context->comm == comm,
+                    "TPSP P2P context does not match the request");
+    auto* local_base = reinterpret_cast<char*>(p2p_context->workspace);
+    slot_bytes = p2p_context->slot_bytes;
+    flag_offset = p2p_context->flag_offset;
     local_inbox = reinterpret_cast<bf16*>(local_base);
     local_gather = reinterpret_cast<bf16*>(local_base + tp_size * slot_bytes);
     local_flags = reinterpret_cast<unsigned int*>(local_base + flag_offset);
-    one = reinterpret_cast<const unsigned int*>(signal_one->const_data_ptr());
-    STD_TORCH_CHECK(slot_bytes >= max_chunk * hidden * int64_t(sizeof(bf16)),
-                    "TPSP P2P workspace slot is too small");
-    for (int source = 0; source < tp_size; ++source) {
-      STD_TORCH_CHECK(
-          workspace_ptrs[source] != 0 &&
-              (source != rank ||
-               workspace_ptrs[source] == reinterpret_cast<int64_t>(local_base)),
-          "Invalid TPSP P2P peer mapping");
-    }
-  } else {
-    STD_TORCH_CHECK(workspace_ptrs.empty() && !signal_one && rank == -1 &&
-                        comm_address != 0,
-                    "Incomplete TPSP P2P configuration");
+    one = reinterpret_cast<const unsigned int*>(p2p_context->signal_one);
   }
+  STD_TORCH_CHECK(comm_address != 0, "TPSP requires an NCCL communicator");
+  int rank = p2p ? p2p_context->rank : -1;
   PipelineState* pipeline = nullptr;
   if (num_chunks > 1) {
     auto& state = pipeline_states[a.get_device_index()];
@@ -525,12 +687,12 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
     size_t shard_bytes = shard_elems * sizeof(bf16);
     // Stage 2: Exchange projected shards via P2P or reduce-scatter with NCCL.
     if (p2p) {
-      // The symmetric-memory peer mapping uses this device's virtual address.
+      // IPC mappings provide a local device pointer to each peer's workspace.
       for (int dest = 0; dest < tp_size; ++dest) {
         if (dest == rank) {
           continue;
         }
-        auto* peer_base = reinterpret_cast<char*>(workspace_ptrs[dest]);
+        auto* peer_base = reinterpret_cast<char*>(p2p_context->peers[dest]);
         STD_CUDA_CHECK(cudaMemcpyAsync(
             peer_base + rank * slot_bytes, partial_ptr + dest * shard_elems,
             shard_bytes, cudaMemcpyDeviceToDevice, comm_stream));
@@ -609,7 +771,7 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
         if (dest == rank) {
           continue;
         }
-        auto* peer_base = reinterpret_cast<char*>(workspace_ptrs[dest]);
+        auto* peer_base = reinterpret_cast<char*>(p2p_context->peers[dest]);
         STD_CUDA_CHECK(cudaMemcpyAsync(
             peer_base + tp_size * slot_bytes + rank * slot_bytes,
             normalized_chunk, shard_bytes, cudaMemcpyDeviceToDevice,
@@ -636,7 +798,7 @@ tpsp_fused_matmul_reduce_scatter_norm_all_gather(
         if (dest == rank) {
           continue;
         }
-        auto* peer_base = reinterpret_cast<char*>(workspace_ptrs[dest]);
+        auto* peer_base = reinterpret_cast<char*>(p2p_context->peers[dest]);
         STD_CUDA_CHECK(cudaMemcpyAsync(
             peer_base + flag_offset +
                 (kTpspGatherConsumed * tp_size + rank) * sizeof(unsigned int),

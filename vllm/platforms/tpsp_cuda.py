@@ -4,22 +4,16 @@
 
 from __future__ import annotations
 
-import socket
 from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-import torch.distributed._symmetric_memory as torch_symm_mem
 from torch.distributed import distributed_c10d as c10d
 
 from vllm.logger import init_logger
 from vllm.model_executor.tpsp import TPSPBackend
 
 logger = init_logger(__name__)
-
-# Keep the workspace layout in sync with csrc/libtorch_stable/tpsp_cuda.cu.
-_TPSP_DATA_REGIONS = 2
-_TPSP_FLAG_PHASES = 3
 
 
 @dataclass
@@ -29,10 +23,7 @@ class CudaTPSPContext:
     rank: int
     comm_address: int
     max_chunk_rows: int
-    workspace: torch.Tensor | None = None
-    peer_workspaces: tuple[torch.Tensor, ...] = ()
-    signal_one: torch.Tensor | None = None
-    workspace_handle: object | None = None
+    p2p_handle: int = 0
     config: int | None = None
 
 
@@ -95,8 +86,13 @@ class CudaTPSPBackend(TPSPBackend):
         if dist.get_world_size(group) != tp_size:
             logger.warning("TPSP unavailable: group_name and tp_size disagree")
             return None
-        if not hasattr(
-            torch.ops._C, "tpsp_fused_matmul_reduce_scatter_norm_all_gather"
+        if not all(
+            hasattr(torch.ops._C, name)
+            for name in (
+                "tpsp_fused_matmul_reduce_scatter_norm_all_gather",
+                "init_tpsp_p2p",
+                "destroy_tpsp_p2p",
+            )
         ):
             logger.warning("CUDA TPSP native operator is not built")
             return None
@@ -128,11 +124,18 @@ class CudaTPSPBackend(TPSPBackend):
         if not self._all_ranks_ready(nccl_ready, group, device):
             logger.warning("CUDA TPSP default NCCL transport is unavailable")
             return None
-        self._initialize_p2p(context, group, hidden_size)
+        context.p2p_handle = torch.ops._C.init_tpsp_p2p(
+            device.index if device.index is not None else torch.cuda.current_device(),
+            comm_address,
+            tp_size,
+            rank,
+            max_chunk_rows,
+            hidden_size,
+        )
         if rank == 0:
             logger.info(
                 "TPSP transport=%s for %s rows per rank",
-                "P2P" if context.workspace is not None else "NCCL",
+                "P2P" if context.p2p_handle else "NCCL",
                 max_chunk_rows,
             )
         self._open_context_ids.add(id(context))
@@ -145,80 +148,6 @@ class CudaTPSPBackend(TPSPBackend):
         supported = torch.tensor(int(ready), device=device)
         dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=group)
         return bool(supported.item())
-
-    def _initialize_p2p(
-        self,
-        context: CudaTPSPContext,
-        group: dist.ProcessGroup,
-        hidden_size: int,
-    ) -> None:
-        tp_size = context.tp_size
-        rank = context.rank
-        device = context.device
-        rows = context.max_chunk_rows
-        slot_bytes = rows * hidden_size * torch.bfloat16.itemsize
-        flag_bytes = _TPSP_FLAG_PHASES * tp_size * torch.int32.itemsize
-        workspace_bytes = _TPSP_DATA_REGIONS * tp_size * slot_bytes + flag_bytes
-        local_uuid = str(getattr(torch.cuda.get_device_properties(device), "uuid", ""))
-        devices: list[tuple[str, str] | None] = [None] * tp_size
-        dist.all_gather_object(devices, (socket.gethostname(), local_uuid), group=group)
-        if any(peer is None for peer in devices):
-            raise RuntimeError("TPSP P2P device discovery returned an incomplete group")
-        peers = [peer for peer in devices if peer is not None]
-        visible = {
-            str(getattr(torch.cuda.get_device_properties(index), "uuid", "")): index
-            for index in range(torch.accelerator.device_count())
-        }
-        accessible = (
-            device.index is not None
-            and bool(local_uuid)
-            and all(
-                host == peers[rank][0]
-                and bool(uuid)
-                and uuid in visible
-                and (
-                    source == rank
-                    or torch.cuda.can_device_access_peer(device.index, visible[uuid])
-                )
-                for source, (host, uuid) in enumerate(peers)
-            )
-            and len({uuid for _, uuid in peers}) == tp_size
-        )
-        if not self._all_ranks_ready(accessible, group, device):
-            logger.info("TPSP P2P topology unavailable")
-            return
-        try:
-            workspace = torch_symm_mem.empty(
-                workspace_bytes, dtype=torch.uint8, device=device
-            )
-        except RuntimeError as exc:
-            logger.warning("TPSP P2P workspace allocation failed: %s", exc)
-            workspace = None
-        if not self._all_ranks_ready(workspace is not None, group, device):
-            return
-        assert workspace is not None
-        try:
-            handle = torch_symm_mem.rendezvous(workspace, group)
-            peer_workspaces = tuple(
-                workspace
-                if source == rank
-                else handle.get_buffer(source, (workspace_bytes,), torch.uint8)
-                for source in range(tp_size)
-            )
-        except RuntimeError as exc:
-            logger.warning("TPSP P2P workspace unavailable: %s", exc)
-            handle = None
-            peer_workspaces = ()
-        if not self._all_ranks_ready(handle is not None, group, device):
-            return
-        assert handle is not None
-        workspace.zero_()
-        torch.accelerator.synchronize(device)
-        dist.barrier(group=group)
-        context.workspace = workspace
-        context.peer_workspaces = peer_workspaces
-        context.signal_one = torch.ones(1, dtype=torch.int32, device=device)
-        context.workspace_handle = handle
 
     def _profile_context(self, context: object) -> CudaTPSPContext:
         if context is None:
@@ -271,7 +200,7 @@ class CudaTPSPBackend(TPSPBackend):
         if type(chunk) is not int or chunk <= 0:
             raise ValueError("CUDA TPSP requires a positive microchunk size")
         if (
-            context.workspace is not None
+            context.p2p_handle
             and min((a.size(0) + context.tp_size - 1) // context.tp_size, chunk)
             > context.max_chunk_rows
         ):
@@ -303,7 +232,6 @@ class CudaTPSPBackend(TPSPBackend):
                 or not bias.is_contiguous()
             ):
                 raise ValueError("CUDA TPSP bias must match the BF16 norm weight")
-        use_p2p = context.workspace is not None
         reduced, _, gathered = (
             torch.ops._C.tpsp_fused_matmul_reduce_scatter_norm_all_gather(
                 a,
@@ -317,12 +245,7 @@ class CudaTPSPBackend(TPSPBackend):
                 chunk,
                 context.comm_address,
                 context.tp_size,
-                context.workspace if use_p2p else None,
-                [peer.data_ptr() for peer in context.peer_workspaces]
-                if use_p2p
-                else [],
-                context.signal_one if use_p2p else None,
-                context.rank if use_p2p else -1,
+                context.p2p_handle,
             )
         )
         return gathered, reduced
@@ -330,12 +253,9 @@ class CudaTPSPBackend(TPSPBackend):
     def close(self, context: CudaTPSPContext | None = None) -> None:
         if context is not None:
             context = self._profile_context(context)
-            if context.workspace is not None:
-                torch.accelerator.synchronize(context.device)
-            context.workspace_handle = None
-            context.peer_workspaces = ()
-            context.workspace = None
-            context.signal_one = None
+            if context.p2p_handle:
+                torch.ops._C.destroy_tpsp_p2p(context.p2p_handle)
+                context.p2p_handle = 0
             self._open_context_ids.remove(id(context))
         else:
             self._closed = True

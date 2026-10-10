@@ -31,12 +31,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifndef USE_ROCM
   ops.def(
+      "init_tpsp_p2p(int device_index, int comm_address, int tp_size, "
+      "int rank, int max_chunk_rows, int hidden_size) -> int");
+  ops.def("destroy_tpsp_p2p(int handle) -> ()");
+  ops.def(
       "tpsp_fused_matmul_reduce_scatter_norm_all_gather("
       "Tensor a, Tensor b, Tensor weight, Tensor residual, "
       "Tensor? projection_bias, Tensor? norm_bias, float eps, int norm_kind, "
-      "int microchunk_rows, int comm_address, int tp_size, "
-      "Tensor? local_workspace, int[] workspace_ptrs, Tensor? signal_one, "
-      "int rank) "
+      "int microchunk_rows, int comm_address, int tp_size, int p2p_handle) "
       "-> (Tensor, Tensor, Tensor)");
 
   // Note about marlin kernel 'workspace' arguments:
@@ -1102,6 +1104,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
       "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
 }
+
+#ifndef USE_ROCM
+STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, tpsp_context) {
+  tpsp_context.impl("init_tpsp_p2p", TORCH_BOX(&init_tpsp_p2p));
+  tpsp_context.impl("destroy_tpsp_p2p", TORCH_BOX(&destroy_tpsp_p2p));
+}
+#endif
 
 STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
   custom_ar.def(
