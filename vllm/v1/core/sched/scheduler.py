@@ -1268,7 +1268,12 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    # Retry after reclaiming blocks from an idle streaming
+                    # session. The request was only peeked, so `continue`
+                    # retries it as the queue head.
+                    if not self._try_reclaim_streaming_kv(request, scheduled_timestamp):
+                        break
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1379,7 +1384,11 @@ class Scheduler(SchedulerInterface):
 
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_kv_holding:
-                self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
+                # A streaming-KV reclaim this pass may have freed a skipped
+                # request's blocks; it has already been re-homed to `waiting`.
+                self.kv_holding_waiting.prepend_requests(
+                    r for r in step_skipped_kv_holding if self._holds_kv_blocks(r)
+                )
             if step_skipped_waiting:
                 self.waiting.prepend_requests(step_skipped_waiting)
 
@@ -1613,6 +1622,68 @@ class Scheduler(SchedulerInterface):
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
 
+    def _try_reclaim_streaming_kv(
+        self,
+        request: Request,
+        timestamp: float,
+    ) -> bool:
+        """Reclaim blocks from an idle resumable session to retry allocation.
+
+        Victims must hold blocks: paused sessions (WAITING_FOR_STREAMING_REQ)
+        are preferred — they are idle with no pending work — over resumed
+        (WAITING) sessions. The newest, lowest-priority victim is picked,
+        mirroring the running loop's preemption choice. A reclaimed victim
+        drops out of the candidate set (num_computed_tokens == 0), so retrying
+        terminates.
+
+        Returns:
+            True if a victim's blocks were reclaimed.
+
+        """
+        candidates = [
+            candidate
+            for candidate in itertools.chain(
+                self.kv_holding_waiting, self.waiting, self.deferred_waiting
+            )
+            if candidate is not request
+            and candidate.resumable
+            and candidate.status
+            in (RequestStatus.WAITING_FOR_STREAMING_REQ, RequestStatus.WAITING)
+            and self._holds_kv_blocks(candidate)
+            and candidate.num_computed_tokens > 0
+            # A deferred free will not help with this step's allocation.
+            and self._request_blocks_can_be_freed(candidate)
+        ]
+        if not candidates:
+            return False
+        paused = [
+            candidate
+            for candidate in candidates
+            if candidate.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        ]
+        victim = max(paused or candidates, key=lambda r: (r.priority, r.arrival_time))
+
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.request_finished(victim)
+        self._free_request_blocks(victim)
+        self.encoder_cache_manager.free(victim)
+        self._inflight_prefills.discard(victim)
+        victim.num_computed_tokens = 0
+        if victim.spec_token_ids:
+            victim.spec_token_ids = []
+        victim.num_preemptions += 1
+        if self.log_stats:
+            victim.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+        self.reset_preempted_req_ids.add(victim.request_id)
+
+        # Re-home the victim: without blocks it no longer belongs to the
+        # kv-holding queues. Paused victims keep their status and accounting.
+        if victim in self.kv_holding_waiting:
+            self.kv_holding_waiting.remove_request(victim)
+        self.deferred_waiting.discard(victim)
+        self._enqueue_waiting_request(victim)
+        return True
+
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -1654,14 +1725,15 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
-        # Current streaming input behaviour: Keep only computed output tokens
-        # (discard final sampled output token).
-        num_computed_tokens = session.num_computed_tokens
+        # Keep the output tokens except the final sampled one. A session
+        # preempted or reclaimed before this fold has num_computed_tokens == 0,
+        # but its tokens are still valid and only need recomputing.
+        keep_end = max(session.num_computed_tokens, session.num_tokens - 1)
         kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : num_computed_tokens
+            session.num_prompt_tokens : keep_end
         ]
-        del session._all_token_ids[num_computed_tokens:]
-        del session.block_hashes[num_computed_tokens // self.hash_block_size :]
+        del session._all_token_ids[keep_end:]
+        del session.block_hashes[keep_end // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.

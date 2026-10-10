@@ -56,7 +56,7 @@ class DummyRequest(Request):
         )
 
 
-def create_scheduler() -> Scheduler:
+def create_scheduler(num_blocks: int = 1000) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
@@ -67,10 +67,10 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
-    vllm_config.cache_config.num_gpu_blocks = 1000
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
     vllm_config.cache_config.enable_prefix_caching = False
     kv_cache_config = KVCacheConfig(
-        num_blocks=1000,
+        num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -88,6 +88,17 @@ def create_scheduler() -> Scheduler:
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=16,
         hash_block_size=16,
+    )
+
+
+def _stop_output(*request_ids: str) -> ModelRunnerOutput:
+    return ModelRunnerOutput(
+        req_ids=list(request_ids),
+        req_id_to_index={req_id: i for i, req_id in enumerate(request_ids)},
+        sampled_token_ids=[[STOP_TOKEN] for _ in request_ids],
+        logprobs=None,
+        prompt_logprobs_dict={req_id: None for req_id in request_ids},
+        pooler_output=[],
     )
 
 
@@ -676,3 +687,151 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+    def test_resumed_sessions_make_progress_under_kv_pressure(self):
+        """Sessions whose continuations cannot all fit must not deadlock:
+        one is scheduled while a peer's retained blocks are reclaimed."""
+        scheduler = create_scheduler(num_blocks=6)
+        sessions = [
+            DummyRequest(f"session-{i}", prompt_token_ids=[i + 1] * 32)
+            for i in range(2)
+        ]
+        for session in sessions:
+            scheduler.add_request(session)
+
+        first = scheduler.schedule()
+        assert set(first.num_scheduled_tokens) == {s.request_id for s in sessions}
+        scheduler.update_from_output(
+            first, _stop_output(*(s.request_id for s in sessions))
+        )
+        assert all(
+            s.status == RequestStatus.WAITING_FOR_STREAMING_REQ for s in sessions
+        )
+
+        # Both sessions resume with continuations that do not fit together.
+        for session in sessions:
+            scheduler.add_request(
+                DummyRequest(session.request_id, prompt_token_ids=[9] * 32)
+            )
+        assert all(s.status == RequestStatus.WAITING for s in sessions)
+        assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() < 2
+
+        # One session is scheduled; the other's retained blocks are reclaimed.
+        resumed = scheduler.schedule()
+        assert set(resumed.num_scheduled_tokens) == {sessions[0].request_id}
+        assert resumed.preempted_req_ids == {sessions[1].request_id}
+        victim = sessions[1]
+        assert victim.num_computed_tokens == 0
+        assert victim in scheduler.waiting
+        assert victim not in scheduler.kv_holding_waiting
+
+        # The scheduled session stops and parks; the reclaimed session then
+        # fully recomputes with its tokens intact.
+        scheduler.update_from_output(resumed, _stop_output(sessions[0].request_id))
+        assert victim._all_token_ids == [2] * 32 + [9] * 32
+        recomputed = scheduler.schedule()
+        assert recomputed.num_scheduled_tokens == {victim.request_id: 64}
+        assert recomputed.preempted_req_ids == {sessions[0].request_id}
+        scheduler.update_from_output(recomputed, _stop_output(victim.request_id))
+        assert victim._all_token_ids == [2] * 32 + [9] * 32 + [STOP_TOKEN]
+
+        # Close the victim's stream; the other session (paused, reclaimed)
+        # resumes and recomputes from scratch as well.
+        scheduler.add_request(
+            DummyRequest(
+                victim.request_id, prompt_token_ids=[0], resumable=False, max_tokens=1
+            )
+        )
+        assert victim.status == RequestStatus.FINISHED_ABORTED
+
+        paused = sessions[0]
+        scheduler.add_request(
+            DummyRequest(paused.request_id, prompt_token_ids=[7] * 16)
+        )
+        assert paused._all_token_ids == [1] * 32 + [9] * 32 + [7] * 16
+        final = scheduler.schedule()
+        assert final.num_scheduled_tokens == {paused.request_id: 80}
+        scheduler.update_from_output(final, _stop_output(paused.request_id))
+        assert paused._all_token_ids == [1] * 32 + [9] * 32 + [7] * 16 + [STOP_TOKEN]
+
+    def test_paused_session_reclaimed_for_new_request(self):
+        """A paused session's blocks are reclaimed for a new request; the
+        session stays WAITING_FOR_STREAMING_REQ and recomputes from scratch
+        when its continuation arrives."""
+        scheduler = create_scheduler(num_blocks=6)
+        session = DummyRequest("session", prompt_token_ids=[1] * 32)
+        scheduler.add_request(session)
+        scheduler.update_from_output(scheduler.schedule(), _stop_output("session"))
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        assert scheduler.num_waiting_for_streaming_input == 1
+
+        # A new request that only fits if the paused session's blocks are
+        # freed.
+        request = DummyRequest("req", resumable=False, prompt_token_ids=[5] * 64)
+        scheduler.add_request(request)
+        scheduled = scheduler.schedule()
+        assert scheduled.num_scheduled_tokens == {"req": 64}
+        assert scheduled.preempted_req_ids == {"session"}
+        assert session.num_computed_tokens == 0
+        # The reclaim does not touch the streaming-input accounting.
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        assert scheduler.num_waiting_for_streaming_input == 1
+        assert session in scheduler.waiting
+        assert session not in scheduler.kv_holding_waiting
+
+        scheduler.update_from_output(scheduled, _stop_output("req"))
+        assert request.status == RequestStatus.FINISHED_STOPPED
+
+        # The continuation folds onto the reclaimed session, which has
+        # num_computed_tokens == 0; its prior tokens must be kept.
+        scheduler.add_request(DummyRequest("session", prompt_token_ids=[9] * 16))
+        assert scheduler.num_waiting_for_streaming_input == 0
+        assert session._all_token_ids == [1] * 32 + [9] * 16
+        scheduled = scheduler.schedule()
+        assert scheduled.num_scheduled_tokens == {"session": 48}
+        scheduler.update_from_output(scheduled, _stop_output("session"))
+        assert session.num_computed_tokens == 48
+        assert session._all_token_ids == [1] * 32 + [9] * 16 + [STOP_TOKEN]
+
+    def test_allocation_failure_without_reclaim_victim(self):
+        """Allocation failure with no idle resumable session leaves the
+        request waiting and yields an empty schedule."""
+        scheduler = create_scheduler(num_blocks=3)
+        request = DummyRequest("req", resumable=False, prompt_token_ids=[1] * 48)
+        scheduler.add_request(request)
+
+        scheduled = scheduler.schedule()
+        assert scheduled.num_scheduled_tokens == {}
+        assert not scheduled.preempted_req_ids
+        assert request.status == RequestStatus.WAITING
+        assert request in scheduler.waiting
+
+    def test_streaming_input_counter_survives_reclaim(self):
+        """num_waiting_for_streaming_input and the unfinished-request count
+        stay balanced through park, reclaim, resume, and abort."""
+        scheduler = create_scheduler(num_blocks=6)
+        session = DummyRequest("session", prompt_token_ids=[1] * 32)
+        scheduler.add_request(session)
+        scheduler.update_from_output(scheduler.schedule(), _stop_output("session"))
+        assert scheduler.num_waiting_for_streaming_input == 1
+        # A paused session has no runnable work.
+        assert scheduler.get_num_unfinished_requests() == 0
+
+        request = DummyRequest("req", resumable=False, prompt_token_ids=[5] * 64)
+        scheduler.add_request(request)
+        scheduled = scheduler.schedule()
+        assert scheduled.preempted_req_ids == {"session"}
+        assert scheduler.num_waiting_for_streaming_input == 1
+        assert scheduler.get_num_unfinished_requests() == 1
+        scheduler.update_from_output(scheduled, _stop_output("req"))
+
+        scheduler.add_request(DummyRequest("session", prompt_token_ids=[9] * 16))
+        assert scheduler.num_waiting_for_streaming_input == 0
+        assert scheduler.get_num_unfinished_requests() == 1
+
+        scheduler.finish_requests("session", RequestStatus.FINISHED_ABORTED)
+        assert scheduler.num_waiting_for_streaming_input == 0
+        assert scheduler.get_num_unfinished_requests() == 0
+        assert not scheduler.waiting
+        assert not scheduler.kv_holding_waiting
+        assert not scheduler.deferred_waiting
