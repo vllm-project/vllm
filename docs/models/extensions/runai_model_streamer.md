@@ -51,6 +51,8 @@ vllm serve s3://core-llm/Llama-3-8b \
     --load-format runai_streamer
 ```
 
+Setting `AWS_ENDPOINT_URL` points the streamer at any S3-compatible object store, so the same `s3://` model paths work against Amazon S3, Backblaze B2, Cloudflare R2, MinIO, and other services that implement the S3 API. Replace the endpoint in the example above with your provider's S3 endpoint, such as `https://your-s3-endpoint.example.com`.
+
 ## Tunable parameters
 
 You can tune parameters using `--model-loader-extra-config`:
