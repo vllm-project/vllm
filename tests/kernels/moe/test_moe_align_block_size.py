@@ -219,6 +219,15 @@ def torch_moe_align_block_size(
     return sorted_token_ids, expert_ids, num_tokens_post_pad
 
 
+def test_moe_align_block_size_rejects_noncontiguous_topk_ids():
+    wide_topk_ids = torch.arange(16, device="cuda", dtype=torch.int32).reshape(2, 8) % 4
+    topk_ids = wide_topk_ids[:, :4]
+    assert not topk_ids.is_contiguous()
+
+    with pytest.raises(RuntimeError, match="topk_ids must be contiguous"):
+        moe_align_block_size(topk_ids, block_size=4, num_experts=4)
+
+
 @pytest.mark.parametrize("m", NUM_TOKENS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
