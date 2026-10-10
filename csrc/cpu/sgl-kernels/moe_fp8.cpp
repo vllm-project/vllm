@@ -7,6 +7,8 @@
 #include "gemm.h"
 #include "moe.h"
 
+#include "cpu/moe_numa_parallel.hpp"
+
 template <typename scalar_t, typename packed_t, typename param_t, bool is_mxfp4>
 void fused_experts_fp_kernel_impl(
     scalar_t* __restrict__ output,
@@ -63,7 +65,9 @@ void fused_experts_fp_kernel_impl(
   int64_t B_tmp_size_per_thread = MAX_CACHE_BLOCK_SIZE * BLOCK_N * std::max(K, N);
 
   // here we only parallel on half of 2N to fuse silu_and_mul with gemm
-  parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  // `nb` indexes the output rows of w1, so a NUMA shard is a contiguous slice
+  // of them and every thread reads only its own node's pages.
+  parallel_2d_numa_or_plain(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     // get local pointers
     int tid = get_thread_num();
     scalar_t* __restrict__ A = A_tmp + tid * BLOCK_M * K;
@@ -151,8 +155,9 @@ void fused_experts_fp_kernel_impl(
   const int64_t stride_e2 = OC * packed_IC;
   const int64_t stride_oc = packed_IC;
 
-  // parallel on [MB2, NB2]
-  parallel_2d(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+  // parallel on [MB2, NB2]; `nb` indexes the output rows of w2, sharded the
+  // same way as stage 1's.
+  parallel_2d_numa_or_plain(MB2, NB2, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
     int tid = get_thread_num();
     alignas(64) scalar_t C[BLOCK_M * BLOCK_K];
     bool use_brgemm = false;
