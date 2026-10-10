@@ -4,6 +4,48 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize("batch_invariant,expected_width", [(False, 128), (True, 512)])
+def test_c128a_batch_invariant_metadata_uses_fixed_width(
+    monkeypatch: pytest.MonkeyPatch, batch_invariant: bool, expected_width: int
+) -> None:
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v4 import sparse_mla
+
+    builder = object.__new__(sparse_mla.DeepseekV4SparseMLAMetadataBuilder)
+    builder.compress_ratio = 128
+    builder.reorder_batch_threshold = 1
+    builder.c128a_max_compressed = 512
+    builder.kv_cache_spec = SimpleNamespace(block_size=128)
+    builder.c128a_global_decode_buffer = torch.empty((1, 512), dtype=torch.int32)
+    builder.c128a_decode_lens_buffer = torch.empty(1, dtype=torch.int32)
+    builder.c128a_prefill_buffer = torch.empty((1, 512), dtype=torch.int32)
+    common = SimpleNamespace(
+        positions=torch.tensor([255]),
+        max_seq_len=255,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+    )
+    widths = []
+
+    def capture_width(*args, max_compressed_tokens, **kwargs):
+        widths.append(max_compressed_tokens)
+        return (
+            torch.empty((1, max_compressed_tokens), dtype=torch.int32),
+            torch.empty(1, dtype=torch.int32),
+            torch.empty((0, max_compressed_tokens), dtype=torch.int32),
+        )
+
+    monkeypatch.setattr(sparse_mla.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    monkeypatch.setattr(
+        sparse_mla, "split_decodes_and_prefills", lambda *a, **k: (1, 0, 1, 0)
+    )
+    monkeypatch.setattr(sparse_mla, "build_c128a_topk_metadata", capture_width)
+    result = builder._build_c128a_metadata(common, torch.zeros(1, dtype=torch.int32))
+    assert widths == [expected_width]
+    assert result["c128a_global_decode_topk_indices"].shape == (1, 1, expected_width)
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,

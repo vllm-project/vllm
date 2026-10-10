@@ -135,6 +135,14 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             ),
         )
 
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> CompressorMetadata:
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        if self.block_size == 8:
+            metadata.c128_boundary = None
+        return metadata
+
 
 class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
     def __init__(
