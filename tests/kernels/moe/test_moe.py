@@ -109,6 +109,24 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
+@pytest.mark.parametrize(
+    ("batch_invariant", "expected"),
+    [(False, True), (True, False)],
+)
+def test_wna16_cuda_respects_batch_invariance(
+    monkeypatch, batch_invariant: bool, expected: bool
+) -> None:
+    monkeypatch.setattr(fused_moe_module.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(fused_moe_module.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+
+    assert (
+        fused_moe_module.should_moe_wna16_use_cuda(
+            num_valid_tokens=32, group_size=128, num_experts=8, bit=4
+        )
+        is expected
+    )
+
+
 def iterative_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
