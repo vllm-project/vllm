@@ -3,19 +3,29 @@
 """Unit tests for mori-io write_done routing (#51681)."""
 
 import threading
+import time
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
+    MoRIIOMode,
     RemoteAllocInfo,
     ReqMeta,
     WriteTask,
     get_port_offset,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWrapper,
 )
 
 from .utils import make_moriio_writer
@@ -79,6 +89,7 @@ def _write_task(
     *,
     multi_pod_hosts: list[str] | None = None,
     remote_dp_size_local: int = 0,
+    remote_dp_size: int = 1,
     request_id: str = "req",
 ) -> WriteTask:
     return WriteTask(
@@ -93,7 +104,20 @@ def _write_task(
         remote_ip=remote_ip,
         multi_pod_hosts=multi_pod_hosts or [],
         remote_dp_size_local=remote_dp_size_local,
+        remote_dp_size=remote_dp_size,
     )
+
+
+def _real_wrapper() -> MoRIIOWrapper:
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper.done_req_ids = []
+    wrapper.done_remote_allocate_req_dict = {}
+    wrapper.done_write_cache_req_ids = []
+    wrapper.failed_write_cache_req_ids = []
+    wrapper._terminal_transfer_ids = OrderedDict()
+    wrapper._aborted_write_endpoints = {}
+    return wrapper
 
 
 def test_execute_write_task_ip_is_per_task_under_overwrite():
@@ -269,3 +293,86 @@ def test_write_blocks_for_req_falls_back_when_multi_pod_hosts_empty():
     assert captured["remote_dp_size_local"] == 4
     assert captured["local_block_ids"] == [1]
     assert captured["remote_block_ids"] == [2]
+
+
+def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
+    wrapper = _real_wrapper()
+    sent: list[tuple[str, int, str]] = []
+    wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
+        (ip, port, message_type)
+    )
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
+    task = _write_task(
+        "tA",
+        "10.0.0.1",
+        multi_pod_hosts=["10.0.0.1", "10.0.0.2"],
+        remote_dp_size_local=2,
+        remote_dp_size=4,
+    )
+    task.enqueue_time = time.perf_counter() - 2 * writer._defer_timeout
+    writer._deferred_tasks.append(task)
+
+    writer._process_deferred_tasks()
+
+    assert writer._deferred_tasks == []
+    assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["tA"]
+    # Global DP ranks 0-3, two per pod: the owning rank is unknown.
+    assert sent == [
+        (host, 20000 + get_port_offset(local_rank, 0), "write_failed")
+        for host in ("10.0.0.1", "10.0.0.2")
+        for local_rank in (0, 1)
+    ]
+
+    # A late decode allocation must not resurrect a write into freed blocks.
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.PRODUCER):
+        wrapper._handle_remote_blocks_message(
+            {"transfer_id": "tA", "block_notify_list": [7], "decode_rank": 1}
+        )
+    assert wrapper.done_remote_allocate_req_dict == {}
+
+
+def test_write_scheduler_waits_for_worker_ack_past_defer_deadline():
+    scheduler = SimpleNamespace(
+        is_producer=True,
+        mode=MoRIIOMode.WRITE,
+        _defer_timeout=60.0,
+        _deferred_send_deadlines={"req-1": (time.monotonic() - 1.0, "tA")},
+        _pending_sent_acks={},
+        unmap_request_id=lambda *args, **kwargs: None,
+    )
+    output = SimpleNamespace(finished_sending=set())
+
+    MoRIIOConnectorScheduler.update_connector_output(scheduler, output)
+    assert output.finished_sending is None
+    assert "req-1" in scheduler._deferred_send_deadlines
+
+    output.finished_sending = {"req-1"}
+    MoRIIOConnectorScheduler.update_connector_output(scheduler, output)
+    assert output.finished_sending == {"req-1"}
+    assert scheduler._deferred_send_deadlines == {}
+
+
+def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
+    wrapper = _real_wrapper()
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.CONSUMER):
+        for tid in ("tA", "tOtherRank"):
+            wrapper._handle_structured_message(
+                {"type": "write_failed", "transfer_id": tid}
+            )
+    worker = SimpleNamespace(
+        mode=MoRIIOMode.WRITE,
+        is_producer=False,
+        moriio_wrapper=wrapper,
+        transfer_id_to_request_id={"tA": "req-1"},
+        _unmatched_write_failures=OrderedDict(),
+        _reported_write_transfers=set(),
+        _completed_write_transfers=OrderedDict(),
+        get_finished=lambda: (set(), set()),
+    )
+
+    results = MoRIIOConnectorWorker.get_transfer_results(worker)
+
+    assert results.finished_recving == {"req-1"}
+    assert results.failed_recving == {"req-1"}
+    assert wrapper.pop_finished_write_req_ids() == set()
+    assert list(worker._unmatched_write_failures) == ["tOtherRank"]

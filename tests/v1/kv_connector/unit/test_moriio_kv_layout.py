@@ -98,6 +98,7 @@ def _wrapper_for_messages() -> Any:
     wrapper.done_req_ids = []
     wrapper.done_write_cache_req_ids = []
     wrapper._terminal_transfer_ids = OrderedDict()
+    wrapper._aborted_write_endpoints = {}
     return wrapper
 
 

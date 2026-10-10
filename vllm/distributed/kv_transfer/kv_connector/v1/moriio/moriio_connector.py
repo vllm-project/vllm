@@ -5,7 +5,7 @@ import math
 import queue
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
@@ -44,6 +45,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferError,
     TransferId,
     WriteTask,
+    WriteTransferState,
     fold_local_rank,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
@@ -53,6 +55,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     pod_index,
     resolve_host_ip,
     set_role,
+    supports_zero_submit_abort,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
@@ -116,6 +119,10 @@ logger = init_logger(__name__)
 _SQ_FULL_BACKOFF_INITIAL_S = 0.001
 _SQ_FULL_BACKOFF_MAX_S = 0.05
 _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
+# A WRITE failure is broadcast to every decode DP rank, so ranks that never
+# see the request would otherwise keep its transfer id forever.
+_MAX_UNMATCHED_WRITE_FAILURES = 4096
+_MAX_COMPLETED_WRITE_TRANSFERS = 4096
 
 
 try:
@@ -316,6 +323,15 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def has_pending_push_work(self) -> bool:
+        scheduler = self.connector_scheduler
+        return bool(
+            scheduler is not None
+            and scheduler.is_producer
+            and scheduler.mode == MoRIIOMode.WRITE
+            and (scheduler._reqs_need_abort or scheduler._deferred_send_deadlines)
+        )
+
     def request_finished(
         self,
         request: "Request",
@@ -355,6 +371,12 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Blocks whose MoRIIO read failed, for the scheduler to recompute."""
@@ -654,6 +676,7 @@ class MoRIIOConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
         self._reqs_need_save: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._reqs_need_abort: dict[ReqId, ReqMeta] = {}
         # Snapshot of kv_transfer_params for chunked prefill recovery.
         self._req_kv_params: dict[ReqId, dict] = {}
 
@@ -667,12 +690,10 @@ class MoRIIOConnectorScheduler:
             set_role(ROLE.CONSUMER)
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
-        # Deadlines for requests whose block freeing was deferred.
-        # Survives across scheduler steps. If the worker never reports
-        # finished_sending before the deadline, we inject them into
-        # connector_output.finished_sending so the scheduler frees the blocks to avoid
-        # hanging indefinitely waiting for a free notification that never comes.
-        # Value: (deadline, transfer_id) for unmapping after mutation.
+        # Requests whose block freeing is deferred. READ mode uses the deadline
+        # as a missing-ACK watchdog; WRITE mode waits for the worker ACK because
+        # only the worker can mark the transfer terminal before blocks are freed.
+        # Value: (deadline, transfer_id) for unmapping after completion.
         self._deferred_send_deadlines: dict[ReqId, tuple[float, TransferId | None]] = {}
         self._defer_timeout = float(
             self.kv_transfer_config.kv_connector_extra_config.get(
@@ -684,6 +705,12 @@ class MoRIIOConnectorScheduler:
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
+        # WRITE consumer: requests whose producer push has not been reported
+        # in finished_recving yet, and those among them that already finished
+        # (e.g. aborted). A finished one keeps its transfer_id mapping so the
+        # late write_done can still release its delayed-free blocks.
+        self._write_recvs_in_flight: set[ReqId] = set()
+        self._finished_write_recvs_in_flight: set[ReqId] = set()
 
     def get_exchange_clipped_blocks(
         self,
@@ -962,6 +989,13 @@ class MoRIIOConnectorScheduler:
         params.setdefault("transfer_id", transfer_id)
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
+        if (
+            not self.is_producer
+            and self.mode == MoRIIOMode.WRITE
+            and params.get("do_remote_prefill")
+            and num_external_tokens > 0
+        ):
+            self._write_recvs_in_flight.add(request_id)
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
             local_block_ids: BlockIds = blocks.get_block_ids()
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -1131,7 +1165,14 @@ class MoRIIOConnectorScheduler:
                     _should_notify = self._global_dp_rank == remote_dp_rank
                 else:
                     _should_notify = self._is_kv_master
-                if _should_notify:
+                if _should_notify and num_external_tokens == 0:
+                    # Nothing left to fetch (full local prefix hit), so release
+                    # the producer's blocks instead of sending an empty
+                    # allocation, which it rejects.
+                    self._release_write_prefill_blocks(
+                        request.request_id, request.kv_transfer_params
+                    )
+                elif _should_notify:
                     peer_zmq = get_peer_zmq_from_request_id(
                         request.request_id, is_producer=False
                     )
@@ -1159,12 +1200,6 @@ class MoRIIOConnectorScheduler:
                                 f"remote_notify_port={remote_notify_port!r})"
                             )
 
-                    # num_external_tokens == 0: nothing to push, so don't tell
-                    # the producer to write into these blocks.
-                    block_notify_list = (
-                        blocks.get_block_ids()[0] if num_external_tokens > 0 else []
-                    )
-
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
                     # local rank (% dp_local), not the global rank. Single-pod
@@ -1191,7 +1226,7 @@ class MoRIIOConnectorScheduler:
                         self.send_notify_block(
                             req_id=request.request_id,
                             transfer_id=request.kv_transfer_params["transfer_id"],
-                            block_notify_list=block_notify_list,
+                            block_notify_list=blocks.get_block_ids()[0],
                             host=_notify_host,
                             port=target_port,
                         )
@@ -1325,6 +1360,8 @@ class MoRIIOConnectorScheduler:
         # Clear the list once workers start the transfers
 
         meta.reqs_to_send = self._reqs_need_send
+        meta.reqs_to_abort = self._reqs_need_abort
+        self._reqs_need_abort = {}
 
         # Reclaim snapshot cache entries that completed this step. Keep
         # entries that are still pending (chunked prefill not yet at the
@@ -1418,13 +1455,25 @@ class MoRIIOConnectorScheduler:
         """
         request_id = request.request_id
         params = request.kv_transfer_params
-        # Consumer: can unmap transfer_id<->request_id immediately since done_recving
-        #   has fired at this point (i.e. KV has been transferred)
+        if (
+            self.is_producer
+            and request.status == RequestStatus.FINISHED_ABORTED
+            and self.mode == MoRIIOMode.WRITE
+        ):
+            params = self._req_kv_params.get(request_id, params)
+        # Consumer: can unmap transfer_id<->request_id once done_recving has
+        #   fired (i.e. KV has been transferred). A WRITE request finished while
+        #   still waiting keeps the mapping: the scheduler holds its blocks until
+        #   finished_recving, which the worker can only report for a mapped
+        #   transfer_id. update_connector_output unmaps it then.
         # Producer: must keep the mapping until we get notification that blocks can
         #   be freed, which may be several scheduler steps later.
         if not self.is_producer:
-            transfer_id = params.get("transfer_id") if params else None
-            self.unmap_request_id(request_id, transfer_id=transfer_id)
+            if request_id in self._write_recvs_in_flight:
+                self._finished_write_recvs_in_flight.add(request_id)
+            else:
+                transfer_id = params.get("transfer_id") if params else None
+                self.unmap_request_id(request_id, transfer_id=transfer_id)
         logger.debug(
             "MoriioConnector request_finished, request_status=%s, "
             "kv_transfer_params=%s",
@@ -1433,6 +1482,39 @@ class MoRIIOConnectorScheduler:
         )
         if not params:
             return False, None
+
+        if (
+            self.is_producer
+            and request.status == RequestStatus.FINISHED_ABORTED
+            and self.mode == MoRIIOMode.WRITE
+            and params.get("do_remote_decode")
+            and supports_zero_submit_abort(
+                self.tp_size,
+                int(params.get("remote_tp_size") or params.get("tp_size") or 0),
+            )
+        ):
+            transfer_id = params.setdefault("transfer_id", f"sidecar-{request_id}")
+            abort_meta = MoRIIOConnectorMetadata()
+            abort_meta.add_new_req(
+                request_id=request_id,
+                local_block_ids=[],
+                kv_transfer_params=params,
+                write_mode=True,
+                abort_write=True,
+            )
+            self._reqs_need_abort.update(abort_meta.reqs_to_abort)
+            self._reqs_need_save.pop(request_id, None)
+            self._reqs_need_pending_save.pop(request_id, None)
+            self._req_kv_params.pop(request_id, None)
+            self._reqs_need_send.pop(request_id, None)
+            self.map_request_id(request_id, transfer_id)
+            self._deferred_send_deadlines[request_id] = (
+                time.monotonic() + self._defer_timeout,
+                transfer_id,
+            )
+            # Even an unallocated request keeps its mapping until the worker
+            # ACK: only the worker can close the submission gate safely.
+            return True, None
 
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,
@@ -1541,17 +1623,24 @@ class MoRIIOConnectorScheduler:
         * An ACK that arrives BEFORE its request finished is parked in
           ``_pending_sent_acks`` and released on a later step once the
           request enters ``_deferred_send_deadlines``.
-        * A deferred send whose ACK never arrives is reaped after
-          ``_defer_timeout`` and surfaced, so leaked blocks are freed.
+        * In READ mode, a deferred send whose ACK never arrives is reaped
+          after ``_defer_timeout``. WRITE-mode timeouts are owned by the worker,
+          which marks the transfer terminal before ACKing the block release.
         * A parked ACK that never matches a deferral before its own
           deadline is a stale duplicate (e.g. a real ACK landing after the
           send was already reaped) and is dropped.
 
         Consumers never populate finished_sending (they report
-        finished_recving), and they unmap in request_finished, so this is a
-        no-op for them.
+        finished_recving). They unmap in request_finished, except for a WRITE
+        request that finished while still waiting, which is unmapped here once
+        its finished_recving arrives.
         """
         if not self.is_producer:
+            for req_id in connector_output.finished_recving or ():
+                self._write_recvs_in_flight.discard(req_id)
+                if req_id in self._finished_write_recvs_in_flight:
+                    self._finished_write_recvs_in_flight.discard(req_id)
+                    self.unmap_request_id(req_id)
             return
 
         incoming = set(connector_output.finished_sending or ())
@@ -1575,7 +1664,7 @@ class MoRIIOConnectorScheduler:
         expired = [
             req_id
             for req_id, (deadline, _) in self._deferred_send_deadlines.items()
-            if now >= deadline
+            if self.mode == MoRIIOMode.READ and now >= deadline
         ]
         if expired:
             safe.update(expired)
@@ -1685,6 +1774,14 @@ class MoRIIOConnectorWorker:
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
+        self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
+        # A repeated notification must not count as a second TP worker's vote.
+        self._reported_write_transfers: set[TransferId] = set()
+        # Unlike the live-report set, remember recently completed IDs after
+        # unmapping so a late allocation's repeated write_failed is not queued
+        # as an unknown early failure. This is bounded deduplication, not an
+        # epoch or a guarantee about transfer-ID reuse/history eviction.
+        self._completed_write_transfers: OrderedDict[TransferId, None] = OrderedDict()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -1877,6 +1974,8 @@ class MoRIIOConnectorWorker:
         remote_ip: str,
         multi_pod_hosts: list[str],
         remote_dp_size_local: int,
+        remote_dp_size: int,
+        transfer_state: WriteTransferState | None = None,
     ) -> None:
         """Schedule a block write operation.
 
@@ -1892,6 +1991,8 @@ class MoRIIOConnectorWorker:
             remote_ip: IP address of remote node
             multi_pod_hosts: List of pod IPs for multi-pod Wide-EP
             remote_dp_size_local: Per-pod DP size for multi-pod
+            remote_dp_size: Global DP size of the decode instance
+            transfer_state: Submission gate retained across asynchronous handshakes
 
         """
         # synchronization to prevent dirty reads between
@@ -1915,6 +2016,8 @@ class MoRIIOConnectorWorker:
             remote_ip=remote_ip,
             multi_pod_hosts=multi_pod_hosts,
             remote_dp_size_local=remote_dp_size_local,
+            remote_dp_size=remote_dp_size,
+            transfer_state=transfer_state,
         )
         self._writer.schedule_write(task)
 
@@ -2658,7 +2761,9 @@ class MoRIIOConnectorWorker:
                 # Accumulate with any completions that arrived before their
                 # transfer_id was registered in transfer_id_to_request_id.
                 self._unmatched_write_completions |= fresh
-                done_recving = self._unmatched_write_completions
+                done_recving = (
+                    self._unmatched_write_completions - self._reported_write_transfers
+                )
             else:
                 # READ mode: the scheduler treats KV loads as synchronous
                 # (load_kv_async=False), so requests go directly to RUNNING
@@ -2683,8 +2788,49 @@ class MoRIIOConnectorWorker:
                 if id in self.transfer_id_to_request_id
             }
             self._unmatched_write_completions -= matched_xfer_ids
+            self._reported_write_transfers.update(matched_xfer_ids)
 
         return done_sending, done_recving
+
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        done_sending, done_recving = self.get_finished()
+        failed_recving: set[ReqId] = set()
+
+        if self.mode == MoRIIOMode.WRITE and not self.is_producer:
+            pending = self._unmatched_write_failures
+            mapping = self.transfer_id_to_request_id
+            completed = self._completed_write_transfers
+            for transfer_id in self.moriio_wrapper.pop_failed_write_req_ids():
+                if transfer_id not in completed:
+                    pending[transfer_id] = None
+            for transfer_id in [t for t in pending if t in mapping]:
+                del pending[transfer_id]
+                request_id = mapping[transfer_id]
+                if (
+                    transfer_id not in self._reported_write_transfers
+                    or request_id in done_recving
+                ):
+                    # Failure wins over success received in this same poll.
+                    failed_recving.add(request_id)
+                    self._reported_write_transfers.add(transfer_id)
+            while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
+                pending.popitem(last=False)
+            done_recving |= failed_recving
+            # Record only mapped terminal results. Unknown notifications must
+            # still wait for metadata, and failure wins over a success received
+            # in this same poll before the ID enters the completed history.
+            if done_recving:
+                for transfer_id, request_id in mapping.items():
+                    if request_id in done_recving:
+                        completed[transfer_id] = None
+            while len(completed) > _MAX_COMPLETED_WRITE_TRANSFERS:
+                completed.popitem(last=False)
+
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Block until all in-flight READs of this layer have landed.
@@ -2883,6 +3029,8 @@ class MoRIIOConnectorWorker:
         remote_engine_id = None
 
         for req_id, meta in metadata.reqs_to_save.items():
+            if not self._writer.bind_transfer(meta):
+                continue
             # we only need to check if dp0 in rank
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
@@ -3081,6 +3229,9 @@ class MoRIIOConnectorWorker:
         """
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
+            if self.mode == MoRIIOMode.WRITE:
+                for request_id, meta in metadata.reqs_to_abort.items():
+                    self._writer.abort_before_write(request_id, meta)
             live_transfer_ids = set(self.transfer_id_to_request_id)
             self._consumer_notification_counts = {
                 transfer_id: count
@@ -3093,6 +3244,9 @@ class MoRIIOConnectorWorker:
             self.moriio_wrapper.async_wait_reqid()
             return
         if self.mode == MoRIIOMode.WRITE:
+            self._reported_write_transfers.intersection_update(
+                self.transfer_id_to_request_id
+            )
             return
 
         # Handshake every referenced remote prefill rank up front, before any
@@ -3231,6 +3385,8 @@ class MoRIIOConnectorWorker:
         )
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
+        if meta.transfer_state is not None and meta.transfer_state.cancelled:
+            return
         # Compute per-request values to pass through the task (no shared state).
         # This avoids race conditions when concurrent requests target different
         # decode pods - each WriteTask carries its own routing info.
@@ -3258,6 +3414,8 @@ class MoRIIOConnectorWorker:
             remote_ip=meta.remote_host,
             multi_pod_hosts=hosts,
             remote_dp_size_local=dp_local,
+            remote_dp_size=int(meta.remote_dp_size),
+            transfer_state=meta.transfer_state,
         )
 
     def merge_contiguous_blocks(
