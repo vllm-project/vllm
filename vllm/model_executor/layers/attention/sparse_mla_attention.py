@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
@@ -24,6 +24,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonPrefillMetadata,
     accumulate_mla_context_chunk,
     align_mla_chunked_context_workspace_size,
+    backend_supports_prefill_query_quantization,
     build_mla_chunked_context_metadata,
     get_mla_dims,
     init_mla_context_partial,
@@ -124,7 +125,23 @@ def _is_masked_mha_available(
         fa_version = get_flash_attn_version(
             head_size=qk_head_dim, head_size_v=v_head_dim
         )
-    return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
+    if fa_version != 4:
+        return False
+    # Masked MHA reads the KV cache only through the same bf16
+    # gather/dequant as dense MHA, so plain FP8 KV does not block it; an
+    # FP8 prefill query does, as do the *ds_mla formats.
+    if kv_cache_dtype not in ("auto", "float16", "bfloat16", "fp8", "fp8_e4m3"):
+        return False
+    if not is_quantized_kv_cache(kv_cache_dtype):
+        return True
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        # The prefill-query dtype is unknown without a config; stay off.
+        return False
+    return not (
+        vllm_config.attention_config.use_prefill_query_quantization
+        and backend_supports_prefill_query_quantization()
+    )
 
 
 def _use_dense_mha_prefill(
