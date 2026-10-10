@@ -142,7 +142,7 @@ def create_uvicorn_log_config(
     }
     if formatter == "json":
         json_formatter = {
-            "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "class": "vllm.logging_utils.formatter.TraceJSONFormatter",
             "format": JSON_FORMAT,
         }
         config["formatters"] = {

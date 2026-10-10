@@ -241,7 +241,7 @@ def _configure_vllm_root_logger(config: "LoggingConfig | None" = None) -> None:
         if log_formatter == "json":
             logging_config["formatters"] = {
                 "vllm_json": {
-                    "class": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                    "class": "vllm.logging_utils.formatter.TraceJSONFormatter",
                     "format": _JSON_FORMAT,
                 }
             }
