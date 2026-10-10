@@ -190,7 +190,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             # worker to slot 0, but only worker rank 0 should own unlinking.
             worker_rank = self.worker_rank
             # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each rank takes its own slot by physical device index.
+            # otherwise each worker uses its own logical rank-indexed slot.
             rank = 0 if self.replicated_layout else worker_rank
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,

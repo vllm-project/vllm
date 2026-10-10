@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -27,6 +26,7 @@ from vllm.parser.abstract_parser import Parser, StreamState
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.renderers.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
