@@ -188,7 +188,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         gate_quant_config = (
             quant_config
             if quant_config is not None
-            and quant_config.get_name() in ("inc", "modelopt_mixed")
+            and quant_config.get_name() in ("inc", "modelopt_mixed", "auto_gptq")
             else None
         )
         self.gate = GateLinear(
