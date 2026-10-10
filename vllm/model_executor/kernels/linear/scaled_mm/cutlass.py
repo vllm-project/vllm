@@ -283,6 +283,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             num_token_padding=self.get_output_padding(),
             use_ue8m0=False,
             column_major_scales=True,
+            tma_aligned_scales=True,
         )
 
     @classmethod
