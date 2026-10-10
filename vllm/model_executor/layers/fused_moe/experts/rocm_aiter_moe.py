@@ -396,6 +396,10 @@ def rocm_aiter_fused_experts(
 
                 gate_mode = GateMode.SEPARATED.value
                 q_dtype_a = dtypes.fp4x2
+                # Run over the zero-filled padding, as ATOM does: AITER drops
+                # its tuned MXMOE configs whenever a pad is passed.
+                hidden_pad = 0
+                intermediate_pad = 0
             else:
                 gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
