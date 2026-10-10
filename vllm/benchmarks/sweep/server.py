@@ -95,28 +95,37 @@ class ServerProcess:
 
         return f"http://{host}:{port}"
 
-    def is_server_ready(self) -> bool:
+    def is_server_ready(self, timeout: float | None = None) -> bool:
         server_address = self._get_vllm_server_address()
         try:
-            response = requests.get(f"{server_address}/health")
-            return response.status_code == 200
+            with requests.get(
+                f"{server_address}/health", timeout=timeout, stream=True
+            ) as response:
+                return response.status_code == 200
         except requests.RequestException:
             return False
 
     def wait_until_ready(self, timeout: int) -> None:
-        start_time = time.monotonic()
-        while not self.is_server_ready():
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if self.is_server_ready(timeout=remaining):
+                if time.monotonic() < deadline:
+                    return
+                break
             # Check if server process has crashed
             if self._server_process.poll() is not None:
                 returncode = self._server_process.returncode
                 raise RuntimeError(
                     f"Server process crashed with return code {returncode}"
                 )
-            if time.monotonic() - start_time > timeout:
-                raise TimeoutError(
-                    f"Server failed to become ready within {timeout} seconds."
-                )
-            time.sleep(1)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1, remaining))
+        raise TimeoutError(f"Server failed to become ready within {timeout} seconds.")
 
     def reset_caches(self) -> None:
         server_cmd = self.server_cmd
