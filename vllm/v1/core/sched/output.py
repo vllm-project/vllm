@@ -70,6 +70,7 @@ class NewRequestData:
                 request.mm_features,
                 request.num_computed_tokens,
                 uses_mrope=uses_mrope,
+                stripped_prefix=request._mm_stripped_prefix,
             ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
