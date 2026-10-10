@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
@@ -7380,26 +7381,38 @@ def test_diffusion_canvas_width_defaults_to_the_served_canvas():
     assert diffusion_canvas_width(SimpleNamespace(sampling_params=None), 64) == 64
 
 
-def _diffusion_request(req_id: str, extra_args: dict) -> Request:
+def _diffusion_request(req_id: str, extra_args: dict, block_size: int = 16) -> Request:
     (request,) = create_requests(
-        num_requests=1, num_tokens=8, max_tokens=64, req_ids=[req_id]
+        num_requests=1,
+        num_tokens=8,
+        max_tokens=64,
+        req_ids=[req_id],
+        block_size=block_size,
     )
     request.sampling_params.extra_args = extra_args
     return request
 
 
-@pytest.fixture
-def diffusion_model_runner(monkeypatch):
-    # These CPU tests only exercise scheduling, not Triton kernels.
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+class _SchedulerOnlyV2Config(VllmConfig):
+    @property
+    def use_v2_model_runner(self) -> bool:
+        return True
+
+    def _validate_v2_model_runner(self) -> None:
+        unsupported = self._get_v2_model_runner_unsupported_features()
+        if unsupported:
+            raise ValueError(
+                f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
+            )
 
 
 def _diffusion_scheduler(async_scheduling: bool = True, **kwargs) -> DiffusionScheduler:
     scheduler_cls = DiffusionAsyncScheduler if async_scheduling else DiffusionScheduler
+    kwargs.setdefault("use_v2_model_runner", True)
     scheduler = create_scheduler(
         async_scheduling=async_scheduling,
         diffusion_canvas_length=8,
+        vllm_config_cls=_SchedulerOnlyV2Config,
         scheduler_cls=scheduler_cls,
         **kwargs,
     )
@@ -7408,17 +7421,18 @@ def _diffusion_scheduler(async_scheduling: bool = True, **kwargs) -> DiffusionSc
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
-@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_is_selected_by_default(async_scheduling):
     config = create_scheduler(
-        async_scheduling=async_scheduling, diffusion_canvas_length=8
+        async_scheduling=async_scheduling,
+        diffusion_canvas_length=8,
+        vllm_config_cls=_SchedulerOnlyV2Config,
+        use_v2_model_runner=True,
     ).vllm_config.scheduler_config
     assert config.get_scheduler_cls() is (
         DiffusionAsyncScheduler if config.async_scheduling else DiffusionScheduler
     )
 
 
-@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_narrows_the_canvas_per_request():
     scheduler = _diffusion_scheduler()
     wide = _diffusion_request("wide", {})
@@ -7437,7 +7451,6 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
 
 @pytest.mark.parametrize("structured", [False, True])
 @pytest.mark.parametrize("async_scheduling", [False, True])
-@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_trims_full_width_worker_drafts(
     structured, async_scheduling
 ):
@@ -7481,7 +7494,6 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(
         pytest.param([1] * 4, RequestStatus.FINISHED_LENGTH_CAPPED, id="final"),
     ],
 )
-@pytest.mark.usefixtures("diffusion_model_runner")
 def test_sync_diffusion_step_commits_only_emitted_tokens(sampled, expected_status):
     """An empty denoising step reuses the canvas; a completed read emits it."""
     scheduler = _diffusion_scheduler(async_scheduling=False)
@@ -7504,7 +7516,6 @@ def test_sync_diffusion_step_commits_only_emitted_tokens(sampled, expected_statu
     assert request.status == expected_status
 
 
-@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
     scheduler = _diffusion_scheduler()
     one = _diffusion_request(
@@ -7527,7 +7538,6 @@ def test_diffusion_scheduler_defers_a_read_with_every_step_in_flight():
     assert set(scheduler.schedule().num_scheduled_tokens) == {"gen"}
 
 
-@pytest.mark.usefixtures("diffusion_model_runner")
 def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     scheduler = _diffusion_scheduler(pipeline_parallel_size=3, use_v2_model_runner=True)
     read = _diffusion_request(
@@ -7544,3 +7554,119 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+class TestSinglePassReads:
+    @pytest.fixture
+    def make_read(self):
+        def make(req_id: str = "read", block_size: int = 16, **extra) -> Request:
+            args = {"diffusion_read_only": True, "diffusion_max_steps": 1, **extra}
+            return _diffusion_request(req_id, args, block_size=block_size)
+
+        return make
+
+    @pytest.fixture
+    def read(self, request, make_read) -> Request:
+        return make_read(**getattr(request, "param", {}))
+
+    @pytest.fixture
+    def scheduler(self, request) -> DiffusionScheduler:
+        kwargs = {
+            "async_scheduling": False,
+            "diffusion_single_pass_reads": True,
+            "device_config": DeviceConfig(device="cpu"),
+        }
+        return _diffusion_scheduler(**{**kwargs, **getattr(request, "param", {})})
+
+    @pytest.mark.parametrize(
+        "scheduler",
+        [
+            {"async_scheduling": False},
+            {"async_scheduling": True},
+            {"max_model_len": 17},
+        ],
+        ids=["sync", "async", "max-model-len-edge"],
+        indirect=True,
+    )
+    @pytest.mark.parametrize(
+        "read, width", [({}, 8), ({"diffusion_canvas_length": 4}, 4)], indirect=["read"]
+    )
+    def test_canvas_runs_with_the_prompt(self, scheduler, read, width):
+        scheduler.add_request(read)
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens == {"read": 8 + width}
+        assert output.scheduled_spec_decode_tokens == {"read": [-1] * width}
+
+    @pytest.mark.parametrize("read", [{"diffusion_canvas_length": 4}], indirect=True)
+    def test_read_finishes_after_one_step(self, scheduler, read):
+        read.max_tokens = read.sampling_params.max_tokens = 4
+        scheduler.add_request(read)
+        _model_output(scheduler, scheduler.schedule(), [[1] * 4])
+        assert list(read.output_token_ids) == [1] * 4
+        assert read.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    @pytest.mark.parametrize("scheduler", [{"async_scheduling": True}], indirect=True)
+    @pytest.mark.parametrize("read", [{"diffusion_canvas_length": 4}], indirect=True)
+    def test_async_read_waits_in_flight_then_finishes(self, scheduler, read):
+        read.max_tokens = read.sampling_params.max_tokens = 4
+        scheduler.add_request(read)
+        first = scheduler.schedule()
+        assert read.num_output_placeholders == 4
+        assert not scheduler.schedule().num_scheduled_tokens
+        _model_output(scheduler, first, [[1] * 4])
+        assert list(read.output_token_ids) == [1] * 4
+        assert read.num_output_placeholders == 0
+        assert read.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    @pytest.mark.parametrize(
+        "scheduler, read",
+        [
+            pytest.param({"diffusion_single_pass_reads": False}, {}, id="flag-off"),
+            pytest.param({}, {"diffusion_read_only": False}, id="generation"),
+            pytest.param({}, {"diffusion_max_steps": None}, id="uncapped-read"),
+            pytest.param({}, {"diffusion_max_steps": 2}, id="two-step-read"),
+            pytest.param(
+                {"max_num_batched_tokens": 8, "max_num_seqs": 4}, {}, id="token-budget"
+            ),
+            pytest.param({"max_model_len": 16}, {}, id="max-model-len"),
+        ],
+        indirect=True,
+    )
+    def test_read_stays_two_step(self, scheduler, read):
+        scheduler.add_request(read)
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens == {"read": 8}
+        assert not output.scheduled_spec_decode_tokens
+
+    @pytest.mark.parametrize(
+        "scheduler", [{"block_size": 8, "num_blocks": 2}], indirect=True
+    )
+    def test_read_waits_for_kv_room_for_its_canvas(self, scheduler, read):
+        scheduler.add_request(read)
+        assert not scheduler.schedule().num_scheduled_tokens
+        assert read.status == RequestStatus.WAITING
+
+    @pytest.mark.parametrize(
+        "scheduler", [{"long_prefill_token_threshold": 4}], indirect=True
+    )
+    def test_canvas_joins_the_last_prompt_chunk(self, scheduler, read):
+        scheduler.add_request(read)
+        scheduler.add_request(_diffusion_request("other", {}))
+        first = scheduler.schedule()
+        _model_output(scheduler, first, [[], []])
+        last = scheduler.schedule()
+        assert first.num_scheduled_tokens == {"read": 4, "other": 4}
+        assert not first.scheduled_spec_decode_tokens
+        assert last.num_scheduled_tokens == {"read": 4 + 8, "other": 4}
+        assert last.scheduled_spec_decode_tokens == {"read": [-1] * 8}
+
+    @pytest.mark.parametrize(
+        "scheduler", [{"enable_prefix_caching": True, "block_size": 4}], indirect=True
+    )
+    def test_prefix_hit_schedules_only_the_uncached_tail(self, scheduler, make_read):
+        scheduler.add_request(make_read("first", block_size=4))
+        _model_output(scheduler, scheduler.schedule(), [[1] * 8])
+        scheduler.add_request(make_read("second", block_size=4))
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens == {"second": 4 + 8}
+        assert output.scheduled_spec_decode_tokens == {"second": [-1] * 8}

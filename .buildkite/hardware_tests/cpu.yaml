@@ -12,6 +12,13 @@ steps:
   - CMakeLists.txt
   - vllm/_custom_ops.py
   - tests/kernels/attention/test_cpu_attn.py
+  - vllm/model_executor/models/diffusion_gemma.py
+  - tests/v1/sample/test_diffusion_gemma_single_pass.py
+  - tests/v1/sample/test_diffusion_gemma_prompt_logprobs.py
+  - vllm/v1/worker/gpu/sample/prompt_logprob.py
+  - vllm/v1/worker/gpu/sample/logprob.py
+  - vllm/v1/attention/backends/cpu_attn.py
+  - vllm/v1/worker/gpu/attn_utils.py
   - tests/v1/attention/test_group_head_counts.py
   - tests/kernels/attention/test_amx_mla.py
   - vllm/v1/attention/backends/mla/amx_mla.py
@@ -41,6 +48,8 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB \
       tests/kernels/attention/test_cpu_attn.py \
+      tests/v1/sample/test_diffusion_gemma_single_pass.py \
+      tests/v1/sample/test_diffusion_gemma_prompt_logprobs.py \
       tests/v1/attention/test_group_head_counts.py \
       tests/kernels/attention/test_amx_mla.py \
       tests/kernels/test_deepseek_v4_cpu_kernels.py \

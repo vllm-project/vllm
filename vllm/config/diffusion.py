@@ -24,3 +24,10 @@ class DiffusionConfig:
     max_denoising_steps: int | None = None
     """Maximum number of denoising iterations per canvas block.
     If not set, read from the model's generation_config.json."""
+
+    single_pass_reads: bool = False
+    """Attach the canvas to the final prompt step for eligible one-step reads,
+    saving one forward pass. Disabled by default and supported only on CPU.
+    Chunked prompts may still need multiple steps. Fusion can change emitted
+    tokens and probabilities. Incompatible with pipeline parallelism and
+    KV connectors or KV offloading."""
