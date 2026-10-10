@@ -692,6 +692,21 @@ def test_quick_reduce_max_size_default(monkeypatch):
     assert reloaded_envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB is None
 
 
+@pytest.mark.parametrize("use_flydsl", [True, False])
+def test_quick_reduce_use_flydsl_env_var(monkeypatch, use_flydsl):
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL", "1" if use_flydsl else "0")
+
+    reloaded_envs = _reload_envs()
+    assert reloaded_envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL is use_flydsl
+
+
+def test_quick_reduce_use_flydsl_default(monkeypatch):
+    monkeypatch.delenv("VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL", raising=False)
+
+    reloaded_envs = _reload_envs()
+    assert reloaded_envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL is False
+
+
 @pytest.mark.parametrize(
     ("gcn_arch_name", "expected"),
     [

@@ -11,6 +11,7 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.envs as envs
 import vllm.ir.ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
@@ -1564,6 +1565,17 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             )
             return
         self.ca_comm = ca_comm
+
+        if envs.VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL:
+            logger.warning_once(
+                "VLLM_ROCM_QUICK_REDUCE_USE_FLYDSL is set together with "
+                "fuse_allreduce_rms. FlyDSL QuickReduce has no fused "
+                "all-reduce + RMSNorm kernel, so fused all-reduces in the "
+                "QuickReduce size range run AITER's HIP QuickReduce + RMSNorm "
+                "instead of FlyDSL. Set "
+                "compilation_config.pass_config.fuse_allreduce_rms=false to "
+                "route them through FlyDSL QuickReduce."
+            )
 
         hidden_dim = config.model_config.get_hidden_size()
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()

@@ -86,7 +86,77 @@ def _make_quick_allreduce_for_test(
     quick_reduce.qr_quantization_min_size = quantization_min_size
     quick_reduce.use_fp16_kernels = False
     quick_reduce.world_size = 2
+    quick_reduce._flydsl_int4 = None
     return quick_reduce
+
+
+class _FakeFlyDSLInt4:
+    def __init__(self):
+        self.allreduce_calls = []
+        self.closed = False
+
+    def allreduce(self, inp, out):
+        self.allreduce_calls.append((inp, out))
+        out.copy_(inp)
+
+    def close(self):
+        self.closed = True
+
+
+def _make_flydsl_quick_allreduce_for_test() -> tuple[QuickAllReduce, _FakeFlyDSLInt4]:
+    quick_reduce = _make_quick_allreduce_for_test(min_size_mb=2)
+    quick_reduce._ptr = 0
+    fake = _FakeFlyDSLInt4()
+    quick_reduce._flydsl_int4 = fake
+    return quick_reduce, fake
+
+
+def test_flydsl_int4_should_quick_allreduce_gates_bf16_payloads():
+    quick_reduce, _ = _make_flydsl_quick_allreduce_for_test()
+
+    at_min = torch.empty(MB, dtype=torch.bfloat16)
+    assert quick_reduce.should_quick_allreduce(at_min)
+    # The HIP kernels take fp16; the FlyDSL kernel is bf16-only.
+    assert not quick_reduce.should_quick_allreduce(torch.empty(MB, dtype=torch.float16))
+    assert not quick_reduce.should_quick_allreduce(
+        torch.empty(MB // 2, dtype=torch.bfloat16)
+    )
+    assert not quick_reduce.should_quick_allreduce(
+        torch.empty(8 * MB + 8, dtype=torch.bfloat16)
+    )
+    assert not quick_reduce.should_quick_allreduce(
+        torch.empty(2 * MB, dtype=torch.bfloat16)[::2]
+    )
+    # Right size, but the data pointer is 8 bytes past a 16-byte boundary.
+    assert not quick_reduce.should_quick_allreduce(
+        torch.empty(MB + 16, dtype=torch.bfloat16)[4 : MB + 4]
+    )
+
+
+def test_flydsl_int4_quick_all_reduce_dispatches_and_closes(monkeypatch):
+    quick_reduce, fake = _make_flydsl_quick_allreduce_for_test()
+
+    def _hip_qr_all_reduce(*args, **kwargs):
+        raise AssertionError("HIP QuickReduce must not run with FlyDSL INT4")
+
+    monkeypatch.setattr(ops, "qr_all_reduce", _hip_qr_all_reduce, raising=False)
+    inp = torch.randn(MB, dtype=torch.bfloat16)
+
+    out = quick_reduce.quick_all_reduce(inp)
+
+    assert len(fake.allreduce_calls) == 1
+    assert fake.allreduce_calls[0][0] is inp
+    assert fake.allreduce_calls[0][1] is out
+    torch.testing.assert_close(out, inp)
+
+    quick_reduce.close()
+
+    assert fake.closed
+    assert quick_reduce._flydsl_int4 is None
+    # A closed communicator must refuse work instead of falling through to
+    # the HIP path, which has no communicator behind it.
+    assert quick_reduce.disabled
+    assert not quick_reduce.should_quick_allreduce(inp)
 
 
 def test_should_quick_allreduce_uses_builtin_min_size_when_unset():
@@ -238,8 +308,9 @@ def test_quick_allreduce_passes_dynamic_quant_level(
     assert called_quant_level == QuickReduceRegime.FP.value
 
 
+@pytest.mark.parametrize("flydsl", [False, True], ids=["hip_qr", "flydsl_qr"])
 def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, flydsl: bool
 ):
     class FakeAiterAllReduce:
         aiter_ca = SimpleNamespace(world_size=2, fully_connected=True)
@@ -263,7 +334,17 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
         def _get_qr_quant_level(self, inp):
             return QuickReduceRegime.INT4.value
 
-    qr_comm = FakeQuickReduce()
+    if flydsl:
+        # The fused op only asks qr_comm whether the payload is eligible. It
+        # runs on its own AITER communicator, so a FlyDSL qr_comm (with no
+        # HIP _ptr) must not stop it. FlyDSL's 2 MiB floor needs 256 tokens.
+        qr_comm, _ = _make_flydsl_quick_allreduce_for_test()
+        num_tokens = 256
+    else:
+        qr_comm = FakeQuickReduce()
+        # token_num > 80 forces vLLM's AITER fused AR+RMS wrapper onto its
+        # non-1stage prefill path.
+        num_tokens = 81
     device_comm = SimpleNamespace(cpu_group=object(), qr_comm=qr_comm)
     monkeypatch.setattr(
         vllm_distributed,
@@ -324,10 +405,9 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
     monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
     monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", True)
 
-    # token_num > 80 forces vLLM's AITER fused AR+RMS wrapper onto its
-    # non-1stage prefill path. hidden_dim=4096 bf16 gives an 8 KiB row, so four
-    # independent RMSNorm rows fit in one 32 KiB QR tile.
-    inp = torch.randn(81, 4096, dtype=torch.bfloat16)
+    # hidden_dim=4096 bf16 gives an 8 KiB row, so four independent RMSNorm
+    # rows fit in one 32 KiB QR tile.
+    inp = torch.randn(num_tokens, 4096, dtype=torch.bfloat16)
     residual = torch.randn_like(inp)
     weight = torch.randn(4096, dtype=torch.bfloat16)
 
@@ -335,8 +415,10 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
         inp, residual, weight, 1e-6
     )
 
-    assert qr_comm.checked_input is inp
+    if not flydsl:
+        assert qr_comm.checked_input is inp
     assert len(calls) == 1
+    # AITER's own communicator, not qr_comm's.
     assert calls[0]["ptr"] == 123
     assert calls[0]["inp"] is inp
     assert calls[0]["residual"] is residual
