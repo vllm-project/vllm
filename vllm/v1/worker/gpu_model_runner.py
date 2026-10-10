@@ -6863,6 +6863,14 @@ class GPUModelRunner(
             # Warmups may use auxiliary streams. Ensure all of their work has
             # completed before beginning CUDA graph capture.
             torch.accelerator.synchronize()
+
+        # NCCL CUDA-graph capture is collective: all ranks must enter each
+        # descriptor's capture in the same order. Local synchronization above
+        # does not provide that ordering; a faster rank can otherwise start
+        # capturing the next descriptor while another rank is still capturing
+        # this one. Use CPU process groups so this barrier does not add device
+        # work to the graph.
+        self._cudagraph_capture_barrier()
         with (
             profiler,
             torch.profiler.record_function(
@@ -6880,6 +6888,27 @@ class GPUModelRunner(
                 is_graph_capturing=True,
                 profile_seq_lens=profile_seq_lens,
             )
+
+        # Do not let one rank advance to the next descriptor until every rank
+        # has finished closing this graph and its capture stream is idle.
+        torch.accelerator.synchronize()
+        self._cudagraph_capture_barrier()
+
+    @staticmethod
+    def _cudagraph_capture_barrier() -> None:
+        """Keep multi-rank CUDA-graph captures in descriptor lockstep.
+
+        CUDA graph capture is per process, but NCCL collectives inside the
+        graph are collective across their process group. CPU barriers are used
+        deliberately because GroupCoordinator's GPU barrier creates hidden
+        device work and is unsafe around graph capture.
+
+        The Kimi post-attention graph under investigation uses TP/DCP
+        collectives, with DCP contained within TP. Synchronize only the TP
+        group here; EP/DeepEP capture synchronization is a separate concern
+        and must not introduce a DP-wide dependency into this path.
+        """
+        get_tp_group().barrier()
 
     def _capture_cudagraphs(
         self,
