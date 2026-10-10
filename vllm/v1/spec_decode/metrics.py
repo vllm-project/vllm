@@ -81,6 +81,7 @@ class SpecDecodingLogging:
 
     def log(self, log_fn=logger.info):
         if not self.num_drafts:
+            self.reset()
             return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
