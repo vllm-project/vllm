@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
 import pytest
 import torch
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
+    async_tensor_h2d,
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
@@ -12,6 +14,7 @@ from vllm.utils.torch_utils import (
     is_lossless_cast,
     is_quantized_kv_cache,
     set_default_torch_dtype,
+    set_random_seed,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
@@ -192,3 +195,40 @@ def test_runtime_threads_override_vllm_set_omp_num_threads(
     torch.set_num_threads(3)
     set_torch_threads_for_runtime()
     assert torch.get_num_threads() == 1
+
+
+@pytest.mark.parametrize(
+    "device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]
+)
+def test_async_tensor_h2d_staging(device):
+    """Staging must preserve values while normalizing dtype and layout."""
+    # Non-contiguous source with a dtype conversion: would previously sync.
+    src = torch.arange(12, dtype=torch.int64).reshape(3, 4).T
+    result = async_tensor_h2d(src, device=device, dtype=torch.int32)
+    assert result.dtype == torch.int32
+    assert result.is_contiguous()
+    assert torch.equal(result.cpu(), src.to(torch.int32))
+
+    # numpy and list sources still work.
+    assert torch.equal(
+        async_tensor_h2d(np.arange(4, dtype=np.int64), device=device),
+        torch.arange(4, device=device),
+    )
+    assert torch.equal(
+        async_tensor_h2d([1, 2, 3], device=device, dtype=torch.int32),
+        torch.tensor([1, 2, 3], dtype=torch.int32, device=device),
+    )
+
+
+def test_set_random_seed_differs_per_data_parallel_index():
+    """Unseeded requests draw from the global RNGs; DP engines sharing the engine
+    seed must get distinct, reproducible streams, and index 0 keeps the seed."""
+
+    def draws(*args):
+        set_random_seed(*args)
+        return np.random.randint(2**31, size=4).tolist(), torch.rand(4).tolist()
+
+    assert draws(42, 0) == draws(42)
+    assert draws(42, 1) == draws(42, 1)
+    assert len({str(draws(42, i)) for i in range(4)}) == 4
+    assert draws(42, 1) != draws(43, 1)

@@ -179,7 +179,8 @@ def test_stop_strings_still_truncate_when_stop_token_ids_set():
     result = detok.update(_ids("abcdeZ"), stop_terminated=True)
     assert result == "cd"
     assert detok.output_text == "ab"
-    assert detok.output_token_ids == _ids("abcdeZ")
+    # Tokens after the stop string are trimmed, including the later stop id.
+    assert detok.output_token_ids == _ids("abcd")
 
 
 def test_fast_incremental_detokenizer_skips_stop_token_id():

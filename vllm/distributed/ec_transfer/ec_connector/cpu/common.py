@@ -99,8 +99,8 @@ def create_ec_shared_region(vllm_config: "VllmConfig") -> ECSharedRegion:
     ec_config = vllm_config.ec_transfer_config
     assert ec_config is not None, "ec_transfer_config required to build region"
 
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
-    engine_id = f"{vllm_config.instance_id}_dp{dp_rank}"
+    dp_index = vllm_config.parallel_config.data_parallel_index
+    engine_id = f"{vllm_config.instance_id}_dp{dp_index}"
 
     dtype = vllm_config.model_config.dtype
     hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)

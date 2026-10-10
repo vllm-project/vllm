@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Required, TypeAlias
 
-from typing_extensions import Required, TypedDict
+from typing_extensions import TypedDict
 
 from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
@@ -21,8 +21,7 @@ ScoreContentPartParam: TypeAlias = (
 
 
 class ScoreMultiModalParam(TypedDict, total=False):
-    """
-    A specialized parameter type for scoring multimodal content
+    """A specialized parameter type for scoring multimodal content.
 
     The reasons why don't reuse `CustomChatCompletionMessageParam` directly:
     1. Score tasks don't need the 'role' field (user/assistant/system) that's required in chat completions

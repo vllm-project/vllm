@@ -59,9 +59,21 @@ def _aiter_mhc_op_accepts_norm(op_name: str) -> bool:
     return False
 
 
+def _has_aiter_mhc_fused_post_pre_delayed_rms_norm() -> bool:
+    if not HAS_AITER_MHC:
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    # The fused delayed seam kernel is only validated on gfx950.
+    return on_gfx950()
+
+
 HAS_AITER_MHC_FUSED = _has_aiter_mhc_fused()
 HAS_AITER_MHC_PRE_NORM = _aiter_mhc_op_accepts_norm("mhc_pre")
 HAS_AITER_MHC_FUSED_NORM = _aiter_mhc_op_accepts_norm("mhc_fused_post_pre")
+HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM = (
+    _has_aiter_mhc_fused_post_pre_delayed_rms_norm()
+)
 
 
 def _aiter_mhc_supported(
@@ -299,13 +311,37 @@ class MHCPreDelayedOp(CustomOp):
 
     Same gates as :class:`MHCPreOp`, but the stream collapse applies the
     caller's ``pre_mix`` and this sublayer's pre-mix is returned for the next
-    sublayer seam. Returns post_mix, comb_mix, layer_input, next_pre_mix.
+    sublayer seam.
+
+    Passing ``sublayer_out`` / ``post_layer_mix`` / ``comb_res_mix`` also
+    applies the preceding post block, which lets AITER fold it into the pre
+    projection and saves a launch. Returns residual, post_mix, comb_mix,
+    layer_input, next_pre_mix; ``residual`` is the caller's own tensor when
+    no post is requested.
     """
 
     # --8<-- [end:mhc_pre_delayed]
     @classmethod
     def enabled(cls) -> bool:
         return True
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Built here, not lazily: CustomOp resolves dispatch against the
+        # current vLLM config, which is only set during model construction.
+        self._post = MHCPostOp()
+
+    def _maybe_post(
+        self,
+        residual: torch.Tensor,
+        sublayer_out: torch.Tensor | None,
+        post_layer_mix: torch.Tensor | None,
+        comb_res_mix: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if sublayer_out is None:
+            return residual
+        assert post_layer_mix is not None and comb_res_mix is not None
+        return self._post(sublayer_out, residual, post_layer_mix, comb_res_mix)
 
     def forward_cuda(
         self,
@@ -322,8 +358,14 @@ class MHCPreDelayedOp(CustomOp):
         x: torch.Tensor | None = None,
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 1e-6,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.mhc_pre_delayed_tilelang(
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual = self._maybe_post(
+            residual, sublayer_out, post_layer_mix, comb_res_mix
+        )
+        return residual, *torch.ops.vllm.mhc_pre_delayed_tilelang(
             residual,
             fn,
             hc_scale,
@@ -354,17 +396,23 @@ class MHCPreDelayedOp(CustomOp):
         x: torch.Tensor | None = None,
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 1e-6,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # The AITER delayed path drives mhc_pre_gemm_sqrsum against `residual`
-        # and folds no RMSNorm, so it cannot serve the model-entry broadcast
-        # (which projects a narrower `x`) or a fused norm. Both are handled by
-        # TileLang, or by the reference when TileLang is unavailable.
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # aiter's fused delayed seam: post-mix, gate projection, and the
+        # collapse with the carried pre-mix and its RMSNorm. It always applies
+        # the norm and projects `residual` itself.
         if (
-            x is None
-            and norm_weight is None
-            and _aiter_mhc_supported(residual, None, supports_norm=False)
+            HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
+            and x is None
+            and norm_weight is not None
+            and _aiter_mhc_supported(residual, norm_weight, supports_norm=True)
         ):
-            return torch.ops.vllm.mhc_pre_delayed_aiter(
+            residual_out = (
+                torch.empty_like(residual) if sublayer_out is not None else None
+            )
+            rest = torch.ops.vllm.mhc_fused_post_pre_delayed_rms_norm_aiter(
                 residual,
                 fn,
                 hc_scale,
@@ -375,9 +423,65 @@ class MHCPreDelayedOp(CustomOp):
                 hc_post_mult_value,
                 sinkhorn_repeat,
                 pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+                norm_weight,
+                norm_eps,
+                residual_out,
             )
+            return (residual if residual_out is None else residual_out), *rest
+        # The unfused AITER delayed path drives mhc_pre_gemm_sqrsum against
+        # `residual` and folds no RMSNorm, so it cannot serve the model-entry
+        # broadcast (which projects a narrower `x`) or a fused norm the branch
+        # above did not take. Both are handled by TileLang, or by the reference
+        # when TileLang is unavailable.
+        if (
+            x is None
+            and norm_weight is None
+            and _aiter_mhc_supported(residual, None, supports_norm=False)
+        ):
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            num_tokens = residual.numel() // (residual.shape[-1] * residual.shape[-2])
+            # Folding the post in only pays while the residual still fits in
+            # cache; past that AITER's heuristic wants the separate kernels,
+            # which can ask for a non-temporal store and a large-m split-k.
+            if sublayer_out is not None and (
+                rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(num_tokens)
+            ):
+                residual = self._maybe_post(
+                    residual, sublayer_out, post_layer_mix, comb_res_mix
+                )
+                sublayer_out = None
+            # The op writes the folded post's residual into this buffer rather
+            # than returning it, since on the unfused path it has none of its
+            # own and an op must not hand back one of its inputs.
+            residual_out = (
+                torch.empty_like(residual) if sublayer_out is not None else None
+            )
+            rest = torch.ops.vllm.mhc_pre_delayed_aiter(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                sublayer_out,
+                post_layer_mix,
+                comb_res_mix,
+                residual_out,
+            )
+            return (residual if residual_out is None else residual_out), *rest
+        residual = self._maybe_post(
+            residual, sublayer_out, post_layer_mix, comb_res_mix
+        )
         if HAS_TILELANG_MHC:
-            return torch.ops.vllm.mhc_pre_delayed_tilelang(
+            return residual, *torch.ops.vllm.mhc_pre_delayed_tilelang(
                 residual,
                 fn,
                 hc_scale,
@@ -392,6 +496,7 @@ class MHCPreDelayedOp(CustomOp):
                 norm_weight,
                 norm_eps,
             )
+        # The post is already applied, so it must not be requested again.
         return self.forward_native(
             residual,
             fn,
@@ -423,7 +528,13 @@ class MHCPreDelayedOp(CustomOp):
         x: torch.Tensor | None = None,
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 1e-6,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        residual = self._maybe_post(
+            residual, sublayer_out, post_layer_mix, comb_res_mix
+        )
         post_mix, comb_mix, layer_input, next_pre_mix = (
             mhc_kernels.mhc_pre_delayed_torch(
                 residual,
@@ -440,6 +551,7 @@ class MHCPreDelayedOp(CustomOp):
             )
         )
         return (
+            residual,
             post_mix,
             comb_mix,
             _apply_mhc_norm(layer_input, norm_weight, norm_eps),

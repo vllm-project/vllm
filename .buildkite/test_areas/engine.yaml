@@ -29,15 +29,16 @@ steps:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
   mirror:
     amd:
-      label: ":amd: (MI300) Engine Core"
+      label: ":amd: (MI355 DPX) Engine Core"
       dind: false
-      device: mi300_1
+      device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
 
 - label: ":nvidia: (L4) V1 Engine"
   key: engine-1-gpu
+  automatic_shard: true
   device: l4
   num_devices: 1
   timeout_in_minutes: 45
@@ -52,10 +53,18 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) V1 Engine"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 45
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s v1/engine/test_preprocess_error_handling.py
+      - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+      - pytest -v -s v1/test_tensor_ipc_queue.py
+      - pytest -v -s config/test_mp_reducer.py
 
 - label: ":nvidia: (H200 MIG 18GB) E2E Scheduling"
   key: e2e-scheduling-1-gpu
@@ -69,23 +78,50 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) E2E Scheduling"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 35GB) E2E Core"
-  device: h200_35gb
-  key: e2e-core-1-gpu
-  timeout_in_minutes: 50
+- label: ":nvidia: (H200 MIG 18GB) E2E Scheduling Accuracy"
+  key: e2e-scheduling-accuracy-1-gpu
+  timeout_in_minutes: 53
+  device: h200_18gb
   source_file_dependencies:
     - vllm/v1/
     - tests/v1/e2e/general/
   commands:
-    - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
+    - pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py
+  mirror:
+    amd:
+      label: ":amd: (MI250) E2E Scheduling Accuracy"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 18GB) E2E Core"
+  device: h200_18gb
+  key: e2e-core-1-gpu
+  automatic_shard: true
+  timeout_in_minutes: 65
+  source_file_dependencies:
+    - vllm/v1/
+    - tests/v1/e2e/general/
+  commands:
+    - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
   mirror:
     amd:
       label: ":amd: (MI250) E2E Core"
+      dind: false
+      commands:
+      - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py --ignore v1/e2e/general/test_async_scheduling_accuracy.py --ignore v1/e2e/general/test_kv_sharing_fast_prefill.py -k "not test_mamba_prefix_cache_mrv2"
       device: mi250_1
       timeout_in_minutes: 50
       depends_on:
@@ -94,6 +130,56 @@ steps:
       - vllm/v1/
       - tests/v1/e2e/general/
       - vllm/platforms/rocm.py
+
+# Keep the large Gemma-3n and Mamba MRV2 warmup allocations on 35GB slices.
+- label: ":nvidia: (H200 MIG 35GB) E2E Core Large Memory"
+  device: h200_35gb
+  key: e2e-core-large-memory
+  timeout_in_minutes: 50
+  source_file_dependencies:
+    - vllm/v1/
+    - tests/v1/e2e/general/
+  commands:
+    - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
+    - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) E2E Core Large Memory"
+      dind: false
+      device: mi355_dpx
+      num_devices: 1
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/
+      - tests/v1/e2e/general/
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
+      - pytest -v -s v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2 v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+
+- label: ":nvidia: (H100) ReplaySSM E2E"
+  device: h100
+  num_devices: 2
+  key: replayssm-e2e
+  timeout_in_minutes: 90
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - tests/v1/e2e/test_replayssm_decode.py
+    - vllm/config/cache.py
+    - vllm/config/vllm.py
+    - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/models/nemotron_h.py
+    - vllm/model_executor/warmup/replayssm_warmup.py
+    - vllm/v1/attention/backends/mamba_attn.py
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/
+    - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/worker/gpu_worker.py
+  commands:
+    - pytest -v -s v1/e2e/test_replayssm_decode.py
 
 - label: ":nvidia: (L4) V1 E2E"
   key: v1-e2e-2-gpus

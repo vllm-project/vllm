@@ -11,10 +11,9 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import torch
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -113,8 +112,7 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class SparseNCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, SparseNCCLWeightTransferUpdateInfo]
 ):
-    """
-    Sparse weight transfer engine using NCCL.
+    """Sparse weight transfer engine using NCCL.
 
     Receives checkpoint-coordinate patches broadcast from the trainer and applies
     them through the model's native weight loader. Sparse updates modify initialized

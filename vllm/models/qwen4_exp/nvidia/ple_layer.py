@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
+from transformers import Qwen4ExpTextConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
@@ -17,17 +18,14 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
-from vllm.transformers_utils.configs.qwen4_exp import (
-    Qwen4ExpTextConfig,
-)
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
     PleShortConvAttentionMetadata,
 )
 
+from ..common.ops.ple import ple_conv, ple_gate
 from .ngram_embedding import Qwen4ExpNGramEmbedding
-from .ops.ple import ple_conv, ple_gate
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):
@@ -146,7 +144,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
         """Dequantize PLE lookup output."""
-
         return self.ple_embedding.ngram_embedding.dequantize(
             embeddings,
             output_dtype,
@@ -195,6 +192,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self,
         inputs: torch.Tensor,
         residual: torch.Tensor,
+        outer_residual: torch.Tensor,
         metadata: PleShortConvAttentionMetadata,
         conv_state: torch.Tensor,
         conv_weights: torch.Tensor,
@@ -209,6 +207,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         has_non_spec = has_prefill or has_decode
         inputs = inputs[: metadata.num_actual_tokens]
         residual = residual[: metadata.num_actual_tokens]
+        outer_residual = outer_residual[: metadata.num_actual_tokens]
 
         spec_token_indices = None
         non_spec_token_indices = None
@@ -235,6 +234,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 conv_state=conv_state,
                 conv_weights=conv_weights,
                 state_indices=spec_state_indices,
+                outer_residual=outer_residual,
                 mode="spec",
                 dilation=self.short_conv_dilation,
                 query_start_loc=query_start_loc,
@@ -259,11 +259,17 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 residual_d, residual_p = torch.split(
                     residual, [num_decode_tokens, num_prefill_tokens], dim=0
                 )
+                outer_residual_d, outer_residual_p = torch.split(
+                    outer_residual,
+                    [num_decode_tokens, num_prefill_tokens],
+                    dim=0,
+                )
                 token_indices_d = None
                 token_indices_p = None
             else:
                 inputs_d = inputs_p = inputs
                 residual_d = residual_p = residual
+                outer_residual_d = outer_residual_p = outer_residual
                 token_indices_d, token_indices_p = torch.split(
                     non_spec_token_indices,
                     [num_decode_tokens, num_prefill_tokens],
@@ -277,16 +283,16 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     conv_state=conv_state,
                     conv_weights=conv_weights,
                     state_indices=state_indices_d,
+                    outer_residual=outer_residual_d,
                     mode="decode",
                     dilation=self.short_conv_dilation,
                     has_initial_states=metadata.has_initial_states_d,
                     token_indices=token_indices_d,
                 )
 
-            query_start_loc = metadata.non_spec_query_start_loc
+            query_start_loc = metadata.query_start_loc_p
             if query_start_loc is None:
                 raise ValueError("query_start_loc is required for prefill short-conv")
-            query_start_loc = query_start_loc[-num_prefills - 1 :] - num_decode_tokens
             has_initial_states = metadata.has_initial_states_p
             if has_initial_states is None:
                 raise ValueError(
@@ -298,6 +304,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 conv_state=conv_state,
                 conv_weights=conv_weights,
                 state_indices=state_indices_p,
+                outer_residual=outer_residual_p,
                 mode="prefill",
                 dilation=self.short_conv_dilation,
                 query_start_loc=query_start_loc,
@@ -316,6 +323,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 conv_state=conv_state,
                 conv_weights=conv_weights,
                 state_indices=state_indices[:num_decode_rows],
+                outer_residual=outer_residual,
                 mode="decode",
                 dilation=self.short_conv_dilation,
                 has_initial_states=metadata.has_initial_states_d,
@@ -324,12 +332,18 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
     # State routing consumes the current request metadata on every replay.
     @eager_break_during_capture
-    def _short_conv(self, inputs: torch.Tensor, residual: torch.Tensor) -> None:
+    def _short_conv(
+        self,
+        inputs: torch.Tensor,
+        residual: torch.Tensor,
+        outer_residual: torch.Tensor,
+    ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        # Profiling omits all metadata or this Mamba entry. The residual
-        # already contains the gated output, so short convolution is a no-op.
+        # Profiling omits all metadata or this Mamba entry. Short convolution
+        # is a no-op there, but preserve the outer residual addition.
         if attn_metadata is None:
+            residual.add_(outer_residual)
             return
 
         if not isinstance(attn_metadata, dict):
@@ -340,6 +354,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
 
         layer_attn_metadata = attn_metadata.get(self.prefix)
         if layer_attn_metadata is None:
+            residual.add_(outer_residual)
             return
         if not isinstance(layer_attn_metadata, PleShortConvAttentionMetadata):
             raise TypeError(
@@ -367,6 +382,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self._short_conv_dilated_dispatch(
             inputs=inputs,
             residual=residual,
+            outer_residual=outer_residual,
             metadata=layer_attn_metadata,
             conv_state=conv_state,
             conv_weights=conv_weights.to(dtype=inputs.dtype),
@@ -404,7 +420,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_conv.weight,
             self.norm_key.eps,
         )
-        self._short_conv(conv_input, gated_output)
+        # State routing depends on runtime request metadata and remains outside
+        # the graph; short convolution accumulates into gated_output.
+        self._short_conv(conv_input, gated_output, hidden_states)
         return gated_output
 
 

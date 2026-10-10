@@ -255,8 +255,9 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let finish_info = vllm_text::Finished {
             usage: collected.usage,
             finish_reason: collected.finish_reason,
-            kv_transfer_params: collected.kv_transfer_params,
-            ec_transfer_params: collected.ec_transfer_params,
+            kv_transfer_params: collected.kv_transfer_params.map(Box::new),
+            ec_transfer_params: collected.ec_transfer_params.map(Box::new),
+            sampling_mask: collected.sampling_mask,
         };
 
         let outputs = convert::to_sequence_output(

@@ -30,7 +30,13 @@ def _mamba_align(block_size=32):
     )
 
 
-def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=None):
+def _make_coord(
+    groups,
+    hash_block_size,
+    use_eagle=False,
+    retention_interval=None,
+    enable_partial_hash_hits=False,
+):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
     the test fixtures."""
@@ -42,6 +48,7 @@ def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=Non
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
         retention_interval=retention_interval,
+        enable_partial_hash_hits=enable_partial_hash_hits,
     )
 
 
@@ -219,8 +226,7 @@ def test_coordinator_fine_grained_partial_tail_hit():
         KVCacheGroupSpec(["L0"], _full(32)),
         KVCacheGroupSpec(["L1"], _mamba_align(32)),
     ]
-    coord = _make_coord(groups, hash_block_size=16)
-    assert coord.enable_partial_hash_hits
+    coord = _make_coord(groups, hash_block_size=16, enable_partial_hash_hits=True)
     hs = _hashes(4)  # 4 hash units of 16 = 64 tokens; block 0 = [0,32), etc.
     # Both groups: full block 0 (key = last sub-hash hs[1]) + partial boundary
     # at token 48 (key = hs[2]). No hs[3] -> block 1 is not full.
@@ -285,38 +291,6 @@ def test_store_mask_swa_only_window_around_each_lcm_boundary():
     assert masks[0] is None
     # SWA: 8 chunks * 8 tokens. Only chunks ending at 32 and 64 are stored.
     assert masks[1] == [False, False, False, True, False, False, False, True]
-
-
-def test_store_mask_swa_does_not_double_scale_under_dcp():
-    """The coordinator receives DCP-resolved specs (worker.py applies
-    resolve_dcp_kv_cache_spec) and indexes chunks in that already-scaled block
-    size. So dcp_world_size must NOT further scale reachable_block_mask; the
-    mask must be identical for any dcp_world_size given the same specs.
-
-    Regression: previously the coordinator forwarded its dcp_world_size, which
-    double-scaled the SWA block size and produced a wrong mask when dcp > 1.
-    """
-    full = _full(32)
-    swa = _swa(block_size=8, sliding_window=8)
-    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
-    scheduler_block_size = lcm(32, 8)
-
-    def make(dcp_world_size):
-        return MooncakeStoreCoordinator(
-            groups,
-            scheduler_block_size=scheduler_block_size,
-            hash_block_size=8,
-            dcp_world_size=dcp_world_size,
-        )
-
-    mask_dcp1 = make(1).store_mask(64)
-    mask_dcp2 = make(2).store_mask(64)
-
-    # dcp must not change the mask; both match the correct single-block-size
-    # result (chunks ending at 32 and 64 -> blocks 3 and 7).
-    expected = [False, False, False, True, False, False, False, True]
-    assert mask_dcp1[1] == expected
-    assert mask_dcp2[1] == expected
 
 
 def test_store_mask_swa_wider_window_covers_more_blocks_per_lcm():

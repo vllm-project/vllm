@@ -54,8 +54,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
-    build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
-    render::build_router as build_render_router,
+    build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::LoadLoraError;
@@ -121,8 +120,8 @@ fn request_output_with_logprobs_and_kv(
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
         finish_reason,
         stop_reason,
-        kv_transfer_params,
-        ec_transfer_params,
+        kv_transfer_params: kv_transfer_params.map(Box::new),
+        ec_transfer_params: ec_transfer_params.map(Box::new),
         ..Default::default()
     }
 }
@@ -518,6 +517,7 @@ impl ChatBackend for FakeChatBackend {
             self.tokenizer(),
             options.tool_call_parser,
             options.reasoning_parser,
+            options.tool_strict_level,
         )?))
     }
 }
@@ -541,7 +541,8 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
-            effective_template_kwargs: Default::default(),
+            media_order: None,
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
 }
@@ -554,7 +555,8 @@ fn render_fake_message_content(
         ChatMessage::System { content }
         | ChatMessage::Developer { content, .. }
         | ChatMessage::User { content }
-        | ChatMessage::ToolResponse { content, .. } => render_fake_content(content, placeholder),
+        | ChatMessage::ToolResponse { content, .. }
+        | ChatMessage::Custom { content, .. } => render_fake_content(content, placeholder),
         ChatMessage::Assistant { .. } => message.text_content(),
     }
 }
@@ -613,7 +615,7 @@ fn qwen_multimodal_model_info_with_limits(
 async fn test_models_with_engine_outputs_and_backend_inner(
     engine_id: impl Into<EngineId>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
-    expected_prompt_token_ids: Option<Vec<u32>>,
+    check_request: impl FnOnce(&EngineCoreRequest) + Send + 'static,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
@@ -628,12 +630,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
-                if let Some(expected_prompt_token_ids) = expected_prompt_token_ids {
-                    assert_eq!(
-                        request.prompt_token_ids.as_deref(),
-                        Some(expected_prompt_token_ids.as_slice())
-                    );
-                }
+                check_request(&request);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, output_specs),
@@ -665,7 +662,8 @@ async fn test_models_with_engine_outputs_and_backend(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
-    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, None, backend).await
+    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, |_| {}, backend)
+        .await
 }
 
 async fn test_chat_with_engine_outputs(
@@ -731,23 +729,36 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     )
 }
 
-#[test]
-fn scale_out_flag_accepts_unset_empty_zero_one_and_whitespace() {
-    assert_eq!(parse_scale_out_endpoints_flag(None), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("")), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("0")), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("1")), Ok(true));
-    assert_eq!(parse_scale_out_endpoints_flag(Some(" 1 ")), Ok(true));
-}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_follows_api_server_options() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-api-server-options",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(
+        AppState::new(vec!["model".to_string()], chat).with_api_server_options(ApiServerOptions {
+            enable_scale_out: true,
+            ..Default::default()
+        }),
+    );
+    let mut app = build_router(state);
 
-#[test]
-fn scale_out_flag_rejects_values_other_than_zero_or_one() {
-    for value in ["-1", "2", "01", "+1", "invalid", " "] {
-        assert_eq!(
-            parse_scale_out_endpoints_flag(Some(value)),
-            Err("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1".to_string())
-        );
-    }
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1425,6 +1436,8 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
     assert!(json[0].get("mm_features").is_none());
+    assert!(json[0].get("reasoning_ended").is_none());
+    assert!(json[0].get("reasoning_parser_kwargs").is_none());
 }
 
 #[tokio::test]
@@ -1464,7 +1477,8 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
                         "messages": [{"role": "user", "content": "hello"}],
                         "max_completion_tokens": 8,
                         "bad_words": ["blocked"],
-                        "vllm_xargs": {"custom": 1}
+                        "vllm_xargs": {"custom": 1},
+                        "chat_template_kwargs": {"enable_thinking": false}
                     })
                     .to_string(),
                 ))
@@ -1487,11 +1501,27 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         json!(["blocked"])
     );
     assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+    assert_eq!(
+        render_json["reasoning_parser_kwargs"],
+        json!({"chat_template_kwargs": {"enable_thinking": false}})
+    );
 
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
         b"engine-render-generate-round-trip",
         default_stream_output_specs(),
-        Some(token_ids),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(token_ids.as_slice())
+            );
+            assert_eq!(
+                request
+                    .reasoning_parser_kwargs
+                    .as_ref()
+                    .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
+                Some(&json!(false))
+            );
+        },
         Arc::new(FakeChatBackend::new()),
     )
     .await;
@@ -2036,6 +2066,56 @@ async fn version_returns_engine_vllm_version() {
         json!({
             "version": "test-vllm-version",
             "rust_frontend_version": vllm_build_info::VERSION,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn kv_event_sources_reports_each_ready_engine() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        data_parallel_rank: 1,
+        kv_events_config: Some(
+            vllm_engine_core_client::protocol::handshake::KvEventsConfig {
+                enable_kv_cache_events: true,
+                publisher: "zmq".to_string(),
+                endpoint: "tcp://10.0.0.2:41233".to_string(),
+                replay_endpoint: None,
+                buffer_steps: 10_000,
+                hwm: 100_000,
+                max_queue_size: 100_000,
+                topic: "kv".to_string(),
+            },
+        ),
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/kv_event_sources")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "1": {
+                "enable_kv_cache_events": true,
+                "publisher": "zmq",
+                "endpoint": "tcp://10.0.0.2:41233",
+                "replay_endpoint": null,
+                "buffer_steps": 10000,
+                "hwm": 100000,
+                "max_queue_size": 100000,
+                "topic": "kv",
+            }
         })
     );
 }
@@ -2721,6 +2801,49 @@ async fn non_stream_chat_returns_json_response() {
     }
     // ...except `tool_calls`, which Python pops from the payload when empty.
     assert!(!message.contains_key("tool_calls"), "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for stream in [false, true] {
+            for watermarking in [None, Some(true), Some(false)] {
+                let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                    Arc::new(FakeChatBackend::new()),
+                    move |request| {
+                        let params = request.sampling_params.as_ref().expect("sampling params");
+                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                    },
+                )
+                .await;
+
+                let mut body = json!({"stream": stream, "max_tokens": 2});
+                if endpoint == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hi"}]);
+                } else {
+                    body["prompt"] = json!("hi");
+                }
+                if let Some(watermarking) = watermarking {
+                    body["watermarking"] = json!(watermarking);
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+                engine_task.await.expect("mock engine task");
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4345,13 +4468,15 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     assert_eq!(json["choices"][0]["index"], 0);
     assert_eq!(json["choices"][0]["token_ids"], json!([33, 44]));
     assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    // Output logprobs carry integer token ids and rank, not the OpenAI
+    // "token_id:N" placeholder string; `bytes` is gone.
+    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["token_id"], 33);
+    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["rank"], 1);
+    assert!(json["choices"][0]["logprobs"]["content"][0]["token"].is_null());
+    assert!(json["choices"][0]["logprobs"]["content"][0]["bytes"].is_null());
     assert_eq!(
-        json["choices"][0]["logprobs"]["content"][0]["token"],
-        "token_id:33"
-    );
-    assert_eq!(
-        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"][0]["token"],
-        "token_id:44"
+        json["choices"][0]["logprobs"]["content"][1]["top_logprobs"][0]["token_id"],
+        44
     );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert_eq!(
@@ -4473,9 +4598,11 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     assert_eq!(first["choices"][0]["index"], 0);
     assert_eq!(first["choices"][0]["token_ids"], json!([33]));
     assert_eq!(
-        first["choices"][0]["logprobs"]["content"][0]["token"],
-        "token_id:33"
+        first["choices"][0]["logprobs"]["content"][0]["token_id"],
+        33
     );
+    assert_eq!(first["choices"][0]["logprobs"]["content"][0]["rank"], 1);
+    assert!(first["choices"][0]["logprobs"]["content"][0]["token"].is_null());
     assert_eq!(first["usage"]["prompt_tokens"], 2);
     assert_eq!(first["usage"]["completion_tokens"], 1);
 
@@ -5707,7 +5834,84 @@ async fn collective_rpc_route_sends_expected_utility_call_and_returns_results() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn weight_checker_route_merges_worker_checksums_and_compares() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let workers = Value::Array(vec![
+                Value::Map(vec![(Value::from("tp0:a"), Value::from("1"))]),
+                Value::Map(vec![(Value::from("tp1:a"), Value::from("2"))]),
+            ]);
+            for (method, result) in [
+                ("compute_weight_checksums", workers.clone()),
+                ("compute_weight_checksums", workers),
+                ("reset_weights", Value::Array(vec![Value::Nil, Value::Nil])),
+            ] {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let array = payload.as_array().expect("utility payload array");
+                assert_eq!(array[2], Value::from("collective_rpc"));
+                assert_eq!(
+                    array[3].as_array().expect("rpc args")[0],
+                    Value::from(method)
+                );
+                let call_id = array[1].as_u64().expect("call id");
+                let envelope = UtilityResultEnvelope::without_type_info(result);
+                send_outputs(push, utility_outputs(call_id, envelope)).await;
+            }
+        })
+    })
+    .await;
+
+    let (status, body) =
+        post_json(&mut app, "/weight_checker", json!({"action": "checksum"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"checksums": {"tp0:a": "1", "tp1:a": "2"}}));
+
+    let baseline = json!({"tp0:a": "1", "tp1:a": "9", "tp2:a": "3"});
+    let (status, body) = post_json(
+        &mut app,
+        "/weight_checker",
+        json!({"action": "compare", "baseline": baseline}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"match": false, "mismatches": ["tp1:a", "tp2:a"]})
+    );
+
+    let (status, body) = post_json(&mut app, "/weight_checker", json!({"action": "reset"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"status": "reset"}));
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_checker_route_rejects_invalid_requests_before_engine_calls() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("invalid request reached engine: {message:?}");
+        })
+    })
+    .await;
+    for body in [
+        json!({}),
+        json!({"action": "frobnicate"}),
+        json!({"action": "compare"}),
+        json!({"action": "compare", "baseline": {"k": 1}}),
+    ] {
+        let (status, _) = post_json(&mut app, "/weight_checker", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn sleep_route_uses_python_compatible_default_query_values() {
+    let before = METRICS.render().expect("render metrics");
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -5743,13 +5947,298 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "sleeping", "level": 1 })
+    );
     engine_task.await.expect("mock engine task");
+    let after = METRICS.render().expect("render metrics");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"2xx\",handler=\"/sleep\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "vllm:sleep_mode_operation_duration_seconds_count",
+            Some("operation=\"sleep\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &after,
+            "vllm:sleep_mode_operations_in_flight",
+            Some("operation=\"sleep\""),
+        ),
+        Some(0.0)
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"POST\",handler=\"/sleep\""),
+        ),
+        1.0
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn wake_up_route_without_tags_sends_none() {
+async fn sleep_route_rejects_invalid_query_before_engine_dispatch() {
+    let before = METRICS.render().expect("render metrics");
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+    for query in ["level=invalid", "level=-1", "level=3", "mode=invalid"] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sleep?{query}"))
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    engine_task.abort_and_join().await;
+    let after = METRICS.render().expect("render metrics");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"4xx\",handler=\"/sleep\""),
+        ),
+        4.0
+    );
+    for metric in [
+        "vllm:sleep_mode_operation_duration_seconds_count",
+        "vllm:sleep_mode_operations_in_flight",
+    ] {
+        assert_eq!(
+            metric_delta(&before, &after, metric, Some("operation=\"sleep\"")),
+            0.0
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn release_kv_cache_memory_route_sends_expected_utility_call() {
+    let before = METRICS.render().expect("render metrics");
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("release_kv_cache_memory"));
+            assert_eq!(array[3], Value::Array(Vec::new()));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/release_kv_cache_memory")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "kv_cache_released" })
+    );
+    engine_task.await.expect("mock engine task");
+    let after = METRICS.render().expect("render metrics");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"2xx\",handler=\"/release_kv_cache_memory\""),
+        ),
+        1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn release_kv_cache_memory_error_records_http_status_and_operation_duration() {
+    let before = METRICS.render().expect("render metrics");
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let call_id =
+                payload.as_array().expect("utility payload array")[1].as_u64().expect("call id");
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    output: UtilityOutput {
+                        call_id: call_id.into(),
+                        failure_message: Some("requires a completed pause first".to_owned()),
+                        result: None,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+        })
+    })
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/release_kv_cache_memory")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    engine_task.await.expect("mock engine task");
+    let after = METRICS.render().expect("render metrics");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"5xx\",handler=\"/release_kv_cache_memory\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "vllm:sleep_mode_operation_duration_seconds_count",
+            Some("operation=\"release_kv_cache_memory\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &after,
+            "vllm:sleep_mode_operations_in_flight",
+            Some("operation=\"release_kv_cache_memory\""),
+        ),
+        Some(0.0)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cancelled_wake_operation_clears_in_flight_and_is_scraped() {
+    let before = METRICS.render().expect("render metrics");
+    let (dispatched_tx, dispatched_rx) = tokio::sync::oneshot::channel();
+    let (app, engine_task) = test_admin_app_with_engine_script(move |dealer, _push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            assert_eq!(
+                payload.as_array().expect("utility payload array")[2],
+                Value::from("wake_up")
+            );
+            dispatched_tx.send(()).expect("notify dispatch");
+            std::future::pending::<()>().await;
+        })
+    })
+    .await;
+    let mut request_app = app.clone();
+    let request_task = tokio::spawn(async move {
+        request_app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/wake_up")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), dispatched_rx)
+        .await
+        .expect("wake dispatch timeout")
+        .expect("wake dispatched");
+    let active = METRICS.render().expect("render metrics");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &active,
+            "vllm:sleep_mode_operations_in_flight",
+            Some("operation=\"wake\""),
+        ),
+        1.0
+    );
+    request_task.abort();
+    assert!(request_task.await.expect_err("request cancelled").is_cancelled());
+    engine_task.abort_and_join().await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .expect("build scrape request"),
+        )
+        .await
+        .expect("scrape metrics");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read metrics");
+    let after = String::from_utf8(body.to_vec()).expect("utf8 metrics");
+    assert_eq!(
+        metric_value(
+            &after,
+            "vllm:sleep_mode_operations_in_flight",
+            Some("operation=\"wake\""),
+        ),
+        Some(0.0)
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "vllm:sleep_mode_operation_duration_seconds_count",
+            Some("operation=\"wake\""),
+        ),
+        1.0
+    );
+    assert!(!after.contains("rl_sleep_mode"));
+    assert!(!after.contains("sleep_mode_operations_total"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_without_tags_accepts_bool_result() {
+    let before = METRICS.render().expect("render metrics");
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -5762,7 +6251,7 @@ async fn wake_up_route_without_tags_sends_none() {
             assert_eq!(array[2], Value::from("wake_up"));
             assert_eq!(array[3], Value::Array(vec![Value::Nil]));
 
-            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
         })
     })
     .await;
@@ -5782,13 +6271,75 @@ async fn wake_up_route_without_tags_sends_none() {
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "awake", "tags": null })
+    );
+    engine_task.await.expect("mock engine task");
+    let after = METRICS.render().expect("render metrics");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"POST\",status=\"2xx\",handler=\"/wake_up\""),
+        ),
+        1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn wake_up_route_accepts_repeated_tags() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("wake_up"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::Array(vec![
+                    Value::from("weights"),
+                    Value::from("kv_cache"),
+                ])])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(false))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/wake_up?tags=weights&tags%5B%5D=ignored&tags=kv_cache")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "status": "sleeping", "tags": ["weights", "kv_cache"] })
+    );
     engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn is_sleeping_route_returns_json_payload() {
+    let before = METRICS.render().expect("render metrics");
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let utility = recv_engine_message(dealer).await;
@@ -5825,6 +6376,16 @@ async fn is_sleeping_route_returns_json_payload() {
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
         json!({ "is_sleeping": true })
+    );
+    let after = METRICS.render().expect("render metrics");
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"GET\",status=\"2xx\",handler=\"/is_sleeping\""),
+        ),
+        1.0
     );
 }
 
@@ -6104,6 +6665,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     for (method, uri) in [
         ("GET", "/is_sleeping"),
         ("POST", "/sleep"),
+        ("POST", "/release_kv_cache_memory"),
         ("POST", "/wake_up"),
         ("GET", "/is_paused"),
         ("POST", "/pause"),
@@ -6113,6 +6675,13 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/reset_prefix_cache"),
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
+        ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/start_weight_update"),
+        ("POST", "/start_draft_weight_update"),
+        ("POST", "/update_weights"),
+        ("POST", "/finish_weight_update"),
+        ("POST", "/update_weight_version"),
+        ("GET", "/weight_info"),
     ] {
         let response = app
             .clone()
@@ -6130,6 +6699,282 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_support_the_http_training_lifecycle() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let mut calls = Vec::new();
+            for _ in 0..10 {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]).expect("decode utility");
+                let array = payload.as_array().expect("utility array");
+                let call_id = array[1].as_u64().expect("call id");
+                let args: serde_json::Value =
+                    rmpv::ext::from_value(array[3].clone()).expect("decode args");
+                calls.push(format!("{} {args}", array[2].as_str().expect("method")));
+                let result = if array[2] == Value::from("get_weight_version") {
+                    utility_result_value("step-2")
+                } else if array[2] == Value::from("collective_rpc") {
+                    utility_result_value(vec![(), ()])
+                } else {
+                    utility_none_result()
+                };
+                send_outputs(push, utility_outputs(call_id, result)).await;
+            }
+            expect_test::expect![[r#"
+                [
+                    "collective_rpc [\"init_weight_transfer_engine\",null,[],{\"init_info\":{\"master_address\":\"127.0.0.1\",\"master_port\":29500,\"rank_offset\":1,\"world_size\":3}}]",
+                    "collective_rpc [\"start_weight_update\",null,[],{}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":{\"names\":[\"model.embed_tokens.weight\"],\"dtype_names\":[\"bfloat16\"],\"shapes\":[[32,16]],\"is_checkpoint_format\":true}}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":[{\"rank\":0,\"ipc_handles_pickled\":\"opaque-handle-0\"},{\"rank\":1,\"ipc_handles_pickled\":\"opaque-handle-1\"}]}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-1\"]",
+                    "collective_rpc [\"start_draft_weight_update\",null,[],{}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-2\"]",
+                    "get_weight_version []",
+                ]
+            "#]].assert_debug_eq(&calls);
+        })
+    })
+    .await;
+    let metrics_before = METRICS.render().unwrap();
+
+    let mut responses = Vec::new();
+    for (method, path, body) in [
+        (
+            "POST",
+            "/init_weight_transfer_engine",
+            Some(json!({
+                "init_info": {"master_address": "127.0.0.1", "master_port": 29500,
+                    "rank_offset": 1, "world_size": 3}
+            })),
+        ),
+        ("POST", "/start_weight_update", None),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": {"names": ["model.embed_tokens.weight"],
+                    "dtype_names": ["bfloat16"], "shapes": [[32, 16]],
+                    "is_checkpoint_format": true}
+            })),
+        ),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": [{"rank": 0, "ipc_handles_pickled": "opaque-handle-0"},
+                    {"rank": 1, "ipc_handles_pickled": "opaque-handle-1"}]
+            })),
+        ),
+        (
+            "POST",
+            "/finish_weight_update",
+            Some(json!({"weight_version": "step-1"})),
+        ),
+        ("POST", "/start_draft_weight_update", None),
+        ("POST", "/finish_weight_update", None),
+        (
+            "POST",
+            "/update_weight_version",
+            Some(json!({"new_version": "step-2"})),
+        ),
+        ("GET", "/weight_info", None),
+    ] {
+        let mut request = Request::builder().method(method).uri(path);
+        let body = match body {
+            Some(body) => {
+                request = request.header("content-type", "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response =
+            app.call(request.body(body).expect("build request")).await.expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        responses.push(
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .expect("decode json")
+                .to_string(),
+        );
+    }
+    engine_task.await.expect("mock engine task");
+    let metrics_after = METRICS.render().unwrap();
+    for operation in ["update", "finish"] {
+        assert_eq!(
+            metric_delta(
+                &metrics_before,
+                &metrics_after,
+                "vllm:rl_weight_update_operation_duration_seconds_count",
+                Some(&format!("operation=\"{operation}\"")),
+            ),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &metrics_after,
+                "vllm:rl_weight_update_operations_in_flight",
+                Some(&format!("operation=\"{operation}\"")),
+            ),
+            Some(0.0)
+        );
+    }
+    expect_test::expect![[r#"
+        [
+            "{\"message\":\"Weight transfer initialized\"}",
+            "{\"message\":\"Weight update started\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"message\":\"Draft weight update started\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"success\":true,\"new_version\":\"step-2\"}",
+            "{\"weight_version\":\"step-2\"}",
+        ]
+    "#]]
+    .assert_debug_eq(&responses);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("invalid payload reached engine: {message:?}");
+        })
+    })
+    .await;
+    let metrics_before = METRICS.render().unwrap();
+
+    for (path, body) in [
+        ("/init_weight_transfer_engine", "{"),
+        ("/init_weight_transfer_engine", "{}"),
+        ("/init_weight_transfer_engine", r#"{"init_info":null}"#),
+        ("/init_weight_transfer_engine", r#"{"init_info":[]}"#),
+        ("/update_weights", "{"),
+        ("/update_weights", "{}"),
+        ("/update_weights", r#"{"update_info":null}"#),
+        ("/update_weights", r#"{"update_info":1}"#),
+        ("/update_weights", r#"{"update_info":[{},null]}"#),
+        ("/finish_weight_update", "{"),
+        ("/finish_weight_update", r#"{"weight_version":1}"#),
+        ("/update_weight_version", "{}"),
+        ("/update_weight_version", r#"{"new_version":null}"#),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    let metrics_after = METRICS.render().unwrap();
+    for operation in ["init", "update", "finish"] {
+        assert_eq!(
+            metric_delta(
+                &metrics_before,
+                &metrics_after,
+                "vllm:rl_weight_update_operation_duration_seconds_count",
+                Some(&format!("operation=\"{operation}\"")),
+            ),
+            0.0
+        );
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_do_not_commit_version_when_finish_fails() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("collective_rpc"));
+            assert_eq!(
+                array[3].as_array().expect("args")[0],
+                Value::from("finish_weight_update")
+            );
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    output: UtilityOutput {
+                        call_id: array[1].as_u64().expect("call id").into(),
+                        failure_message: Some("weight reload failed".to_string()),
+                        result: None,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("get_weight_version"));
+            send_outputs(
+                push,
+                utility_outputs(
+                    array[1].as_u64().expect("call id"),
+                    utility_result_value("step-0"),
+                ),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"weight_version":"step-1"}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("weight reload failed")
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/weight_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({"weight_version": "step-0"})
+    );
+    engine_task.await.expect("mock engine task");
 }
 
 // ========================= Stop string tests =========================
@@ -6976,21 +7821,56 @@ where
     )
 }
 
+/// An empty body starts profiling without overrides, with or without a JSON
+/// content type.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn start_profile_route_sends_expected_utility_call() {
+    for content_type in [None, Some("application/json")] {
+        let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+            boxed_test_future(async move {
+                let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+                let call_id = recv_profile_call(dealer, start).await;
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            })
+        })
+        .await;
+
+        let mut request = Request::builder().method("POST").uri("/start_profile");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        let response = app
+            .clone()
+            .call(request.body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{content_type:?}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(body.is_empty());
+        engine_task.await.expect("mock engine task");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_forwards_session_overrides() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-
-            assert_eq!(array[2], Value::from("profile"));
-            assert_eq!(array[3], Value::Array(vec![Value::from(true), Value::Nil]));
-
+            let start = vec![
+                Value::from(true),
+                Value::from("sharegpt_run-1"),
+                Value::from(5000),
+                Value::from(20),
+            ];
+            let call_id = recv_profile_call(dealer, start).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })
@@ -7002,16 +7882,241 @@ async fn start_profile_route_sends_expected_utility_call() {
             Request::builder()
                 .method("POST")
                 .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "profile_prefix": "sharegpt_run-1",
+                        "delay_iterations": 5000,
+                        "max_iterations": 20,
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_ignores_completion_payload() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let call_id = recv_profile_call(dealer, start).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen3-0.6B",
+                        "prompt": "profile this request",
+                        "max_tokens": 16,
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn duplicate_start_profile_returns_conflict() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let start = vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+            let call_id = recv_profile_call(dealer, start).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let first = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    let second = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
                 .body(Body::empty())
                 .expect("build request"),
         )
         .await
         .expect("call app");
 
-    let status = response.status();
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    assert!(body.is_empty());
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_succeeds_again_after_stop() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let expected_args = [
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+                vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil],
+                vec![Value::from(false), Value::Nil],
+            ];
+            for expected in expected_args {
+                let call_id = recv_profile_call(dealer, expected).await;
+                send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+            }
+        })
+    })
+    .await;
+
+    for uri in [
+        "/start_profile",
+        "/stop_profile",
+        "/start_profile",
+        "/stop_profile",
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    engine_task.await.expect("mock engine task");
+}
+
+/// Receive a `profile` utility call with the expected args and return its call id.
+async fn recv_profile_call(dealer: &mut DealerSocket, expected_args: Vec<Value>) -> u64 {
+    let utility = recv_engine_message(dealer).await;
+    assert_eq!(utility[0].as_ref(), &[0x03]);
+    let payload = decode_value(&utility[1]).expect("decode utility payload");
+    let array = payload.as_array().expect("utility payload array");
+    assert_eq!(array[2], Value::from("profile"));
+    assert_eq!(array[3], Value::Array(expected_args));
+    array[1].as_u64().expect("call id")
+}
+
+/// A start issued while a stop is in flight waits for that stop instead of
+/// racing it, so a stale stop reply cannot clear the new session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_waits_for_inflight_stop() {
+    let (stop_received_tx, stop_received_rx) = tokio::sync::oneshot::channel();
+    let (release_stop_tx, release_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (app, engine_task) = test_profiling_app_with_engine_script(move |dealer, push| {
+        boxed_test_future(async move {
+            let start = || vec![Value::from(true), Value::Nil, Value::Nil, Value::Nil];
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, vec![Value::from(false), Value::Nil]).await;
+            stop_received_tx.send(()).expect("notify stop received");
+            release_stop_rx.await.expect("release stop");
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+
+            let call_id = recv_profile_call(dealer, start()).await;
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let post = |uri: &'static str| {
+        let mut app = app.clone();
+        async move {
+            app.call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app")
+            .status()
+        }
+    };
+
+    let timeout = Duration::from_secs(2);
+    assert_eq!(post("/start_profile").await, StatusCode::OK);
+    let stop = tokio::spawn(post("/stop_profile"));
+    tokio::time::timeout(timeout, stop_received_rx)
+        .await
+        .expect("stop dispatch timeout")
+        .expect("stop received");
+
+    // Nothing before the profile lock awaits, so one poll reaches it; an
+    // unserialized client would instead reject against the stale session.
+    let mut restart = std::pin::pin!(post("/start_profile"));
+    assert!(futures::poll!(restart.as_mut()).is_pending());
+
+    release_stop_tx.send(()).expect("release stop");
+    let stop = tokio::time::timeout(timeout, stop).await.expect("stop timeout");
+    assert_eq!(stop.expect("stop task"), StatusCode::OK);
+    let restart = tokio::time::timeout(timeout, restart).await.expect("restart timeout");
+    assert_eq!(restart, StatusCode::OK);
+    tokio::time::timeout(timeout, engine_task)
+        .await
+        .expect("mock engine timeout")
+        .expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_rejects_invalid_prefix() {
+    let (app, engine_task) =
+        test_profiling_app_with_engine_script(|_, _| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"profile_prefix": "../trace"}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     engine_task.await.expect("mock engine task");
 }
 
@@ -7020,16 +8125,8 @@ async fn start_profile_route_sends_expected_utility_call() {
 async fn stop_profile_route_sends_expected_utility_call() {
     let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            assert_eq!(utility[0].as_ref(), &[0x03]);
-
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_u64().expect("call id");
-
-            assert_eq!(array[2], Value::from("profile"));
-            assert_eq!(array[3], Value::Array(vec![Value::from(false), Value::Nil]));
-
+            let stop = vec![Value::from(false), Value::Nil];
+            let call_id = recv_profile_call(dealer, stop).await;
             send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
         })
     })

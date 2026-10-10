@@ -288,17 +288,17 @@ def _make_session(
     session = P2PSession(
         peer_id=peer_id,
         local_id=local_id,
-        transport=transport,  # type: ignore[arg-type]
+        transport=transport,
         local_block_len=transport.block_len,
         local_hash_seed=local_hash_seed,
-        conn=conn,  # type: ignore[arg-type]
+        conn=conn,
     )
     return session, conn, transport
 
 
 def _serve(session: P2PSession, parent: FakeParent) -> None:
     """Resolve enqueued inbound lookups, as the manager does each step."""
-    session.serve_external_requests(parent)  # type: ignore[arg-type]
+    session.serve_external_requests(parent)
 
 
 def _activate(
@@ -827,7 +827,7 @@ class TestLookupFlow:
         assert fresh[0][LookupMsg.KEYS] == [b"hA"]
 
     def test_flush_uses_work_list_not_full_scan(self):
-        """flush drains a work-list rather than scanning every live request.
+        """Flush drains a work-list rather than scanning every live request.
 
         A request with no newly-registered keys is not revisited: after a
         flush the work-list is empty, an idle re-flush sends nothing, and a
@@ -1951,7 +1951,7 @@ class TestFinishRequestServerSide:
         )
         session.poll()
         # Force write_blocks to fail on the next call.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
 
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
 
@@ -2057,7 +2057,7 @@ class TestFinishRequestServerSide:
         assert outbound.finishing is False
 
         # Round 2: write_blocks fails for k2 while transfer_1 is still inflight.
-        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[method-assign]
         session.add_stored_blocks("req-1", [b"k2"], [1], job_id=200)
         # No new transfer was registered.
         assert list(session._server._inflight.keys()) == [tid_1]
@@ -2163,7 +2163,7 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
@@ -2183,13 +2183,13 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
         )
         conn = FakeConnection(peer_id="peer:8000")
-        session.attach_connection(conn)  # type: ignore[arg-type]
+        session.attach_connection(conn)
         assert conn._sent
         assert conn._sent[0][TYPE_KEY] == ConnectMsg.TYPE
 
@@ -2197,7 +2197,7 @@ class TestPendingSession:
         """attach_connection on an already-connected session raises."""
         session, conn, _ = _make_session()
         with pytest.raises(ValueError, match="already connected"):
-            session.attach_connection(FakeConnection())  # type: ignore[arg-type]
+            session.attach_connection(FakeConnection())
 
     def test_pending_close_returns_pending_stores(self):
         """Closing a pending session reports buffered stores as failed."""
@@ -2205,7 +2205,7 @@ class TestPendingSession:
         session = P2PSession(
             peer_id="peer:8000",
             local_id="local:9000",
-            transport=transport,  # type: ignore[arg-type]
+            transport=transport,
             local_block_len=4096,
             local_hash_seed=_DEFAULT_HASH_SEED,
             conn=None,
@@ -2313,7 +2313,7 @@ class TestAdversarial:
     def test_non_dict_message(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
-        conn._inbox.append(42)  # type: ignore[arg-type]
+        conn._inbox.append(42)
         result_ = session.poll()
         loads = result_.loads
         stores = result_.stores
@@ -2402,7 +2402,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[assignment]
+        session._server.on_fetch = _boom
         conn.enqueue(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -2425,7 +2425,7 @@ class TestDispatchErrorHandling:
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated internal bug")
 
-        session._server.on_fetch = _boom  # type: ignore[assignment]
+        session._server.on_fetch = _boom
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS):
             conn.enqueue(
                 {
@@ -2454,7 +2454,7 @@ class TestDispatchErrorHandling:
         # Alternate (boom, success) (_MAX-1) times: counter rises to 1
         # then resets to 0 each cycle, never reaching the threshold.
         for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS - 1):
-            session._server.on_fetch = _boom  # type: ignore[assignment]
+            session._server.on_fetch = _boom
             conn.enqueue(
                 {
                     TYPE_KEY: FetchMsg.TYPE,
@@ -2465,7 +2465,7 @@ class TestDispatchErrorHandling:
                 }
             )
             session.poll()
-            session._server.on_fetch = original_on_fetch  # type: ignore[assignment]
+            session._server.on_fetch = original_on_fetch
             # A benign no-op message (unknown type) dispatches cleanly
             # and resets the consecutive-error counter.
             conn.enqueue({TYPE_KEY: "unknown_for_test"})

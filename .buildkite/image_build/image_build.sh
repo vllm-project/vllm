@@ -79,6 +79,54 @@ setup_buildx_builder() {
     docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 }
 
+download_ci_hcl() {
+    # Returns non-zero instead of exiting: the optional export path must be
+    # able to give up without failing a build whose image already exists.
+    echo "--- :arrow_down: Downloading ci.hcl"
+    curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}" || return $?
+    echo "Downloaded to ${CI_HCL_PATH}"
+
+    if [[ ! -f "${CI_HCL_PATH}" ]]; then
+        echo "Error: ci.hcl not found at ${CI_HCL_PATH}"
+        return 1
+    fi
+}
+
+export_kernel_symbol_map_from_cache() {
+    # The existing-image path: everything here is best effort. Called as
+    # `... || echo`, so errexit is suspended inside and any failure just
+    # returns; the build keeps the image it already has.
+    local rc=0
+    download_ci_hcl \
+        && setup_buildx_builder \
+        && resolve_parent_commit \
+        && export PARENT_COMMIT \
+        && BUILD_TMP_DIR="$(mktemp -d)" \
+        && export_kernel_symbol_map || rc=$?
+    rm -rf -- "${BUILD_TMP_DIR:-}"
+    return "${rc}"
+}
+
+export_kernel_symbol_map() {
+    # Only when the build asked for it (nightly/post-merge). The map was
+    # produced inside the csrc-build stage during the main bake; this second
+    # bake of the scratch stage is a cache hit that just writes the file out.
+    if [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" != "1" ]]; then
+        return 0
+    fi
+    echo "--- :world_map: Exporting kernel symbol map"
+    local out_dir="${BUILD_TMP_DIR}/kernel-symbol-map"
+    mkdir -p "${out_dir}"
+    if docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --progress plain \
+        --set "kernel-symbol-map.output=type=local,dest=${out_dir}" kernel-symbol-map \
+        && [[ -s "${out_dir}/kernel_symbol_map.json.gz" ]]; then
+        ls -la "${out_dir}"
+        (cd "${out_dir}" && buildkite-agent artifact upload "kernel_symbol_map.json.gz")
+    else
+        echo "kernel symbol map export failed; continuing without it" >&2
+    fi
+}
+
 annotate_image_tags() {
     .buildkite/scripts/annotate-image-build.sh \
         "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
@@ -90,6 +138,15 @@ check_and_skip_if_image_exists() {
         if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image already exists: ${IMAGE_TAG}"
             echo "Skipping build"
+            if [[ "${VLLM_KERNEL_SYMBOL_MAP:-0}" == "1" ]]; then
+                # The image is reused, but the symbol map is an artifact of
+                # this build. Bake just the export target: its layers come
+                # from the registry cache, and the map step itself reruns
+                # if the cached image was built without the arg. Never
+                # fails the build: the image is already there.
+                export_kernel_symbol_map_from_cache \
+                    || echo "kernel symbol map: export from the cached image failed; continuing" >&2
+            fi
             annotate_image_tags
             exit 0
         fi
@@ -154,7 +211,7 @@ print_bake_config() {
     local bake_tmp
     bake_tmp="$(mktemp -d)"
     BAKE_CONFIG_FILE="${bake_tmp}/bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
-    docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
+    docker buildx bake "${BAKE_FILES[@]}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"
     (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
@@ -230,8 +287,10 @@ TARGET="test-ci"
 VLLM_BAKE_FILE_PATH="${VLLM_BAKE_FILE_PATH:-docker/docker-bake.hcl}"
 BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
 CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
-CI_HCL_PATH="/tmp/ci.hcl"
+CI_HCL_PATH="${CI_HCL_PATH:-/tmp/ci.hcl}"
+ZSTD_HCL_PATH="${ZSTD_HCL_PATH:-.buildkite/image_build/zstd.hcl}"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
+BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" -f "${ZSTD_HCL_PATH}")
 
 prepare_cache_tags
 ecr_login
@@ -288,14 +347,7 @@ if [[ ! -f "${VLLM_BAKE_FILE_PATH}" ]]; then
     exit 1
 fi
 
-echo "--- :arrow_down: Downloading ci.hcl"
-curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}"
-echo "Downloaded to ${CI_HCL_PATH}"
-
-if [[ ! -f "${CI_HCL_PATH}" ]]; then
-    echo "Error: ci.hcl not found at ${CI_HCL_PATH}"
-    exit 1
-fi
+download_ci_hcl || exit 1
 
 setup_buildx_builder
 
@@ -309,7 +361,7 @@ BUILD_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
 BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
 BUILD_STATUS=0
-docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" \
+docker --debug buildx bake "${BAKE_FILES[@]}" \
     --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
 
 record_buildkit_trace "${BUILD_METADATA_FILE}" || true
@@ -319,5 +371,6 @@ if [[ "${BUILD_STATUS}" -ne 0 ]]; then
 fi
 
 echo "--- :white_check_mark: Build complete"
+export_kernel_symbol_map || true
 
 annotate_image_tags

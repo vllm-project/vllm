@@ -13,7 +13,9 @@ Test organization:
 """
 
 from collections.abc import Hashable
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -97,6 +99,50 @@ class _MockModel(SupportsEncoderCudaGraph):
 
     def get_encoder_cudagraph_budget_range(self, vllm_config):
         return (self._min_budget, self._max_budget)
+
+    def get_max_frames_per_video(self) -> int:
+        return 0
+
+    def get_encoder_cudagraph_item_specs(
+        self, mm_kwargs: dict[str, Any]
+    ) -> list[EncoderItemSpec]:
+        return []
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        return EncoderCudaGraphCaptureInputs(values={})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        return EncoderCudaGraphReplayBuffers(values={})
+
+    def encoder_cudagraph_forward(
+        self, inputs: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        return torch.zeros(0)
+
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
+        return torch.zeros(0)
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        return {}
 
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
@@ -197,6 +243,138 @@ class TestFindBudgetGraph:
     def test_num_graphs_to_capture_tracks_budgets(self):
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.get_num_graphs_to_capture() == 3
+
+
+# ---------------------------------------------------------------------------
+# _execute_local greedy packing with budget-cliff deferral (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+def _run_packing(
+    mgr: EncoderCudaGraphManager, specs: list[EncoderItemSpec]
+) -> list[tuple[list[int], str, int]]:
+    """Run _execute_local with graph replay and postprocess mocked out.
+
+    Returns:
+        (batch_indices, path, token_budget) for every graph replay.
+
+    """
+    mgr.model = MagicMock()
+
+    runs: list[tuple[list[int], str, int]] = []
+
+    def fake_run(mm_kwargs, token_budget, path="default", axis_keys=()):
+        runs.append((list(mm_kwargs["indices"]), path, token_budget))
+        n_tokens = sum(
+            specs[i].get_path_output_tokens(path) for i in mm_kwargs["indices"]
+        )
+        return torch.zeros(n_tokens, 32)
+
+    def fake_postprocess(
+        graph_outputs,
+        batch_indices,
+        per_item_out_tokens,
+        outputs_by_orig_idx,
+        clone,
+        batch_mm_kwargs,
+    ):
+        for i in batch_indices:
+            outputs_by_orig_idx[i] = torch.zeros(per_item_out_tokens[i], 32)
+
+    mgr.model.postprocess_encoder_output = fake_postprocess
+    with (
+        patch.object(mgr, "_get_item_specs", lambda mm_kwargs: specs),
+        patch.object(
+            mgr,
+            "_select_items",
+            lambda mm_kwargs, indices: ({"indices": indices}, ()),
+        ),
+        patch.object(mgr, "_run_budget_graph", fake_run),
+    ):
+        result = mgr._execute_local({})
+    assert len(result) == len(specs)
+    return runs
+
+
+class TestExecuteLocalPacking:
+    """Greedy packing defers items that cross a budget cliff."""
+
+    @staticmethod
+    def _spec(tokens: int) -> EncoderItemSpec:
+        return EncoderItemSpec(input_size=tokens, output_tokens=tokens)
+
+    def test_cliff_deferral_splits_batch(self):
+        # Merging would force 4200 tokens into the 8192 budget; deferring
+        # the 4000-token item costs 256 + 4096 instead.
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(4000), self._spec(200)])
+        assert runs == [([1], "default", 256), ([0], "default", 4096)]
+
+    def test_tie_does_not_defer(self):
+        # 4096 + 4096 ties the merged 8192 budget; merging wins because it
+        # saves one replay.
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(4000), self._spec(4000)])
+        assert runs == [([0, 1], "default", 8192)]
+
+    def test_deferral_requires_item_outweighing_batch(self):
+        # The third 1366-token item would save budget if deferred (4096+2048
+        # < 8192) but is smaller than the current batch (4096), so it merges:
+        # deferring mid-size items fragments flood packing into extra replays.
+        mgr = _make_manager_with_budgets([256, 2048, 4096, 8192])
+        runs = _run_packing(mgr, [self._spec(1366)] * 3)
+        assert runs == [([0, 1, 2], "default", 8192)]
+
+    def test_packing_without_cliff_unchanged(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100), self._spec(100)])
+        assert runs == [([0, 1], "default", 256)]
+
+    def test_small_items_split_to_avoid_cliff(self):
+        # Merging 3+ items of 100 tokens crosses 256 -> 4096; splitting
+        # into pairs costs 256 + 256 < 4096.
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100)] * 4)
+        assert runs == [([0, 1], "default", 256), ([2, 3], "default", 256)]
+
+    def test_max_batch_size_split_unchanged(self):
+        mgr = _make_manager_with_budgets([1024, 4096])
+        mgr.max_batch_size = 3
+        runs = _run_packing(mgr, [self._spec(100)] * 4)
+        assert runs == [([0, 1, 2], "default", 1024), ([3], "default", 1024)]
+
+    def test_oversized_item_still_falls_back_to_eager(self):
+        mgr = _make_manager_with_budgets([256, 4096])
+        runs = _run_packing(mgr, [self._spec(100), self._spec(9000)])
+        assert runs == [([0], "default", 256)]
+        assert mgr.graph_misses == 1
+
+    def test_multi_path_deferral_skips_zero_token_paths(self):
+        mgr = _make_manager_with_budgets([256, 4096, 8192])
+        mgr.path_token_budgets = {
+            "a": [0, 256, 4096, 8192],
+            "b": [256, 4096, 8192],
+        }
+        specs = [
+            EncoderItemSpec(
+                input_size=300,
+                output_tokens=300,
+                path_output_tokens={"a": 200, "b": 100},
+            ),
+            EncoderItemSpec(
+                input_size=4000,
+                output_tokens=4000,
+                path_output_tokens={"a": 0, "b": 4000},
+            ),
+        ]
+        runs = _run_packing(mgr, specs)
+        # Path b alone triggers deferral (256 + 4096 < 8192); the deferred
+        # item has zero tokens on path a, so that path is skipped.
+        assert runs == [
+            ([0], "a", 256),
+            ([0], "b", 256),
+            ([1], "b", 4096),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +751,105 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# E-only capture and output lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
+@pytest.mark.usefixtures("dist_init", "workspace_init")
+@pytest.mark.parametrize("profile_only", [False, True])
+@torch.inference_mode()
+def test_eonly_capture_preserves_outputs_across_replay_and_fallback(profile_only):
+    """The E-only entry captures only the encoder and preserves cached outputs."""
+    from vllm.distributed.ec_transfer.ec_connector.base import (
+        ECConnectorBase,
+        ECConnectorMetadata,
+    )
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.ec_connector import ActiveECConnector
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+    from vllm.v1.worker.workspace import lock_workspace
+
+    device = torch.device("cuda:0")
+    dtype = torch.float16
+    model = SimpleMockViTModel().to(device).half()
+    manager = _make_manager_for_gpu(model, _BUDGETS, _MAX_BATCH, device, dtype)
+    encoder = object.__new__(EncoderRunner)
+    encoder.device = device
+    encoder.cudagraph_manager = manager
+    runner = object.__new__(MMEncoderModelRunner)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    # No decoder manager is installed: capture must be encoder-only.
+    with patch(
+        "vllm.v1.worker.mm_encoder_model_runner.lock_workspace", wraps=lock_workspace
+    ) as lock:
+        runner.capture_model(profile_only=profile_only)
+        assert lock.call_count == int(not profile_only)
+    assert len(manager.budget_graphs["default"]) == len(_BUDGETS)
+
+    cache: dict[str, torch.Tensor] = {}
+    pending_sends: dict[str, torch.Tensor] = {}
+    connector = MagicMock(spec=ECConnectorBase)
+    connector.is_producer = True
+    connector.is_consumer = False
+    connector.get_finished.return_value = (None, None)
+    connector.save_caches.side_effect = lambda *, encoder_cache, mm_hash: (
+        pending_sends.update({mm_hash: encoder_cache[mm_hash]})
+    )
+    with patch(
+        "vllm.v1.worker.gpu.ec_connector.get_ec_transfer", return_value=connector
+    ):
+        ec = ActiveECConnector(SimpleNamespace(), cache)
+    scheduled = cast(
+        SchedulerOutput,
+        SimpleNamespace(
+            ec_connector_metadata=ECConnectorMetadata(), finished_req_ids=frozenset()
+        ),
+    )
+    saved_outputs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    # Mixed sizes exercise packing order; 64 is the boundary, 81 falls back.
+    for grids in ([[1, 8, 8], [1, 4, 4]], [[1, 16, 16]], [[1, 18, 18]], [[1, 4, 4]]):
+        inputs = _make_mm_kwargs(grids, device, dtype)
+        expected = model.encoder_eager_forward(inputs).split(
+            [t * (h // 2) * (w // 2) for t, h, w in grids]
+        )
+        with ec.maybe_get_output(scheduled) as ec_output:
+            outputs = manager.execute(inputs)
+            assert outputs is not None
+            cache[str(len(cache))] = outputs[0]
+        assert ec_output is not None
+        assert ec_output.finished_sending is None
+        assert outputs is not None
+        for actual, eager in zip(outputs, expected):
+            torch.testing.assert_close(actual, eager)
+        for previous, snapshot in saved_outputs:
+            torch.testing.assert_close(previous, snapshot, rtol=0, atol=0)
+        saved_outputs.extend((output, output.clone()) for output in outputs)
+    assert manager.graph_hits == 4
+    assert manager.graph_misses == 1
+    assert pending_sends.keys() == cache.keys()
+    connector.get_finished.return_value = (set(cache), None)
+    with ec.maybe_get_output(scheduled) as ec_output:
+        pass
+    assert ec_output is not None
+    assert ec_output.finished_sending == set(cache)
+
+
+def test_eonly_without_encoder_graph_skips_capture():
+    from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+    encoder = object.__new__(EncoderRunner)
+    encoder.cudagraph_manager = None
+    runner = object.__new__(MMEncoderModelRunner)
+    runner.model_state = SimpleNamespace(encoder_runner=encoder)
+    assert runner.capture_model() == 0
 
 
 # ---------------------------------------------------------------------------

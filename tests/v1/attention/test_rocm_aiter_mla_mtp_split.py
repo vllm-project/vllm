@@ -56,12 +56,21 @@ class _ExpandPageIndicesKernel:
         self,
         page_indices,
         block_table_tensor,
-        stride,
+        stride_0,
+        stride_1,
         paged_kv_indptr,
         *,
         KERNEL_BLOCK_SIZE,
         BLOCK_SIZE,
     ):
+        # Both block-table strides are passed explicitly: the kernel no longer
+        # assumes the column stride is 1. This stand-in indexes the tensor
+        # directly so torch applies the strides for it, but the values are
+        # checked against the tensor actually handed in -- a caller passing the
+        # wrong stride is exactly the bug the parameter exists to prevent, and
+        # silently ignoring them here would hide it.
+        assert stride_0 == block_table_tensor.stride(0)
+        assert stride_1 == block_table_tensor.stride(1)
         self.kernel_block_size = KERNEL_BLOCK_SIZE
         for req_idx in range(self.grid[0]):
             out_start = int(paged_kv_indptr[req_idx].item())
@@ -87,26 +96,38 @@ def _builder(
     kv_cache_dtype: str = "auto",
     dcp_world_size: int = 1,
     dcp_rank: int = 0,
+    asm_dcp_verify: bool = False,
+    decode_causal: bool = True,
+    supports_segmented_dcp_verify: bool | None = None,
 ):
+    decode_num_heads = num_heads * dcp_world_size
+    asm_heads = (
+        rocm_aiter_mla._asm_dcp_verify_heads(decode_num_heads) if asm_dcp_verify else 0
+    )
+    if supports_segmented_dcp_verify is None:
+        supports_segmented_dcp_verify = rocm_aiter_mla._segmented_dcp_verify_supported(
+            dcp_world_size, 1
+        )
     stub = SimpleNamespace(
         device=torch.device("cpu"),
         num_heads=num_heads,
         # DCP gathers every rank's head shard before decode, and the routing
         # predicates read the gathered count.
-        _decode_num_heads=num_heads * dcp_world_size,
+        _decode_num_heads=decode_num_heads,
         dcp_world_size=dcp_world_size,
         dcp_rank=dcp_rank,
         cp_kv_cache_interleave_size=1,
         # Mirrors the production constructor: configuration decides whether the
-        # segmented route is available, query length decides per batch.
-        _supports_segmented_dcp_verify=rocm_aiter_mla._segmented_dcp_verify_supported(
-            dcp_world_size, 1
-        ),
+        # segmented route is available, query length decides per batch. CPRR
+        # preferred still keeps this True so qlen < _MIN_CPRR_QLEN can fall back.
+        _supports_segmented_dcp_verify=supports_segmented_dcp_verify,
         # Derived once in the real constructor, so derive it once here too.
         _segmented_page_size=rocm_aiter_mla._segmented_mla_page_size(kernel_block_size),
         _dcp_verify_buffers=None,
         _graph_seq_lens=None,
         _kv_cache_dtype_str=kv_cache_dtype,
+        # Unsized as during profiling, so the Gluon KV bound stays out of the way.
+        _kv_cache_bytes=None,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
         paged_kv_indptr=torch.empty(max_decode_rows + 1, dtype=torch.int32),
@@ -120,7 +141,11 @@ def _builder(
         _uniform_padded_mtp_qo_len=(AiterMLAMetadataBuilder._uniform_padded_mtp_qo_len),
         _use_persistent_metadata=False,
         kernel_block_size=kernel_block_size,
-        _num_attention_heads=AiterMLAHelper.get_actual_mla_num_heads(num_heads),
+        _num_attention_heads=(
+            asm_heads
+            if asm_dcp_verify
+            else AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        ),
         _mla_work_meta_data=torch.empty(1, dtype=torch.int32),
         _mla_work_info_set=torch.empty(1, dtype=torch.int32),
         _mla_work_indptr=torch.empty(1, dtype=torch.int32),
@@ -130,6 +155,19 @@ def _builder(
         _mla_q_dtype=torch.bfloat16,
         _mla_kv_dtype=torch.bfloat16,
         decode_attn_out_dtype=torch.bfloat16,
+        _decode_causal=decode_causal,
+        # Default off so existing cases keep exercising segmented/persistent.
+        # Pass asm_dcp_verify=True for the CPRR route and its qlen-floor fallback.
+        _asm_dcp_verify=asm_dcp_verify,
+        _asm_dcp_verify_heads=asm_heads,
+        _g_kv_indptr_buf=(
+            torch.zeros(max_decode_rows + 1, dtype=torch.int32)
+            if asm_dcp_verify and dcp_world_size > 1
+            else None
+        ),
+        # Only read when the asm route is on; the real builder derives it from
+        # the device CU count.
+        _mla_max_split_per_batch=256,
     )
     # Bound to the stub rather than faked: the verify flatten's per-row view is
     # part of what _build_decode is being tested for.
@@ -153,6 +191,25 @@ def test_backend_declares_uniform_batch_support():
         AiterMLAMetadataBuilder._cudagraph_support
         == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
     )
+
+
+@pytest.mark.parametrize("causal", [True, False])
+def test_build_hands_common_causal_flag_to_aiter_builder(monkeypatch, causal):
+    seen = []
+
+    def fake_common_build(self, *args):
+        seen.append(self._decode_causal)
+        return SimpleNamespace(decode=None, prefill=None)
+
+    monkeypatch.setattr(
+        rocm_aiter_mla.MLACommonMetadataBuilder, "build", fake_common_build
+    )
+    builder = object.__new__(AiterMLAMetadataBuilder)
+    builder._fp8_prefill_enabled = False
+
+    builder.build(0, SimpleNamespace(causal=causal))
+
+    assert seen == [causal]
 
 
 def test_dcp_verify_row_view_is_causal_per_row():
@@ -258,10 +315,214 @@ def test_dcp_fp8_verify_build_uses_segmented(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         num_decode_tokens=2 * qlen,
+        max_query_len=qlen,
         dcp_tot_seq_lens_device=torch.tensor([10, 12], dtype=torch.int32),
     )
 
     assert metadata.dcp_verify is not None
+
+
+def _cprr_decode_batch(builder, *, qlen: int, num_reqs: int = 1):
+    seq_lens = torch.full((num_reqs,), 16, dtype=torch.int32)
+    query_start_loc = torch.arange(0, (num_reqs + 1) * qlen, qlen, dtype=torch.int32)
+    return AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.zeros(num_reqs, 8, dtype=torch.int32),
+        seq_lens_device=seq_lens,
+        max_seq_len=16,
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc,
+        num_decode_tokens=num_reqs * qlen,
+        max_query_len=qlen,
+        dcp_tot_seq_lens_device=seq_lens * 8,
+    )
+
+
+def test_asm_preferred_qlen2_falls_back_to_segmented(monkeypatch):
+    """K=4 can clamp to qlen 2; CPRR has no kernel, so use segmented MLA."""
+    monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+
+    metadata = _cprr_decode_batch(
+        _builder(
+            mtp_decode_qlen=5,
+            dcp_world_size=8,
+            num_heads=12,
+            asm_dcp_verify=True,
+            kernel_block_size=2,
+        ),
+        qlen=2,
+    )
+
+    assert metadata.dcp_verify is not None
+    assert metadata.g_kv_indptr is None
+    assert not metadata.has_persistent_metadata
+    get_mla_metadata_v1.assert_not_called()
+
+
+def test_asm_preferred_qlen_at_cprr_floor_stays_on_cprr(monkeypatch):
+    monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+
+    metadata = _cprr_decode_batch(
+        _builder(
+            mtp_decode_qlen=5,
+            dcp_world_size=8,
+            num_heads=12,
+            asm_dcp_verify=True,
+        ),
+        qlen=rocm_aiter_mla._MIN_CPRR_QLEN,
+    )
+
+    assert metadata.dcp_verify is None
+    assert metadata.g_kv_indptr is not None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.kwargs.get("is_cp_round_robin") is True
+
+
+def test_cprr_capable_single_token_decode_keeps_persistent_metadata(monkeypatch):
+    """The CPRR qlen floor must not suppress the ordinary qlen-1 schedule."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+
+    metadata = _cprr_decode_batch(
+        _builder(
+            mtp_decode_qlen=5,
+            dcp_world_size=8,
+            num_heads=12,
+            asm_dcp_verify=True,
+        ),
+        qlen=1,
+    )
+
+    assert metadata.g_kv_indptr is None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.kwargs.get("is_cp_round_robin") is None
+
+
+def test_non_causal_dcp_block_uses_plain_mask0_metadata(monkeypatch):
+    """A non-causal block needs no CPRR global-position window or head pad."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    builder = _builder(
+        mtp_decode_qlen=5,
+        dcp_world_size=8,
+        num_heads=12,
+        asm_dcp_verify=True,
+    )
+    builder._decode_causal = False
+
+    metadata = _cprr_decode_batch(builder, qlen=4)
+
+    assert metadata.dcp_verify is None
+    assert metadata.g_kv_indptr is None
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.call_args.args[3] == 96
+    assert get_mla_metadata_v1.call_args.args[5] is False
+    assert get_mla_metadata_v1.call_args.kwargs.get("is_cp_round_robin") is None
+
+
+def test_asm_qlen2_without_segmented_fails_during_build(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=mock.MagicMock()),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+
+    with pytest.raises(RuntimeError, match="requires either segmented MLA"):
+        _cprr_decode_batch(
+            _builder(
+                mtp_decode_qlen=5,
+                dcp_world_size=8,
+                num_heads=12,
+                asm_dcp_verify=True,
+                supports_segmented_dcp_verify=False,
+            ),
+            qlen=2,
+        )
+
+
+def test_non_causal_dcp_block_bypasses_cprr_in_forward(monkeypatch):
+    """Process-level CPRR capability must not pad or route a non-causal batch."""
+    captured = {}
+
+    def fake_aiter_decode(q, kv_buffer, out, *args, **kwargs):
+        captured["q_heads"] = q.shape[1]
+        captured["kwargs"] = kwargs
+        return None, torch.zeros(q.shape[0], q.shape[1])
+
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_get_aiter_mla_decode", lambda: fake_aiter_decode
+    )
+
+    impl = object.__new__(AiterMLAImpl)
+    impl.num_heads = 12
+    impl.dcp_world_size = 8
+    impl.kv_cache_dtype = "auto"
+    impl.kv_lora_rank = 512
+    impl.qk_rope_head_dim = 64
+    impl.scale = 576**-0.5
+    decode = SimpleNamespace(
+        max_qo_len=4,
+        qo_indptr=torch.tensor([0, 4], dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([0, 1], dtype=torch.int32),
+        paged_kv_indices=torch.zeros(1, dtype=torch.int32),
+        paged_kv_last_page_len=torch.ones(1, dtype=torch.int32),
+        use_gluon_decode=False,
+        use_gluon_verify=False,
+        dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
+        dcp_verify=None,
+        g_kv_indptr=None,
+        has_persistent_metadata=False,
+        attn_out_dtype=torch.bfloat16,
+        asm_decode_num_heads=0,
+        mla_num_kv_splits=0,
+        cp_world_size=8,
+        cp_rank=0,
+        min_kv_seq_len=1,
+    )
+    attn_metadata = SimpleNamespace(decode=decode, causal=False, work_meta_data=None)
+    layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
+    q = torch.zeros(4, 96, 576, dtype=torch.bfloat16)
+
+    output, lse = impl.forward_mqa(q, torch.zeros(1, 1, 576), attn_metadata, layer)
+
+    assert captured["q_heads"] == 96
+    assert captured["kwargs"]["causal"] is False
+    assert "g_kv_indptr" not in captured["kwargs"]
+    assert "num_kv_splits" not in captured["kwargs"]
+    assert output.shape[1] == 96
+    assert lse is not None and lse.shape == (4, 96)
 
 
 def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
@@ -302,9 +563,14 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32),
         use_gluon_decode=False,
         use_gluon_verify=False,
+        dcp_route=rocm_aiter_mla._DCPDecodeRoute.PLAIN,
         dcp_verify=None,
         has_persistent_metadata=False,
         attn_out_dtype=torch.bfloat16,
+        # 0 == the round-robin (cprr) asm route is off, this rank's decode takes
+        # the existing path. Mirrors the AiterMLADecodeMetadata default.
+        asm_decode_num_heads=0,
+        g_kv_indptr=None,
     )
     attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
     layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
@@ -430,6 +696,7 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
             ),
             use_gluon_decode=False,
             use_gluon_verify=False,
+            dcp_route=rocm_aiter_mla._DCPDecodeRoute.SEGMENTED,
             dcp_verify=view,
             attn_out_dtype=torch.bfloat16,
         )
@@ -494,7 +761,6 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
     Sweeping num_heads asserts metadata is sized for the padded decode shape,
     covering Kimi-K3 TP4's 24 -> 32 head path and native fp8 nhead=32 folding.
     """
-
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
     info_calls = []
 
@@ -565,7 +831,7 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
             get_num_attention_heads=lambda parallel_config: num_heads,
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=2),
-        cache_config=SimpleNamespace(cache_dtype="fp8_e4m3"),
+        cache_config=SimpleNamespace(cache_dtype="fp8_e4m3", num_gpu_blocks=None),
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
             # Empty: the per-layer head-count probe finds no attention layer and
@@ -614,6 +880,7 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, 4, 8], dtype=torch.int32),
         num_decode_tokens=8,
+        max_query_len=4,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -664,6 +931,7 @@ def test_min_kv_seq_len_ignores_cudagraph_padding_rows(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * mtp_qlen,
+        max_query_len=mtp_qlen,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -674,7 +942,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
     monkeypatch,
 ):
     """Full-CG zero-qo rows follow rocm_aiter_mla.py:608-657,717-759."""
-
     get_mla_metadata_v1 = mock.MagicMock()
     monkeypatch.setitem(
         sys.modules,
@@ -715,6 +982,7 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
         query_start_loc_cpu=torch.tensor([0, mtp_qlen, mtp_qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, mtp_qlen, mtp_qlen], dtype=torch.int32),
         num_decode_tokens=seq_lens.numel() * mtp_qlen,
+        max_query_len=mtp_qlen,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -736,7 +1004,6 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
 
 def test_decode_expands_kernel_block_page_indices(monkeypatch):
     """kernel_block_size>1 expands b -> b*K+offset at rocm_aiter_mla.py:696-704."""
-
     expand_kernel = _ExpandPageIndicesKernel()
     monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel)
     # qlen==1 now takes the persistent-metadata path, which imports
@@ -784,6 +1051,7 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, 1, 2], dtype=torch.int32),
         num_decode_tokens=seq_lens.numel(),
+        max_query_len=1,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -793,7 +1061,14 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         metadata.paged_kv_indices[: expected_indices.numel()],
         expected_indices,
     )
-    assert expand_kernel.grid == (seq_lens.numel(),)
+    # The launch now carries a second grid dimension over token chunks, so
+    # the expansion is spread across the context instead of one workgroup
+    # walking it serially. The width comes from the block-table upper bound
+    # on tokens per request, which is available host-side and so costs no
+    # device sync; derived here rather than hard-coded so the assertion
+    # still describes the launch if the chunk size changes.
+    expected_chunks = max(1, -(-block_table.shape[1] * kernel_block_size // 1024))
+    assert expand_kernel.grid == (seq_lens.numel(), expected_chunks)
     assert expand_kernel.kernel_block_size == kernel_block_size
 
 
@@ -875,6 +1150,7 @@ def test_persistent_metadata_gate(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * qo_len,
+        max_query_len=qo_len,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -944,8 +1220,88 @@ def test_persistent_metadata_gate_without_gluon_build(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * qo_len,
+        max_query_len=qo_len,
         dcp_tot_seq_lens_device=None,
     )
 
     assert metadata.has_persistent_metadata is expect_persistent
     assert get_mla_metadata_v1.called is expect_persistent
+
+
+def _build_non_causal(monkeypatch, *, num_heads, kv_cache_dtype, qlen, mtp_qlen):
+    """Drive _build_decode with causal=False and hand back the aiter mock."""
+    get_mla_metadata_v1 = mock.MagicMock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter",
+        SimpleNamespace(get_mla_metadata_v1=get_mla_metadata_v1),
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
+    )
+    builder = _builder(
+        mtp_decode_qlen=mtp_qlen,
+        kv_cache_dtype=kv_cache_dtype,
+        num_heads=num_heads,
+    )
+    builder._decode_causal = False
+    metadata = AiterMLAMetadataBuilder._build_decode(
+        builder,
+        block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
+        seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
+        max_seq_len=7,
+        query_start_loc_cpu=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
+        num_decode_tokens=2 * qlen,
+        max_query_len=qlen,
+        dcp_tot_seq_lens_device=None,
+    )
+    return metadata, get_mla_metadata_v1
+
+
+def test_non_causal_build_hands_the_mask_to_aiter(monkeypatch):
+    """The schedule carries the mask, so is_causal must follow the block."""
+    metadata, get_mla_metadata_v1 = _build_non_causal(
+        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=8, mtp_qlen=8
+    )
+    assert metadata.has_persistent_metadata
+    # 6th positional arg of get_mla_metadata_v1 is is_causal.
+    assert get_mla_metadata_v1.call_args.args[5] is False
+
+
+@pytest.mark.parametrize("num_heads", [12, 16, 48])
+def test_a_two_token_fp8_block_is_refused_without_a_fold(monkeypatch, num_heads):
+    """16-head (and padded-to-16) qlen-2 fp8 has no non-causal kernel.
+
+    48/80/112 (and 33 padded to 48) fold to H16 while keeping Q2, so they
+    must be refused the same way as native 16-head qlen 2.
+    """
+    with pytest.raises(ValueError, match="2-token"):
+        _build_non_causal(
+            monkeypatch,
+            num_heads=num_heads,
+            kv_cache_dtype="fp8",
+            qlen=2,
+            mtp_qlen=8,
+        )
+
+
+def test_a_two_token_fp8_block_is_allowed_when_folded(monkeypatch):
+    """32 heads at qlen 2 folds onto the 16-head / 4-token kernel."""
+    metadata, get_mla_metadata_v1 = _build_non_causal(
+        monkeypatch,
+        num_heads=32,
+        kv_cache_dtype="fp8",
+        qlen=2,
+        mtp_qlen=8,
+    )
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.called
+
+
+def test_a_two_token_bf16_block_is_allowed(monkeypatch):
+    """The bf16 fold has no such hole, so the guard must not fire there."""
+    metadata, _ = _build_non_causal(
+        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=2, mtp_qlen=8
+    )
+    assert metadata.has_persistent_metadata

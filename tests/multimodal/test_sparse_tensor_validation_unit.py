@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for sparse tensor validation.
+"""Unit tests for sparse tensor validation.
 
 Simple, fast unit tests that can run without server fixtures.
 Run with: pytest tests/multimodal/test_sparse_tensor_validation_unit.py -v
@@ -56,8 +55,7 @@ class TestSparseTensorValidationContextManager:
                 tensor.to_dense()
 
     def test_without_context_manager_allows_invalid(self):
-        """
-        WITHOUT validation, invalid tensors may not immediately error.
+        """WITHOUT validation, invalid tensors may not immediately error.
 
         This demonstrates the vulnerability: PyTorch 2.8.0+ doesn't validate
         by default, which can lead to memory corruption.

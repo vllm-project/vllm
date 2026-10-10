@@ -45,6 +45,7 @@ def set_weight_attrs(
     Args:
         weight: The weight tensor.
         weight_attrs: A dictionary of attributes to set on the weight tensor.
+
     """
     if weight_attrs is None:
         return
@@ -73,9 +74,8 @@ def replace_parameter(
     new_tensor: torch.Tensor | None,
     prefer_copy: bool = False,
 ):
-    """
-    Replace a parameter of a layer while maintaining the ability to reload the weight.
-    Called within implementations of the `process_weights_after_loading` method.
+    """Replace a parameter of a layer while maintaining the ability to reload the
+    weight. Called within implementations of the `process_weights_after_loading` method.
 
     Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
     ``is_shuffled``) are carried over to the replacement parameter, except
@@ -97,6 +97,7 @@ def replace_parameter(
             a new parameter. This preserves the parameter's storage address
             (``data_ptr``), which is required for captured CUDA graphs to
             remain valid across weight updates (e.g. in RL training loops).
+
     """
     # should not be used on a tied/shared param
 

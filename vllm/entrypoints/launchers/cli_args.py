@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file contains the command line arguments for the vLLM's online server.
+"""This file contains the command line arguments for the vLLM's online server.
 It is kept in a separate file for documentation purposes.
 """
 
@@ -15,18 +14,25 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+)
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+
+logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -47,7 +53,7 @@ class LoRAParserAction(argparse.Action):
             if item in [None, ""]:  # Skip if item is None or empty string
                 continue
             if "=" in item and "," not in item:  # Old format: name=path
-                name, path = item.split("=")
+                name, path = item.split("=", 1)
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
@@ -90,6 +96,11 @@ class BaseFrontendArgs:
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
     or the ones from tokenizer."""
+    trust_request_mm_kwargs: bool = False
+    """Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
+    and `media_io_kwargs`). If False, the server rejects non-empty values
+    because they can change multimodal preprocessing resource usage. Only
+    enable this when API clients are trusted."""
     default_chat_template_kwargs: dict[str, Any] | None = None
     """Default keyword arguments to pass to the chat template renderer.
     These will be merged with request-level chat_template_kwargs,
@@ -117,6 +128,13 @@ class BaseFrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
+    tool_strict_level: ToolStrictLevelName = "auto"
+    """Server-side floor for structural-tag based tool calling, applied on top
+    of the per-tool `strict` field. `auto` follows the request's tool choice
+    and per-tool strictness; `function` constrains the
+    tool-call envelope (markup and function name) for every request with
+    tools; `parameter` additionally pins argument schemas, as if every tool
+    were `strict: true`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
     Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
@@ -124,8 +142,6 @@ class BaseFrontendArgs:
     The `demo` Python tool executes model-generated code in Docker without
     network isolation by default. See the security guide for more
     information."""
-    log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
-    """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: int | None = None
     """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""
@@ -174,12 +190,26 @@ class BaseFrontendArgs:
     ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
     explicit request-level ``chat_template_kwargs.cohere_format`` takes
     priority."""
+    anthropic_disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto"
+    """Anthropic ``/v1/messages`` only. The ``reasoning_effort`` used for
+    requests with ``thinking: {"type": "disabled"}``. ``none`` turns thinking
+    off for models that support it; ``low`` suits models that always think
+    (e.g. GLM-5.3) or reject ``none`` (e.g. gpt-oss). ``auto`` (default) uses
+    ``low`` when the renderer rejects ``none`` or renders it the same as a
+    thinking effort, and ``none`` otherwise."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
+    """
+    enable_scale_out: bool = False
+    """
+    If set to True, register the scale-out endpoints (`/render`, `/derender`,
+    `/inference/v1/generate` and `/inference/v1/abort_requests`) on `vllm serve`.
+    Has no effect on `vllm launch render` or `vllm serve --tokens-only` which
+    always register their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.
@@ -254,6 +284,11 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    grpc_port: int | None = None
+    """Enable the Rust frontend's additional gRPC Inference and Control services
+    on this port. Requires `VLLM_USE_RUST_FRONTEND=1 vllm serve`; HTTP remains on
+    `--port`. Binds on `--host`, or 127.0.0.1 with `--uds`. Cannot be combined
+    with the Python gRPC server's `--grpc` flag."""
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
@@ -336,7 +371,10 @@ class FrontendArgs(BaseFrontendArgs):
     """
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
-    Can significantly improve late-interaction scoring performance."""
+    Can significantly improve late-interaction scoring performance.
+    When disabled, the setting is also propagated to the engine's
+    `PoolerConfig`, so the engine-side scorer uses the reference MaxSim
+    path instead of the fused Triton kernel."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -418,13 +456,47 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--grpc",
         action="store_true",
         default=False,
-        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
-        "server. Requires: pip install vllm[grpc].",
+        help="Launch the Python gRPC (SMG VllmEngine) server on --port instead "
+        "of the HTTP OpenAI-compatible server. Requires: pip install vllm[grpc]. "
+        "Cannot be combined with --grpc-port, which enables the Rust "
+        "frontend's gRPC services.",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     return parser
+
+
+def validate_grpc_port_arg(args: argparse.Namespace) -> None:
+    """Validate the Rust frontend's optional gRPC listener."""
+    if getattr(args, "grpc_port", None) is None:
+        return
+
+    if args.grpc:
+        raise ValueError(
+            "--grpc and --grpc-port are mutually exclusive. Use --grpc "
+            "--port for the Python gRPC server, or VLLM_USE_RUST_FRONTEND=1 "
+            "with --grpc-port for the Rust frontend."
+        )
+    if not envs.VLLM_USE_RUST_FRONTEND or getattr(args, "subparser", None) != "serve":
+        raise ValueError("--grpc-port requires VLLM_USE_RUST_FRONTEND=1 vllm serve")
+    if args.headless or (
+        args.api_server_count is not None and args.api_server_count <= 0
+    ):
+        raise ValueError(
+            "--grpc-port requires a Rust frontend; remove --headless "
+            "and non-positive --api-server-count"
+        )
+    if args.data_parallel_multi_port_external_lb:
+        raise ValueError(
+            "--grpc-port is incompatible with "
+            "--data-parallel-multi-port-external-lb: "
+            "its frontends would share the same gRPC port"
+        )
+    if not 0 <= args.grpc_port <= 65535:
+        raise ValueError("--grpc-port must be between 0 and 65535")
+    if args.grpc_port != 0 and args.grpc_port == args.port and not args.uds:
+        raise ValueError("--grpc-port must differ from --port when HTTP uses TCP")
 
 
 def validate_parsed_serve_args(args: argparse.Namespace):
@@ -436,6 +508,16 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
+    if args.chat_template is not None and "hf" in (
+        args.tool_call_parser,
+        getattr(args, "reasoning_parser", None),
+    ):
+        logger.warning(
+            "--chat-template is set; the hf parser still expects "
+            "the checkpoint's output format."
+        )
+
+    validate_grpc_port_arg(args)
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
@@ -471,3 +553,20 @@ def create_parser_for_docs() -> FlexibleArgumentParser:
         prog="-m vllm.entrypoints.launchers.api_server.entry"
     )
     return make_arg_parser(parser_for_docs)
+
+
+def propagate_flash_late_interaction(args, engine_args) -> None:
+    """Propagate `--no-enable-flash-late-interaction` into the engine config.
+
+    The frontend flag alone only disables the API-server scoring path;
+    mirroring it into `PoolerConfig.enable_flash_late_interaction` lets the
+    engine-side scorer fall back to the reference MaxSim path too.
+    """
+    if getattr(args, "enable_flash_late_interaction", True):
+        return
+    from vllm.config.pooler import PoolerConfig
+
+    if engine_args.pooler_config is None:
+        engine_args.pooler_config = PoolerConfig(enable_flash_late_interaction=False)
+    else:
+        engine_args.pooler_config.enable_flash_late_interaction = False

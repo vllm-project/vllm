@@ -27,31 +27,10 @@ ROCM_ATTN_BACKENDS = [
 
 ATTN_BACKENDS = ROCM_ATTN_BACKENDS if current_platform.is_rocm() else ["auto"]
 
-# Per-backend tolerance with explicit entries; "default" is the fallback
-BACKEND_TOL: dict[str, float] = {
-    "default": 0.05,  # 5% tolerance for other backends (e.g. FLASH_ATTN)
-    # Relaxed tolerances for ROCm attn
-    # See: https://github.com/vllm-project/vllm/issues/35569
-    "ROCM_ATTN": 0.09,  # gfx950:~8.45%, gfx942:~3.70%
-    "ROCM_AITER_FA": 0.045,  # gfx950:~2.00%, gfx942:~0.80%
-    "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~2.20%
-    "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
-}
-
-# Some ROCm attention backends show small absolute drift on the low
-# text-vs-text probability even though larger scores remain well inside the
-# relative tolerance. The absolute drift is uniform across score magnitudes
-# (~0.005-0.010), so it only exceeds the relative tolerance for the small
-# ~0.10 text-vs-text value. Keep the relative tolerances tight and add only a
-# small absolute floor for the affected backends.
-# TRITON_ATTN: gfx942/ROCm 7.2 drifts ~0.008 abs on text-vs-text (~7.9% rel).
-BACKEND_ABS_TOL: dict[str, float] = {
-    "default": 0.0,
-    "auto": 0.007,
-    "ROCM_AITER_FA": 0.005,
-    "TRITON_ATTN": 0.009,
-    "FLEX_ATTENTION": 0.00875,
-}
+# The absolute floor matters only for the low ~0.10 text-vs-text score, where a
+# few thousandths of drift would otherwise exceed the relative bound.
+REL_TOL = 0.05
+ABS_TOL = 0.007
 
 # ROCm: disable prefix caching and eliminate batch variance to reduce
 # test flakiness.
@@ -62,17 +41,9 @@ ROCM_EXTRA_ARGS = (
 )
 
 
-def get_tol(backend: str) -> float:
-    return BACKEND_TOL.get(backend, BACKEND_TOL["default"])
-
-
-def get_abs_tol(backend: str) -> float:
-    return BACKEND_ABS_TOL.get(backend, BACKEND_ABS_TOL["default"])
-
-
 def assert_score(actual: float, expected: float, backend: str, label: str):
-    tol = get_tol(backend)
-    abs_tol = get_abs_tol(backend)
+    tol = REL_TOL
+    abs_tol = ABS_TOL
     diff = abs(actual - expected)
     rel_diff = diff / abs(expected) if expected != 0 else diff
     print(
@@ -104,9 +75,16 @@ documents = [
     },
 ]
 
-TEXT_VS_TEXT = 0.10040374100208282
-TEXT_VS_IMAGE = 0.7423753142356873
-TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
+# One bf16 ULP in attention compounds to ~0.1% here, so ROCm backends each
+# settle differently; these are their midpoint across backends and archs.
+if current_platform.is_rocm():
+    TEXT_VS_TEXT = 0.105243
+    TEXT_VS_IMAGE = 0.742472
+    TEXT_VS_TEXT_PLUS_IMAGE = 0.544568
+else:
+    TEXT_VS_TEXT = 0.10040374100208282
+    TEXT_VS_IMAGE = 0.7423753142356873
+    TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
 
 
 @pytest.fixture(scope="module", params=ATTN_BACKENDS)
@@ -507,6 +485,4 @@ async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     kwargs_scores = [
         r.relevance_score for r in sorted(kwargs_rerank.results, key=lambda x: x.index)
     ]
-    assert field_scores == pytest.approx(
-        kwargs_scores, rel=get_tol(backend), abs=get_abs_tol(backend)
-    )
+    assert field_scores == pytest.approx(kwargs_scores, rel=REL_TOL, abs=ABS_TOL)

@@ -4,10 +4,7 @@
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import (
-    RoutingMethodType,
-    get_routing_method_type,
-)
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     zero_experts_compute_triton,
 )
@@ -53,14 +50,9 @@ class ZeroExpertRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return get_routing_method_type(
-            scoring_func=self.scoring_func,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            num_expert_group=None,
-            has_e_score_bias=True,
-            routed_scaling_factor=self.routed_scaling_factor,
-        )
+        # Zero experts are resolved by this router, which kernels with
+        # built-in routing (e.g. FlashInfer TRT-LLM) cannot reproduce.
+        return RoutingMethodType.Unspecified
 
     def _compute_routing(
         self,

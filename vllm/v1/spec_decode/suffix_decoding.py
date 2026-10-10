@@ -7,8 +7,7 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 class SuffixDecodingProposer:
-    """
-    Speculative decoding proposer for Suffix Decoding (https://arxiv.org/pdf/2411.04975).
+    """Speculative decoding proposer for Suffix Decoding (https://arxiv.org/pdf/2411.04975).
     This class imports and uses the official implementation from Arctic Inference
     (https://github.com/snowflakedb/ArcticInference).
     """

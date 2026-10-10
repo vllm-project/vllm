@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Define LoRA functionality mixin for model runners.
-"""
+"""Define LoRA functionality mixin for model runners."""
 
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import TypeAlias
 
 import numpy as np
 import torch
@@ -19,10 +16,7 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
-from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
-from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
-
-InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
 
@@ -154,16 +148,17 @@ class LoRAModelRunnerMixin:
         num_sampled_tokens: np.ndarray | None = None,
         num_active_loras: int = 0,
     ):
-        """
-        Context manager to select dummy LoRAs for capture/warmup.
+        """Context manager to select dummy LoRAs for capture/warmup.
 
         Args:
             lora_config: LoRA configuration, or None if LoRA is disabled.
             num_scheduled_tokens: Array of scheduled token counts per request.
+            mapping_type: Which LoRA mapping to build (language or encoder).
             num_sampled_tokens: Array of sampled token counts per request.
             num_active_loras: Number of distinct active LoRAs to use.
                 - 0: No LoRA active (set up zero mappings).
                 - >0: Use exactly this many distinct LoRAs.
+
         """
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
@@ -259,8 +254,7 @@ class LoRAModelRunnerMixin:
         num_active_loras: int = 0,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ):
-        """
-        Context manager for dummy runs with LoRA.
+        """Context manager for dummy runs with LoRA.
 
         Args:
             lora_config: LoRA configuration.
@@ -269,6 +263,8 @@ class LoRAModelRunnerMixin:
             remove_lora: Whether to remove LoRAs after the context exits.
             num_active_loras: Number of distinct active LoRAs to use.
                 LoRA is activated when num_active_loras > 0.
+            mapping_type: Which LoRA mapping to build (language or encoder).
+
         """
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),

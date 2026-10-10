@@ -7,13 +7,13 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
-import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,23 +21,27 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
 from vllm.platforms import current_platform
-
-DAEMON_TIMEOUT_S = 600
+from vllm.utils.network_utils import get_open_port
 
 
 class WeightCacheDaemon:
     """Context manager running the real weight cache daemon as a subprocess."""
 
-    def __init__(self, model: str, tp_size: int, extra_args: list[str] | None = None):
+    def __init__(
+        self,
+        model: str,
+        tp_size: int,
+        extra_args: list[str] | None = None,
+    ):
         # Short base path: Unix socket paths are limited to ~107 characters.
         self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
-        self.tp_size = tp_size
+        self.health_port = get_open_port()
         self._cmd = [
             sys.executable,
             "-m",
-            "vllm.model_executor.model_loader.weight_cache.daemon",
+            "vllm.entrypoints.cli.main",
+            "preload",
             "--model",
             model,
             "--tensor-parallel-size",
@@ -45,21 +49,19 @@ class WeightCacheDaemon:
             "--weight-cache-socket-dir",
             self.socket_dir,
             "--enforce-eager",
+            "--weight-cache-health-host",
+            "127.0.0.1",
+            "--weight-cache-health-port",
+            str(self.health_port),
             *(extra_args or []),
         ]
         self._proc: subprocess.Popen | None = None
-        self._lines: list[str] = []
 
     def __enter__(self) -> "WeightCacheDaemon":
         self._proc = subprocess.Popen(
             self._cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
         )
         threading.Thread(target=self._drain_stderr, daemon=True).start()
-        try:
-            self._wait_ready(DAEMON_TIMEOUT_S)
-        except Exception:
-            self._stop()
-            raise
         return self
 
     def __exit__(self, *exc_info) -> None:
@@ -67,34 +69,17 @@ class WeightCacheDaemon:
 
     def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
-        for line in self._proc.stderr:
-            self._lines.append(line)
+        self._proc.stderr.read()
 
-    def _logs(self) -> str:
-        return "".join(self._lines)
-
-    def _wait_ready(self, timeout_s: float) -> None:
-        assert self._proc is not None
-        # Each rank binds its socket only once the model is fully cached.
-        # Poll for the socket files rather than a log line: model loading can
-        # pull in JIT compilers that swap the process's stderr and swallow
-        # everything logged afterwards, making log-based readiness flaky.
-        expected = [
-            get_socket_path(gpu_id, self.socket_dir) for gpu_id in range(self.tp_size)
-        ]
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if self._proc.poll() is not None:
-                raise RuntimeError(
-                    f"Weight cache daemon exited with {self._proc.returncode}:\n"
-                    f"{self._logs()}"
-                )
-            if all(os.path.exists(path) for path in expected):
-                return
-            time.sleep(1.0)
-        raise TimeoutError(
-            f"Weight cache daemon not ready after {timeout_s}s:\n{self._logs()}"
-        )
+    def check_health(self) -> None:
+        url = f"http://127.0.0.1:{self.health_port}/health"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                assert response.status == 200
+        except urllib.error.HTTPError as error:
+            raise AssertionError(
+                f"Weight cache daemon is not ready: HTTP {error.code}"
+            ) from error
 
     def _stop(self) -> None:
         assert self._proc is not None
@@ -174,14 +159,40 @@ K3_CASE = ModelCase(
     daemon_args=["--trust-remote-code"],
 )
 
+# Qwen3.5-0.8B ships one MTP layer in the target checkpoint, so method="mtp"
+# loads the draft from the same model. The daemon must cache it in its draft
+# group for the warm runs (fallback=False) to succeed.
+QWEN_MTP_CASE = ModelCase(
+    model="Qwen/Qwen3.5-0.8B",
+    prompts=[
+        "Hello, my name is",
+        "The capital of France is",
+    ],
+    llm_kwargs=dict(
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+    ),
+    daemon_args=[
+        "--speculative-config",
+        '{"method": "mtp", "num_speculative_tokens": 1}',
+    ],
+)
 
-@pytest.mark.parametrize("case", [QWEN_CASE, K3_CASE], ids=["qwen3.5", "kimi-k3"])
+
+@pytest.mark.parametrize(
+    "case",
+    [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
+    ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp"],
+)
 def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
 
     All runs must produce outputs identical to a default-loader baseline. The
     warm runs disable the disk fallback, so they only pass if the weights
-    really came from the daemon.
+    really came from the daemon — for the MTP case, both the target's and the
+    draft's daemon groups.
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
@@ -201,11 +212,206 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
         cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
 
-    with WeightCacheDaemon(case.model, tp_size=1, extra_args=case.daemon_args) as d:
+    with WeightCacheDaemon(
+        case.model,
+        tp_size=1,
+        extra_args=case.daemon_args,
+    ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        d.check_health()
         # Warm restart: a second engine lifetime against the same daemon.
         restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
 
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
     assert restart_outputs == baseline_outputs
+
+
+def _parallel(**kw):
+    from types import SimpleNamespace
+
+    base = dict(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        data_parallel_rank=0,
+        nnodes=1,
+        node_rank=0,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_daemon_places_tp_and_dp_ranks_on_local_gpus():
+    """Each node serves a contiguous global-rank block (DP-major), so without
+    DP local GPU i is TP rank r*local+i, and single-node DP launchers offset
+    by --data-parallel-start-rank."""
+    from vllm.model_executor.model_loader.weight_cache.daemon import plan_local_ranks
+
+    tp_second_node = _parallel(tensor_parallel_size=8, nnodes=2, node_rank=1)
+    assert plan_local_ranks(tp_second_node) == [(i, 0, 0, 4 + i) for i in range(4)]
+
+    dp_third_node = _parallel(
+        data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=8
+    )
+    assert plan_local_ranks(dp_third_node) == [(i, 8 + i, 0, 0) for i in range(4)]
+
+    dp_tp = _parallel(
+        tensor_parallel_size=2,
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_rank=2,
+    )
+    assert plan_local_ranks(dp_tp) == [
+        (0, 2, 0, 0),
+        (1, 2, 0, 1),
+        (2, 3, 0, 0),
+        (3, 3, 0, 1),
+    ]
+
+    # DP + nnodes: node-local TP replicas
+    dp_tp_node0 = _parallel(tensor_parallel_size=8, data_parallel_size=2, nnodes=2)
+    assert plan_local_ranks(dp_tp_node0) == [(i, 0, 0, i) for i in range(8)]
+    dp_tp_node1 = _parallel(
+        tensor_parallel_size=8, data_parallel_size=2, nnodes=2, node_rank=1
+    )
+    assert plan_local_ranks(dp_tp_node1) == [(i, 1, 0, i) for i in range(8)]
+
+    # DP + nnodes: TP group spans nodes (TP8 x DP2 on 4 nodes)
+    tp_span_node1 = _parallel(
+        tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=1
+    )
+    assert plan_local_ranks(tp_span_node1) == [(i, 0, 0, 4 + i) for i in range(4)]
+    tp_span_node2 = _parallel(
+        tensor_parallel_size=8, data_parallel_size=2, nnodes=4, node_rank=2
+    )
+    assert plan_local_ranks(tp_span_node2) == [(i, 1, 0, i) for i in range(4)]
+
+    # DP + nnodes: several DP replicas per node (TP4 x DP4 on 2 nodes)
+    dp_multi_node0 = _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
+    assert plan_local_ranks(dp_multi_node0) == [(i, i // 4, 0, i % 4) for i in range(8)]
+
+    # PP adds one daemon placement per stage while preserving TP rank order.
+    pp_tp = _parallel(tensor_parallel_size=2, pipeline_parallel_size=2)
+    assert plan_local_ranks(pp_tp) == [
+        (0, 0, 0, 0),
+        (1, 0, 0, 1),
+        (2, 0, 1, 0),
+        (3, 0, 1, 1),
+    ]
+
+
+def test_daemon_rejects_unmappable_parallelism():
+    from vllm.model_executor.model_loader.weight_cache.daemon import (
+        _reject_unsupported_parallelism,
+    )
+
+    _reject_unsupported_parallelism(
+        _parallel(
+            data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=12
+        )
+    )
+    # DP combines with --nnodes when the world size divides evenly.
+    _reject_unsupported_parallelism(
+        _parallel(tensor_parallel_size=4, data_parallel_size=4, nnodes=2)
+    )
+    _reject_unsupported_parallelism(_parallel(pipeline_parallel_size=2))
+    with pytest.raises(ValueError, match="evenly divide"):
+        _reject_unsupported_parallelism(_parallel(tensor_parallel_size=3, nnodes=2))
+    with pytest.raises(ValueError, match="evenly divide"):
+        _reject_unsupported_parallelism(
+            _parallel(tensor_parallel_size=2, data_parallel_size=3, nnodes=4)
+        )
+    with pytest.raises(ValueError, match="exceeds"):
+        _reject_unsupported_parallelism(
+            _parallel(
+                data_parallel_size=16, data_parallel_size_local=4, data_parallel_rank=13
+            )
+        )
+
+
+def test_weight_cache_key_distinguishes_dp_ranks():
+    from dataclasses import replace
+
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    key = WeightCacheKey(
+        checkpoint="ckpt",
+        model_arch="Arch",
+        tp_size=1,
+        tp_rank=0,
+        dtype="bf16",
+        quantization=None,
+        quant_config_hash="h",
+        revision=None,
+        vllm_version="v",
+        dp_size=16,
+        dp_rank=3,
+        pp_size=2,
+        pp_rank=1,
+    )
+    assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
+    assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
+    assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
+
+
+@pytest.mark.parametrize("hf_quant_config", [None, {"quant_algo": "NVFP4"}])
+def test_weight_cache_key_distinguishes_nvfp4_activation_override(
+    tmp_path, hf_quant_config
+):
+    """Cache keys isolate activation modes and reject ambiguous legacy hashes."""
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.utils.hashing import safe_hash
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="modelopt_fp4",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(
+            architectures=["NemotronHForCausalLM"],
+            quantization_config=hf_quant_config,
+        ),
+    )
+    static_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    model_config.quantization_config = QuantizationConfigArgs(
+        moe={"activation": "nvfp4_per_token"}
+    )
+    per_token_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    assert static_key.mismatched_fields(per_token_key) == ["quant_config_hash"]
+
+    legacy_hash = (
+        ""
+        if hf_quant_config is None
+        else safe_hash(
+            json.dumps(hf_quant_config, sort_keys=True).encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+    )
+    assert static_key.mismatched_fields(
+        replace(static_key, quant_config_hash=legacy_hash)
+    ) == ["quant_config_hash"]
+
+
+def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
+    """Copy mode clones the weights into the engine, so nothing is external
+    (vllm_config is never touched)."""
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        IpcModelLoader,
+    )
+
+    copy_mode = LoadConfig(
+        load_format="ipc_cache", model_loader_extra_config={"mode": "copy"}
+    )
+    loader = IpcModelLoader(copy_mode)
+    assert loader.get_external_weight_memory(None) == 0

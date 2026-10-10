@@ -58,6 +58,7 @@ from vllm.entrypoints.cohere.protocol import (
     CohereChatV2Request,
     CohereChatV2Response,
     CohereFinishReason,
+    CohereLogprobItem,
     CohereUsage,
     CohereUsageBilledUnits,
     CohereUsageTokens,
@@ -79,6 +80,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionResponseChoice,
     ChatCompletionStreamResponse,
     ChatCompletionToolsParam,
     ChatMessage,
@@ -249,6 +251,7 @@ class CohereServingChatV2(OpenAIServingChat):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
+        tool_strict_level: str = "auto",
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -265,6 +268,7 @@ class CohereServingChatV2(OpenAIServingChat):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             reasoning_parser=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            tool_strict_level=tool_strict_level,
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
@@ -555,10 +559,13 @@ class CohereServingChatV2(OpenAIServingChat):
             temperature=request.temperature,
             top_p=request.p,
             top_k=request.k,
+            watermarking=request.watermarking,
             seed=request.seed,
             frequency_penalty=request.frequency_penalty,
             presence_penalty=request.presence_penalty,
             logprobs=request.logprobs,
+            # Cohere logprob items carry token ids alongside the logprobs.
+            return_token_ids=request.logprobs,
             priority=request.priority or 0,
             kv_transfer_params=request.kv_transfer_params,
             chat_template_kwargs=request.chat_template_kwargs,
@@ -1088,8 +1095,28 @@ class CohereServingChatV2(OpenAIServingChat):
             ),
             message=assistant_msg,
             usage=usage,
+            logprobs=self._build_logprobs(choice),
             kv_transfer_params=response.kv_transfer_params,
         )
+
+    @staticmethod
+    def _build_logprobs(
+        choice: ChatCompletionResponseChoice,
+    ) -> list[CohereLogprobItem] | None:
+        if (
+            choice.logprobs is None
+            or not choice.logprobs.content
+            or choice.token_ids is None
+        ):
+            return None
+        return [
+            CohereLogprobItem(
+                text=entry.token, token_ids=[token_id], logprobs=[entry.logprob]
+            )
+            for entry, token_id in zip(
+                choice.logprobs.content, choice.token_ids, strict=True
+            )
+        ]
 
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Route response construction through the citation-carrying subclass.

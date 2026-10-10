@@ -52,6 +52,22 @@ def chunk_kda_prefill(
     """Run chunk KDA from raw gate and beta projections.
 
     Args:
+        q: query tensor, ``[1, T, H, K]``.
+        k: key tensor, ``[1, T, H, K]``.
+        v: value tensor, ``[1, T, H, V]``.
+        raw_g: raw gate projection, before the activation.
+        raw_beta: raw beta projection, before the activation.
+        A_log: log of the per-head gate decay.
+        g_bias: optional per-head gate bias.
+        scale: scale applied to the query-key products. Defaults to
+            ``k.shape[-1] ** -0.5``.
+        initial_state: fp32 per-sequence initial recurrent state, or ``None``.
+        output_final_state: whether to return the final recurrent state.
+        lower_bound: optional floor applied to the gate.
+        use_qk_l2norm_in_kernel: fold the q/k L2 norm into the kernel.
+        cu_seqlens: int32 cumulative sequence lengths.
+        chunk_indices: precomputed chunk indices for ``cu_seqlens``.
+        chunk_offsets: int32 per-sequence first chunk index.
         use_fused_chunk: request the two-kernel ROCm path. It is used only when
             every one of its preconditions holds; otherwise the Triton path
             runs unchanged.
@@ -71,6 +87,7 @@ def chunk_kda_prefill(
 
     Returns:
         The output and, when requested, the final recurrent state.
+
     """
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -138,7 +155,13 @@ def chunk_kda_prefill(
             aqk=ws["aqk"],
             decay=ws["decay"],
             # v is dead by this point, so it doubles as the output buffer.
-            out=out if out is not None else v,
+            out=out
+            if out is not None
+            else (
+                v
+                if v.is_contiguous()
+                else torch.empty_like(v, memory_format=torch.contiguous_format)
+            ),
             scale=scale,
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,

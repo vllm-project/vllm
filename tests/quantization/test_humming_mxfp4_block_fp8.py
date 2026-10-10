@@ -15,6 +15,7 @@ it in vLLM comes down to two things, both exercised here:
 """
 
 import pytest
+import torch
 
 from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     HummingExpertsBase,
@@ -56,8 +57,8 @@ def test_mxfp4_weight_with_per_token_fp8_activation_still_supported():
     ],
 )
 def test_humming_fp8_input_schema_to_quant_key(group_size, expected_key):
-    from vllm.model_executor.layers.quantization.utils.humming_utils import (
-        _humming_input_schema_to_quant_key,
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        input_schema_to_quant_key,
     )
     from vllm.utils.humming import HummingInputSchema
     from vllm.utils.humming import dtypes as humming_dtypes
@@ -66,18 +67,21 @@ def test_humming_fp8_input_schema_to_quant_key(group_size, expected_key):
         a_dtype=humming_dtypes.float8e4m3,
         input_scale_group_size=group_size,
     )
-    assert _humming_input_schema_to_quant_key(schema) == expected_key
+    assert input_schema_to_quant_key(schema, param_dtype=torch.bfloat16) == expected_key
 
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
 def test_humming_bf16_input_schema_is_unquantized():
-    from vllm.model_executor.layers.quantization.utils.humming_utils import (
-        _humming_input_schema_to_quant_key,
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        input_schema_to_quant_key,
     )
     from vllm.utils.humming import HummingInputSchema
 
     # No a_dtype -> unquantized (bf16/fp16) inputs -> None.
-    assert _humming_input_schema_to_quant_key(HummingInputSchema()) is None
+    assert (
+        input_schema_to_quant_key(HummingInputSchema(), param_dtype=torch.bfloat16)
+        is None
+    )
 
 
 def test_block_fp8_activation_quant_config_is_block_quantized():
@@ -86,7 +90,7 @@ def test_block_fp8_activation_quant_config_is_block_quantized():
     DeepEP prepare/finalize step quantize activations to block FP8 *before* the
     all-to-all dispatch instead of deferring to Humming -- and what makes
     HummingExpertsBase.expects_unquantized_inputs return False."""
-    from vllm.model_executor.layers.quantization.utils.humming_utils import (
+    from vllm.model_executor.layers.quantization.utils.humming import (
         make_humming_moe_quant_config,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -108,7 +112,7 @@ def test_default_activation_quant_config_defers_to_humming():
     """Without a block activation shape the config stays per-token (the deferred
     path): Humming quantizes internally, preserving pre-existing behavior for
     every non-block-FP8 scheme."""
-    from vllm.model_executor.layers.quantization.utils.humming_utils import (
+    from vllm.model_executor.layers.quantization.utils.humming import (
         make_humming_moe_quant_config,
     )
     from vllm.platforms import current_platform

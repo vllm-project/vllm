@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -33,7 +34,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import SupportsPP, SupportsQuant
 from .nemotron_h import (
@@ -92,10 +92,12 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
 
     def forward(
         self,
-        inputs_embeds: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
+        *,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Start projections (Fusion)
         if self.has_start_projections:
@@ -179,10 +181,11 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
 
     def forward(
         self,
-        inputs_embeds: torch.Tensor,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
+        *,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Start projections (Fusion)
         if self.has_start_projections:
@@ -305,13 +308,14 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
+            assert input_ids is not None
             inputs_embeds = self.get_input_embeddings(input_ids)
 
         residual = None
@@ -386,6 +390,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
         vllm_config = kwargs.get("vllm_config")
+        assert isinstance(vllm_config, VllmConfig)
         return get_draft_quant_config(vllm_config)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -393,14 +398,15 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         """Forward - applies attention-based MTP."""
+        assert hidden_states is not None
         hidden_states = self.model(
             input_ids,
             positions,
@@ -420,6 +426,11 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         )
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Only MTP, embedding and LM head weights are loaded."""
+        name = name.removeprefix("language_model.")
+        return not name.startswith(("mtp.", "lm_head.")) and "embeddings" not in name
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
         stacked_params_mapping = [
@@ -438,7 +449,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="",  # Empty - non-gated MoE
+                ckpt_up_proj_name=None,  # non-gated MoE
                 num_experts=num_experts,
                 num_redundant_experts=self.num_redundant_experts,
             )
@@ -450,17 +461,11 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             # MTP weights are nested in "language_model."
             # in Multimodal Nemotron-H checkpoints.
             name = name.removeprefix("language_model.")
+            if self.is_unused_checkpoint_weight(name):
+                continue
             is_lm_head_weight = name.startswith("lm_head.")
             if is_lm_head_weight:
                 self.has_own_lm_head = True
-            # Only process MTP and LM head weights -
-            # skip all non-MTP and non-LM head weights
-            if (
-                not name.startswith("mtp.")
-                and "embeddings" not in name
-                and not is_lm_head_weight
-            ):
-                continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -473,9 +478,10 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
                     name = name.replace("backbone.", "model.")
 
             if "scale" in name or "zero_point" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
 
             # Handle stacked parameters (qkv_proj) for attention layers
             is_stacked = False
@@ -547,6 +553,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
 
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            assert weight_loader is not None
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 

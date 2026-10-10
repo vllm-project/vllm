@@ -11,6 +11,7 @@ from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
+from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
 
@@ -84,6 +85,7 @@ def test_dspark_markov_head_is_replicated(
     assert head.markov_w2.tp_size == 1
     assert head.markov_w1.weight.shape == (128, 8)
     assert head.markov_w2.weight.shape == (128, 8)
+    head.markov_w2.quant_method.process_weights_after_loading(head.markov_w2)
 
     def fail_collective(*args, **kwargs):
         raise AssertionError("replicated Markov head must not invoke TP collectives")
@@ -216,7 +218,7 @@ def test_v41_dspark_loads_linear_scales(
     """Checkpoint ``.scale`` maps to the quant method's scale parameter and
     loads untouched. MXFP8 block-scale expansion lives in the KMxfp8Static
     loader (see tests/quantization/test_modelopt.py), not in load_weights."""
-    from vllm.models.deepseek_v4_1.nvidia import dspark
+    from vllm.models.deepseek_v41.nvidia import dspark
 
     mxfp8 = scale_dtype != torch.float32
     scale_name = "weight_scale" if mxfp8 else "weight_scale_inv"
@@ -240,7 +242,7 @@ def test_v41_dspark_loads_linear_scales(
         linear_scale_name=scale_name,
         pad_shared_expert=False,
         model=SimpleNamespace(
-            layers=[SimpleNamespace(ffn=SimpleNamespace(use_mega_moe=False))],
+            layers=[SimpleNamespace(ffn=SimpleNamespace(use_native_mega_moe=False))],
             confidence_head=None,
         ),
         named_parameters=lambda: [(runtime_name, param)],
@@ -262,3 +264,108 @@ def test_v41_dspark_loads_linear_scales(
     assert loaded == {runtime_name}
     assert shards == [() if shard_id is None else (shard_id,)]
     torch.testing.assert_close(param, checkpoint_scale)
+
+
+def test_dsv4_context_wkv_weights_are_duplicated_by_draft_layer():
+    weights = [
+        ("mtp.0.attn.wkv.weight", torch.arange(4)),
+        ("mtp.1.attn.wq_a.weight", torch.arange(3)),
+        ("mtp.2.attn.wkv.scale", torch.tensor(0.5)),
+        ("mtp.3.attn.wkv.weight", torch.arange(2)),
+    ]
+
+    duplicated = list(dsv4_dspark._duplicate_context_wkv_weights(weights, 3))
+
+    assert [name for name, _ in duplicated] == [
+        "mtp.0.attn.wkv.weight",
+        "context_wkv_proj.weight",
+        "mtp.1.attn.wq_a.weight",
+        "mtp.2.attn.wkv.scale",
+        "context_wkv_proj.scale",
+        "mtp.3.attn.wkv.weight",
+    ]
+    assert duplicated[1][1].shard_id == 0
+    assert duplicated[4][1].shard_id == 2
+    assert duplicated[0][1].data_ptr() == duplicated[1][1].data_ptr()
+    assert duplicated[3][1].data_ptr() == duplicated[4][1].data_ptr()
+
+
+def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
+    calls = []
+    stacked_output = torch.arange(24, dtype=torch.float32).view(2, 12)
+
+    class StackedProjection:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, main_x):
+            self.calls += 1
+            assert main_x.shape == (2, 5)
+            return stacked_output
+
+    projection = StackedProjection()
+    layers = [
+        SimpleNamespace(attn=SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset))
+        for i in range(3)
+    ]
+    model = SimpleNamespace(
+        config=SimpleNamespace(head_dim=4),
+        context_wkv_proj=projection,
+        layers=layers,
+        num_dspark_layers=3,
+    )
+    slot_mappings = [torch.tensor([0, 1]), None, torch.tensor([4, 5])]
+    monkeypatch.setattr(
+        dsv4_dspark,
+        "_insert_context_kv",
+        lambda attn, kv, positions, slots: calls.append(
+            (attn, kv.clone(), positions, slots)
+        ),
+    )
+
+    dsv4_dspark.DSparkDeepseekV4Model.precompute_and_store_context_kv(
+        model,
+        torch.zeros(2, 5),
+        torch.tensor([7, 8]),
+        slot_mappings,
+    )
+
+    assert projection.calls == 1
+    assert len(calls) == 2
+    assert torch.equal(calls[0][1], stacked_output.view(2, 3, 4)[:, 0])
+    assert torch.equal(calls[1][1], stacked_output.view(2, 3, 4)[:, 2] + 2)
+    assert calls[0][3] is slot_mappings[0]
+    assert calls[1][3] is slot_mappings[2]
+
+
+@pytest.mark.cpu_test
+def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
+    """The draft's MLA layers must share a KV cache group with the target's."""
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
+    from vllm.v1.core.kv_cache_utils import _get_kv_cache_groups_uniform_page_size
+
+    vllm_config = SimpleNamespace(
+        model_config=None, cache_config=SimpleNamespace(block_size=64)
+    )
+    target_attn = SimpleNamespace(
+        kv_cache_dtype="fp8",
+        head_size=576,
+        sliding_window=None,
+        indexer=None,
+        non_causal_multi_token_decode=False,
+        attn_backend=SimpleNamespace(get_name=lambda: "ROCM_AITER_MLA"),
+        _uses_flat_kv_cache=lambda: False,
+    )
+    draft_attn = SimpleNamespace(
+        kv_cache_dtype="fp8", head_size=576, non_causal_multi_token_decode=True
+    )
+    target_spec = MLAAttention.get_kv_cache_spec(target_attn, vllm_config)
+    draft_spec = MultiHeadLatentAttention.get_kv_cache_spec(draft_attn, vllm_config)
+
+    kv_cache_spec = {f"model.layers.{i}.attn": target_spec for i in range(24)}
+    kv_cache_spec |= {f"draft.layers.{i}.attn": draft_spec for i in range(5)}
+
+    groups = _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    assert len(groups) == 1
+    assert len(groups[0].layer_names) == 29

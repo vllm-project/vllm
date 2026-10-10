@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
-from typing_extensions import Self, override
+from typing_extensions import override
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.collection_utils import full_groupby
@@ -178,8 +178,7 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
 
 
 def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, object]]:
-    """
-    Convert string values "inf", "-inf", and "nan" to their float equivalents.
+    """Convert string values "inf", "-inf", and "nan" to their float equivalents.
 
     This handles the case where JSON serialization represents inf/nan as strings.
     """

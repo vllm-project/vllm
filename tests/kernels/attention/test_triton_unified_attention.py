@@ -10,6 +10,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_attention_helpers import (
+    apply_softcap,
     compute_tile_loop_bounds,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
@@ -135,6 +136,7 @@ def ref_paged_attn(
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
+    head_size_v = value_cache.shape[-1]
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
@@ -149,7 +151,7 @@ def ref_paged_attn(
 
         k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
         k = k[:kv_len]
-        v = value_cache[block_indices].view(-1, num_kv_heads, head_size)
+        v = value_cache[block_indices].view(-1, num_kv_heads, head_size_v)
         v = v[:kv_len]
 
         if q.shape[1] != k.shape[1]:
@@ -177,6 +179,53 @@ def ref_paged_attn(
         start_idx += query_len
 
     return torch.cat(outputs, dim=0)
+
+
+@torch.inference_mode()
+def test_fp8_softmax_preserves_small_probabilities() -> None:
+    """Keep exp(-8) contributions that underflow when cast directly to E4M3."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens = block_size = 32
+    head_size = 128
+
+    query = torch.zeros(1, 1, head_size, dtype=FP8_DTYPE, device=device)
+    query[..., 0] = 1
+    key_cache = torch.zeros(1, block_size, 1, head_size, dtype=FP8_DTYPE, device=device)
+    key_cache[:, 1:, :, 0] = -8
+    value_cache = torch.ones_like(key_cache)
+    value_cache[:, 0] = 0
+    output = torch.empty(1, 1, head_size, dtype=torch.bfloat16, device=device)
+
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    seqused_k = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=1,
+        seqused_k=seqused_k,
+        max_seqlen_k=num_tokens,
+        softmax_scale=1.0,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=scale,
+        k_descale=scale,
+        v_descale=scale,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+
+    scores = torch.einsum("qhd,thd->qht", query.float(), key_cache[0].float())
+    probabilities = torch.softmax(scores, dim=-1)
+    expected = torch.einsum("qht,thd->qhd", probabilities, value_cache[0].float())
+
+    torch.testing.assert_close(output.float(), expected, atol=5e-5, rtol=1e-2)
 
 
 def ref_paged_clamped_mm_attn(
@@ -898,3 +947,40 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+@triton.jit
+def _softcap_probe_kernel(
+    scores_ptr,
+    out_ptr,
+    numel,
+    soft_cap,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    scores = tl.load(scores_ptr + offs, mask=mask, other=0.0)
+    tl.store(out_ptr + offs, apply_softcap(scores, soft_cap), mask=mask)
+
+
+@torch.inference_mode()
+def test_softcap_does_not_overflow_on_large_scores() -> None:
+    """Scores above ~88 * soft_cap must not overflow to inf/NaN.
+
+    The exp-based softcap computes ``(exp(y) - exp(-y)) / (exp(y) + exp(-y))``
+    with ``y = S / soft_cap``. For ``|y| > ~88`` the exponentials overflow to
+    ``inf`` and the ratio becomes ``inf / inf = NaN``, poisoning the whole
+    attention row. Gemma-2 style models use ``attn_logit_softcapping = 50``,
+    so scores above 4400 are in range for their large attention logits.
+    """
+    soft_cap = 50.0
+    scores = torch.tensor(
+        [1.0, 100.0, 1000.0, 3000.0, 5000.0, 10000.0, -1.0, -10000.0, 4400.0],
+        device=DEVICE_TYPE,
+        dtype=torch.float32,
+    )
+    out = torch.empty_like(scores)
+    _softcap_probe_kernel[(1,)](scores, out, scores.numel(), soft_cap, BLOCK=16)
+    ref = soft_cap * torch.tanh(scores / soft_cap)
+    assert torch.isfinite(out).all(), out
+    torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)

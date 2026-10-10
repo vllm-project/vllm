@@ -4,7 +4,7 @@
 
 These cover the registry/factory contract and capability flags. They do not
 touch CUDA - the ``cumem`` suspend/resume path is exercised end-to-end on GPU
-in ``tests/basic_correctness/test_cumem.py``.
+in ``tests/basic_correctness/memory/``.
 """
 
 import pytest
@@ -56,6 +56,7 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
+    worker._sleep_saved_parameters = {}
     worker._sleep_saved_buffers = {}
     worker._sleep_saved_draft_buffers = {}
     worker.vllm_config = SimpleNamespace(

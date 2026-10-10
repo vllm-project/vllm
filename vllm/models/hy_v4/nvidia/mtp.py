@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -59,7 +59,7 @@ _MTP_QUANT_EXCLUSION_ATTRS = ("ignored_layers", "exclude_modules")
 
 
 def _get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
+    config: PreTrainedConfig, weight_name: str
 ) -> int | None:
     """Return the MTP layer index a checkpoint weight belongs to, or None.
 
@@ -106,6 +106,7 @@ def _resolve_fused_expert_param(
 
     Returns:
         The matching draft parameter name, or None when there is none.
+
     """
     if not ckpt_suffix:
         return param_base if param_base in params_dict else None
@@ -146,7 +147,7 @@ def _prepare_mtp_fp8_expert_scale(
 
 
 def _create_mtp_quant_config(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     backbone_quant_config: QuantizationConfig | None = None,
 ) -> QuantizationConfig | None:
     """Create the quantization config for the MTP layers.
@@ -164,6 +165,7 @@ def _create_mtp_quant_config(
     Returns:
         The quantization config to use for the MTP layers, or None when the MTP
         layers are unquantized.
+
     """
     mtp_quant_algo = getattr(hf_config, "mtp_quant_algo", None)
 
@@ -241,6 +243,7 @@ def _remap_mtp_quant_exclusions(
 
     Returns:
         A shallow copy with the translated exclusions, or the input unchanged.
+
     """
     if quant_config is None:
         return None
@@ -300,7 +303,7 @@ class HYV4SharedHead(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
@@ -326,7 +329,7 @@ class HYV4MultiTokenPredictorLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
         model_config: ModelConfig,
@@ -671,6 +674,7 @@ class HYV4MTP(nn.Module):
         Returns:
             True when the weight was consumed (even if this rank holds none of
             the addressed experts).
+
         """
         base = name.split(".experts.")[0]
         for ckpt_proj, tag in (

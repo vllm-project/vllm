@@ -35,6 +35,7 @@ def sha256(input: Any) -> bytes:
 
     Returns:
         Bytes representing the SHA-256 hash of the serialized input.
+
     """
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return hashlib.sha256(input_bytes).digest()
@@ -53,6 +54,7 @@ def sha256_cbor(input: Any) -> bytes:
 
     Returns:
         Bytes representing the SHA-256 hash of the CBOR serialized input.
+
     """
     input_bytes = cbor2.dumps(input, canonical=True)
     return hashlib.sha256(input_bytes).digest()
@@ -87,6 +89,7 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
 
     Returns:
         A hash function.
+
     """
     if hash_fn_name == "sha256":
         return sha256
@@ -110,6 +113,7 @@ def safe_hash(data: bytes, usedforsecurity: bool = True) -> HASH:
 
     Returns:
         Hash object
+
     """
     try:
         return hashlib.md5(data, usedforsecurity=usedforsecurity)

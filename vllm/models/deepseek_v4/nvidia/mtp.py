@@ -20,6 +20,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -51,6 +52,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
     _FUSED_MTP_INPUT_RMSNORM_KERNEL,
     _MTP_SHARED_HEAD_RMSNORM_KERNEL,
@@ -62,6 +64,7 @@ from .model import (
     DeepseekV4Model,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
+    prepare_mega_gate_routing_metadata,
 )
 
 logger = init_logger(__name__)
@@ -92,6 +95,9 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
         self.rms_norm_eps = config.rms_norm_eps
+        self.use_native_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -181,8 +187,23 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
+        mega_gate_metadata = None
+        if self.use_native_mega_moe:
+            routing_input_ids = input_ids
+            if self.mtp_block.use_sequence_parallel:
+                routing_input_ids = sp_shard(routing_input_ids)
+            mega_gate_metadata = prepare_mega_gate_routing_metadata(
+                routing_input_ids,
+                has_hash_routing=False,
+                image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
+                if getattr(self.config, "vision_n_layers", 0) > 0
+                else None,
+            )
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            positions=positions, x=hidden_states, input_ids=input_ids
+            positions=positions,
+            x=hidden_states,
+            input_ids=input_ids,
+            mega_gate_metadata=mega_gate_metadata,
         )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
         if self.mtp_block.use_sequence_parallel:
@@ -319,6 +340,26 @@ class DeepSeekV4MTP(nn.Module):
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
+    def _to_spec_layer_name(self, name: str) -> str:
+        """Remap V4 `mtp.{i}.*` names to `model.layers.{num_hidden_layers + i}.*`
+        so that get_spec_layer_idx_from_weight_name can identify them."""
+        mtp_layer_idx = 0
+        for subname in name.split("."):
+            try:
+                # we use the first encountered integer
+                mtp_layer_idx = int(subname)
+                break
+            except ValueError:
+                continue
+        return name.replace(
+            f"mtp.{mtp_layer_idx}.",
+            f"model.layers.{self.config.num_hidden_layers + mtp_layer_idx}.",
+        )
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        name = self._to_spec_layer_name(name)
+        return get_spec_layer_idx_from_weight_name(self.config, name) is None
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Weight name remapping for checkpoint compatibility.
         # Maps checkpoint weight paths to model parameter paths.
@@ -334,16 +375,6 @@ class DeepSeekV4MTP(nn.Module):
                 if old_pattern in name:
                     name = name.replace(old_pattern, new_pattern)
             return name
-
-        def _find_mtp_layer_idx(name: str) -> int:
-            subnames = name.split(".")
-            for subname in subnames:
-                try:
-                    # we return the first encountered integer
-                    return int(subname)
-                except ValueError:
-                    continue
-            return 0
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -365,7 +396,7 @@ class DeepSeekV4MTP(nn.Module):
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_mega_moe:
+        if first_layer.mtp_block.ffn.use_native_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(
                 self.config.n_routed_experts
             )
@@ -388,15 +419,7 @@ class DeepSeekV4MTP(nn.Module):
         )
 
         for name, loaded_weight in weights:
-            mtp_layer_idx = _find_mtp_layer_idx(name)
-            # V4 checkpoints store MTP weights as `mtp.{i}.*`; remap to
-            # `model.layers.{num_hidden_layers + i}.*` so that
-            # get_spec_layer_idx_from_weight_name can identify them.
-            name = name.replace(
-                f"mtp.{mtp_layer_idx}.",
-                f"model.layers.{self.config.num_hidden_layers + mtp_layer_idx}.",
-            )
-
+            name = self._to_spec_layer_name(name)
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -518,8 +541,7 @@ class DeepSeekV4MTP(nn.Module):
         self.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """

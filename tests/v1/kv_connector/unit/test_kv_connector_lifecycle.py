@@ -71,6 +71,7 @@ def test_kv_connector_mixin_clears_metadata():
         assert connector._connector_metadata is None
         # Test connector wrapper records method calls
         assert connector.call_record.get("bind_connector_metadata", 0) == 1
+        assert connector.call_record.get("wait_for_save", 0) == 1
         assert connector.call_record.get("clear_connector_metadata", 0) == 1
     finally:
         # Ensure we clean up the global connector between tests

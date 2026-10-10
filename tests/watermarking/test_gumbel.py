@@ -4,14 +4,17 @@
 import pytest
 import torch
 
+from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarkDetector,
+    DualKeyGumbelWatermarker,
     GumbelWatermarkDetector,
     GumbelWatermarker,
     derive_watermark_key,
 )
 from vllm.v1.watermarking.gumbel import _gamma_survival_integer_shape
+from vllm.v1.watermarking.watermarker import RandomSampler
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 
@@ -39,6 +42,21 @@ def test_detector_deduplicates_context_even_when_target_differs():
     detection = GumbelWatermarkDetector(key=42, context_width=1).detect([1, 2, 1, 3])
 
     assert detection.num_scored_tokens == 3
+
+
+def test_watermarker_respects_filtered_token_support():
+    logits = torch.full((2, 8), -torch.inf)
+    logits[0, 3] = 0
+    logits[1, 6] = 0
+    contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
+
+    token_ids = (
+        GumbelWatermarker(key=42)
+        .sample(logits, contexts, lambda values: None)
+        .token_ids
+    )
+
+    assert torch.equal(token_ids, torch.tensor([3, 6]))
 
 
 def test_dual_key_detector_scores_each_token_against_both_keys():
@@ -98,8 +116,12 @@ def test_dual_key_detector_rejects_invalid_alpha():
         DualKeyGumbelWatermarkDetector(key=42, alpha=1.1)
 
 
-def test_dual_key_detector_default_alpha():
-    assert DualKeyGumbelWatermarkDetector(key=42).alpha == 0.2
+def test_dual_key_alpha_defaults_match():
+    config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    watermarker = DualKeyGumbelWatermarker(key=42)
+    detector = DualKeyGumbelWatermarkDetector(key=42)
+
+    assert detector.alpha == watermarker.alpha == config.alpha
 
 
 @pytest.mark.skipif(
@@ -197,3 +219,64 @@ def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool
     )
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
+    torch.manual_seed(0)
+    num_rows, vocab_size, num_steps = 5, 4099, 3
+    logits = torch.randn(num_rows, vocab_size, device="cuda", dtype=torch.float16)
+    temperatures = torch.tensor([0.0, 0.3, 0.5, 1.0, 2.0], device="cuda")
+    processed_logits = logits / torch.where(
+        temperatures == 0, 1, temperatures
+    ).unsqueeze(-1)
+    contexts = torch.randint(0, vocab_size, (num_rows, 4), device="cuda")
+    idx_mapping = torch.arange(num_rows, dtype=torch.int32, device="cuda")
+    seeds = torch.arange(num_rows, dtype=torch.int64, device="cuda") + 10
+    positions = torch.arange(num_rows, dtype=torch.int64, device="cuda") + 20
+    # The skipped rows must divide by a temperature other than 1, or the
+    # unprocessed logits the cache stores are the logits the sampler sees.
+    # Row 0 keeps a greedy row in the skipped set.
+    skip_mask = torch.tensor([True, True, False, False, True], device="cuda")
+    cols = torch.arange(num_rows, dtype=torch.int32, device="cuda") % num_steps
+    cache = torch.zeros(
+        num_rows, num_steps, vocab_size + 1, dtype=logits.dtype, device="cuda"
+    )
+
+    ordinary = gumbel_sample(
+        logits,
+        idx_mapping,
+        temperatures,
+        seeds,
+        positions,
+        apply_temperature=True,
+        is_drafting=True,
+    )
+    watermarked = philox_gumbel_sample(processed_logits, contexts, 42)
+    expected = torch.where(skip_mask, ordinary, watermarked)
+    actual = (
+        GumbelWatermarker(key=42, context_width=4)
+        .sample(
+            processed_logits,
+            contexts,
+            random_sampler=RandomSampler(
+                expanded_idx_mapping=idx_mapping,
+                temperatures=temperatures,
+                seeds=seeds,
+                positions=positions,
+                is_drafting=True,
+                logits_cache=cache,
+                logits_cache_col=cols,
+                logits_cache_source=logits,
+            ),
+            skip_mask=skip_mask,
+        )
+        .token_ids
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    stored = cache[torch.arange(num_rows, device="cuda"), cols.long(), :vocab_size]
+    assert torch.equal(stored.view(torch.int16), logits.view(torch.int16))
+    assert not cache[:, :, -1].any()

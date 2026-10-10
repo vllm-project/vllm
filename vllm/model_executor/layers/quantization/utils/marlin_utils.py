@@ -8,7 +8,6 @@ import numpy
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -23,6 +22,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import num_compute_units
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .quant_utils import pack_cols, unpack_cols
 
@@ -32,6 +32,7 @@ GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
+MARLIN_MAX_BLOCKS_PER_SM = 4
 
 MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
@@ -397,8 +398,7 @@ def check_moe_marlin_supports_layer(
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
-    """
-    Given Marlin packed weight matrices w1_packed, and w2_packed,
+    """Given Marlin packed weight matrices w1_packed, and w2_packed,
     return the MoE intermediate size N
     """
     marlin_tile_size = 16
@@ -408,29 +408,96 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
 def marlin_make_workspace_new(
     device: torch.device,
     max_blocks_per_sm: int = 1,
-    existing: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
     # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = num_compute_units(device.index)
-    size = sms * max_blocks_per_sm
-    # On weight reload, reuse the existing storage so the workspace address
-    # captured by CUDA graphs stays valid.
-    if existing is not None:
-        if (
-            existing.device != device
-            or existing.dtype != torch.int
-            or existing.numel() != size
-        ):
-            raise ValueError(
-                f"Existing Marlin workspace is incompatible "
-                f"(device={existing.device}, dtype={existing.dtype}, "
-                f"numel={existing.numel()}; expected device={device}, "
-                f"dtype={torch.int}, numel={size}). Reload must reuse the "
-                f"workspace storage captured by CUDA graphs."
-            )
-        return existing.zero_()
-    return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
+    return torch.zeros(sms * max_blocks_per_sm, dtype=torch.int, device=device)
+
+
+def get_marlin_workspace(device: torch.device) -> torch.Tensor:
+    """Get zero-initialized locks for the current stream, ubatch, and lane.
+
+    Marlin resets its locks after each call, so ordered calls can reuse them.
+    """
+    from vllm.utils.torch_utils import current_stream
+    from vllm.v1.worker.workspace import (
+        current_workspace_manager,
+        is_workspace_manager_initialized,
+    )
+
+    if not is_workspace_manager_initialized():
+        return marlin_make_workspace_new(device, MARLIN_MAX_BLOCKS_PER_SM)
+
+    return current_workspace_manager().get_persistent(
+        ("marlin_locks", current_stream()),
+        (num_compute_units(device.index) * MARLIN_MAX_BLOCKS_PER_SM,),
+        torch.int,
+        zero_init=True,
+    )
+
+
+def _marlin_gemm(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_bias: torch.Tensor | None,
+    b_scales: torch.Tensor,
+    a_scales: torch.Tensor | None,
+    global_scale: torch.Tensor | None,
+    b_zeros: torch.Tensor | None,
+    workspace: torch.Tensor | None,
+    b_q_type_id: int,
+    size_m: int,
+    size_n: int,
+    size_k: int,
+    use_atomic_add: bool = False,
+    use_fp32_reduce: bool = False,
+    is_zp_float: bool = False,
+) -> torch.Tensor:
+    if workspace is None:
+        workspace = get_marlin_workspace(a.device)
+    return torch.ops._C.marlin_gemm(
+        a,
+        None,
+        b_q_weight,
+        b_bias,
+        b_scales,
+        a_scales,
+        global_scale,
+        b_zeros,
+        workspace,
+        b_q_type_id,
+        size_m,
+        size_n,
+        size_k,
+        use_atomic_add,
+        use_fp32_reduce,
+        is_zp_float,
+    )
+
+
+def _marlin_gemm_fake(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_bias: torch.Tensor | None,
+    b_scales: torch.Tensor,
+    a_scales: torch.Tensor | None,
+    global_scale: torch.Tensor | None,
+    b_zeros: torch.Tensor | None,
+    workspace: torch.Tensor | None,
+    b_q_type_id: int,
+    size_m: int,
+    size_n: int,
+    size_k: int,
+    use_atomic_add: bool = False,
+    use_fp32_reduce: bool = False,
+    is_zp_float: bool = False,
+) -> torch.Tensor:
+    dtype = a.dtype if a.dtype in (torch.float16, torch.bfloat16) else b_scales.dtype
+    return torch.empty((size_m, size_n), device=a.device, dtype=dtype)
+
+
+direct_register_custom_op("marlin_gemm", _marlin_gemm, fake_impl=_marlin_gemm_fake)
 
 
 def marlin_repeat_scales_on_all_ranks(group_size: int, is_row_parallel: bool) -> bool:
@@ -687,7 +754,7 @@ def apply_gptq_marlin_linear(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     weight_zp: torch.Tensor,
-    workspace: torch.Tensor,
+    workspace: torch.Tensor | None,
     wtype: ScalarType,
     output_size_per_partition: int,
     input_size_per_partition: int,
@@ -724,9 +791,8 @@ def apply_gptq_marlin_linear(
 
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
-    output = ops.marlin_gemm(
+    output = torch.ops.vllm.marlin_gemm(
         reshaped_x,
-        None,
         weight,
         bias,
         weight_scale,
@@ -734,7 +800,7 @@ def apply_gptq_marlin_linear(
         None,
         weight_zp,
         workspace,
-        wtype,
+        wtype.id,
         size_m=reshaped_x.shape[0],
         size_n=padded_n,
         size_k=padded_k,

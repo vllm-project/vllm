@@ -24,7 +24,7 @@ def _get_lora_id(
     top_k_num,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns lora_id"""
+    """Returns lora_id."""
     if naive_block_assignment:
         token_idx = pid_m // top_k_num
         return tl.load(token_lora_mapping_ptr + token_idx)
@@ -41,7 +41,7 @@ def _get_expert_id(
     max_loras,
     naive_block_assignment: tl.constexpr,
 ):
-    """Returns expert_id"""
+    """Returns expert_id."""
     if naive_block_assignment:
         return tl.load(expert_ids_ptr + pid_m)
     else:
@@ -61,7 +61,7 @@ def _get_token_offs(
     naive_block_assignment: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
-    """Returns token offsets"""
+    """Returns token offsets."""
     if naive_block_assignment:
         return tl.where(offs == 0, pid_m, num_valid_tokens)
     else:
@@ -76,8 +76,7 @@ _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
 def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
-    """
-    `_LORA_PTR_DICT` collects the required information during `profile_run`,
+    """`_LORA_PTR_DICT` collects the required information during `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
     Refer to:
     https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
@@ -101,9 +100,7 @@ def _adjust_kernel_inputs(
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
-    """
-    helper function to adjust kernel inputs when sorted_token_ids is None
-    """
+    """Helper function to adjust kernel inputs when sorted_token_ids is None."""
     if sorted_token_ids is None:
         stride_tl = 0
         stride_el = 0

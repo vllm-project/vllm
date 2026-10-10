@@ -164,13 +164,12 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
         gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
         fa_raw = torch.empty(num_blocks * fa_spec.page_size_bytes, dtype=torch.int8)
-        gdn_raw = torch.empty(num_blocks * gdn_spec.page_size_bytes, dtype=torch.int8)
+        gdn_block_stride = gdn_spec.page_size_bytes + 64
+        gdn_raw = torch.empty(num_blocks, gdn_block_stride, dtype=torch.int8)
         (fa_cache,) = dense_kv_cache_views(
             fa_raw, fa_spec, num_blocks, 1, KVCacheLayout.LBHNC
         )
-        (gdn_cache,) = dense_kv_cache_views(
-            gdn_raw, gdn_spec, num_blocks, 1, KVCacheLayout.LBHNC
-        )
+        gdn_cache = gdn_raw[:, : gdn_spec.page_size_bytes]
 
         worker.register_kv_caches(
             {
@@ -184,7 +183,7 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
             "model.layers.0.self_attn",
             "model.layers.1.linear_attn",
         ]
-        assert worker.block_len_per_layer == [
+        assert worker.kv_block_len_per_layer == [
             fa_spec.page_size_bytes,
             gdn_spec.page_size_bytes,
         ]
@@ -242,6 +241,8 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages():
     kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
+    # __new__ skips __init__, where this cache is created. register_kv_caches clears it.
+    worker._prepared_transfer_regions = {}
     worker.use_mla = False
     worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
     worker.is_kv_consumer = True
