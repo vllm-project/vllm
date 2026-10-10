@@ -27,10 +27,23 @@ def install() -> None:
 
     autotuner_mod = importlib.import_module("triton.runtime.autotuner")
     Autotuner = autotuner_mod.Autotuner
-    from triton.compiler.errors import CompileTimeAssertionFailure
-    from triton.runtime.errors import OutOfResources, PTXASError
-
-    _invalid_config_errors = (OutOfResources, CompileTimeAssertionFailure, PTXASError)
+    # triton-ascend (NPU) lacks the CUDA-only PTXASError, and some forks
+    # omit CompileTimeAssertionFailure; tolerate both so the deterministic
+    # first-config patch also works on non-CUDA backends.
+    _err_classes = []
+    for _err_path, _err_name in (
+        ("triton.compiler.errors", "CompileTimeAssertionFailure"),
+        ("triton.runtime.errors", "OutOfResources"),
+        ("triton.runtime.errors", "PTXASError"),
+    ):
+        try:
+            _mod = importlib.import_module(_err_path)
+            _err_classes.append(getattr(_mod, _err_name))
+        except (ImportError, AttributeError):
+            pass
+    if not _err_classes:
+        return
+    _invalid_config_errors = tuple(_err_classes)
     _picked_cache: dict[tuple, int] = {}
     seen_kernels: set[str] = set()
 
