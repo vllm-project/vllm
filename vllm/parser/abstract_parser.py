@@ -22,7 +22,9 @@ from xgrammar.structural_tag import (
 )
 
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
@@ -786,8 +788,16 @@ class DelegatingParser(Parser):
     def _append_unstreamed_tool_args(
         self,
         delta_message: DeltaMessage | None,
-    ) -> None:
-        """Append parsed-but-unstreamed tool-call arguments to *delta_message*."""
+    ) -> DeltaMessage | None:
+        """Append parsed-but-unstreamed tool-call arguments to *delta_message*.
+
+        Returns the delta to emit.  The withheld arguments do not depend on
+        the last chunk carrying tool-call content of its own: a truncated
+        stream often ends on a trailing newline (the closing argument tag is
+        followed by ``\n`` in the chat template), which yields no delta at
+        all.  In that case the tail is emitted as its own delta instead of
+        being dropped.
+        """
         if (
             self._tool_parser is not None
             and delta_message
@@ -797,6 +807,24 @@ class DelegatingParser(Parser):
             last_tc.function.arguments = (
                 last_tc.function.arguments or ""
             ) + self._tool_parser.get_remaining_unstreamed_args()
+            return delta_message
+
+        remaining = (
+            self._tool_parser.get_remaining_unstreamed_args()
+            if self._tool_parser is not None
+            else ""
+        )
+        if not remaining:
+            return delta_message
+
+        tail = DeltaToolCall(
+            index=self._tool_parser.current_tool_id,
+            function=DeltaFunctionCall(arguments=remaining),
+        )
+        if delta_message is None:
+            return DeltaMessage(tool_calls=[tail])
+        delta_message.tool_calls = [*(delta_message.tool_calls or []), tail]
+        return delta_message
 
     def finalize_generation(
         self,
@@ -817,8 +845,7 @@ class DelegatingParser(Parser):
                     delta_message = DeltaMessage()
                 delta_message.content = (delta_message.content or "") + promoted
 
-        self._append_unstreamed_tool_args(delta_message)
-        return delta_message
+        return self._append_unstreamed_tool_args(delta_message)
 
     def parse(
         self,

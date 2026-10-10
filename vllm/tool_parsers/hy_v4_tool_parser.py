@@ -379,6 +379,8 @@ class HYV4ToolExtractor:
         self._current_arg_key: str | None = None  # key being collected
         self._current_arg_is_string: bool = False  # is current arg pure string?
         self._streamed_json_len: int = 0  # bytes of JSON already sent
+        # exact JSON text already sent to the client
+        self._streamed_json_prefix: str = ""
 
         self.tool_calls_start_token: str = f"<tool_calls{token_suffix}>"
         self.tool_calls_end_token: str = f"</tool_calls{token_suffix}>"
@@ -410,7 +412,7 @@ class HYV4ToolExtractor:
 
         self.func_args_regex = re.compile(
             rf"{re.escape(self.arg_key_start_token)}(.*?)"
-            rf"{re.escape(self.arg_key_end_token)}"
+            rf"{re.escape(self.arg_key_end_token)}\s*"
             rf"{re.escape(self.arg_value_start_token)}(.*?)"
             rf"{re.escape(self.arg_value_end_token)}",
             re.DOTALL,
@@ -572,6 +574,29 @@ class HYV4ToolExtractor:
         self._current_arg_key = None
         self._current_arg_is_string = False
         self._streamed_json_len = 0
+        self._streamed_json_prefix = ""
+
+    def get_remaining_unstreamed_args(self) -> str:
+        """Return the shortest suffix that closes the streamed arguments.
+
+        Incremental streaming withholds the closing ``}`` until
+        ``</tool_call>`` arrives, and never closes a string value that is
+        still being streamed.  When generation ends early (max_tokens, a stop
+        sequence, client disconnect) the caller holds an unterminated JSON
+        fragment.  Return the suffix that makes the text already streamed
+        parse; the truncated tail of an open string is what the model
+        actually produced and has already been sent.
+        """
+        prefix = self._streamed_json_prefix
+        if self._streaming_tool_name is None or not prefix:
+            return ""
+        for suffix in ("", "}", '"}'):
+            try:
+                json.loads(prefix + suffix)
+            except ValueError:
+                continue
+            return suffix
+        return ""
 
     def extract_tool_calls_streaming(
         self,
@@ -909,6 +934,7 @@ class HYV4ToolExtractor:
             if end > self._streamed_json_len:
                 argument_diff = snapshot[self._streamed_json_len : end]
                 self._streamed_json_len = end
+            self._streamed_json_prefix = snapshot[:end]
 
         # --- construct return dict ---
         if name_new and argument_diff:
@@ -1108,6 +1134,12 @@ class HYV4ToolParser(ToolParser):
                 for tc in result["tool_calls"]
             ],
         )
+
+    def get_remaining_unstreamed_args(self) -> str:
+        """At stream end, close out a tool call whose arguments were only
+        partially streamed -- see
+        ``HYV4ToolExtractor.get_remaining_unstreamed_args``."""
+        return self._extractor.get_remaining_unstreamed_args()
 
     def extract_tool_calls_streaming(
         self,
