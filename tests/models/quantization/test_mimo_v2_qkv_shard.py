@@ -231,3 +231,47 @@ def test_wrong_chunk_count_is_detected():
     )
     assert _relative_l2(_dequantize(*correct), expected) <= TOL
     assert _relative_l2(_dequantize(*wrong), expected) > 5 * TOL
+
+
+def test_qkv_proj_for_absent_layer_is_skipped():
+    """Tensors for layers the model instance does not have must be skipped.
+
+    A checkpoint can carry more decoder layers than the model was built with
+    (``--hf-overrides '{"num_hidden_layers": N}'`` is the common case). The
+    expert and generic branches of ``load_weights`` skip such tensors; the fused
+    fp8 ``qkv_proj`` branch must too, rather than failing in ``get_submodule``.
+    """
+    from vllm.model_executor.models.mimo_v2 import MiMoV2Model
+
+    class _TwoLayerStandIn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([torch.nn.Module() for _ in range(2)])
+
+    model = _TwoLayerStandIn()
+    # params_dict as ``load_weights`` builds it: only the two present layers.
+    params_dict = {
+        f"layers.{i}.self_attn.qkv_proj.{kind}": torch.nn.Parameter(torch.empty(1))
+        for i in range(2)
+        for kind in ("weight", "weight_scale_inv")
+    }
+    pending: dict[str, dict[str, torch.Tensor]] = {}
+    loaded: set[str] = set()
+    fp8 = torch.zeros(4, 4, dtype=FP8_DTYPE)
+    scale = torch.ones(1, 1)
+
+    for kind, tensor in (("weight", fp8), ("weight_scale_inv", scale)):
+        consumed = MiMoV2Model._try_load_fp8_qkv_proj(
+            model,
+            f"layers.7.self_attn.qkv_proj.{kind}",
+            tensor,
+            pending,
+            params_dict,
+            loaded,
+            tp_rank=0,
+            tp_size=1,
+        )
+        assert consumed, "an fp8 qkv_proj tensor must always be consumed"
+
+    assert not pending, "tensors for an absent layer must not be held as pending"
+    assert not loaded, "nothing should have been loaded for an absent layer"
