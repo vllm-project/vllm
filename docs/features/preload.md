@@ -61,9 +61,9 @@ The daemon itself must load from disk; passing `--load-format ipc_cache` to
 3. Before serving anything, the engine and daemon compare a fingerprint of the
    cached weights: checkpoint content (hashed from safetensors metadata, so
    identical weights in different directories still match), model
-   architecture, TP/DP size/rank, dtype, quantization method and config, model
-   revision, and vLLM version. On any mismatch the engine falls back to disk
-   loading (unless `fallback` is disabled).
+   architecture, TP/DP size/rank, dtype, quantization method and config, text
+   RoPE parameters, model revision, and vLLM version. On any mismatch the engine
+   falls back to disk loading (unless `fallback` is disabled).
 4. The engine also verifies the daemon's GPU UUID matches its own device, so a
    stale socket cannot serve weights for the wrong GPU.
 

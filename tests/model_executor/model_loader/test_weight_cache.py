@@ -331,12 +331,11 @@ def test_daemon_rejects_unmappable_parallelism():
         )
 
 
-def test_weight_cache_key_distinguishes_dp_ranks():
-    from dataclasses import replace
-
+@pytest.fixture
+def weight_cache_key():
     from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
 
-    key = WeightCacheKey(
+    return WeightCacheKey(
         checkpoint="ckpt",
         model_arch="Arch",
         tp_size=1,
@@ -344,6 +343,7 @@ def test_weight_cache_key_distinguishes_dp_ranks():
         dtype="bf16",
         quantization=None,
         quant_config_hash="h",
+        rope_parameters_hash="initial",
         revision=None,
         vllm_version="v",
         dp_size=16,
@@ -351,6 +351,12 @@ def test_weight_cache_key_distinguishes_dp_ranks():
         pp_size=2,
         pp_rank=1,
     )
+
+
+def test_weight_cache_key_distinguishes_dp_ranks(weight_cache_key):
+    from dataclasses import replace
+
+    key = weight_cache_key
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
@@ -381,6 +387,7 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
             architectures=["NemotronHForCausalLM"],
             quantization_config=hf_quant_config,
         ),
+        hf_text_config=SimpleNamespace(),
     )
     static_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
     model_config.quantization_config = QuantizationConfigArgs(
@@ -400,6 +407,106 @@ def test_weight_cache_key_distinguishes_nvfp4_activation_override(
     assert static_key.mismatched_fields(
         replace(static_key, quant_config_hash=legacy_hash)
     ) == ["quant_config_hash"]
+
+
+@pytest.mark.parametrize(
+    "nested_text_config", [False, True], ids=["text", "multimodal"]
+)
+@pytest.mark.parametrize(
+    "rope_parameters, expected_mismatches",
+    [
+        ({"rope_type": "default", "rope_theta": 1000000.0}, ["rope_parameters_hash"]),
+        (
+            {"rope_type": "linear", "rope_theta": 10000.0, "factor": 2.0},
+            ["rope_parameters_hash"],
+        ),
+        ({"rope_type": "default", "rope_theta": 10000.0}, []),
+    ],
+    ids=["theta", "scaling", "explicit-defaults"],
+)
+def test_weight_cache_key_checks_effective_rope_parameters(
+    tmp_path, nested_text_config, rope_parameters, expected_mismatches
+):
+    """Daemon rotary buffers must not override the engine's RoPE settings."""
+    from transformers import Qwen2Config, Qwen3VLConfig, Qwen3VLTextConfig
+
+    from vllm.config import ModelConfig
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+
+    if nested_text_config:
+        config = Qwen3VLConfig(
+            architectures=["Qwen3VLForConditionalGeneration"],
+            text_config=Qwen3VLTextConfig(
+                rope_parameters={"rope_type": "default", "rope_theta": 10000.0}
+            ).to_dict(),
+        )
+        overrides = {"text_config": {"rope_parameters": rope_parameters}}
+    else:
+        config = Qwen2Config(architectures=["Qwen2ForCausalLM"])
+        overrides = {"rope_parameters": rope_parameters}
+    config.save_pretrained(tmp_path)
+    kwargs = dict(model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128)
+    daemon_config = ModelConfig(**kwargs)
+    engine_config = ModelConfig(**kwargs, hf_overrides=overrides)
+    daemon_key = WeightCacheKey.from_model_config(daemon_config, 1, 0)
+    engine_key = WeightCacheKey.from_model_config(engine_config, 1, 0)
+
+    assert daemon_key.mismatched_fields(engine_key) == expected_mismatches
+
+
+@pytest.mark.parametrize(
+    "is_reload, rope_hash, tp_rank, expected_mismatches",
+    [
+        (False, "initial", 0, []),
+        (False, "loaded", 0, ["rope_parameters_hash"]),
+        (True, "loaded", 0, []),
+        (True, "initial", 0, []),
+        (True, "different", 0, ["rope_parameters_hash"]),
+        (True, "loaded", 1, ["tp_rank"]),
+    ],
+    ids=[
+        "startup",
+        "startup-rejects-loaded",
+        "reload",
+        "reload-with-initial",
+        "reload-rejects-different",
+        "reload-checks-rank",
+    ],
+)
+def test_daemon_checks_rope_parameters_for_loading_stage(
+    monkeypatch, weight_cache_key, is_reload, rope_hash, tp_rank, expected_mismatches
+):
+    """Reloads also accept post-load RoPE settings without weakening startup checks."""
+    import socket
+    from dataclasses import replace
+
+    import torch
+
+    from vllm.model_executor.model_loader.weight_cache import daemon
+    from vllm.model_executor.model_loader.weight_cache.protocol import recv_msg
+
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server.cache_config = weight_cache_key
+    server.loaded_rope_parameters_hash = "loaded"
+    server.model = torch.nn.Linear(1, 1)
+    server.role = "target"
+    server.global_rank = 0
+    monkeypatch.setattr(daemon, "get_current_device_uuid", lambda: "test-device")
+    request = {
+        "cache_config": replace(
+            weight_cache_key, rope_parameters_hash=rope_hash, tp_rank=tp_rank
+        ),
+        "is_reload": is_reload,
+    }
+    client_socket, server_socket = socket.socketpair()
+    with client_socket, server_socket:
+        client_socket.settimeout(5)
+        server_socket.settimeout(5)
+        server._handle_get_state(server_socket, request)
+        response = recv_msg(client_socket)
+    assert response["status"] == ("mismatch" if expected_mismatches else "ok")
+    if expected_mismatches:
+        assert response["fields"] == expected_mismatches
 
 
 def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
