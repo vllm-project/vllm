@@ -77,8 +77,11 @@ class PoolsideV1ToolParser(ToolParser):
         self.func_detail_regex = re.compile(
             r"<tool_call>\s*([^\n<]+?)\s*\n?\s*(<arg_key>.*?)?</tool_call>", re.DOTALL
         )
+        # The key group cannot cross ``</arg_key>``, so a stray tag never leaks into it.
         self.func_arg_regex = re.compile(
-            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
+            r"<arg_key>([^<]*+(?:<(?!/?arg_key>)[^<]*+)*+)(?:</arg_key>\s*)+"
+            r"<arg_value>(.*?)</arg_value>",
+            re.DOTALL,
         )
 
         if not self.model_tokenizer:
