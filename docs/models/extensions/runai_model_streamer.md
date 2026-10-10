@@ -51,6 +51,28 @@ vllm serve s3://core-llm/Llama-3-8b \
     --load-format runai_streamer
 ```
 
+## Model-specific checkpoint selection
+
+For models exposing `is_unused_checkpoint_weight`, `runai_streamer` skips
+safetensors files containing only unused weights before streaming. It uses the
+same model-owned rule as the default loader, including MTP draft models with
+this hook; it does not assume a particular MTP tensor prefix.
+
+Local checkpoints are selected using safetensors headers. Object-storage
+checkpoints use `model.safetensors.index.json` from the actual weights URI
+(`model_weights` when provided). Only the index is downloaded for selection,
+not a local copy of the weights. Without a hook or a usable index, the original
+file list is retained. Files missing from the index are also retained.
+
+With distributed streaming, ranks agree on the union of required files before
+reading them. If any rank cannot filter, all files are retained. If ranks have
+different prepared file lists, selection is disabled rather than substituting
+another node's local paths.
+
+Selection is file-level: a shard containing both needed and unneeded tensors
+is still streamed in full. This does not reduce an earlier Hugging Face
+checkpoint download, and it does not change `runai_streamer_sharded`.
+
 ## Tunable parameters
 
 You can tune parameters using `--model-loader-extra-config`:
