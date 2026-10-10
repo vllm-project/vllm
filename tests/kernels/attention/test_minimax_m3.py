@@ -2610,6 +2610,7 @@ def test_decode_sparse_attention_correctness(
     error = (actual[:active_tokens].float() - expected.float()).abs()
     assert error.mean().item() < 2.5e-4
     assert error.max().item() < 1.7e-2
+    assert torch.equal(actual[active_tokens:], torch.zeros_like(actual[active_tokens:]))
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
