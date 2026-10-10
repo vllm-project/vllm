@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import os
+import shutil
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, NoReturn
@@ -107,13 +108,45 @@ class DeepGemmQuantScaleFMT(Enum):
         return cached
 
 
+_DEFAULT_CUDA_HOME = "/usr/local/cuda"
+
+
+def _deep_gemm_nvcc_path() -> str | None:
+    """Return the nvcc DeepGEMM's JIT would run, or None if it is missing.
+
+    Mirrors ``deep_jit::CUDA::find_cuda_toolkit()``, which DeepGEMM runs on
+    the first use of any kernel and which asserts when the toolkit is missing.
+    """
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not cuda_home:
+        nvcc = shutil.which("nvcc")
+        cuda_home = (
+            os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
+        )
+    if not os.path.exists(cuda_home):
+        return None
+    nvcc = os.environ.get(
+        "DG_JIT_NVCC_COMPILER", os.environ.get("DJ_JIT_NVCC_COMPILER")
+    ) or os.path.join(cuda_home, "bin", "nvcc")
+    return shutil.which(nvcc)
+
+
 @functools.cache
 def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.support_deep_gemm()
-    return is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
+    if not (is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()):
+        return False
+    if _deep_gemm_nvcc_path() is None:
+        logger.warning_once(
+            "DeepGEMM kernels are disabled: DeepGEMM JIT-compiles its kernels "
+            "with nvcc, which is missing (CUDA_HOME, CUDA_PATH, PATH or "
+            "/usr/local/cuda). Set CUDA_HOME to a CUDA toolkit to enable them."
+        )
+        return False
+    return True
 
 
 @functools.cache
