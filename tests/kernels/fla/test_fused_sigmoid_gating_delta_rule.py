@@ -159,9 +159,10 @@ def test_gdn_decode_explicit_flashinfer_rejects_unsupported_config(
 @pytest.mark.parametrize("backend", ["auto", "triton", "flashinfer"])
 def test_gdn_layer_preserves_loaded_bias_with_flashinfer_dtype(backend, monkeypatch):
     """BF16 checkpoint bias values survive loading into the selected backend."""
+    from transformers import Qwen3NextConfig
+
     from vllm.distributed import parallel_state
     from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
-    from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 
     monkeypatch.setattr(
         parallel_state, "_TP", SimpleNamespace(world_size=2, rank_in_group=1)
