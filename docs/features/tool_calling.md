@@ -474,6 +474,31 @@ Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_temp
     The base model provides general function calling capabilities, but best results
     are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
+### Gemma 4 Models (`gemma4`)
+
+Supported models:
+
+* `google/gemma-4-26B-A4B-it` and other Gemma 4 instruction-tuned checkpoints, including AWQ/GPTQ quants
+
+Gemma 4 emits channel-based reasoning plus a native tool-call syntax that the parser
+extracts directly (no guided decoding needed for `tool_choice="auto"`):
+
+```text
+<|channel|>thought
+...reasoning...<channel|>
+<|tool_call>call:get_weather{location:<|"|>San Francisco<|"|>}<tool_call|>
+```
+
+String arguments are wrapped in `<|"|>` delimiters; numbers and booleans stay bare
+(`count:42,flag:true`); nested dicts and lists are supported.
+
+Flags: `--tool-call-parser gemma4 --reasoning-parser gemma4 --enable-auto-tool-choice`
+
+!!! note
+    Gemma 4 reasoning is disabled by default; pass `enable_thinking: true` in
+    `chat_template_kwargs` (or set `reasoning_effort`) to activate thinking.
+    See [reasoning outputs](./reasoning_outputs.md).
+
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
