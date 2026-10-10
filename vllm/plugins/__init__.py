@@ -84,6 +84,30 @@ def load_general_plugins():
         return
     plugins_loaded = True
 
+    allowed_plugins = envs.VLLM_PLUGINS
+    if allowed_plugins is not None:
+        from importlib.metadata import entry_points
+
+        available_plugins = {
+            p.name
+            for group in (
+                DEFAULT_PLUGINS_GROUP,
+                IO_PROCESSOR_PLUGINS_GROUP,
+                PLATFORM_PLUGINS_GROUP,
+                STAT_LOGGER_PLUGINS_GROUP,
+                ENDPOINT_PLUGINS_GROUP,
+            )
+            for p in entry_points(group=group)
+        }
+        unknown = sorted(set(allowed_plugins) - available_plugins - {""})
+        if unknown:
+            logger.warning(
+                "VLLM_PLUGINS contains %s, which match no installed plugin. "
+                "These entries will be ignored. Available plugins: %s",
+                unknown,
+                sorted(available_plugins),
+            )
+
     plugins = load_plugins_by_group(group=DEFAULT_PLUGINS_GROUP)
     # general plugins, we only need to execute the loaded functions
     for func in plugins.values():
