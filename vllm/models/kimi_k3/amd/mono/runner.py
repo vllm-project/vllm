@@ -13,11 +13,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.distributed import get_tp_group
+from vllm.models.kimi_k3.amd.mono.common.tiles import MAX_TOKENS, TILE_TOKENS
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
-
-MAX_TOKENS = 8  # the x rows fit one CTA's LDS
 
 
 class _State:
@@ -38,17 +37,20 @@ def alloc_scratch(device) -> None:
     from vllm.models.kimi_k3.amd.mono.stages import moe
 
     n = max(
-        kda.scratch_bytes(
-            kda.KdaPreBuild(
-                tokens=MAX_TOKENS,
-                qlen=MAX_TOKENS,
-                nblocks=8,
-                delta=True,
-                state_len=3 + MAX_TOKENS,
+        max(
+            kda.scratch_bytes(
+                kda.KdaPreBuild(
+                    tokens=MAX_TOKENS // length * length,
+                    qlen=length,
+                    nblocks=8,
+                    delta=True,
+                    state_len=3 + TILE_TOKENS,
+                )
             )
+            for length in range(1, TILE_TOKENS + 1)
         ),
-        moe.scratch_bytes(moe.MoeBuild(tokens=MAX_TOKENS)),
-        layer.scratch_bytes(layer.K2Build(tokens=MAX_TOKENS, nblocks=8)),
+        moe.scratch_bytes(moe.MoeBuild(tokens=moe.MOE_TILE_TOKENS)),
+        layer.scratch_bytes(layer.K2Build(tokens=moe.MOE_TILE_TOKENS, nblocks=8)),
     )
     _State.zero_bytes = (n + 255) // 256 * 256
     _State.scratch = torch.zeros(_State.zero_bytes, dtype=torch.uint8, device=device)
@@ -71,7 +73,9 @@ def peers(device) -> "PeerBuffer":
         from vllm.models.kimi_k3.amd.mono.stages import moe
 
         tp = get_tp_group()
-        nbytes = max(moe.peer_bytes(MAX_TOKENS), layer.peer_bytes(MAX_TOKENS))
+        nbytes = max(
+            moe.peer_bytes(moe.MOE_TILE_TOKENS), layer.peer_bytes(moe.MOE_TILE_TOKENS)
+        )
         buf = PeerBuffer(nbytes, tp.cpu_group, tp.rank_in_group, tp.world_size, device)
         buf.bytes.zero_()
         _State.peers = buf

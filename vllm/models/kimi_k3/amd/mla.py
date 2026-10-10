@@ -7,6 +7,7 @@ from typing import cast
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
@@ -36,6 +37,7 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         attn = self.mla_attn
         if not (
             rocm_aiter_ops.is_mla_enabled()
+            and not is_breakable_cudagraph_enabled()
             and attn.kv_cache_dtype.startswith("fp8")
             and self.kv_lora_rank == _OPT_KV_LORA_RANK
             and self.qk_rope_head_dim == _OPT_ROT_DIM

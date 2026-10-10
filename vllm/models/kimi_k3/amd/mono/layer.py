@@ -171,7 +171,9 @@ def build(key: K2Build):
     if key in _BUILDS:
         return _BUILDS[key]
     s, ns = key.tokens, key.nblocks + 1
-    assert 1 <= s <= 8
+    assert 1 <= s <= k2b.MOE_TILE_TOKENS
+    max_u = s * k2b.TOPK
+    route_rows = 8 if s <= 8 else k2b.MOE_TILE_TOKENS
     lay = scratch_layout(key)
     play = peer_layout(s)
     half = peer_bytes(s) // 2
@@ -180,13 +182,17 @@ def build(key: K2Build):
     class RouteLds:
         route: fx.Array[fx.Int32, s * 2 * k2b.TOPK, 16]
         flag: fx.Array[fx.Int32, k2b.E, 16]
-        expert: fx.Array[fx.Int32, k2b.MAX_U, 16]
-        kof: fx.Array[fx.Int32, k2b.MAX_U * 8, 16]
+        expert: fx.Array[fx.Int32, max_u, 16]
+        kof: fx.Array[fx.Int32, max_u * route_rows, 16]
         scan: fx.Array[fx.Int32, WAVES, 16]
 
     @fx.struct
     class EarlyLds:
-        xl: fx.Array[fx.Int32, s * (HIDDEN + gemv.LDS_PAD) // 2, 16]
+        xl: fx.Array[
+            fx.Int32,
+            s * ((HIDDEN if s <= 8 else 4096) + gemv.LDS_PAD) // 2,
+            16,
+        ]
 
     @fx.struct
     class AttnLds:
@@ -278,6 +284,8 @@ def build(key: K2Build):
             peer[region + "_own"] = shift(preg(own, off, region), fx.Int64(par) * half)
         c = {
             "S": s,
+            "max_u": s * k2b.TOPK,
+            "route_rows": route_rows,
             "NS": ns,
             "NB": key.nblocks,
             "tid": tid,

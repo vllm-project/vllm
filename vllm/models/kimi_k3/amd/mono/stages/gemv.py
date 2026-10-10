@@ -92,6 +92,47 @@ def mfmas(lane, wave, xl, xrow, k, s, ops):
     return acc
 
 
+@traced
+def staged_mfmas(c, src, k, ops, cm=0, ldk=None, k0=0):
+    """Stage at most 4096 K columns so 16 token rows fit in LDS."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    ldk = k if ldk is None else ldk
+    if s <= 8 or k <= 4096:
+        xrow = k + LDS_PAD
+        rows_to_lds(tid, src, k, s, c["xl"], xrow, cm, ldk=ldk, k0=k0)
+        return mfmas(lane, wave, c["xl"], xrow, k, s, ops)
+    xrow = 4096 + LDS_PAD
+    g = lane // ROWS
+    t = fx.min(lane % ROWS, s - 1)
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for half in range_constexpr(2):
+        width = min(4096, k - half * 4096)
+        rows_to_lds(tid, src, width, s, c["xl"], xrow, cm, ldk=ldk, k0=k0 + half * 4096)
+        per, n = chunks(width)
+        for i in range_constexpr(per):
+            ch = wave + WAVES * i
+            kk = fx.min(ch, n - 1) * KCH + g * 8
+            for q in range_constexpr(4):
+                xb = fx.Vector(
+                    fx.ptr_load(
+                        c["xl"] + (t * xrow + kk + 32 * q) // 2,
+                        result_type=fx.Vector.make_type(4, fx.Int32),
+                    )
+                )
+                if const_live(per, n):
+                    xb = fx.Vector.from_elements(
+                        [(ch < n).select(xb[d], fx.Int32(0)) for d in range(4)],
+                        fx.Int32,
+                    )
+                acc = mfma_bf16(
+                    ops[half * 4 + i][q].bitcast(fx.BFloat16),
+                    xb.bitcast(fx.BFloat16),
+                    acc,
+                )
+        gpu.barrier()
+    return acc
+
+
 def const_live(per, n):
     """Whether some wave's last chunk is past K (its MFMA must add zero)."""
     return per * WAVES != n

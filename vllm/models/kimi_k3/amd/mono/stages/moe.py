@@ -143,7 +143,7 @@ W13_STEPS = W13_K // 128  # 28
 W2_STEPS = RI // 128  # 3
 DOWN_TASKS = LAT // ROWS  # 224
 DOWN_BATCH = 5  # a wave's experts whose w2 is in flight together
-MAX_U = 8 * TOPK
+MOE_TILE_TOKENS = 16
 TL_POINTS = 8  # start, early, sdown, ug, down, lnorm, up, reduce
 
 _STREAM = fx.Stream(None)
@@ -389,21 +389,17 @@ def early_loads(c, kind, i, q):
 def early_compute(c, kind, i, q, ops):
     """Early task (i, q): x's K slice (the input row, or -- ``xflags`` -- the
     row this launch's AttnRes stage publishes) against ``ops`` -> ``early_out``."""
-    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
+    tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     klen, _ = early_shape(kind)
-    xrow = klen + gemv.LDS_PAD
     if const_expr(c.get("xflags") is not None):
         if tid < c["xflags"]:
             c["poll"]([(c["xrdy"], tid, 1)])
         gpu.barrier()
-        gemv.rows_to_lds(
-            tid, c["xbuf"], klen, s, c["xl"], xrow, CM_DEV, ldk=HIDDEN, k0=q * klen
+        acc = gemv.staged_mfmas(
+            c, c["xbuf"], klen, ops, CM_DEV, ldk=HIDDEN, k0=q * klen
         )
     else:
-        gemv.rows_to_lds(
-            tid, c["args"]["x"], klen, s, c["xl"], xrow, ldk=HIDDEN, k0=q * klen
-        )
-    acc = gemv.mfmas(lane, wave, c["xl"], xrow, klen, s, ops)
+        acc = gemv.staged_mfmas(c, c["args"]["x"], klen, ops, ldk=HIDDEN, k0=q * klen)
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
     early_out(c, kind, i, q, red)
@@ -547,9 +543,9 @@ def load_route(c):
         e = tid + THREADS * i
         if e < E:
             fx.ptr_store(fx.Int32(0), rt["flag"] + e)
-    for i in range_constexpr((MAX_U * 8 + THREADS - 1) // THREADS):
+    for i in range_constexpr((c["max_u"] * c["route_rows"] + THREADS - 1) // THREADS):
         j = tid + THREADS * i
-        if j < MAX_U * 8:
+        if j < c["max_u"] * c["route_rows"]:
             fx.ptr_store(fx.Int32(-1), rt["kof"] + j)
     gpu.barrier()
     if tid < s * TOPK:
@@ -577,7 +573,7 @@ def load_route(c):
         k = tid % TOPK
         e = fx.max(fx.min(fx.ptr_load(rt["route"] + (t * 2 * TOPK + k)), E - 1), 0)
         slot = fx.ptr_load(rt["flag"] + e)
-        fx.ptr_store(fx.Int32(k), rt["kof"] + (slot * 8 + t))
+        fx.ptr_store(fx.Int32(k), rt["kof"] + (slot * c["route_rows"] + t))
     gpu.barrier()
     return uniform(tot)
 
@@ -717,7 +713,7 @@ def stage_ug(c, task, ops):
     gpu.barrier()
     fx.ptr_store(v, c["av"] + tid)
     gpu.barrier()
-    k = fx.ptr_load(rt["kof"] + (slot * 8 + tt))
+    k = fx.ptr_load(rt["kof"] + (slot * c["route_rows"] + tt))
     if live & (col < 4) & (k >= 0):
         scale = (code << 23).bitcast(fx.Float32)
         pk = fx.Int32(0)
@@ -851,7 +847,7 @@ def stage_down(c, rgd, nu, ops0):
         slots = [fx.min(b0 + WAVES * j, nu - 1) for j in range(DOWN_BATCH)]
         for j in range_constexpr(DOWN_BATCH):
             live = (b0 + WAVES * j) < nu
-            k = fx.ptr_load(rt["kof"] + (slots[j] * 8 + t))
+            k = fx.ptr_load(rt["kof"] + (slots[j] * c["route_rows"] + t))
             picked = (k >= 0) & (lane % 16 < s)
             pick = t * TOPK + fx.max(k, 0)
             acc = fx.Vector.filled(4, 0.0, fx.Float32)
@@ -1031,42 +1027,48 @@ def stage_lnorm(c, j):
     task's sum of squares -> rstd -> bf16(acc rstd w) -> LN, LNRDY."""
     s, tid, lane, red = c["S"], c["tid"], c["lane"], c["red"]
     a = c["args"]
-    mine = tid < s * 64
-    t = fx.min(tid // 64, s - 1)
-    cp = tid % 64
-    col = j * 128 + 2 * cp
-    lo, hi = sum_partials(
-        c["poll"],
-        c["peer"]["latr_own"],
-        lambda src: ((src * s + t) * LAT + col) // 2,
-        TP,
-    )
-    lo, hi = bf16_round(lo), bf16_round(hi)
-    sq = wave_sum(lo * lo + hi * hi)
-    if mine & (lane == 0):
-        c["put"](c["lmsq"], j * s + t, sq)
-    gpu.barrier()
-    if mine & (lane < LN_TASKS):
-        v = c["poll"]([(c["lmsq"], lane * s + t, 1)])[0][0]
-        fx.ptr_store(f32_of(v), red + (t * 32 + lane))
-    gpu.barrier()
-    tot = fx.ptr_load(red + t * 32)
-    for q in range_constexpr(1, LN_TASKS):
-        tot = tot + fx.ptr_load(red + (t * 32 + q))
-    r = hw_rsq(tot * fx.Float32(1.0 / LAT) + fx.Float32(c["ln_eps"]))
-    w0 = fx.Float32(
-        fx.BFloat16(bo.buffer_load(rsrc(a["ln_w"]), col, vec_width=1, dtype=T.bf16))
-    )
-    w1 = fx.Float32(
-        fx.BFloat16(bo.buffer_load(rsrc(a["ln_w"]), col + 1, vec_width=1, dtype=T.bf16))
-    )
-    y = (
-        fx.Vector.from_elements([lo * r * w0, hi * r * w1], fx.Float32)
-        .to(fx.BFloat16)
-        .bitcast(fx.Int32)[0]
-    )
-    if mine:
-        bo.buffer_store(y, rsrc(c["ln"]), (t * LAT + col) // 2, cache_modifier=CM_DEV)
+    for batch in range_constexpr((s + WAVES - 1) // WAVES):
+        mine = tid // 64 + batch * WAVES < s
+        t = fx.min(tid // 64 + batch * WAVES, s - 1)
+        cp = tid % 64
+        col = j * 128 + 2 * cp
+        lo, hi = sum_partials(
+            c["poll"],
+            c["peer"]["latr_own"],
+            lambda src, t=t, col=col: ((src * s + t) * LAT + col) // 2,
+            TP,
+        )
+        lo, hi = bf16_round(lo), bf16_round(hi)
+        sq = wave_sum(lo * lo + hi * hi)
+        if mine & (lane == 0):
+            c["put"](c["lmsq"], j * s + t, sq)
+        gpu.barrier()
+        if mine & (lane < LN_TASKS):
+            v = c["poll"]([(c["lmsq"], lane * s + t, 1)])[0][0]
+            fx.ptr_store(f32_of(v), red + (t * 32 + lane))
+        gpu.barrier()
+        tot = fx.ptr_load(red + t * 32)
+        for q in range_constexpr(1, LN_TASKS):
+            tot = tot + fx.ptr_load(red + (t * 32 + q))
+        r = hw_rsq(tot * fx.Float32(1.0 / LAT) + fx.Float32(c["ln_eps"]))
+        w0 = fx.Float32(
+            fx.BFloat16(bo.buffer_load(rsrc(a["ln_w"]), col, vec_width=1, dtype=T.bf16))
+        )
+        w1 = fx.Float32(
+            fx.BFloat16(
+                bo.buffer_load(rsrc(a["ln_w"]), col + 1, vec_width=1, dtype=T.bf16)
+            )
+        )
+        y = (
+            fx.Vector.from_elements([lo * r * w0, hi * r * w1], fx.Float32)
+            .to(fx.BFloat16)
+            .bitcast(fx.Int32)[0]
+        )
+        if mine:
+            bo.buffer_store(
+                y, rsrc(c["ln"]), (t * LAT + col) // 2, cache_modifier=CM_DEV
+            )
+        gpu.barrier()
     publish(c["put"], c["lnrdy"], j, fx.Int32(1), tid == 0)
     gpu.barrier()
 
@@ -1116,23 +1118,24 @@ def stage_up(c, j):
 def stage_reduce(c, j):
     """Columns 128 j ..: FINAL in rank order -> bf16 out."""
     s, tid = c["S"], c["tid"]
-    if tid < s * 64:
-        t = tid // 64
-        cp = tid % 64
-        col = j * 128 + 2 * cp
-        lo, hi = sum_partials(
-            c["poll"],
-            c["peer"]["final_own"],
-            lambda src: ((src * s + t) * HIDDEN + col) // 2,
-            TP,
-        )
-        w = (
-            fx.Vector.from_elements([lo, hi], fx.Float32)
-            .to(fx.BFloat16)
-            .bitcast(fx.Int32)[0]
-        )
-        bo.buffer_store(w, rsrc(c["args"]["out"]), (t * HIDDEN + col) // 2)
-    gpu.barrier()
+    for batch in range_constexpr((s + WAVES - 1) // WAVES):
+        if tid // 64 + batch * WAVES < s:
+            t = tid // 64 + batch * WAVES
+            cp = tid % 64
+            col = j * 128 + 2 * cp
+            lo, hi = sum_partials(
+                c["poll"],
+                c["peer"]["final_own"],
+                lambda src, t=t, col=col: ((src * s + t) * HIDDEN + col) // 2,
+                TP,
+            )
+            w = (
+                fx.Vector.from_elements([lo, hi], fx.Float32)
+                .to(fx.BFloat16)
+                .bitcast(fx.Int32)[0]
+            )
+            bo.buffer_store(w, rsrc(c["args"]["out"]), (t * HIDDEN + col) // 2)
+        gpu.barrier()
 
 
 # ---------------------------------------------------------------- kernel
@@ -1143,7 +1146,9 @@ def build(key: MoeBuild):
     if key in _BUILDS:
         return _BUILDS[key]
     s = key.tokens
-    assert 1 <= s <= 8
+    assert 1 <= s <= MOE_TILE_TOKENS
+    max_u = s * TOPK
+    route_rows = 8 if s <= 8 else MOE_TILE_TOKENS
     lay = scratch_layout(key)
     play = peer_layout(s)
     half = peer_bytes(s) // 2
@@ -1152,13 +1157,17 @@ def build(key: MoeBuild):
     class RouteLds:
         route: fx.Array[fx.Int32, s * 2 * TOPK, 16]
         flag: fx.Array[fx.Int32, E, 16]
-        expert: fx.Array[fx.Int32, MAX_U, 16]
-        kof: fx.Array[fx.Int32, MAX_U * 8, 16]
+        expert: fx.Array[fx.Int32, max_u, 16]
+        kof: fx.Array[fx.Int32, max_u * route_rows, 16]
         scan: fx.Array[fx.Int32, WAVES, 16]
 
     @fx.struct
     class EarlyLds:
-        xl: fx.Array[fx.Int32, s * (HIDDEN + gemv.LDS_PAD) // 2, 16]
+        xl: fx.Array[
+            fx.Int32,
+            s * ((HIDDEN if s <= 8 else 4096) + gemv.LDS_PAD) // 2,
+            16,
+        ]
 
     @fx.struct
     class UgLds:
@@ -1235,6 +1244,8 @@ def build(key: MoeBuild):
             peer[region + "_own"] = shift(preg(own, off, region), fx.Int64(par) * half)
         c = {
             "S": s,
+            "max_u": s * TOPK,
+            "route_rows": route_rows,
             "tid": tid,
             "bid": bid,
             "lane": tid % 64,
@@ -1321,7 +1332,7 @@ def build(key: MoeBuild):
                 n = s * 2 * TOPK
                 if tid < n:
                     bo.buffer_store(fx.ptr_load(c["rt"]["route"] + tid), rsrc(out), tid)
-                if tid < MAX_U:
+                if tid < c["max_u"]:
                     bo.buffer_store(
                         fx.ptr_load(c["rt"]["expert"] + tid), rsrc(out), n + 1 + tid
                     )

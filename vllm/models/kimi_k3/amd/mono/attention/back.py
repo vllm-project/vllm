@@ -221,16 +221,20 @@ def stage_reduce(c, task):
     """Columns 128 task ..: the 8 ranks' partials, rank order, -> bf16 delta in
     LDS (thread: token, column pair)."""
     s, tid = c["S"], c["tid"]
-    if tid < s * (COLS // 2):
-        t = tid // (COLS // 2)
-        cp = tid % (COLS // 2)
-        col = task * COLS + 2 * cp
-        lo, hi = sum_partials(
-            c["poll"], c["ar_own"], lambda src: ((src * s + t) * HIDDEN + col) // 2, TP
-        )
-        fx.ptr_store(bf16_round(lo), c["delta_lds"] + (t * COLS + 2 * cp))
-        fx.ptr_store(bf16_round(hi), c["delta_lds"] + (t * COLS + 2 * cp + 1))
-    gpu.barrier()
+    for batch in range_constexpr((s + WAVES - 1) // WAVES):
+        if tid // (COLS // 2) + batch * WAVES < s:
+            t = tid // (COLS // 2) + batch * WAVES
+            cp = tid % (COLS // 2)
+            col = task * COLS + 2 * cp
+            lo, hi = sum_partials(
+                c["poll"],
+                c["ar_own"],
+                lambda src, t=t, col=col: ((src * s + t) * HIDDEN + col) // 2,
+                TP,
+            )
+            fx.ptr_store(bf16_round(lo), c["delta_lds"] + (t * COLS + 2 * cp))
+            fx.ptr_store(bf16_round(hi), c["delta_lds"] + (t * COLS + 2 * cp + 1))
+        gpu.barrier()
 
 
 _BUILDS: dict = {}

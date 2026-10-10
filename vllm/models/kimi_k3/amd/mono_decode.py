@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM side of the Kimi-K3 mono decode (``VLLM_ROCM_MONO_DECODE=1``, MI355X, TP8).
 
-A spec-verify step runs each decoder layer as two persistent launches:
+A spec-verify step of at most 16 rows uses two persistent launches per layer:
 
 - K1 (``kda_pre``, KDA layers): AttnRes -> in_proj -> f_b -> conv -> the KDA
   recurrence -> the gated norm, writing o_proj's input.
@@ -11,8 +11,10 @@ A spec-verify step runs each decoder layer as two persistent launches:
   all-reduce, up_proj) + the final all-reduce. An MLA layer runs vLLM's
   attention up to o_proj's input, then K2.
 
-Any other batch (prefill, mixed, more than ``MAX_TOKENS`` rows) takes the
-original path; both paths take and return the same tensors.
+For 17..64 rows, KDA layers use K1 followed by the existing projection and
+AITER MoE. K1 needs pure uniform verification with at most 8 tokens per
+request; other attention batches take the original path. Both paths take
+and return the same tensors.
 
 The all-reduces run in-kernel over a peer buffer every TP rank maps. Mailbox
 tags carry a device epoch the model bumps once a forward (``step_begin``, which
@@ -34,6 +36,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.kimi_k3.amd.mono import runner
+from vllm.models.kimi_k3.amd.mono.common.tiles import TILE_TOKENS
 from vllm.models.kimi_k3.amd.mono.runner import MAX_TOKENS
 from vllm.platforms import current_platform
 
@@ -103,7 +106,7 @@ class MonoMoe:
     def eligible(self, x: torch.Tensor) -> bool:
         return (
             self.ok
-            and x.size(0) <= MAX_TOKENS
+            and 1 <= x.size(0) <= 16
             and x.dtype == torch.bfloat16
             and x.is_contiguous()
         )
@@ -144,6 +147,7 @@ class MonoKda:
 
         attn = layer.self_attn
         self.layer = layer
+        self._launches: dict = {}
         # a FULL graph would bake one step's metadata into the launch
         self.ok = (
             is_breakable_cudagraph_enabled()
@@ -181,6 +185,22 @@ class MonoKda:
         _mono_kda_pre(self, prefix_sum, block_residual, prefix_delta, positions, core)
         return core
 
+    def launch(self, key, *, stream, **values):
+        """Compile once; metadata pointers and the stream remain runtime inputs."""
+        import flydsl.compiler as flyc
+
+        from vllm.models.kimi_k3.amd.mono.attention import kda
+
+        args = (*kda.ABI.pack(values), stream)
+        compiled = self._launches.get(key)
+        if compiled is None:
+            # compile() executes the launch while materializing the callable.
+            compiled = flyc.compile(kda.build(key), *args)
+            if compiled is not None:
+                self._launches[key] = compiled
+        else:
+            compiled(*args)
+
 
 def _spec_len(m, s, prefix_sum, prefix_delta, block_residual) -> int | None:
     """The uniform spec length of a pure spec-verify step K1 can serve, else
@@ -197,6 +217,8 @@ def _spec_len(m, s, prefix_sum, prefix_delta, block_residual) -> int | None:
         return None
     idx = m.spec_state_indices_tensor
     L = idx.size(-1)
+    if not 1 <= L <= TILE_TOKENS:
+        return None
     if m.uniform_spec_sequence_length != L or m.num_actual_tokens != s:
         return None
     if m.num_spec_decodes * L != s or s > MAX_TOKENS:
@@ -240,30 +262,46 @@ def _mono_kda_pre(
         onorm_eps=attn.o_norm.eps,
         lower_bound=attn.gate_lower_bound,
         write_idx=layer.block_write_idx if layer.is_block_write_layer else -1,
+        state_rows=s if L == 8 and s in (32, 64) else 0,
     )
     assert kda_pre.scratch_bytes(key) <= runner.scratch_bytes()
-    kda_pre.kda_pre(
+    assert attn.in_proj_qkvgfab.weight.is_contiguous()
+    assert rstate.shape[1:] == (kda_pre.NH, kda_pre.HD, kda_pre.HD)
+    assert rstate.stride(-1) == 1 and rstate.stride(-2) == kda_pre.HD
+    assert rstate.stride(-3) == kda_pre.HD * kda_pre.HD
+    mono_kda.launch(
         key,
-        prefix=prefix_sum,
-        delta=prefix_delta,
-        blocks=block_residual,
-        ares_nw=layer.self_attention_res_norm.weight,
-        ares_qk=layer.self_attention_res_proj.weight.view(kda_pre.HIDDEN),
-        in_nw=layer.input_layernorm.weight,
-        w_in=attn.in_proj_qkvgfab.weight,
-        w_fb=attn.f_b_proj.weight,
-        conv_w=attn.conv1d.weight.view(kda_pre.QKV, 4),
-        conv_state=conv_state,
-        a_log=attn.A_log,
-        dt_bias=attn.dt_bias,
-        on_w=attn.o_norm.weight,
-        rstate=rstate,
-        st_idx=m.spec_state_indices_tensor,
-        num_acc=m.num_accepted_tokens,
-        core_out=core,
-        scratch=runner.scratch(),
+        prefix=prefix_sum.data_ptr(),
+        delta=kda_pre.ptr(prefix_delta),
+        blocks=block_residual.data_ptr(),
+        blk_sm=block_residual.stride(0),
+        blk_sr=block_residual.stride(1),
+        ares_nw=layer.self_attention_res_norm.weight.data_ptr(),
+        ares_qk=layer.self_attention_res_proj.weight.data_ptr(),
+        in_nw=layer.input_layernorm.weight.data_ptr(),
+        w_in=attn.in_proj_qkvgfab.weight.data_ptr(),
+        w_fb=attn.f_b_proj.weight.data_ptr(),
+        conv_w=attn.conv1d.weight.data_ptr(),
+        conv_st=conv_state.data_ptr(),
+        cs_seq=conv_state.stride(0),
+        cs_dim=conv_state.stride(1),
+        cs_tok=conv_state.stride(2),
+        a_log=attn.A_log.data_ptr(),
+        dt_bias=attn.dt_bias.data_ptr(),
+        on_w=attn.o_norm.weight.data_ptr(),
+        rstate=rstate.data_ptr(),
+        rs_seq=rstate.stride(0),
+        st_idx=m.spec_state_indices_tensor.data_ptr(),
+        st_stride=m.spec_state_indices_tensor.stride(0),
+        num_acc=m.num_accepted_tokens.data_ptr(),
+        core_out=core.data_ptr(),
+        x_dbg=0,
+        proj_dbg=0,
+        scratch=runner.scratch().data_ptr(),
         layer=layer.layer_idx,
-        epoch=runner.epoch(),
+        epoch=runner.epoch().data_ptr(),
+        tl=0,
+        stream=torch.cuda.current_stream(),
     )
 
 
@@ -325,7 +363,11 @@ class MonoK2:
         self.moe = layer.mlp._mono_moe
 
     def eligible(self, core: torch.Tensor) -> bool:
-        return core.size(0) <= MAX_TOKENS and core.dtype == torch.bfloat16
+        return (
+            1 <= core.size(0) <= 16
+            and core.dtype == torch.bfloat16
+            and core.is_contiguous()
+        )
 
     def forward(self, core, prefix_sum, block_residual, reset=False):
         """``reset`` (a block-write layer): ``prefix_sum`` is the new prefix's

@@ -30,7 +30,7 @@ differ only in their order.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -67,6 +67,11 @@ from vllm.models.kimi_k3.amd.mono.common.plan import (
     source_digest,
 )
 from vllm.models.kimi_k3.amd.mono.common.sync import Mailbox, publish, sreg
+from vllm.models.kimi_k3.amd.mono.common.tiles import (
+    TILE_TOKENS,
+    tile_layout,
+    token_tiles,
+)
 
 HIDDEN = 7168
 NA = 56  # attn CTAs
@@ -119,6 +124,17 @@ class KdaPreBuild:
     write_idx: int = -1  # a block-write layer's block: the updated prefix stored there
     kda0: int = 0  # the first KDA task's CTA
     xp: int = 0  # experiment switch (timing only)
+    state_rows: int = 0  # zero selects a measured configuration
+
+
+def _state_rows(key: KdaPreBuild) -> int:
+    if key.state_rows:
+        return key.state_rows
+    if key.tokens == 24 and key.qlen == 6:
+        return 32
+    if (key.tokens, key.qlen) in ((48, 4), (50, 5)):
+        return 64
+    return VCH
 
 
 ABI = KernelAbi(
@@ -158,6 +174,11 @@ ABI = KernelAbi(
 
 
 def scratch_layout(key: KdaPreBuild) -> dict:
+    if key.state_rows == 0:
+        key = replace(key, state_rows=_state_rows(key))
+    tile_tokens = 16
+    if key.tokens > tile_tokens:
+        return tile_layout(key, scratch_layout, key.qlen, tile_tokens=tile_tokens)
     s, ns = key.tokens, key.nblocks + 1
     assert s % key.qlen == 0
     pairs = {
@@ -167,7 +188,7 @@ def scratch_layout(key: KdaPreBuild) -> dict:
         "xrdy": NA,
         "proj": s * NPROJ,
         "qk": s * NH * 2 * HD,
-        "onrm": s * NH * NVCH,
+        "onrm": s * NH * (HD // _state_rows(key)),
     }
     lay = pair_layout(pairs.items())
     end = max(o + n for o, n in lay.values())
@@ -557,6 +578,68 @@ def stage_gemv(c, rg, ops):
     gpu.barrier()
 
 
+@traced
+def projection_chunk(c, half, ops0, ops1, acc0, acc1):
+    """One K slice's weights against every row of a token tile."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    if tid < NA:
+        c["poll"]([(c["xrdy"], tid, 1)])
+    gpu.barrier()
+    row = c["XCOLS"] + LDS_PAD
+    count = 4 if half == 0 else 3
+    width = count * WAVES * KCH
+    words = s * width // 8
+    for i in range_constexpr((words + THREADS - 1) // THREADS):
+        e = fx.min(tid + THREADS * i, words - 1)
+        tt = e // (width // 8)
+        kk = e % (width // 8) * 8
+        v = fx.Vector(
+            bo.buffer_load(
+                rsrc(c["xbuf"]),
+                (tt * HIDDEN + half * 4096 + kk) // 2,
+                vec_width=4,
+                dtype=T.i32,
+                cache_modifier=CM_DEV,
+            )
+        )
+        if tid + THREADS * i < words:
+            fx.ptr_store(v, c["xl"] + (tt * row + kk) // 2)
+    gpu.barrier()
+    t, g = fx.min(lane % ROWS, s - 1), lane // ROWS
+    for i in range_constexpr(count):
+        k = (wave + WAVES * i) * KCH + g * 8
+        for q in range_constexpr(4):
+            xb = fx.Vector(
+                fx.ptr_load(
+                    c["xl"] + (t * row + k + 32 * q) // 2,
+                    result_type=fx.Vector.make_type(4, fx.Int32),
+                )
+            ).bitcast(fx.BFloat16)
+            acc0 = mfma_bf16(ops0[i][q].bitcast(fx.BFloat16), xb, acc0)
+            acc1 = mfma_bf16(ops1[i][q].bitcast(fx.BFloat16), xb, acc1)
+    gpu.barrier()
+    return acc0, acc1
+
+
+@traced
+def projection_out(c, rg, acc):
+    """Publish a projection group's bf16 results after the K reduction."""
+    s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
+    fx.ptr_store(acc, c["red"] + (wave * 64 + lane) * 4)
+    gpu.barrier()
+    if (tid < ROWS * s) & (rg < GEMV_TASKS):
+        r, tt = tid % ROWS, tid // ROWS
+        v = bf16r(row_sum(c["red"], r, tt))
+        c["put"](c["proj"], tt * NPROJ + rg * ROWS + r, v)
+        if const_expr(c["debug"]):
+            bo.buffer_store(
+                v.to(fx.BFloat16),
+                rsrc(c["args"]["proj_dbg"]),
+                tt * NPROJ + rg * ROWS + r,
+            )
+    gpu.barrier()
+
+
 # ---------------------------------------------------------------- kda
 def kda_stage(c, req, h, ch):
     """The task's inputs that need no hand-off, issued before its first poll:
@@ -572,10 +655,10 @@ def kda_stage(c, req, h, ch):
     k["slots"] = [
         uniform(ld_i32(a["st_idx"], req * a["st_stride"] + j)) for j in range(L)
     ]
-    # conv: thread < 48 owns channel (part, d)
-    ct = fx.min(tid, 3 * VCH - 1)
-    part = ct // VCH
-    chan = part * PROJ + h * HD + ch * VCH + ct % VCH
+    # The first 3 * VCH threads own the q, k and v conv channels.
+    ct = fx.min(tid, 3 * c["VCH"] - 1)
+    part = ct // c["VCH"]
+    chan = part * PROJ + h * HD + ch * c["VCH"] + ct % c["VCH"]
     cs = a["conv_st"] + fx.Int64(fx.max(k["slot_c"], 0)) * fx.Int64(a["cs_seq"]) * 2
     co = chan * a["cs_dim"]  # the channel's first entry (bf16 elements)
     k["cs"], k["co"], k["chan"], k["part"] = cs, co, chan, part
@@ -589,13 +672,18 @@ def kda_stage(c, req, h, ch):
         ld_bf(cs, co + (k["acc_idx"] + 1 + j) * a["cs_tok"]) for j in range(sl - L)
     ]
     # recurrence: thread -> state row v = tid / 32, k columns (tid % 32) 4 ..
-    vr = ch * VCH + tid // 32
+    vr = ch * c["VCH"] + tid // 32
     k0 = (tid % 32) * 4
     k["head_off"] = (h * HD + vr) * HD + k0
     base0 = a["rstate"] + fx.Int64(fx.max(k["slot0"], 0)) * fx.Int64(a["rs_seq"]) * 4
-    k["st"] = fx.Vector(
-        bo.buffer_load(rsrc(base0), k["head_off"], vec_width=4, dtype=T.f32)
-    )
+    k["st"] = [
+        fx.Vector(
+            bo.buffer_load(
+                rsrc(base0), k["head_off"] + r * 16 * HD, vec_width=4, dtype=T.f32
+            )
+        )
+        for r in range(c["VCH"] // 16)
+    ]
     # f_b: wave w's rows 16 w .. of head h, a lane 64 B of its row
     fr = h * HD + wave * 16 + lane % 16
     fb = (fr * HD + (lane // 16) * 32) // 2
@@ -618,7 +706,7 @@ def kda_conv(c, k, req, h, ch):
     L, sl, tid = c["L"], c["SL"], c["tid"]
     a = c["args"]
     stamp(c["on"], c["tls"], tid, 12)
-    if tid < 3 * VCH:
+    if tid < 3 * c["VCH"]:
         xs = c["poll"](
             [(c["proj"], (req * L + j) * NPROJ + k["chan"], 1) for j in range(L)]
         )
@@ -647,12 +735,12 @@ def kda_conv(c, k, req, h, ch):
                     c["qk"],
                     ((req * NH + h) * L + j) * 2 * HD
                     + k["part"] * HD
-                    + ch * VCH
-                    + tid % VCH,
+                    + ch * c["VCH"]
+                    + tid % c["VCH"],
                     o,
                 )
             if k["part"] == 2:
-                fx.ptr_store(o, c["vloc"] + (j * VCH + tid % VCH))
+                fx.ptr_store(o, c["vloc"] + (j * c["VCH"] + tid % c["VCH"]))
     gpu.barrier()
 
 
@@ -718,65 +806,84 @@ def kda_gates(c, k, req, h):
 
 @traced
 def kda_recur(c, k, req, h, ch):
-    """State rows 16 ch .. of head h: the recurrence over the L tokens, a state
+    """State rows VCH ch .. of head h: the recurrence over the L tokens, a state
     written a token, bf16 outputs to LDS ``ol`` and their partial norms (ONRM)."""
     L, tid, lane = c["L"], c["tid"], c["lane"]
     a = c["args"]
     v = tid // 32
     k0 = (tid % 32) * 4
     live0 = k["slot0"] > 0
-    stv = [live0.select(k["st"][e], fx.Float32(0.0)) for e in range(4)]
+    stv = [
+        [live0.select(k["st"][r][e], fx.Float32(0.0)) for e in range(4)]
+        for r in range(c["VCH"] // 16)
+    ]
     for j in range_constexpr(L):
         qv = [fx.ptr_load(c["qkl"] + ((2 * j) * HD + k0 + e)) for e in range(4)]
         kv = [fx.ptr_load(c["qkl"] + ((2 * j + 1) * HD + k0 + e)) for e in range(4)]
         dk = [fx.ptr_load(c["decay"] + (j * HD + k0 + e)) for e in range(4)]
-        stv = [stv[e] * dk[e] for e in range(4)]
-        p = stv[0] * kv[0] + stv[1] * kv[1] + stv[2] * kv[2] + stv[3] * kv[3]
-        p = butterfly(p, (16, 8, 4, 2, 1))
-        vn = (fx.ptr_load(c["vloc"] + (j * VCH + v)) - p) * fx.ptr_load(c["beta"] + j)
-        stv = [stv[e] + vn * kv[e] for e in range(4)]
-        o = stv[0] * qv[0] + stv[1] * qv[1] + stv[2] * qv[2] + stv[3] * qv[3]
-        o = bf16r(butterfly(o, (16, 8, 4, 2, 1)))
-        o = live0.select(o, fx.Float32(0.0))
+        beta = fx.ptr_load(c["beta"] + j)
         slot = k["slots"][j]
-        if (slot > 0) & live0:
-            dst = rsrc(a["rstate"] + fx.Int64(slot) * fx.Int64(a["rs_seq"]) * 4)
-            bo.buffer_store(
-                fx.Vector.from_elements(stv, fx.Float32), dst, k["head_off"]
+        for r in range_constexpr(c["VCH"] // 16):
+            stv[r] = [stv[r][e] * dk[e] for e in range(4)]
+            p = (
+                stv[r][0] * kv[0]
+                + stv[r][1] * kv[1]
+                + stv[r][2] * kv[2]
+                + stv[r][3] * kv[3]
             )
-        if lane % 32 == 0:
-            fx.ptr_store(o, c["ol"] + (j * VCH + v))
+            p = butterfly(p, (16, 8, 4, 2, 1))
+            vn = (fx.ptr_load(c["vloc"] + (j * c["VCH"] + v + 16 * r)) - p) * beta
+            stv[r] = [stv[r][e] + vn * kv[e] for e in range(4)]
+            o = (
+                stv[r][0] * qv[0]
+                + stv[r][1] * qv[1]
+                + stv[r][2] * qv[2]
+                + stv[r][3] * qv[3]
+            )
+            o = live0.select(bf16r(butterfly(o, (16, 8, 4, 2, 1))), fx.Float32(0.0))
+            if (slot > 0) & live0:
+                dst = rsrc(a["rstate"] + fx.Int64(slot) * fx.Int64(a["rs_seq"]) * 4)
+                bo.buffer_store(
+                    fx.Vector.from_elements(stv[r], fx.Float32),
+                    dst,
+                    k["head_off"] + r * 16 * HD,
+                )
+            if lane % 32 == 0:
+                fx.ptr_store(o, c["ol"] + (j * c["VCH"] + v + 16 * r))
     gpu.barrier()
     if tid < L:
         ss = fx.Float32(0.0)
-        for e in range_constexpr(VCH):
-            x = fx.ptr_load(c["ol"] + (tid * VCH + e))
+        for e in range_constexpr(c["VCH"]):
+            x = fx.ptr_load(c["ol"] + (tid * c["VCH"] + e))
             ss = ss + x * x
-        c["put"](c["onrm"], ((req * NH + h) * L + tid) * NVCH + ch, ss)
+        c["put"](c["onrm"], ((req * NH + h) * L + tid) * c["NVCH"] + ch, ss)
     gpu.barrier()
 
 
 @traced
 def kda_norm(c, req, h, ch):
-    """Rows 16 ch ..: gated RMSNorm over the head's 128 (every chunk's partial)
+    """Rows VCH ch ..: gated RMSNorm over the head's 128 (every chunk's partial)
     -> core_out."""
     L, tid = c["L"], c["tid"]
     a = c["args"]
-    if tid < L * VCH:
-        j = tid // VCH
-        e = tid % VCH
-        vr = ch * VCH + e
+    if tid < L * c["VCH"]:
+        j = tid // c["VCH"]
+        e = tid % c["VCH"]
+        vr = ch * c["VCH"] + e
         got = c["poll"](
-            [(c["onrm"], ((req * NH + h) * L + j) * NVCH + q, 1) for q in range(NVCH)]
+            [
+                (c["onrm"], ((req * NH + h) * L + j) * c["NVCH"] + q, 1)
+                for q in range(c["NVCH"])
+            ]
             + [(c["proj"], (req * L + j) * NPROJ + G2_0 + h * HD + vr, 1)]
         )
-        ss = sum_polled(got[:NVCH])
+        ss = sum_polled(got[: c["NVCH"]])
         r = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(c["onorm_eps"]))
         y = (
-            fx.ptr_load(c["ol"] + (j * VCH + e))
+            fx.ptr_load(c["ol"] + (j * c["VCH"] + e))
             * r
             * ld_bf(a["on_w"], vr)
-            * sigmoid(f32_of(got[NVCH][0]))
+            * sigmoid(f32_of(got[c["NVCH"]][0]))
         )
         bo.buffer_store(
             y.to(fx.BFloat16), rsrc(a["core_out"]), (req * L + j) * PROJ + h * HD + vr
@@ -785,22 +892,28 @@ def kda_norm(c, req, h, ch):
 
 
 @traced
+def kda_task(c, task, on, tls):
+    tid = c["tid"]
+    req = task // (NH * c["NVCH"])
+    h = (task // c["NVCH"]) % NH
+    ch = task % c["NVCH"]
+    k = kda_stage(c, req, h, ch)
+    stamp(on, tls, tid, 7)
+    kda_conv(c, k, req, h, ch)
+    stamp(on, tls, tid, 8)
+    kda_gates(c, k, req, h)
+    stamp(on, tls, tid, 9)
+    kda_recur(c, k, req, h, ch)
+    stamp(on, tls, tid, 10)
+    kda_norm(c, req, h, ch)
+    stamp(on, tls, tid, 11)
+
+
+@traced
 def kda_tasks(c, on, tls):
-    s, L, tid, bid = c["S"], c["L"], c["tid"], c["bid"]
-    for task in range(first_task(bid, c["kda0"]), (s // L) * NH * NVCH, BLOCKS):
-        req = task // (NH * NVCH)
-        h = (task // NVCH) % NH
-        ch = task % NVCH
-        k = kda_stage(c, req, h, ch)
-        stamp(on, tls, tid, 7)
-        kda_conv(c, k, req, h, ch)
-        stamp(on, tls, tid, 8)
-        kda_gates(c, k, req, h)
-        stamp(on, tls, tid, 9)
-        kda_recur(c, k, req, h, ch)
-        stamp(on, tls, tid, 10)
-        kda_norm(c, req, h, ch)
-        stamp(on, tls, tid, 11)
+    s, L, bid = c["S"], c["L"], c["bid"]
+    for task in range(first_task(bid, c["kda0"]), (s // L) * NH * c["NVCH"], BLOCKS):
+        kda_task(c, task, on, tls)
 
 
 # ---------------------------------------------------------------- kernel
@@ -810,10 +923,25 @@ _BUILDS: dict = {}
 def build(key: KdaPreBuild):
     if key in _BUILDS:
         return _BUILDS[key]
-    s, L = key.tokens, key.qlen
+    state_rows = _state_rows(key)
+    assert state_rows in (16, 32, 64)
+    nvch = HD // state_rows
+    tile_tokens = 16
+    tiles = token_tiles(key.tokens, key.qlen, tile_tokens=tile_tokens)
+    s, L = max(rows for _, rows in tiles), key.qlen
     ns = key.nblocks + 1
-    lay = scratch_layout(key)
-    xrow = HIDDEN + LDS_PAD
+    layouts = [
+        scratch_layout(replace(key, tokens=rows, state_rows=state_rows))
+        for _, rows in tiles
+    ]
+    offsets = []
+    total = 0
+    for layout in layouts:
+        total = (total + 255) // 256 * 256
+        offsets.append(total)
+        total += max(o + n for o, n in layout.values())
+    xcols = 4096 if s > TILE_TOKENS else HIDDEN
+    xrow = xcols + LDS_PAD
     assert s * xrow * 2 <= 136 * 1024, "x rows exceed LDS"
     assert L <= 16 and key.nblocks >= 1
 
@@ -830,8 +958,8 @@ def build(key: KdaPreBuild):
         fa: fx.Array[fx.Float32, L * HD, 16]
         qkl: fx.Array[fx.Float32, L * 2 * HD, 16]
         decay: fx.Array[fx.Float32, L * HD, 16]
-        vloc: fx.Array[fx.Float32, L * VCH, 16]
-        ol: fx.Array[fx.Float32, L * VCH, 16]
+        vloc: fx.Array[fx.Float32, L * state_rows, 16]
+        ol: fx.Array[fx.Float32, L * state_rows, 16]
         beta: fx.Array[fx.Float32, 16, 16]
 
     @fx.union
@@ -847,8 +975,8 @@ def build(key: KdaPreBuild):
 
     keyed = key_tuple(key, _SOURCES)
     name = (
-        f"k3_mono_kda_pre_s{s}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
-        f"_g{int(key.debug)}_t{int(key.timeline)}"
+        f"k3_mono_kda_pre_s{key.tokens}_l{L}_nb{key.nblocks}_d{int(key.delta)}"
+        f"_g{int(key.debug)}_t{int(key.timeline)}_v{state_rows}"
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -891,97 +1019,156 @@ def build(key: KdaPreBuild):
         lds = alloc.allocate(Smem).peek()
         role = alloc.allocate(RoleLds)
         al, gl, kl = role.attn.peek(), role.gemv.peek(), role.kda.peek()
-        mb = Mailbox(step_tag(epoch, layer) - 1)
-        c = {
-            "S": s,
-            "L": L,
-            "NS": ns,
-            "NB": key.nblocks,
-            "SL": key.state_len,
-            "tid": tid,
-            "bid": bid,
-            "lane": tid % 64,
-            "wave": tid // 64,
-            "delta": key.delta,
-            "debug": key.debug,
-            "eps": key.eps,
-            "out_eps": key.out_eps,
-            "onorm_eps": key.onorm_eps,
-            "lb": key.lower_bound,
-            "kda0": key.kda0,
-            "xp": key.xp,
-            "write_idx": key.write_idx,
-            "gate_local": False,
-            "put": mb.put,
-            "poll": mb.poll,
-            "red": lds.red.ptr,
-            "vals": al.vals.ptr,
-            "xl": gl.xl.ptr,
-            "fa": kl.fa.ptr,
-            "qkl": kl.qkl.ptr,
-            "decay": kl.decay.ptr,
-            "vloc": kl.vloc.ptr,
-            "ol": kl.ol.ptr,
-            "beta": kl.beta.ptr,
-            "xbuf": scratch + fx.Int64(lay["x"][0]),
-            "args": {
-                "prefix": prefix,
-                "delta": delta,
-                "blocks": blocks,
-                "blk_sm": blk_sm,
-                "blk_sr": blk_sr,
-                "ares_nw": ares_nw,
-                "ares_qk": ares_qk,
-                "in_nw": in_nw,
-                "w_in": w_in,
-                "w_fb": w_fb,
-                "conv_w": conv_w,
-                "conv_st": conv_st,
-                "cs_seq": cs_seq,
-                "cs_dim": cs_dim,
-                "cs_tok": cs_tok,
-                "a_log": a_log,
-                "dt_bias": dt_bias,
-                "on_w": on_w,
-                "rstate": rstate,
-                "rs_seq": rs_seq,
-                "st_idx": st_idx,
-                "st_stride": st_stride,
-                "num_acc": num_acc,
-                "core_out": core_out,
-                "x_dbg": x_dbg,
-                "proj_dbg": proj_dbg,
-            },
-        }
-        for region in ("part", "wgt", "msq", "xrdy", "proj", "qk", "onrm"):
-            c[region] = sreg(scratch, lay[region][0], region)
+        contexts = []
+        for tile in range_constexpr(len(tiles)):
+            first, s = tiles[tile]
+            lay = layouts[tile]
+            tile_scratch = scratch + fx.Int64(offsets[tile])
+            mb = Mailbox(step_tag(epoch, layer) - 1)
+            c = {
+                "S": s,
+                "XCOLS": xcols,
+                "L": L,
+                "VCH": state_rows,
+                "NVCH": nvch,
+                "NS": ns,
+                "NB": key.nblocks,
+                "SL": key.state_len,
+                "tid": tid,
+                "bid": bid,
+                "lane": tid % 64,
+                "wave": tid // 64,
+                "delta": key.delta,
+                "debug": key.debug,
+                "eps": key.eps,
+                "out_eps": key.out_eps,
+                "onorm_eps": key.onorm_eps,
+                "lb": key.lower_bound,
+                "kda0": key.kda0,
+                "xp": key.xp,
+                "write_idx": key.write_idx,
+                "gate_local": False,
+                "on": key.timeline,
+                "tls": lds.tls.ptr,
+                "put": mb.put,
+                "poll": mb.poll,
+                "red": lds.red.ptr,
+                "vals": al.vals.ptr,
+                "xl": gl.xl.ptr,
+                "fa": kl.fa.ptr,
+                "qkl": kl.qkl.ptr,
+                "decay": kl.decay.ptr,
+                "vloc": kl.vloc.ptr,
+                "ol": kl.ol.ptr,
+                "beta": kl.beta.ptr,
+                "xbuf": tile_scratch + fx.Int64(lay["x"][0]),
+                "args": {
+                    "prefix": prefix + fx.Int64(first * HIDDEN * 2),
+                    "delta": delta + fx.Int64(first * HIDDEN * 2)
+                    if key.delta
+                    else delta,
+                    "blocks": blocks + fx.Int64(first) * fx.Int64(blk_sm) * 2,
+                    "blk_sm": blk_sm,
+                    "blk_sr": blk_sr,
+                    "ares_nw": ares_nw,
+                    "ares_qk": ares_qk,
+                    "in_nw": in_nw,
+                    "w_in": w_in,
+                    "w_fb": w_fb,
+                    "conv_w": conv_w,
+                    "conv_st": conv_st,
+                    "cs_seq": cs_seq,
+                    "cs_dim": cs_dim,
+                    "cs_tok": cs_tok,
+                    "a_log": a_log,
+                    "dt_bias": dt_bias,
+                    "on_w": on_w,
+                    "rstate": rstate,
+                    "rs_seq": rs_seq,
+                    "st_idx": st_idx + fx.Int64(first // L) * fx.Int64(st_stride) * 4,
+                    "st_stride": st_stride,
+                    "num_acc": num_acc + fx.Int64(first // L * 4),
+                    "core_out": core_out + fx.Int64(first * PROJ * 2),
+                    "x_dbg": x_dbg + fx.Int64(first * HIDDEN * 2)
+                    if key.debug
+                    else x_dbg,
+                    "proj_dbg": proj_dbg + fx.Int64(first * NPROJ * 2)
+                    if key.debug
+                    else proj_dbg,
+                },
+            }
+            for region in ("part", "wgt", "msq", "xrdy", "proj", "qk", "onrm"):
+                c[region] = sreg(tile_scratch, lay[region][0], region)
+            contexts.append(c)
         on, tls = key.timeline, lds.tls.ptr
-        c["on"], c["tls"] = on, tls
-        stamp_begin(on, tls, tid, TL_POINTS)
-        if bid < NA:
-            stage_slice(c, bid)
-            stamp(on, tls, tid, 1)
-            if bid < s:
-                stage_gate(c, bid)
-            stamp(on, tls, tid, 2)
-            stage_mix(c, bid)
-            stamp(on, tls, tid, 3)
-        if bid >= NA:
-            gi = bid - NA
-            rg0 = 2 * gi
-            rg1 = 2 * gi + 1
-            ops0 = gemv_loads(c, rg0, range(PER_WAVE))
-            load_x(c)
-            stamp(on, tls, tid, 4)
-            # the second group's first half in flight under the first's MFMAs
-            ops1 = gemv_loads(c, rg1, range(4))
-            stage_gemv(c, rg0, ops0)
-            stamp(on, tls, tid, 5)
-            ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
-            stage_gemv(c, rg1, ops1)
-            stamp(on, tls, tid, 6)
-        kda_tasks(c, on, tls)
-        stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
+        if const_expr(key.tokens > TILE_TOKENS):
+            stamp_begin(on, tls, tid, TL_POINTS)
+            if bid < NA:
+                for tile in range_constexpr(len(tiles)):
+                    c = contexts[tile]
+                    stage_slice(c, bid)
+                    if bid < c["S"]:
+                        stage_gate(c, bid)
+                    stage_mix(c, bid)
+                stamp(on, tls, tid, 3)
+            if bid >= NA:
+                stamp(on, tls, tid, 4)
+                rg0, rg1 = 2 * (bid - NA), 2 * (bid - NA) + 1
+                accs0 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
+                accs1 = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in tiles]
+                for half in range_constexpr(2):
+                    chunks = range(half * 4, min(half * 4 + 4, PER_WAVE))
+                    ops0 = gemv_loads(contexts[0], rg0, chunks)
+                    ops1 = gemv_loads(contexts[0], rg1, chunks)
+                    for tile in range_constexpr(len(tiles)):
+                        accs0[tile], accs1[tile] = projection_chunk(
+                            contexts[tile],
+                            half,
+                            ops0,
+                            ops1,
+                            accs0[tile],
+                            accs1[tile],
+                        )
+                stamp(on, tls, tid, 5)
+                for tile in range_constexpr(len(tiles)):
+                    projection_out(contexts[tile], rg0, accs0[tile])
+                    projection_out(contexts[tile], rg1, accs1[tile])
+                stamp(on, tls, tid, 6)
+            for tile in range_constexpr(len(tiles)):
+                c = contexts[tile]
+                c["kda0"] = (key.kda0 + tiles[tile][0] // L * NH * nvch) % BLOCKS
+                kda_tasks(c, on, tls)
+            stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
+        else:
+            for tile in range_constexpr(len(tiles)):
+                c = contexts[tile]
+                on, tls = key.timeline, lds.tls.ptr
+                c["on"], c["tls"] = on, tls
+                stamp_begin(on, tls, tid, TL_POINTS)
+                if bid < NA:
+                    stage_slice(c, bid)
+                    stamp(on, tls, tid, 1)
+                    if bid < c["S"]:
+                        stage_gate(c, bid)
+                    stamp(on, tls, tid, 2)
+                    stage_mix(c, bid)
+                    stamp(on, tls, tid, 3)
+                if bid >= NA:
+                    gi = bid - NA
+                    rg0 = 2 * gi
+                    rg1 = 2 * gi + 1
+                    ops0 = gemv_loads(c, rg0, range(PER_WAVE))
+                    load_x(c)
+                    stamp(on, tls, tid, 4)
+                    # Prefetch the second group under the first group's MFMAs.
+                    ops1 = gemv_loads(c, rg1, range(4))
+                    stage_gemv(c, rg0, ops0)
+                    stamp(on, tls, tid, 5)
+                    ops1 = ops1 + gemv_loads(c, rg1, range(4, PER_WAVE))
+                    stage_gemv(c, rg1, ops1)
+                    stamp(on, tls, tid, 6)
+                kda_tasks(c, on, tls)
+                stamp_flush(on, tls, tl, tid, bid, TL_POINTS)
 
     @flyc.jit
     def launch(
