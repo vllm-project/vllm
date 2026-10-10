@@ -805,6 +805,7 @@ def _causal_conv1d_update_kernel(
     BLOCK_N: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
+    """Causal conv1d decode step; an invalid accepted count zeroes the output."""
     if launch_pdl:
         tl.extra.cuda.gdc_wait()
 
@@ -838,6 +839,7 @@ def _causal_conv1d_update_kernel(
                 tl.extra.cuda.gdc_launch_dependents()
             return
 
+    max_seqlen = seqlen  # launch-wide max_query_len: the spec-decode state row width
     if IS_VARLEN:
         query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
         query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
@@ -871,9 +873,24 @@ def _causal_conv1d_update_kernel(
         # - accept 1 tokens: [history2, ..., historyM, draft1]
         # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
         # - and so on.
-        conv_state_token_offset = (
-            tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
-        )
+        # num_accepted comes from the previous step, which may have verified more
+        # tokens than this one (dynamic K, trimmed drafts): bound it by the state
+        # row (max_seqlen), not by this request's query length.
+        num_accepted = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64)
+        if (num_accepted < 1) | (num_accepted > max_seqlen):
+            zero = tl.zeros((BLOCK_N,), dtype=tl.float32)
+            for idx_token in tl.range(seqlen):
+                o_ptrs = (
+                    o_ptr
+                    + o_offset
+                    + idx_token * stride_o_token
+                    + idx_feats * stride_o_dim
+                )
+                tl.store(o_ptrs, zero, mask=idx_feats < dim)
+            if launch_pdl:
+                tl.extra.cuda.gdc_launch_dependents()
+            return
+        conv_state_token_offset = num_accepted - 1
     else:
         conv_state_token_offset = 0
 
