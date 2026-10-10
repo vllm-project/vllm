@@ -66,6 +66,27 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+MULTILINE_STRING_FUNCTION_OUTPUT = (
+    'write_file(path="a.py", content="""import os\n\ndef f():\n    return 1\n""")'
+)
+MULTILINE_STRING_FUNCTION_CALL = FunctionCall(
+    name="write_file",
+    arguments='{"path": "a.py", '
+    '"content": "import os\\n\\ndef f():\\n    return 1\\n"}',
+)
+RAW_NEWLINE_STRING_FUNCTION_OUTPUT = "write_file(path='a.txt', content='a\nb')"
+RAW_NEWLINE_STRING_FUNCTION_CALL = FunctionCall(
+    name="write_file",
+    arguments='{"path": "a.txt", "content": "a\\nb"}',
+)
+MULTILINE_CALL_FUNCTION_OUTPUT = (
+    "get_weather(\n    city='San Francisco',\n    metric='celsius'\n)"
+)
+
+COMMA_SEPARATED_CALLS_OUTPUT = (
+    f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}, "
+    f"{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>"
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -180,6 +201,54 @@ TEST_CASES = [
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_nonstreaming",
     ),
+    pytest.param(
+        True,
+        f"<function_calls>{MULTILINE_STRING_FUNCTION_OUTPUT}\n{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
+        [MULTILINE_STRING_FUNCTION_CALL, SIMPLE_FUNCTION_CALL],
+        id="multiline_string_streaming",
+    ),
+    pytest.param(
+        False,
+        f"<function_calls>{MULTILINE_STRING_FUNCTION_OUTPUT}\n{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
+        [MULTILINE_STRING_FUNCTION_CALL, SIMPLE_FUNCTION_CALL],
+        id="multiline_string_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"<function_calls>{RAW_NEWLINE_STRING_FUNCTION_OUTPUT}\n{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
+        [RAW_NEWLINE_STRING_FUNCTION_CALL, SIMPLE_FUNCTION_CALL],
+        id="raw_newline_string_streaming",
+    ),
+    pytest.param(
+        False,
+        f"<function_calls>{RAW_NEWLINE_STRING_FUNCTION_OUTPUT}\n{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
+        [RAW_NEWLINE_STRING_FUNCTION_CALL, SIMPLE_FUNCTION_CALL],
+        id="raw_newline_string_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"<function_calls>{MULTILINE_CALL_FUNCTION_OUTPUT}\n{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
+        [SIMPLE_FUNCTION_CALL, PARAMETERLESS_FUNCTION_CALL],
+        id="multiline_call_streaming",
+    ),
+    pytest.param(
+        False,
+        f"<function_calls>{MULTILINE_CALL_FUNCTION_OUTPUT}\n{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
+        [SIMPLE_FUNCTION_CALL, PARAMETERLESS_FUNCTION_CALL],
+        id="multiline_call_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        COMMA_SEPARATED_CALLS_OUTPUT,
+        [SIMPLE_FUNCTION_CALL, PARAMETERLESS_FUNCTION_CALL],
+        id="comma_separated_calls_streaming",
+    ),
+    pytest.param(
+        False,
+        COMMA_SEPARATED_CALLS_OUTPUT,
+        [SIMPLE_FUNCTION_CALL, PARAMETERLESS_FUNCTION_CALL],
+        id="comma_separated_calls_nonstreaming",
+    ),
 ]
 
 
@@ -203,6 +272,20 @@ def test_tool_call(
     for actual, expected in zip(tool_calls, expected_tool_calls):
         assert actual.type == "function"
         assert actual.function == expected
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_assignment_is_not_a_tool_call(
+    streaming: bool, default_tokenizer: TokenizerLike
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    model_output = f"<function_calls>result = {SIMPLE_FUNCTION_OUTPUT}</function_calls>"
+
+    _, tool_calls = run_tool_extraction(tool_parser, model_output, streaming=streaming)
+
+    assert len(tool_calls) == 0
 
 
 def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
