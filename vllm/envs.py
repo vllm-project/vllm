@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     VLLM_CPU_INT4_W4A8: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
+    VLLM_USE_FUSED_MQA_TOPK: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
@@ -1093,6 +1094,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    # Use the single-launch fused FP8 MQA-logits + top-k kernel for eligible
+    # sparse MLA indexer prefill chunks on SM100-family GPUs (FP8 indexer cache,
+    # 32 index heads, top-k 2048, no DCP/PCP). Falls back to the dense path
+    # otherwise. Default: off.
+    "VLLM_USE_FUSED_MQA_TOPK": lambda: bool(
+        int(os.getenv("VLLM_USE_FUSED_MQA_TOPK", "0"))
+    ),
     # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
     # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.
     # Default: 512 MB

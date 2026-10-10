@@ -10,6 +10,11 @@ import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    FUSED_MQA_TOPK_MAX_KEYS,
+    FUSED_MQA_TOPK_MAX_ROWS,
+    fused_mqa_topk_available,
+)
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -1299,6 +1304,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        use_fused_mqa_topk: bool = False,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
@@ -1308,8 +1314,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
 
+        With ``use_fused_mqa_topk`` the fused MQA+top-k kernel needs no logits
+        buffer: chunks whose gathered keys fit its 1M-key limit are bounded by
+        its 16384-row limit instead of the logits budget (one fused call per
+        chunk). Requests are never packed past that key limit, so only a single
+        request longer than 1M keys takes the dense, logits-budget path (the
+        profiling run relies on this to skip the dense logits reservation).
+
         Returns list of (req_slice, query_slice) tuples.
         """
+
+        def fused(n: int) -> bool:
+            return use_fused_mqa_topk and n <= FUSED_MQA_TOPK_MAX_KEYS
+
         chunks: list[tuple[slice, slice]] = []
         n = len(compressed_seq_lens_cpu)
         max_logits_elems = max_logits_bytes // 4
@@ -1324,7 +1341,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
-                if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
+                if fused(new_n):
+                    fits = new_m <= FUSED_MQA_TOPK_MAX_ROWS
+                else:
+                    fits = not use_fused_mqa_topk and new_m * new_n <= max_logits_elems
+                if new_n <= workspace_size and fits:
                     chunk_m, chunk_n = new_m, new_n
                     end += 1
                 else:
@@ -1343,6 +1364,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             max_q = (
                 max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
             )
+            if fused(chunk_n):
+                max_q = FUSED_MQA_TOPK_MAX_ROWS
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
@@ -1472,12 +1495,24 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     request_offset=num_decodes,
                 )
             else:
+                chunk_options = {}
+                if (
+                    envs.VLLM_USE_FUSED_MQA_TOPK
+                    and current_platform.is_cuda()
+                    and current_platform.is_device_capability_family(100)
+                    and not self.indexer_uses_fp4
+                    and self.dcp_world_size == 1
+                    and self.pcp_world_size == 1
+                    and fused_mqa_topk_available()
+                ):
+                    chunk_options["use_fused_mqa_topk"] = True
                 chunk_specs = self._split_indexer_prefill_chunks(
                     self._prefill_split_seq_lens(compressed_seq_lens_cpu[num_decodes:]),
                     prefill_query_lens_cpu,
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
+                    **chunk_options,
                 )
 
             chunks = []

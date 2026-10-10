@@ -1583,6 +1583,22 @@ endif()
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/deepgemm.cmake)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+      cuda_archs_loose_intersection(FUSED_MQA_ARCHS "10.0f" "${CUDA_ARCHS}")
+      if(FUSED_MQA_ARCHS)
+        set(FUSED_MQA_SRC "csrc/libtorch_stable/fused_mqa_topk/fused_mqa_topk.cu")
+        set_gencode_flags_for_srcs(SRCS "${FUSED_MQA_SRC}" CUDA_ARCHS "${FUSED_MQA_ARCHS}")
+        set_property(SOURCE ${FUSED_MQA_SRC} APPEND PROPERTY INCLUDE_DIRECTORIES
+          "${deepgemm_SOURCE_DIR}/deep_gemm/include"
+          "${deepgemm_SOURCE_DIR}/third-party/cutlass/include")
+        # Single-launch fused MQA-logits + top-k prefill kernel.
+        set_property(SOURCE ${FUSED_MQA_SRC} APPEND PROPERTY COMPILE_OPTIONS
+          "-O3" "--expt-relaxed-constexpr" "--expt-extended-lambda")
+        target_sources(_C_stable_libtorch PRIVATE ${FUSED_MQA_SRC})
+        target_compile_definitions(_C_stable_libtorch PRIVATE VLLM_ENABLE_FUSED_MQA_TOPK=1)
+      endif()
+    endif()
+
     include(cmake/external_projects/deepselect.cmake)
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
