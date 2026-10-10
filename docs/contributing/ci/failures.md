@@ -83,7 +83,7 @@ To clean an already-downloaded log:
 [.buildkite/scripts/ci-clean-log.sh](../../../.buildkite/scripts/ci-clean-log.sh)
 
 ```bash
-./ci-clean-log.sh ci.log
+.buildkite/scripts/ci-clean-log.sh ci.log
 ```
 
 Use a tool [wl-clipboard](https://github.com/bugaevc/wl-clipboard) for quick copy-pasting:
@@ -106,7 +106,7 @@ CI test failures may be flaky. Use a bash loop to run repeatedly:
 [.buildkite/scripts/rerun-test.sh](../../../.buildkite/scripts/rerun-test.sh)
 
 ```bash
-./rerun-test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]
+.buildkite/scripts/rerun-test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]
 ```
 
 ## Submitting a PR
