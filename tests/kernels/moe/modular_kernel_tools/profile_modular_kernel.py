@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import json
 from collections.abc import Callable
 from itertools import product
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
@@ -43,14 +45,28 @@ def do_profile(
         with_stack=True,
         record_shapes=True,
     ) as tprof:
-        fn(**fn_kwargs)
         device = torch.accelerator.current_device_index()
+        # Sync before fn() to fix profiler startup jitter, otherwise it will skew the dispatch
+        # (dist is always initialized from parallel_launch_with_config)
+        dist.barrier()
+        torch.accelerator.synchronize(device)
+        with torch.profiler.record_function("mk_profile"):
+            fn(**fn_kwargs)
         torch.accelerator.synchronize(device)
 
     # TODO (varun): Add a descriptive trace file name
-    tprof.export_chrome_trace(
-        f"{config.torch_trace_dir_path}/m{config.M}_{pgi.rank}_trace.json"
-    )
+    trace_path = f"{config.torch_trace_dir_path}/m{config.M}_{pgi.rank}_trace.json"
+    tprof.export_chrome_trace(trace_path)
+    # Re-load the trace and strip the barrier from the trace so it is not counted as otherNccl.
+    with open(trace_path) as f:
+        trace = json.load(f)
+    events = trace["traceEvents"]
+    t0 = next(e["ts"] for e in events if e.get("name") == "mk_profile")
+    trace["traceEvents"] = [
+        e for e in events if e.get("ph") == "M" or e.get("ts", t0) >= t0
+    ]
+    with open(trace_path, "w") as f:
+        json.dump(trace, f)
 
 
 def profile_modular_kernel(
