@@ -21,6 +21,9 @@ from vllm.entrypoints.generate.base.serving import (
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
+from vllm.entrypoints.openai.completion.packed_logprobs import (
+    create_packed_completion_logprobs,
+)
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -380,15 +383,23 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
                     if request.logprobs is not None:
                         assert out_logprobs is not None, "Did not output logprobs"
-                        logprobs = self._create_completion_logprobs(
-                            token_ids=delta_token_ids,
-                            top_logprobs=out_logprobs,
-                            num_output_top_logprobs=request.logprobs,
-                            tokenizer=tokenizer,
-                            logprob_token_ids=request.logprob_token_ids,
-                            initial_text_offset=next_text_offsets[i],
-                            return_as_token_id=request.return_tokens_as_token_ids,
-                        )
+                        if request.return_top_k_logprobs:
+                            logprobs = create_packed_completion_logprobs(
+                                delta_token_ids,
+                                out_logprobs,
+                                request.logprobs,
+                                initial_text_offset=next_text_offsets[i],
+                            )
+                        else:
+                            logprobs = self._create_completion_logprobs(
+                                token_ids=delta_token_ids,
+                                top_logprobs=out_logprobs,
+                                num_output_top_logprobs=request.logprobs,
+                                tokenizer=tokenizer,
+                                logprob_token_ids=request.logprob_token_ids,
+                                initial_text_offset=next_text_offsets[i],
+                                return_as_token_id=request.return_tokens_as_token_ids,
+                            )
                         # Advance by the tokens just reported, not by delta_text:
                         # text held back for stop strings lags the tokens.
                         if logprobs.tokens:
@@ -559,7 +570,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     out_logprobs = output.logprobs
                     output_text = output.text
 
-                if request.logprobs is not None:
+                if request.return_top_k_logprobs:
+                    logprobs = create_packed_completion_logprobs(
+                        token_ids, out_logprobs, request.logprobs
+                    )
+                elif request.logprobs is not None:
                     assert out_logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_completion_logprobs(
                         token_ids=token_ids,
