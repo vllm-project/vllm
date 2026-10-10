@@ -791,7 +791,9 @@ def blackwell_selection():
             return_value=DeviceCapability(10, 0),
         ),
         patch(
-            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            # get_flash_attn_version() imports this inside the call, so the
+            # patch has to land on the defining module, not on fa_utils.
+            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
             return_value=True,
         ),
     ):
@@ -807,7 +809,9 @@ def hopper_selection():
             return_value=DeviceCapability(9, 0),
         ),
         patch(
-            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            # get_flash_attn_version() imports this inside the call, so the
+            # patch has to land on the defining module, not on fa_utils.
+            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
             return_value=True,
         ),
     ):
@@ -817,8 +821,9 @@ def hopper_selection():
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("flash_attn_version", [None, 3, 4])
+@pytest.mark.parametrize("native_mm_prefix", [False, True])
 def test_hopper_mm_prefix_selects_triton_flash_attn(
-    use_mm_prefix, flash_attn_version, hopper_selection
+    use_mm_prefix, flash_attn_version, native_mm_prefix, hopper_selection
 ):
     """Hopper selects the composite when its causal route resolves FA3 or FA4."""
     from vllm.engine.arg_utils import EngineArgs
@@ -828,7 +833,13 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
         dtype="bfloat16",
         attention_config=AttentionConfig(flash_attn_version=flash_attn_version),
     ).create_engine_config()
-    with set_current_vllm_config(config):
+    with (
+        patch(
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+            return_value=object if native_mm_prefix else None,
+        ),
+        set_current_vllm_config(config),
+    ):
         backend = get_attn_backend(
             256, torch.bfloat16, None, use_mm_prefix=use_mm_prefix
         )
@@ -839,8 +850,9 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
+@pytest.mark.parametrize("native_mm_prefix", [False, True])
 def test_mm_prefix_selects_composite_without_changing_causal_default(
-    use_mm_prefix, kv_cache_dtype, blackwell_selection
+    use_mm_prefix, kv_cache_dtype, native_mm_prefix, blackwell_selection
 ):
     """The image-mask requirement must reach CUDA's automatic backend priority."""
     from vllm.engine.arg_utils import EngineArgs
@@ -848,7 +860,13 @@ def test_mm_prefix_selects_composite_without_changing_causal_default(
     config = EngineArgs(
         model="google/gemma-4-31B-it", dtype="bfloat16"
     ).create_engine_config()
-    with set_current_vllm_config(config):
+    with (
+        patch(
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
+            return_value=object if native_mm_prefix else None,
+        ),
+        set_current_vllm_config(config),
+    ):
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
