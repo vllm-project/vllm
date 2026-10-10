@@ -7305,7 +7305,7 @@ class GPUModelRunner(
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
-    ) -> None:
+    ) -> dict[str, torch.Tensor]:
         """Initialize KV cache based on `kv_cache_config`.
 
         Args:
@@ -7314,6 +7314,9 @@ class GPUModelRunner(
             is_profiling: Whether this call is part of a profiling run.
             kv_cache_allocation_context: Context manager the allocation runs
                 inside, e.g. to place the KV cache in a specific memory pool.
+
+        Returns:
+            The KV cache tensors by layer name, for `init_kv_connector`.
 
         """
         kv_cache_config = deepcopy(kv_cache_config)
@@ -7361,8 +7364,12 @@ class GPUModelRunner(
             # validate all draft model layers belong to the same kv cache
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
+        return kv_caches
 
-        if has_kv_transfer_group() and not is_profiling:
+    def init_kv_connector(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Register the KV caches with the KV connector. The worker calls this
+        outside its runtime pool, so connector buffers survive sleep/wake."""
+        if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)

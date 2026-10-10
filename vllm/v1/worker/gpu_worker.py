@@ -858,10 +858,13 @@ class Worker(WorkerBase):
             else self._maybe_get_memory_pool_context(tag="runtime")
         )
         with runtime_pool:
-            self.model_runner.initialize_kv_cache(
+            kv_caches = self.model_runner.initialize_kv_cache(
                 kv_cache_config,
                 kv_cache_allocation_context=mem_pool_context,
             )
+        # Outside the runtime pool: memory the connector registers for RDMA
+        # must stay where it is across sleep/wake.
+        self.model_runner.init_kv_connector(kv_caches)
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch

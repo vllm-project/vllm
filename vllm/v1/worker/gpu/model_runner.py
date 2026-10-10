@@ -600,7 +600,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
-    ) -> None:
+    ) -> dict[str, torch.Tensor]:
         # GPUWorker finalizes the PD interleave before KV cache initialization.
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
@@ -787,14 +787,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
-        else:
-            self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
-
+        elif self.vllm_config.aux_output_config.enabled:
             # AuxOutput connector requires resolved kv_cache_config.
-            if self.vllm_config.aux_output_config.enabled:
-                self.aux_output_connector = get_aux_output_connector(
-                    self.model, self.vllm_config, kv_cache_config
-                )
+            self.aux_output_connector = get_aux_output_connector(
+                self.model, self.vllm_config, kv_cache_config
+            )
+        return kv_caches_dict
+
+    def init_kv_connector(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Register the KV caches with the KV connector. The worker calls this
+        outside its runtime pool, so connector buffers survive sleep/wake."""
+        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
