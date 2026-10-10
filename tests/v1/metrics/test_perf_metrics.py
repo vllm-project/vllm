@@ -519,24 +519,26 @@ def test_model_metrics_aggregation():
 
 @pytest.mark.parametrize(
     (
+        "is_new_request",
         "num_scheduled_tokens",
         "spec_decode_tokens",
         "expected_num_logits_tokens",
     ),
     [
-        pytest.param(1, [], 1, id="decode"),
-        pytest.param(2, [], 1, id="chunked-prefill"),
-        pytest.param(3, [11, 12], 3, id="speculative-decode"),
-        pytest.param(3, [-1, -1], 3, id="padded-speculative-decode"),
-        pytest.param(4, [11, 12], 1, id="resumed-prefill"),
+        pytest.param(False, 1, [], 1, id="decode"),
+        pytest.param(False, 2, [], 1, id="chunked-prefill"),
+        pytest.param(False, 3, [11, 12], 3, id="speculative-decode"),
+        pytest.param(True, 3, [-1, -1], 3, id="padded-speculative-decode"),
+        pytest.param(True, 4, [11, 12], 1, id="resumed-prefill"),
     ],
 )
-def test_step_perf_stats_classifies_cached_requests(
+def test_step_perf_stats_classifies_requests(
+    is_new_request,
     num_scheduled_tokens,
     spec_decode_tokens,
     expected_num_logits_tokens,
 ):
-    """Test cached request phase classification with speculative tokens."""
+    """Test request phase classification with speculative tokens."""
     model_metrics = ModelMetrics.__new__(ModelMetrics)
     unembed_metrics = UnembedMetrics(
         hidden_size=8,
@@ -546,14 +548,17 @@ def test_step_perf_stats_classifies_cached_requests(
         tp_size=1,
     )
     model_metrics.metrics = [unembed_metrics]
+    new_request = SimpleNamespace(req_id="r0", num_computed_tokens=16)
     scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[],
+        scheduled_new_reqs=[new_request] if is_new_request else [],
         scheduled_cached_reqs=SimpleNamespace(
-            req_ids=["r0"],
-            num_computed_tokens=[16],
+            req_ids=[] if is_new_request else ["r0"],
+            num_computed_tokens=[] if is_new_request else [16],
         ),
         num_scheduled_tokens={"r0": num_scheduled_tokens},
-        scheduled_spec_decode_tokens={"r0": spec_decode_tokens},
+        scheduled_spec_decode_tokens=(
+            {"r0": spec_decode_tokens} if spec_decode_tokens else {}
+        ),
     )
 
     perf_stats = model_metrics.get_step_perf_stats_per_gpu(scheduler_output)
