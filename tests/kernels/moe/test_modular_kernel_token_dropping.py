@@ -67,6 +67,37 @@ def make_kernel(monkeypatch, capacity, prepare_finalize=None):
     return kernel, observed
 
 
+def test_deepep_token_drop_stats_are_logged_once(monkeypatch):
+    prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular(expert_capacity=2)
+    prepare_finalize.token_dropping_in_dispatch = True
+    stats = SimpleNamespace(
+        num_tokens=5,
+        num_routable_tokens=4,
+        num_input_assignments=7,
+        num_kept_assignments=3,
+        num_dropped_assignments=4,
+        assignment_drop_rate=4 / 7,
+        num_fully_dropped_tokens=2,
+        fully_dropped_token_rate=1 / 2,
+        num_partially_dropped_tokens=1,
+    )
+    get_stats = Mock(return_value=stats)
+    logger = Mock()
+    logger.isEnabledFor.return_value = True
+    monkeypatch.setattr(mk, "logger", logger)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    prepare_finalize._log_token_drop_stats(
+        SimpleNamespace(get_token_drop_stats=get_stats)
+    )
+    prepare_finalize._log_token_drop_stats(
+        SimpleNamespace(get_token_drop_stats=get_stats)
+    )
+
+    get_stats.assert_called_once_with()
+    logger.info.assert_called_once()
+
+
 @pytest.mark.parametrize("capacity", [None, 0, 1, 2, 8])
 @pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
 def test_dropping_compacts_fully_dropped_standard_rows(
@@ -237,6 +268,91 @@ def test_dispatch_support_controls_batched_physical_capacity(supports_dropping):
     assert scratch13 == (2, rows, 256)
     assert scratch2 == (2, rows, 128)
     assert output == (2, rows, 128)
+
+
+@pytest.mark.parametrize("disable_native", [False, True])
+def test_deepep_capacity_selects_native_or_python_path(monkeypatch, disable_native):
+    pytest.importorskip("deep_ep")
+    from vllm import envs
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
+        DeepEPLLPrepareAndFinalize,
+    )
+
+    monkeypatch.setenv(
+        "VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING", str(int(disable_native))
+    )
+    assert envs.VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING is disable_native
+    capacity = 1
+    dispatcher = DeepEPLLPrepareAndFinalize(
+        SimpleNamespace(supports_token_dropping=True),
+        max_tokens_per_rank=8,
+        num_dispatchers=2,
+        expert_capacity=capacity,
+    )
+    experts = SimpleNamespace(
+        moe_config=SimpleNamespace(
+            expert_capacity=capacity,
+            is_lora_enabled=False,
+            moe_parallel_config=None,
+        ),
+        expert_capacity=None,
+        max_num_tokens=8,
+        supports_batched_compaction=lambda _: True,
+        use_row_major_dispatch_scales=False,
+    )
+    kernel = mk.FusedMoEKernelModularImpl(dispatcher, experts)
+    kernel._configure_compaction()
+
+    assert dispatcher.token_dropping_in_dispatch is not disable_native
+    assert experts.max_num_tokens == (1 if disable_native else 2)
+    assert dispatcher._get_batched_compaction()._compact_tokens == (
+        2 if disable_native else None
+    )
+
+    topk_ids = torch.zeros((3, 1), dtype=torch.int64)
+    topk_weights = torch.tensor([[0.1], [0.9], [0.2]])
+    filtered_ids, filtered_weights, dropped_rows = kernel._drop_tokens(
+        topk_ids, topk_weights
+    )
+    if disable_native:
+        torch.testing.assert_close(
+            filtered_ids, torch.tensor([[-1], [0], [-1]], dtype=torch.int64)
+        )
+        torch.testing.assert_close(
+            filtered_weights, torch.tensor([[0.0], [0.9], [0.0]])
+        )
+        torch.testing.assert_close(dropped_rows, torch.tensor([True, False, True]))
+    else:
+        assert filtered_ids is topk_ids
+        assert filtered_weights is topk_weights
+        assert dropped_rows is None
+
+
+def test_disable_native_deepep_token_dropping_applies_to_all_dispatchers(
+    monkeypatch,
+):
+    pytest.importorskip("deep_ep")
+    from vllm import envs
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
+        DeepEPHTPrepareAndFinalize,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
+        DeepEPLLPrepareAndFinalize,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+        DeepEPV2PrepareAndFinalize,
+    )
+
+    monkeypatch.setenv("VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING", "1")
+    assert envs.VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING
+    buffer = SimpleNamespace(supports_token_dropping=True)
+    dispatchers = [
+        DeepEPHTPrepareAndFinalize(buffer, 2, 2, 0, expert_capacity=1),
+        DeepEPLLPrepareAndFinalize(buffer, 8, 2, expert_capacity=1),
+        DeepEPV2PrepareAndFinalize(buffer, 2, 2, 0, 2, 1, expert_capacity=1),
+    ]
+
+    assert all(not dispatcher.token_dropping_in_dispatch for dispatcher in dispatchers)
 
 
 def test_dropping_rejects_compilation(monkeypatch):

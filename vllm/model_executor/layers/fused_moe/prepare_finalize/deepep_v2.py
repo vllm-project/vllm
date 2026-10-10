@@ -6,6 +6,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -129,6 +130,10 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
+        self.token_dropping_in_dispatch = (
+            getattr(buffer, "supports_token_dropping", False) is True
+            and not envs.VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING
+        )
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -208,13 +213,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 n = tokens.shape[0]
             num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
 
-        (
-            recv_x,
-            recv_topk_idx,
-            recv_topk_weights,
-            handle,
-            event,
-        ) = self.buffer.dispatch(
+        dispatch_result = self.buffer.dispatch(
             x=token_data,
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
@@ -223,7 +222,18 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             do_expand=do_expand,
             do_cpu_sync=do_cpu_sync,
             async_with_compute_stream=False,
+            expert_capacity=(
+                self.expert_capacity if self.token_dropping_in_dispatch else None
+            ),
         )
+        (
+            recv_x,
+            recv_topk_idx,
+            recv_topk_weights,
+            handle,
+            event,
+        ) = dispatch_result
+        self._log_token_drop_stats(handle)
 
         a2a_idx = dbo_current_ubatch_id()
         self.handles[a2a_idx] = handle
@@ -488,6 +498,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_weights=None,
             async_with_compute_stream=combine_async,
             allocate_on_comm_stream=combine_async,
+            expert_capacity=(
+                self.expert_capacity if self.token_dropping_in_dispatch else None
+            ),
         )
 
         if do_async:

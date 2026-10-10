@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from math import prod
+from math import gcd, prod
 from typing import Protocol, final
 
 import torch
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -250,6 +252,41 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     def __init__(self, expert_capacity: int | None = None) -> None:
         self.expert_capacity = expert_capacity
+        self._token_drop_stats_logged = False
+
+    def _log_token_drop_stats(self, handle: object) -> None:
+        if (
+            self.expert_capacity is None
+            or not self.token_dropping_in_dispatch
+            or self._token_drop_stats_logged
+            or not logger.isEnabledFor(logging.INFO)
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return
+
+        get_stats = getattr(handle, "get_token_drop_stats", None)
+        if get_stats is None:
+            return
+
+        stats = get_stats()
+        logger.info(
+            "DeepEP token dropping stats for first dispatch: capacity=%s "
+            "tokens=%d routable_tokens=%d input_assignments=%d "
+            "kept_assignments=%d dropped_assignments=%d "
+            "assignment_drop_rate=%.2f%% fully_dropped_tokens=%d "
+            "fully_dropped_token_rate=%.2f%% partially_dropped_tokens=%d",
+            self.expert_capacity,
+            stats.num_tokens,
+            stats.num_routable_tokens,
+            stats.num_input_assignments,
+            stats.num_kept_assignments,
+            stats.num_dropped_assignments,
+            100 * stats.assignment_drop_rate,
+            stats.num_fully_dropped_tokens,
+            100 * stats.fully_dropped_token_rate,
+            stats.num_partially_dropped_tokens,
+        )
+        self._token_drop_stats_logged = True
 
     def post_init_setup(self, fused_experts: "FusedMoEExperts"):
         """Initialize FusedMoEPrepareAndFinalizeModular settings that depend on
@@ -302,6 +339,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         finalize_async.
         """
         return False
+
+    token_dropping_in_dispatch: bool = False
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -1348,11 +1387,29 @@ class FusedMoEKernelModularImpl:
         if self.prepare_finalize.activation_format == FusedMoEActivationFormat.Standard:
             self.prepare_finalize._configure_standard_compaction(
                 self.expert_capacity,
-                self.prepare_finalize.supports_token_dropping,
+                self.prepare_finalize.supports_token_dropping
+                and not self.prepare_finalize.token_dropping_in_dispatch,
             )
             return
 
         if not self.prepare_finalize.uses_batched_compaction:
+            return
+
+        compact_tokens: int | None = None
+
+        if (
+            self.prepare_finalize.token_dropping_in_dispatch
+            and self.expert_capacity is not None
+        ):
+            max_tokens_per_rank = self.prepare_finalize.max_num_tokens_per_rank()
+            assert max_tokens_per_rank is not None
+            num_dispatchers = self.prepare_finalize.num_dispatchers()
+            compact_tokens = max(1, min(max_tokens_per_rank, self.expert_capacity))
+            # DeepEP TMA requires the packed row count to be 4-aligned.
+            compact_alignment = 4 // gcd(4, num_dispatchers)
+            compact_tokens = round_up(compact_tokens, compact_alignment)
+            assert compact_tokens <= max_tokens_per_rank
+            self.fused_experts.max_num_tokens = compact_tokens
             return
 
         compact_tokens = self.prepare_finalize._configure_batched_compaction(
@@ -1807,7 +1864,13 @@ class FusedMoEKernelModularImpl:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Cap expert assignments without changing token positions."""
         capacity = self.expert_capacity
-        if capacity is None or topk_ids.numel() == 0 or capacity == 0:
+        if capacity is None or topk_ids.numel() == 0:
+            return self._drop_tokens_reference(topk_ids, topk_weights)
+
+        if self.prepare_finalize.token_dropping_in_dispatch:
+            return topk_ids, topk_weights, None
+
+        if capacity == 0:
             return self._drop_tokens_reference(topk_ids, topk_weights)
 
         num_tokens, num_slots = topk_ids.shape

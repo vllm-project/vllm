@@ -57,8 +57,14 @@ class _FakeBuffer:
         topk_weights,
         async_with_compute_stream,
         allocate_on_comm_stream,
+        expert_capacity=None,
     ):
-        self.calls.append({"async_with_compute_stream": async_with_compute_stream})
+        self.calls.append(
+            {
+                "async_with_compute_stream": async_with_compute_stream,
+                "expert_capacity": expert_capacity,
+            }
+        )
         # DeepEP returns a completion event only for an async combine.
         self.last_event = _FakeEvent(has_event=async_with_compute_stream)
         return self.out, None, self.last_event
@@ -92,6 +98,7 @@ def test_finalize_async_defers_join_to_receiver():
     dst = torch.zeros_like(out_src)
     recv = _run(pf, dst, do_async=True)
     assert pf.buffer.calls[0]["async_with_compute_stream"] is True
+    assert pf.buffer.calls[0]["expert_capacity"] is None
     assert not torch.equal(dst, out_src), "join must not happen before receiver"
     recv()
     assert pf.buffer.last_event.waited, "receiver must join via event wait"
@@ -106,6 +113,7 @@ def test_finalize_async_under_dbo_uses_sync_combine(monkeypatch):
     dst = torch.zeros_like(out_src)
     recv = _run(pf, dst, do_async=True)
     assert pf.buffer.calls[0]["async_with_compute_stream"] is False
+    assert pf.buffer.calls[0]["expert_capacity"] is None
     recv()
     assert not pf.buffer.last_event.waited, "no event to wait on for sync combine"
     assert torch.equal(dst, out_src)
@@ -119,4 +127,5 @@ def test_finalize_sync():
     ret = _run(pf, dst, do_async=False)
     assert ret is None
     assert pf.buffer.calls[0]["async_with_compute_stream"] is False
+    assert pf.buffer.calls[0]["expert_capacity"] is None
     assert torch.equal(dst, out_src)

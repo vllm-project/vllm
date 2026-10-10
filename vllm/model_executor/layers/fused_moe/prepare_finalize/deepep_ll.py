@@ -109,6 +109,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         self.global_to_physical = _maybe_cast(global_to_physical)
         self.supports_token_dropping = self.global_to_physical is None
+        self.token_dropping_in_dispatch = (
+            self.supports_token_dropping
+            and getattr(buffer, "supports_token_dropping", False) is True
+            and not envs.VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING
+        )
         self.physical_to_global = _maybe_cast(physical_to_global)
         self.local_expert_global_ids = _maybe_cast(local_expert_global_ids)
 
@@ -297,8 +302,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             a1,
             dispatch_topk_ids,
             self.max_tokens_per_rank,
-            # if self.expert_capacity is None
-            # else self.expert_capacity,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
             round_scale=self.use_ue8m0_dispatch,
@@ -311,7 +314,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             ),
             async_finish=False,
             return_recv_hook=True,
+            expert_capacity=(
+                self.expert_capacity if self.token_dropping_in_dispatch else None
+            ),
+            topk_weights=topk_weights,
         )
+        self._log_token_drop_stats(handle)
         self.handles[a2a_idx] = handle
 
         return (
@@ -414,6 +422,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             zero_copy=False,
             return_recv_hook=do_recv_hook,
             out=output,
+            expert_capacity=(
+                self.expert_capacity if self.token_dropping_in_dispatch else None
+            ),
         )
 
         return recv_hook, receiver

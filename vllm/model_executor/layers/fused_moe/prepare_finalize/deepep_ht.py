@@ -6,6 +6,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -60,6 +61,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
+        self.token_dropping_in_dispatch = (
+            getattr(buffer, "supports_token_dropping", False) is True
+            and not envs.VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING
+        )
         self.async_prepare = True
         self.sync_dbo_comm = current_platform.is_rocm()
         # The dispatch function returns a handle that the combine function
@@ -145,14 +150,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        (
-            token_data,
-            expert_topk_ids,
-            expert_topk_weights,
-            expert_num_tokens_per_expert_list,
-            handle,
-            event,
-        ) = self.buffer.dispatch(
+        dispatch_result = self.buffer.dispatch(
             x=token_data,
             handle=None,
             num_tokens_per_rank=num_tokens_per_rank,
@@ -168,9 +166,21 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             previous_event=previous_event,
             async_finish=self.async_prepare and not dbo_enabled(),
             allocate_on_comm_stream=False,
+            expert_capacity=(
+                self.expert_capacity if self.token_dropping_in_dispatch else None
+            ),
         )
+        (
+            token_data,
+            expert_topk_ids,
+            expert_topk_weights,
+            expert_num_tokens_per_expert_list,
+            handle,
+            event,
+        ) = dispatch_result
 
         self._sync_dbo_comm_if_needed()
+        self._log_token_drop_stats(handle)
 
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
@@ -391,6 +401,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             previous_event=previous_event,
             async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False,
+            expert_capacity=(
+                self.expert_capacity if self.token_dropping_in_dispatch else None
+            ),
         )
 
         self._sync_dbo_comm_if_needed()

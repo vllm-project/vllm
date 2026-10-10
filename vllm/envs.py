@@ -284,6 +284,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
+    VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING: bool = False
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
@@ -1989,6 +1990,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # turn this for better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
+    ),
+    # Fall back to vLLM's Python token dropping and compaction instead of
+    # applying expert capacity in DeepEP dispatch/combine kernels.
+    "VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_DEEPEP_NATIVE_TOKEN_DROPPING", "0"))
     ),
     # DeepEP v2: enable two-tier NVLink+RDMA hybrid mode
     "VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE": lambda: bool(
