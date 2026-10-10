@@ -2391,28 +2391,32 @@ def _make_host_buffer_worker(copy_op):
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_block_ids,expected_ids",
+    "group_block_ids",
     [
-        # Single group (non-hybrid model): one copy, as before.
-        ([[1, 2, 3]], [1, 2, 3]),
-        # Hybrid model: three groups collapse into a single copy.
-        ([[1, 2], [3, 4], [5]], [1, 2, 3, 4, 5]),
+        # Single group (non-hybrid model).
+        [[1, 2, 3]],
+        # Hybrid model: each group copies only its own layers.
+        [[1, 2], [3, 4], [5]],
         # An empty group contributes no ids.
-        ([[1, 2], []], [1, 2]),
+        [[1, 2], []],
     ],
 )
-def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_ids):
-    """h2d copies are issued once per request, not once per KV cache group."""
+def test_sync_recved_kv_copies_each_group_own_layers(group_block_ids):
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
 
     calls = []
     worker = _make_host_buffer_worker(
         lambda src, dst, src_ids, dst_ids, direction: calls.append(
-            (src_ids, dst_ids, direction)
+            (list(src), list(dst), src_ids, dst_ids, direction)
         )
     )
-    worker.host_xfer_buffers = {"layer": None}
-    worker.device_kv_caches = {"layer": None}
+    names = [f"layer.{g}" for g in range(len(group_block_ids))]
+    # "shared" reuses another layer's KV cache: a host buffer, no transfer group.
+    worker.host_xfer_buffers = dict.fromkeys([*names, "shared"])
+    worker.device_kv_caches = dict.fromkeys([*names, "shared"])
+    worker.kv_cache_config = SimpleNamespace(
+        transfer_groups=[SimpleNamespace(layer_names=[name]) for name in names]
+    )
 
     meta = ReqMeta(
         local_block_ids=group_block_ids,
@@ -2421,4 +2425,6 @@ def test_sync_recved_kv_issues_one_copy_per_request(group_block_ids, expected_id
     )
     worker.sync_recved_kv_to_device("req", meta)
 
-    assert calls == [(expected_ids, expected_ids, "h2d")]
+    assert calls == [
+        ([name], [name], ids, ids, "h2d") for name, ids in zip(names, group_block_ids)
+    ]
