@@ -22,6 +22,11 @@ ERROR_CASES = [
         {"modules_to_save": ["lm_head"]},
         "Unsupported modules_to_save",
     ),
+    (
+        "test_rank_pattern",
+        {"r": 8, "rank_pattern": {"q_proj": 32}},
+        "LoRA rank 32 is greater than max_lora_rank",
+    ),
     ("test_rank_zero", {"r": 0}, "must be a positive integer"),
     ("test_rank_negative", {"r": -8}, "must be a positive integer"),
     ("test_lora_bias", {"lora_bias": True}, "does not support LoRA bias"),
@@ -153,3 +158,92 @@ def test_peft_helper_init_lora_weights_supported(init_lora_weights):
             "use_bdlora": None,
         }
     ).validate_legal(lora_config)
+
+
+@pytest.mark.parametrize(
+    "config,module_name,expected",
+    [
+        # rank_pattern only: alpha / r_m
+        ({"rank_pattern": {"q_proj": 4}}, "model.layers.0.self_attn.q_proj", (4, 8.0)),
+        ({"rank_pattern": {"q_proj": 4}}, "model.layers.0.self_attn.v_proj", (16, 2.0)),
+        # alpha_pattern only: alpha_m / r
+        (
+            {"alpha_pattern": {"v_proj": 64}},
+            "model.layers.0.self_attn.v_proj",
+            (16, 4.0),
+        ),
+        # keys only match at a "." boundary, like in PEFT
+        ({"rank_pattern": {"proj": 4}}, "model.layers.0.self_attn.q_proj", (16, 2.0)),
+        # fused MoE experts from PEFT `target_parameters`: gate_up_proj is stored
+        # as `experts.base_layer`, down_proj as `experts`
+        (
+            {"rank_pattern": {"experts.gate_up_proj": 2}},
+            "model.layers.0.mlp.experts.base_layer",
+            (2, 16.0),
+        ),
+        (
+            {"rank_pattern": {"experts.down_proj": 2}},
+            "model.layers.0.mlp.experts",
+            (2, 16.0),
+        ),
+        (
+            {"rank_pattern": {"experts.gate_up_proj": 2}},
+            "model.layers.0.mlp.experts",
+            (16, 2.0),
+        ),
+    ],
+)
+def test_peft_helper_rank_and_alpha_pattern(config, module_name, expected):
+    peft_helper = PEFTHelper(
+        r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"], **config
+    )
+    rank, scaling = peft_helper.get_rank_and_scaling(module_name)
+    assert rank == expected[0]
+    assert scaling == pytest.approx(expected[1])
+
+
+def test_peft_helper_pattern_rslora():
+    peft_helper = PEFTHelper(
+        r=16,
+        lora_alpha=32,
+        target_modules=["q_proj"],
+        use_rslora=True,
+        rank_pattern={"q_proj": 4},
+    )
+    assert peft_helper.get_rank_and_scaling("model.q_proj") == (4, 32 / math.sqrt(4))
+
+
+def test_peft_helper_dynamic_rank_conversion():
+    """PEFT's `save_as_lora` with a dynamic rank writes r=1, lora_alpha=1 and the
+    same per-module values in rank_pattern and alpha_pattern, so every module
+    keeps a scaling of 1."""
+    peft_helper = PEFTHelper(
+        r=1,
+        lora_alpha=1,
+        target_modules=["q_proj", "v_proj"],
+        rank_pattern={"layers.0.self_attn.q_proj": 32, "layers.0.self_attn.v_proj": 3},
+        alpha_pattern={"layers.0.self_attn.q_proj": 32, "layers.0.self_attn.v_proj": 3},
+    )
+    assert peft_helper.get_rank_and_scaling("model.layers.0.self_attn.q_proj") == (
+        32,
+        1.0,
+    )
+    assert peft_helper.get_rank_and_scaling("model.layers.0.self_attn.v_proj") == (
+        3,
+        1.0,
+    )
+    with pytest.raises(ValueError, match="LoRA rank 32 is greater than max_lora_rank"):
+        peft_helper.validate_legal(LoRAConfig(max_lora_rank=16))
+
+
+def test_peft_helper_null_patterns():
+    peft_helper = PEFTHelper.from_dict(
+        {
+            "r": 8,
+            "lora_alpha": 16,
+            "target_modules": ["q_proj"],
+            "rank_pattern": None,
+            "alpha_pattern": None,
+        }
+    )
+    assert peft_helper.get_rank_and_scaling("model.q_proj") == (8, 2.0)
