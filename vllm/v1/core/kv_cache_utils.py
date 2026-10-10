@@ -606,8 +606,8 @@ def _gen_prompt_embeds_extra_hash_keys(
         end_token_idx: The end token index of the block.
 
     Returns:
-        Return a stable hash of the block prompt embeddings if prompt embeds
-        are present. Return empty list otherwise.
+        Return the block's prompt-embedding hash and, when needed, token-ID
+        routing mask. Return an empty list when prompt embeddings are absent.
 
     """
     if request.prompt_embeds is None:
@@ -619,7 +619,12 @@ def _gen_prompt_embeds_extra_hash_keys(
         # Hash prompt embeds once per block and cache on request
         embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
-    return [("prompt_embeds", embeds_hash)]
+    extra_keys = [("prompt_embeds", embeds_hash)]
+    if request.prompt_is_token_ids is not None:
+        block_mask = request.prompt_is_token_ids[start_token_idx:end_token_idx]
+        if any(block_mask):
+            extra_keys.append(("prompt_is_token_ids", bytes(block_mask)))
+    return extra_keys
 
 
 def generate_block_hash_extra_keys(
