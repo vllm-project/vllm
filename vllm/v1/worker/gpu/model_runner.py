@@ -856,6 +856,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 - num_reqs * self.speculator.num_extra_query_per_req,
             )
 
+        assert num_tokens <= self.max_num_tokens, (
+            f"Dummy run with {num_tokens} tokens exceeds max_num_batched_tokens "
+            f"({self.max_num_tokens})"
+        )
+
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
 
@@ -1897,9 +1902,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             assert block_tables is not None
             attn_groups = self.attn_groups
-            if dummy_run and is_profile:
+            if dummy_run and is_profile and not valid_dummy_state_slots:
                 # Mamba layers take a cheap warmup path with no metadata;
                 # attention metadata is still built so those kernels tune.
+                # valid_dummy_state_slots runs the real Mamba kernels on distinct
+                # state slots; the caller must restore that state afterwards.
                 attn_groups = [
                     [g for g in groups if not isinstance(g.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups

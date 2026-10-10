@@ -15,6 +15,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.attention_warmup import (
+    mixed_batch_attention_warmup,
+)
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
@@ -286,15 +289,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
     ):
         logger.info_once("Warming up FlashInfer attention.")
-        # Warmup with mixed batch containing both prefill and decode tokens
-        # This is to warm up both prefill and decode attention kernels
-        worker.model_runner._dummy_run(
-            num_tokens=16,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            create_mixed_batch=True,
-        )
+        mixed_batch_attention_warmup(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
