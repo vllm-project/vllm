@@ -43,9 +43,7 @@
 /vllm/entrypoints/pooling @noooop
 /vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
-/vllm/entrypoints/*.py @njhill
-/vllm/entrypoints/chat_utils.py @DarkLight1337
-/vllm/entrypoints/offline_utils.py @DarkLight1337
+/vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
 
 # Rust Frontend
