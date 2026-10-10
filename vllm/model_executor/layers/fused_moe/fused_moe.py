@@ -1303,13 +1303,21 @@ def get_default_config(
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
     if envs.VLLM_BATCH_INVARIANT:
-        return {
+        config = {
             "BLOCK_SIZE_M": 64,
             "BLOCK_SIZE_N": 64,
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
             "SPLIT_K": 1,
         }
+        if dtype is None and current_platform.is_device_capability(90):
+            config.update(
+                BLOCK_SIZE_N=128,
+                BLOCK_SIZE_K=64,
+                num_warps=4,
+                num_stages=3,
+            )
+        return config
 
     # num_stages can cause triton.runtime.errors.OutOfResources on ROCm.
     num_stages_rocm = 2
