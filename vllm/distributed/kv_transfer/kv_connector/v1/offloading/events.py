@@ -29,6 +29,7 @@ from vllm.distributed.kv_events import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    generate_block_hash_extra_keys,
     maybe_convert_block_hash,
     resolve_block_hashes,
     to_event_extra_keys,
@@ -89,11 +90,24 @@ class _OffloadEventMetadata:
     block_size: int
     lora_id: int | None
     lora_name: str | None
-    # Deferred: needs the same incremental curr_mm_idx handling as GPU events.
-    extra_keys: tuple[tuple[Any, ...] | None, ...] | None
+    extra_keys: tuple[tuple[Any, ...] | None, ...]
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
     active_residencies: set[tuple[Medium, str | None]]
+
+
+def _block_extra_keys(
+    req: "Request", start: int, end: int, block_size: int
+) -> tuple[tuple[Any, ...] | None, ...]:
+    """Each block's hash extra keys, as the GPU block pool publishes them."""
+    keys: list[tuple[Any, ...] | None] = []
+    mm_idx = 0
+    for block_start in range(start, end, block_size):
+        block_keys, mm_idx = generate_block_hash_extra_keys(
+            req, block_start, block_start + block_size, mm_idx
+        )
+        keys.append(block_keys)
+    return tuple(keys)
 
 
 class OffloadingEventsTracker:
@@ -227,7 +241,9 @@ class OffloadingEventsTracker:
             block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=_block_extra_keys(
+                req, chunk_start, boundary_tokens, tokens_per_hash
+            ),
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
@@ -328,7 +344,9 @@ class OffloadingEventsTracker:
             block_size=group_config.tokens_per_block,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=_block_extra_keys(
+                req, tok_start, tok_end, group_config.tokens_per_block
+            ),
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
