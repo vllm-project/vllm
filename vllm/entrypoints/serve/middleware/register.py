@@ -73,3 +73,9 @@ def init_entrypoints_middleware(
             raise ValueError(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
+
+    # Added last so that it sees the server's own receive and send. Imported
+    # here because engine startup unregisters existing vllm: metrics.
+    from .client_disconnect import ClientDisconnectMetricsMiddleware
+
+    app.add_middleware(ClientDisconnectMetricsMiddleware)
