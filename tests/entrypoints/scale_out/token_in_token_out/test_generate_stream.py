@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import torch
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import StreamOptions
@@ -35,6 +36,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.multimodal.kv_handoff import export_multimodal_kv_handoff
 from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.renderers import renderer_from_config
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -246,6 +248,55 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_kv", [False, True])
+async def test_generate_preserves_kv_requirement_and_masks_without_rendering(remote_kv):
+    engine = _mock_engine()
+    mask = torch.tensor([True, False, True])
+    original = {
+        "type": "multimodal",
+        "prompt_token_ids": [1, 2, 2, 2, 3],
+        "mm_hashes": {"image": ["image-a"]},
+        "mm_placeholders": {"image": [PlaceholderRange(1, 3, mask)]},
+        "mm_kwargs": {"image": [None]},
+        "cache_salt": "tenant-a",
+    }
+    payload = export_multimodal_kv_handoff(original, "model-a")
+    payload["sampling_params"] = {"max_tokens": 1}
+    payload["return_token_ids"] = True
+    if remote_kv:
+        payload["kv_transfer_params"] = {"do_remote_prefill": True}
+    request = GenerateRequest.model_validate_json(json.dumps(payload))
+
+    async def mock_generate(prompt, sampling_params, *args, **kwargs):
+        assert prompt["prompt_token_ids"] == original["prompt_token_ids"]
+        assert prompt["mm_hashes"] == original["mm_hashes"]
+        assert prompt["mm_kwargs"] == {"image": [None]}
+        assert prompt["mm_requires_kv"] is True
+        assert prompt["mm_kv_handoff"]["model_fingerprint"] == "model-a"
+        assert prompt["cache_salt"] == "tenant-a"
+        assert torch.equal(prompt["mm_placeholders"]["image"][0].is_embed, mask)
+        if remote_kv:
+            assert sampling_params.extra_args["kv_transfer_params"] == {
+                "do_remote_prefill": True
+            }
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    engine.renderer.render_cmpl_async = AsyncMock(
+        side_effect=AssertionError("processed features must not be rendered again")
+    )
+    response = await serving.serve_tokens(request)
+    assert isinstance(response, GenerateTokensResponse)
+    engine.generate.assert_called_once()
+    serving.online_renderer.preprocess_completion.assert_not_awaited()
+    engine.renderer.render_cmpl_async.assert_not_awaited()
+    assert response.mm_placeholders["image"][0].is_embed == mask.tolist()
 
 
 @pytest.mark.asyncio

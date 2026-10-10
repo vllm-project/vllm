@@ -79,6 +79,90 @@ decode = client.chat.completions.create(
 
 If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
 
+## Experimental multimodal continuation inputs
+
+The engine input processor can export an image prompt after rendering and restore
+its processed state for continuation from existing KV. The exported dictionary
+uses the [Generate API](../serving/online_serving/token_in_token_out.md) input
+fields: `token_ids`, `features`, and `cache_salt`. Its shared `MultiModalFeatures`
+format preserves media hashes, placeholder ranges, and `is_embed` masks, including
+sparse layouts used by existing EC inputs. `features.requires_kv` explicitly
+requires decoder KV coverage; `features.kv_handoff` carries the format version,
+model configuration fingerprint, and position-state contract. It contains no KV
+tensors or transfer handles and does not start a transfer.
+
+The initial model contract supports image-only `LlavaForConditionalGeneration`
+with ordinary sequence positions. M-RoPE, encoder-decoder models, LoRA,
+speculative decoding, encoder-cache connectors, and prompt logprobs are not
+supported by this path.
+
+Export the input on the prefill engine:
+
+```python
+prefill_input, handoff = await prefill_engine.input_processor.prepare_multimodal_kv_handoff(
+    prompt
+)
+```
+
+Submit `prefill_input` directly to `prefill_engine.generate()`. The serving
+integration must bind `handoff` to the same request and corresponding KV, arrange
+any KV transfer through its existing connector, and deliver the input dictionary
+to decode. For Python callers, restore and submit the input:
+
+```python
+async def resume_request(decode_engine, handoff, sampling_params, request_id):
+    decode_input = decode_engine.input_processor.restore_multimodal_kv_handoff(handoff)
+    async for output in decode_engine.generate(decode_input, sampling_params, request_id):
+        yield output
+```
+
+These examples assume configured `AsyncLLM` instances and caller-supplied
+generation/connector parameters. `LLMEngine.add_request()` also accepts the
+processed input. Do not pass it to `LLM.generate()` or a renderer: those entry
+points reject processed multimodal inputs to avoid discarding media identities
+and KV requirements during a second render. This does not add a new HTTP API.
+
+Alternatively, submit the same dictionary to the existing Generate endpoint:
+
+```python
+decode_body = {
+    **handoff,
+    "sampling_params": {"max_tokens": 32, "temperature": 0.0},
+}
+# Add the connector's kv_transfer_params when using remote KV.
+# Local prefix KV reuse does not require transfer parameters.
+response = await http_client.post(
+    f"{decode_url}/inference/v1/generate", json=decode_body
+)
+response.raise_for_status()
+```
+
+Both entry points use the same feature-to-engine conversion and engine admission
+checks. Merely setting `kv_transfer_params` does not enable this mode. Existing
+metadata-only EC requests still require `ec_transfer_params` unless the caller
+explicitly sets `features.requires_kv` with compatible handoff information.
+The shared format can carry `mm_metadata`, but the initial LLaVA continuation
+contract accepts no additional model state; M-RoPE support needs a separate model
+state contract. Ordinary receiver-cache references retain their existing meaning.
+
+The restored input explicitly requires KV coverage for every image span. It may
+reuse local prefix KV without a connector, or use imported KV. Before scheduling
+computation, the engine checks actual coverage, including after preemption and
+failed loads. Missing coverage produces a request error; the caller must recover
+through prefill or resubmit with media. A configured connector alone does not
+establish coverage, and enabling load-failure recomputation does not permit
+recomputing a missing image.
+
+After validating the KV-only contract, admission skips encoder cache capacity
+checks, so a decode worker with `--limit-mm-per-prompt '{"image":0}'` can accept
+these inputs. Prompt length and token validation still apply. Ordinary media
+inputs and receiver-cache references still require encoder capacity.
+
+!!! note
+    This interface is experimental. CPU tests cover the input and scheduler
+    contracts; GPU end-to-end correctness, model evaluation, and performance
+    have not yet been established.
+
 ## Generate API output modes
 
 When the prefill and decode stages use the [Generate API](../serving/online_serving/token_in_token_out.md) (`/inference/v1/generate`), only the decode response reaches the client, so set `output_mode` on the decode request only. A proxy that reuses the client's request body for the prefill request must reset `output_mode` to `tokens` there. A prefill instance started with `--tokens-only` has no tokenizer and rejects `output_mode: "text"` with a 400.

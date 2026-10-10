@@ -4179,6 +4179,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.aux_output_connector = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.encoder_cache_mismatch_reqs = set()
+    scheduler.missing_multimodal_kv_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
@@ -6405,6 +6406,263 @@ def test_encoder_cache_accepts_matching_embed_count():
     assert compatible.request_id in scheduler_output.num_scheduled_tokens
     assert compatible.request_id not in scheduler.encoder_cache_mismatch_reqs
     assert compatible.request_id not in scheduler_output.scheduled_encoder_inputs
+
+
+@pytest.mark.parametrize("computed", [0, 49, 50, 149])
+def test_media_free_request_without_complete_kv_fails_without_encoder_work(computed):
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+        mm_requires_kv=True,
+    )[0]
+    scheduler.add_request(request)
+    request.num_computed_tokens = computed
+    output = scheduler.schedule()
+    assert request.request_id not in output.num_scheduled_tokens
+    assert not output.scheduled_encoder_inputs
+    result = scheduler.update_from_output(
+        output, ModelRunnerOutput(req_ids=[], req_id_to_index={})
+    )
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert result[request.client_index].outputs[0].finish_reason == FinishReason.ERROR
+    assert request.request_id not in scheduler.requests
+
+
+def test_media_free_coverage_is_rechecked_after_preemption():
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+        mm_requires_kv=True,
+    )[0]
+    # Imported/local KV covers the image, so text continuation needs no encoder.
+    assert scheduler._try_schedule_encoder_inputs(request, 150, 10, 100) == (
+        [],
+        10,
+        100,
+        [],
+        [],
+    )
+    request.status = RequestStatus.RUNNING
+    scheduler._preempt_request(request, 0)
+    assert request.num_computed_tokens == 0
+    assert scheduler._try_schedule_encoder_inputs(request, 0, 160, 100) == (
+        [],
+        0,
+        100,
+        [],
+        [],
+    )
+    assert request.request_id in scheduler.missing_multimodal_kv_reqs
+
+
+def test_media_free_async_load_waits_without_claiming_coverage():
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+        mm_requires_kv=True,
+    )[0]
+    assert scheduler._try_schedule_encoder_inputs(request, 0, 0, 100) == (
+        [],
+        0,
+        100,
+        [],
+        [],
+    )
+    assert not scheduler.missing_multimodal_kv_reqs
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancel"])
+@pytest.mark.parametrize("recompute", [False, True])
+def test_media_free_remote_kv_lifecycle(outcome, recompute):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=160, is_async=True),
+    )
+    scheduler.recompute_kv_load_failures = recompute
+    request = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+        mm_requires_kv=True,
+    )[0]
+    scheduler.add_request(request)
+    loading = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert not loading.scheduled_encoder_inputs
+    if outcome == "cancel":
+        scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+    received = KVConnectorOutput(finished_recving={request.request_id})
+    if outcome == "failure":
+        received.failed_recving = {request.request_id}
+    outputs = scheduler.update_from_output(
+        loading,
+        ModelRunnerOutput(req_ids=[], req_id_to_index={}, kv_connector_output=received),
+    )
+    if outcome == "success":
+        resumed = scheduler.schedule()
+        assert request.request_id in resumed.num_scheduled_tokens
+        assert not resumed.scheduled_encoder_inputs
+        assert not scheduler.missing_multimodal_kv_reqs
+    elif outcome == "failure":
+        if recompute:
+            # The connector cannot supply the missing KV on retry either.
+            scheduler.connector.config = dataclasses.replace(
+                scheduler.connector.config, matched_tokens=0, is_async=False
+            )
+            resumed = scheduler.schedule()
+            assert request.request_id not in resumed.num_scheduled_tokens
+            assert not resumed.scheduled_encoder_inputs
+            outputs = scheduler.update_from_output(
+                resumed, ModelRunnerOutput(req_ids=[], req_id_to_index={})
+            )
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert (
+            outputs[request.client_index].outputs[0].finish_reason == FinishReason.ERROR
+        )
+    else:
+        assert request.status == RequestStatus.FINISHED_ABORTED
+
+
+def test_media_free_sync_load_failure_cannot_recompute_missing_media():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_kv_connector=mock_kv(matched_tokens=160, is_async=False),
+    )
+    scheduler.recompute_kv_load_failures = True
+    request = create_requests(
+        num_requests=1,
+        num_tokens=176,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+        mm_requires_kv=True,
+    )[0]
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    invalid_block = scheduled.scheduled_new_reqs[0].block_ids[0][5]
+    outputs = scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1]],
+            kv_connector_output=KVConnectorOutput(invalid_block_ids={invalid_block}),
+        ),
+    )
+    assert not any(output.outputs for output in outputs.values())
+    resumed = scheduler.schedule()
+    assert not resumed.num_scheduled_tokens
+    assert not resumed.scheduled_encoder_inputs
+    scheduler.update_from_output(
+        resumed, ModelRunnerOutput(req_ids=[], req_id_to_index={})
+    )
+    assert request.status == RequestStatus.FINISHED_ERROR
+
+
+@pytest.mark.parametrize("image_end", [150, 170])
+def test_media_free_local_prefix_cache_coverage_without_connector(image_end):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf", enable_prefix_caching=True
+    )
+    assert scheduler.connector is None
+    kwargs = dict(
+        num_requests=1,
+        num_tokens=176,
+        mm_positions=[[PlaceholderRange(offset=50, length=image_end - 50)]],
+        mm_hashes_list=[["same-image"]],
+        max_tokens=1,
+    )
+    prefill = create_requests(**kwargs, req_ids=["prefill"])[0]
+    scheduler.add_request(prefill)
+    scheduled = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[prefill.request_id],
+            req_id_to_index={prefill.request_id: 0},
+            sampled_token_ids=[[1]],
+        ),
+    )
+    assert prefill.is_finished()
+    decode = create_requests(**kwargs, req_ids=["decode"], mm_requires_kv=True)[0]
+    scheduler.add_request(decode)
+    resumed = scheduler.schedule()
+    # A full prompt hit replays its final block, leaving 160 cached tokens.
+    assert not resumed.scheduled_encoder_inputs
+    if image_end <= 160:
+        assert resumed.num_scheduled_tokens[decode.request_id] == 16
+        assert not scheduler.missing_multimodal_kv_reqs
+    else:
+        assert decode.request_id not in resumed.num_scheduled_tokens
+        scheduler.update_from_output(
+            resumed, ModelRunnerOutput(req_ids=[], req_id_to_index={})
+        )
+        assert decode.status == RequestStatus.FINISHED_ERROR
+
+
+@pytest.mark.parametrize("requires_kv", [False, True])
+def test_multimodal_decode_does_not_scan_past_features(requires_kv):
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=2001,
+        mm_positions=[[PlaceholderRange(offset=2 * i, length=1) for i in range(1000)]],
+        mm_requires_kv=requires_kv,
+    )[0]
+
+    class CountedFeatures(list):
+        reads = 0
+
+        def __getitem__(self, index):
+            self.reads += 1
+            return super().__getitem__(index)
+
+        def __iter__(self):
+            for i in range(len(self)):
+                yield self[i]
+
+    features = CountedFeatures(request.mm_features)
+    request.mm_features = features
+    assert scheduler._try_schedule_encoder_inputs(request, 2000, 1, 100) == (
+        [],
+        1,
+        100,
+        [],
+        [],
+    )
+    # A logarithmic range lookup is allowed; a full feature scan is not.
+    assert features.reads < 32
+
+
+def test_media_free_streaming_update_extends_required_kv_boundary():
+    from vllm.v1.request import StreamingUpdate
+
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    session = create_requests(num_requests=1, num_tokens=10)[0]
+    session.num_computed_tokens = 10
+    continuation = create_requests(
+        num_requests=1,
+        num_tokens=10,
+        mm_positions=[[PlaceholderRange(offset=3, length=4)]],
+        mm_requires_kv=True,
+    )[0]
+    continuation.resumable = True
+    update = StreamingUpdate.from_request(continuation)
+    assert update is not None
+    scheduler._update_request_as_session(session, update)
+    assert session.mm_required_kv_tokens == 17
+    assert scheduler._try_schedule_encoder_inputs(session, 10, 10, 100) == (
+        [],
+        0,
+        100,
+        [],
+        [],
+    )
 
 
 def test_encoder_cache_rejects_mismatched_embed_count(caplog_vllm):

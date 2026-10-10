@@ -372,6 +372,14 @@ class MultiModalFeatureSpec:
     mm_hash: str | None = None
     """The hash for caching processor outputs (without LoRA prefix)."""
 
+    requires_kv: bool = False
+    """No media payload exists: this feature must be covered by decoder KV.
+
+    Unlike a receiver-cache reference (data=None), this bypasses the media
+    cache. Scheduling any computation before the end of this feature fails
+    the request, including after preemption or a partial KV load.
+    """
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)
