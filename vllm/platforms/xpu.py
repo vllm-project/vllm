@@ -94,6 +94,19 @@ def get_mem_info_wrapper(
     # Call the underlying C++ implementation
     free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
 
+    # Some Level-Zero sysman builds report free=0 (memory telemetry
+    # unavailable) even though the device has free memory. Fall back to the
+    # native query, which reads mem info directly instead of via sysman.
+    if free == 0 and total > 0:
+        native_free, native_total = torch.xpu.mem_get_info(device)
+        if native_free > 0:
+            logger.warning_once(
+                "torch.ops._C_cache_ops.getMemoryInfo reported free=0 "
+                "(likely missing Level-Zero sysman memory telemetry on this "
+                "driver); falling back to torch.xpu.mem_get_info."
+            )
+            return native_free, native_total
+
     return free, total
 
 
