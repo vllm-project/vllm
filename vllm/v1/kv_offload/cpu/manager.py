@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 from typing_extensions import override
@@ -9,7 +9,9 @@ from typing_extensions import override
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     LoadStoreSpec,
     LookupResult,
     Medium,
@@ -21,8 +23,10 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     get_offload_group_idx,
 )
+from vllm.v1.kv_offload.config import OffloadingConfig, OffloadingGroupConfig
 from vllm.v1.kv_offload.cpu.common import (
     CPULoadStoreSpec,
+    CPUOffloadingInfo,
     CPUOffloadingMetrics,
 )
 from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkStatus
@@ -44,6 +48,108 @@ class _RequestCacheAccess:
     finished: bool = False
 
 
+def _chunks_per_request(
+    groups: tuple[OffloadingGroupConfig, ...],
+    blocks_per_chunk: int,
+    seq_len: int,
+) -> int:
+    """Chunks one request of seq_len tokens holds, summed over every group.
+
+    A group without a window holds one chunk for each chunk-sized span of the
+    request. A group with a window holds no more than the window, because the
+    tier lets the older chunks of that group age out.
+    """
+    total = 0
+    for group in groups:
+        chunk_count = cdiv(seq_len, blocks_per_chunk * group.tokens_per_block)
+        window_chunks = group.sliding_window_size_in_chunks
+        if window_chunks is not None:
+            chunk_count = min(chunk_count, window_chunks)
+        total += chunk_count
+    return total
+
+
+def _capacity_tokens_at_max_len(
+    groups: tuple[OffloadingGroupConfig, ...],
+    blocks_per_chunk: int,
+    num_chunks: int,
+    max_model_len: int,
+) -> int | None:
+    """Largest token count the tier serves at a length up to max_model_len.
+
+    A tier of num_chunks slots holds num_chunks / _chunks_per_request(seq_len)
+    requests, so it serves num_chunks * seq_len // _chunks_per_request(seq_len)
+    tokens. _chunks_per_request is a step function of seq_len, so that ratio
+    rises between two steps and drops at each step. Every peak therefore sits at
+    the last token of a chunk. Measure one such length for each group chunk size,
+    add max_model_len, and keep the largest result.
+
+    Every candidate length holds full chunks, on purpose. A partly filled chunk
+    costs a whole slot, so it never serves more tokens than the full chunk length
+    below it.
+
+    Args:
+        groups: The offloading groups, which give the block size of each group.
+        blocks_per_chunk: GPU blocks for each chunk, the same count for every
+            group.
+        num_chunks: Chunk slots in the tier.
+        max_model_len: The longest request that the engine accepts.
+
+    Returns:
+        The token count, or None when max_model_len is 0 and the caller
+        therefore did not know the longest request.
+
+    """
+    tokens_per_chunk = {blocks_per_chunk * group.tokens_per_block for group in groups}
+    if max_model_len <= 0 or not tokens_per_chunk or min(tokens_per_chunk) <= 0:
+        return None
+
+    seq_len_candidates = {
+        round_down(max_model_len, tokens) for tokens in tokens_per_chunk
+    }
+    seq_len_candidates.add(max_model_len)
+    return max(
+        num_chunks * seq_len // _chunks_per_request(groups, blocks_per_chunk, seq_len)
+        for seq_len in seq_len_candidates
+        if seq_len > 0
+    )
+
+
+def _build_config_info(
+    num_chunks: int,
+    kv_bytes_per_chunk: int | None,
+    config: OffloadingConfig,
+) -> ConfigInfoMapping:
+    """Render the static facts of the CPU tier as info metric labels.
+
+    Args:
+        num_chunks: Chunk slots in the tier. Chunks, not GPU blocks.
+        kv_bytes_per_chunk: Page-aligned bytes of one chunk, or None from a
+            caller that does not report it.
+        config: The offloading configuration, which gives the group shapes and
+            max_model_len.
+
+    Returns:
+        One label for each field of CPUOffloadingInfo, which documents the
+        fields and the name agreement with CPUOffloadingSpec. A fact the caller
+        did not report reads "None". A reported 0 keeps its number, because it
+        names an empty tier.
+
+    """
+    blocks_per_chunk = config.cache.blocks_per_chunk
+    return CPUOffloadingInfo(
+        cpu_num_chunks=num_chunks,
+        cpu_blocks_per_chunk=blocks_per_chunk,
+        cpu_kv_bytes_per_chunk=kv_bytes_per_chunk,
+        cpu_capacity_tokens_at_max_len=_capacity_tokens_at_max_len(
+            config.groups,
+            blocks_per_chunk,
+            num_chunks,
+            config.model.max_model_len,
+        ),
+    ).as_config_info()
+
+
 class CPUOffloadingManager(OffloadingManager):
     """An OffloadingManager with a pluggable CachePolicy, resolved by name via
     CachePolicyFactory (built in: "lru", "arc"; external policies can either
@@ -58,6 +164,8 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_chunks: int,
+        kv_bytes_per_chunk: int | None = None,
+        config: OffloadingConfig | None = None,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
@@ -66,6 +174,13 @@ class CPUOffloadingManager(OffloadingManager):
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
+        # Rendered once: the facts are static, and the scheduler reads them on
+        # its own path.
+        self._config_info: ConfigInfoMapping = (
+            _build_config_info(num_chunks, kv_bytes_per_chunk, config)
+            if config is not None
+            else {}
+        )
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -445,6 +560,11 @@ class CPUOffloadingManager(OffloadingManager):
         if self.events is not None:
             yield from self.events
             self.events.clear()
+
+    @override
+    def config_info(self) -> Sequence[ConfigInfoMapping]:
+        """Report the CPU cache facts of the one cache this manager holds."""
+        return [self._config_info]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()

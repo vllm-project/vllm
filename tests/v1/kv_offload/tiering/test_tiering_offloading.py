@@ -11,12 +11,13 @@ These tests verify:
 """
 
 from collections.abc import Iterable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -99,7 +100,8 @@ def has_histogram_count(reduced: dict[str, int | float], metric_name: str) -> bo
 
 
 class MetricsSecondaryTierManager(SecondaryTierManager):
-    """Test-only secondary tier that declares and emits one labeled metric."""
+    """Test-only secondary tier that declares and emits one labeled metric,
+    and publishes one config fact."""
 
     MY_TIER_METRIC = "my_tier_metric"
 
@@ -111,6 +113,13 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
                 labelnames=("tier",),
             )
         }
+
+    @classmethod
+    def config_info_keys(cls, extra_config):
+        return ("path",)
+
+    def config_info(self):
+        return {"path": f"/mnt/{self.tier_type}"}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -247,6 +256,19 @@ class TestExampleSecondaryTierManager:
 
         # Third chunk not present
         assert tier.lookup(chunks[2], _CTX) is LookupResult.MISS
+
+    def test_config_info_keys_match_the_filled_values(self):
+        """A name the declaration misses becomes a dropped label at runtime."""
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="example",
+            custom_param=67,
+        )
+        info = tier.config_info()
+        assert tuple(info) == ExampleSecondaryTierManager.config_info_keys({})
+        assert info["example_info"] == 67
 
 
 # What a request-level cascade does with a key already present in the primary
@@ -1545,3 +1567,186 @@ def test_parse_tier_filter_skips_bad_entries():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_tiering_manager_reports_one_config_info_series_for_each_tier():
+    """The info metric holds one series for each tier, and the tier label tells
+    the series apart. A tier cannot know its own index, so the manager adds the
+    label. A tier fills the names it owns only. The primary tier here gets no
+    configuration, so it adds no label of its own. See
+    test_tiering_primary_tier_publishes_the_cpu_labels in test_factory.py for
+    the labels it adds with one."""
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_chunks=5, mmap_region=mock_region
+    )
+    secondary_tiers = [
+        MetricsSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="test_metrics",
+        )
+        for _ in range(2)
+    ]
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=secondary_tiers,
+    )
+
+    assert manager.config_info() == [
+        {"tier": "0:primary"},
+        {"tier": "1:test_metrics", "path": "/mnt/test_metrics"},
+        {"tier": "2:test_metrics", "path": "/mnt/test_metrics"},
+    ]
+
+
+def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
+    """A tiering manager runs with no secondary tier, and the info metric then
+    holds the primary series alone. The series still carries the tier label, so
+    the frontend publishes one series and not a bare metric."""
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[],
+    )
+
+    assert manager.config_info() == [{"tier": "0:primary"}]
+
+
+def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
+    """This manager holds one primary tier, so two mappings would give two
+    series with one tier label. If the two mappings agree on every declared
+    name, the frontend cache then collapses them into one series and warns
+    about nothing. The unpack fails at engine start instead."""
+
+    class _TwoMappingPrimary(CPUPrimaryTierOffloadingManager):
+        def config_info(self):
+            return [{"path": "/a"}, {"path": "/b"}]
+
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=_TwoMappingPrimary(num_chunks=5, mmap_region=mock_region),
+        secondary_tiers=[],
+    )
+
+    with pytest.raises(ValueError):
+        manager.config_info()
+
+
+def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
+    """The manager adds the tier label to a copy. A tier that returns a stored
+    mapping must not gain a foreign key that outlives the call."""
+
+    class _StoredInfoTier(MetricsSecondaryTierManager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.info: dict[str, str] = {"path": "/mnt/a"}
+
+        def config_info(self):
+            return self.info
+
+    mock_region = _mock_mmap_region(5)
+    tier = _StoredInfoTier(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="test_metrics",
+    )
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5, mmap_region=mock_region
+        ),
+        secondary_tiers=[tier],
+    )
+
+    manager.config_info()
+
+    assert tier.info == {"path": "/mnt/a"}
+
+
+def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
+    """The spec declares the info label names in the API-server process, and
+    the manager fills the values in the engine process. A drift between the two
+    empties every declared label and drops every filled value, so this pins
+    both sides to the same literal names. The frontend reads a value by name,
+    so the order of the names does not have to agree."""
+    tier_configs = [{"type": "test_metrics"}, {"type": "test_metrics"}]
+    mock_region = _mock_mmap_region(5)
+    manager = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=5,
+            mmap_region=mock_region,
+            config=make_offloading_config(blocks_per_chunk=2, max_model_len=1024),
+        ),
+        secondary_tiers=[
+            MetricsSecondaryTierManager(
+                offloading_spec=_MOCK_OFFLOADING_SPEC,
+                primary_kv_view=mock_region.create_kv_memoryview(),
+                tier_type=tier_config["type"],
+            )
+            for tier_config in tier_configs
+        ],
+    )
+
+    with patch.object(
+        SecondaryTierFactory,
+        "get_tier_class",
+        return_value=MetricsSecondaryTierManager,
+    ):
+        keys = TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+    assert keys == (
+        "cpu_num_chunks",
+        "cpu_blocks_per_chunk",
+        "cpu_kv_bytes_per_chunk",
+        "cpu_capacity_tokens_at_max_len",
+        "tier",
+        "path",
+    )
+    filled: set[str] = set()
+    for info in manager.config_info():
+        assert set(info) <= set(keys)
+        filled |= set(info)
+    assert filled == set(keys)
+
+
+def test_tiering_spec_passes_each_tier_its_own_config():
+    """A tier reads its own parameters out of its own config dict, not out of
+    the instance-wide kv_connector_extra_config. A tier that names a label
+    after one of its own keys declares nothing from the wrong dict."""
+    seen: list[dict] = []
+
+    class _RecordingTier(MetricsSecondaryTierManager):
+        @classmethod
+        def config_info_keys(cls, extra_config):
+            seen.append(extra_config)
+            return ()
+
+    tier_configs = [{"type": "test_metrics", "root_dir": "/mnt/a"}]
+    with patch.object(
+        SecondaryTierFactory, "get_tier_class", return_value=_RecordingTier
+    ):
+        TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+    assert seen == tier_configs
+
+
+def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
+    """TieringOffloadingManager.config_info() writes the tier label over the
+    value of a tier, so a tier that declares the name loses its own value with
+    no message. The declaration must fail at start-up instead."""
+
+    class _ReservedLabelTier(MetricsSecondaryTierManager):
+        @classmethod
+        def config_info_keys(cls, extra_config):
+            return ("tier",)
+
+    tier_configs = [{"type": "test_metrics"}]
+    with (
+        patch.object(
+            SecondaryTierFactory, "get_tier_class", return_value=_ReservedLabelTier
+        ),
+        pytest.raises(AssertionError, match="reserved label 'tier'"),
+    ):
+        TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
