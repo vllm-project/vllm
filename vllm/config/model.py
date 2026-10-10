@@ -305,6 +305,17 @@ class ModelConfig:
     predetermined token sequence while still computing real logprobs. Reserved
     for debugging and RL workflows: enabling it reserves a per-request trace
     buffer, so it is off by default."""
+    screened_lm_head: bool = False
+    """Whether to compute the logits of batches that only read the top-k logits
+    (greedy, or temperature with top-k <= 32 and optional top-p) from an FP8
+    copy of the lm_head that screens out the rows that provably cannot be among
+    them, plus exact logits for the rest. Sampled tokens match the full lm_head
+    for the same seed (up to sub-ulp ties) while the step reads about half its
+    bytes. Batches with logprobs, penalties, logit bias, min-p or structured
+    outputs use the full lm_head. Requires an unquantized, unsharded lm_head and
+    raises otherwise. Adds an FP8 copy of the lm_head to model memory. Gains
+    are largest on GPUs where the lm_head is a large share of the step (e.g.
+    DGX Spark); on HBM GPUs it can be slower than the full lm_head."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -477,6 +488,7 @@ class ModelConfig:
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
+            "screened_lm_head",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",

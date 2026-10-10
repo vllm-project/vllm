@@ -1560,6 +1560,11 @@ class Worker(WorkerBase):
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
             self.model_runner.reset_lora_state()
+        # A draft update can touch an lm_head shared with the target.
+        if (
+            screened_head := getattr(self.model_runner, "screened_head", None)
+        ) is not None:
+            screened_head.refresh()
 
     def shutdown(self) -> None:
         gc.unfreeze()
