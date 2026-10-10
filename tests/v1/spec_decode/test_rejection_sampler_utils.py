@@ -772,6 +772,41 @@ def test_block_verification_placeholder_truncates_block(
         )
 
 
+@pytest.mark.parametrize("actual_steps", [1, 3])
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_block_verification_shorter_than_configured_steps(actual_steps, temperature):
+    """Adaptive verification must not read beyond the final shortened block.
+
+    Run under compute-sanitizer to detect the final lookahead load even when
+    PyTorch's allocator leaves accessible padding after draft_sampled.
+    """
+    torch.manual_seed(42)
+    vocab_size = 257
+    target_logits = torch.randn(vocab_size, device="cuda")
+    draft_logits = torch.randn(vocab_size, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        actual_steps,
+        temperature=temperature,
+        num_trials=64,
+    )
+    inputs["draft_logits"] = draft_logits.view(1, 1, -1).expand(64, 5, -1).contiguous()
+    inputs["draft_sampled"] = inputs["draft_sampled"].to(torch.int32)
+    expected, expected_counts = rejection_sample(
+        **inputs, num_speculative_steps=actual_steps, use_block_verification=True
+    )
+    actual, actual_counts = rejection_sample(
+        **inputs, num_speculative_steps=5, use_block_verification=True
+    )
+    torch.testing.assert_close(actual_counts, expected_counts)
+    valid = (
+        torch.arange(actual_steps + 1, device="cuda")[None, :]
+        < expected_counts[:, None]
+    )
+    torch.testing.assert_close(actual[:, : actual_steps + 1][valid], expected[valid])
+
+
 def test_greedy_placeholder_emits_target_argmax():
     """Greedy sampling skips resampling and relies on the rejection kernel
     storing the target argmax at the rejected position. A placeholder must not
