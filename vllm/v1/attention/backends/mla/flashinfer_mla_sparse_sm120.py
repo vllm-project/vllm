@@ -16,6 +16,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 
@@ -125,10 +126,11 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             if num_decode_tokens:
                 topk_indices_physical = cast(
                     torch.Tensor,
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=False,
                     ),
                 )
@@ -183,6 +185,9 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
             output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
             return output, None
 
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         topk_indices_physical = cast(
             torch.Tensor,
             triton_convert_req_index_to_global_index(
@@ -190,13 +195,15 @@ class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetada
                 attn_metadata.block_table,
                 topk_indices,
                 BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
             ),
         )
         return (
             self._run_mqa_kernel(
                 q,
-                kv_c_and_k_pe_cache,
+                # The SM120 kernels are built for 64-row pages only.
+                kv_rows.view(-1, 64, kv_rows.shape[-1]),
                 topk_indices_physical,
             ),
             None,

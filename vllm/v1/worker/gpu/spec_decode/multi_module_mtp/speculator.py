@@ -14,11 +14,11 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
-)
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
+)
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 logger = init_logger(__name__)
@@ -150,11 +150,12 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
+        dp_sync_state: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
@@ -200,7 +201,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
-            dp_sync=dp_sync,
+            dp_sync_state=dp_sync_state,
         )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
@@ -252,6 +253,17 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
         return self.draft_tokens[:num_reqs]
+
+    # Each MTP module may carry its own LM head, selected by spec_step_idx.
+    def compute_draft_logits(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+
+    def get_draft_top_tokens(
+        self, hidden_states: torch.Tensor, spec_step_idx: int
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states, spec_step_idx=spec_step_idx)
 
     @torch.inference_mode()
     def _run_model(
@@ -427,6 +439,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                spec_step_idx=step,
             )
 
             self.draft_tokens[:num_reqs, step] = draft_tokens

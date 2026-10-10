@@ -158,8 +158,18 @@ def run_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_KV_CACHE_LAYOUT": "HND",
     }
-    bootstrap_port = get_open_port()
     with contextlib.ExitStack() as stack:
+        bootstrap_port = 0
+        if connector == "mooncake":
+            from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (  # noqa: E501
+                MooncakeBootstrapServer,
+            )
+
+            bootstrap = MooncakeBootstrapServer("127.0.0.1", 0)
+            stack.callback(bootstrap.shutdown)
+            bootstrap.start()
+            bootstrap_port = bootstrap.port
+            extra["bootstrap_server_address"] = f"127.0.0.1:{bootstrap_port}"
         servers: list[RemoteOpenAIServer] = []
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
         for role, tp, assigned in (
@@ -176,7 +186,6 @@ def run_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
                 selector: ",".join(assigned),
                 "VLLM_PORT": str(get_open_port()),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(get_open_port()),
-                "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(bootstrap_port),
             }
             servers.append(
                 RemoteOpenAIServer(

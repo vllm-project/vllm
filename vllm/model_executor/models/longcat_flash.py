@@ -39,7 +39,7 @@ from itertools import islice
 
 import torch
 from torch import nn
-from transformers import PreTrainedConfig
+from transformers import LongcatFlashConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -58,13 +58,17 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.int8_utils import block_dequant
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    LoaderFunction,
+    composed_weight_loader,
+    default_weight_loader,
+)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -80,119 +84,21 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class FlashConfig(PreTrainedConfig):
-    """Flash model configuration."""
+def _scaled_weight_loader(scale: float) -> LoaderFunction:
+    return composed_weight_loader(default_weight_loader, lambda x: x * scale)
 
-    moe_intermediate_size: int
 
-    model_type = "longcat_flash"
-    keys_to_ignore_at_inference = ["past_key_values"]
-
-    def __init__(
-        self,
-        vocab_size=131072,
-        hidden_size=4096,
-        intermediate_size=8192,
-        num_layers=28,
-        num_hidden_layers=None,
-        num_attention_heads=96,
-        num_key_value_heads=128,
-        ep_size=1,
-        kv_lora_rank=512,
-        q_lora_rank=1536,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        qk_nope_head_dim=128,
-        num_experts_per_tok=None,
-        norm_topk_prob=False,
-        max_position_embeddings=8192,
-        initializer_range=0.02,
-        rms_norm_eps=1e-05,
-        use_cache=True,
-        pad_token_id=None,
-        bos_token_id=100000,
-        eos_token_id=100001,
-        pretraining_tp=1,
-        tie_word_embeddings=False,
-        rope_parameters=None,
-        attention_bias=False,
-        attention_dropout=0.0,
-        mla_scale_q_lora=False,
-        mla_scale_kv_lora=False,
-        dtype="bfloat16",
-        params_dtype="bfloat16",
-        router_dtype="float32",
-        router_bias=False,
-        topk_method=None,
-        routed_scaling_factor=1.0,
-        zero_expert_num=0,
-        zero_expert_type=None,
-        nextn_use_scmoe=False,
-        **kwargs,
+def scale_mla_lora_norms_on_load(self_attn: nn.Module, config) -> None:
+    """Fold LongCat's MLA LoRA scaling into the q/kv_a_layernorm weight loaders."""
+    for norm, rank, enabled in (
+        (self_attn.q_a_layernorm, config.q_lora_rank, config.mla_scale_q_lora),
+        (self_attn.kv_a_layernorm, config.kv_lora_rank, config.mla_scale_kv_lora),
     ):
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            dtype=dtype,
-            params_dtype=params_dtype,
-            router_dtype=router_dtype,
-            topk_method=topk_method,
-            router_bias=router_bias,
-            nextn_use_scmoe=nextn_use_scmoe,
-            **kwargs,
-        )
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.num_hidden_layers = (
-            num_hidden_layers if num_hidden_layers is not None else num_layers
-        )
-        self.num_attention_heads = num_attention_heads
-        self.ep_size = ep_size
-        self.kv_lora_rank = kv_lora_rank
-        self.q_lora_rank = q_lora_rank
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.v_head_dim = v_head_dim
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.num_experts_per_tok = num_experts_per_tok
-        self.norm_topk_prob = norm_topk_prob
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
-
-        self.num_key_value_heads = num_key_value_heads
-        self.initializer_range = initializer_range
-        self.rms_norm_eps = rms_norm_eps
-        self.pretraining_tp = pretraining_tp
-        self.use_cache = use_cache
-        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
-        rope_scaling = kwargs.pop("rope_scaling", None)
-        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
-        rope_theta = kwargs.pop("rope_theta", 1000000.0)
-        if "rope_theta" not in rope_parameters:
-            rope_parameters["rope_theta"] = rope_theta
-        self.rope_parameters = rope_parameters
-        self.attention_bias = attention_bias
-        self.attention_dropout = attention_dropout
-        self.mla_scale_q_lora = mla_scale_q_lora
-        self.mla_scale_kv_lora = mla_scale_kv_lora
-        self.zero_expert_num = zero_expert_num
-        self.zero_expert_type = zero_expert_type
-        self.routed_scaling_factor = routed_scaling_factor
-        self.hidden_act = "silu"
-        self.intermediate_size = (
-            self.ffn_hidden_size
-            if hasattr(self, "ffn_hidden_size")
-            else intermediate_size
-        )
-        if hasattr(self, "moe_intermediate_size"):
-            self.moe_intermediate_size = self.moe_intermediate_size
-        elif hasattr(self, "expert_ffn_hidden_size"):
-            self.moe_intermediate_size = self.expert_ffn_hidden_size
-        else:
-            self.moe_intermediate_size = self.intermediate_size
+        if enabled:
+            scale = (config.hidden_size / rank) ** 0.5
+            set_weight_attrs(
+                norm.weight, {"weight_loader": _scaled_weight_loader(scale)}
+            )
 
 
 class FlashMLP(nn.Module):
@@ -242,22 +148,17 @@ class FlashMLP(nn.Module):
 class LongcatRouter(nn.Module):
     def __init__(
         self,
-        config: FlashConfig,
+        config: LongcatFlashConfig,
         zero_expert_num: int,
         router_params_dtype: torch.dtype,
         prefix: str = "",
     ):
         super().__init__()
-        self.n_routed_experts = (
-            config.n_routed_experts
-            if hasattr(config, "n_routed_experts")
-            else config.num_experts[0]
-        )
-        self.n_routed_experts = self.n_routed_experts + zero_expert_num
+        self.n_routed_experts = config.n_routed_experts + zero_expert_num
         self.classifier = GateLinear(
             config.hidden_size,
             self.n_routed_experts,
-            bias=config.router_bias,
+            bias=False,
             out_dtype=router_params_dtype,
             params_dtype=router_params_dtype,
             prefix=f"{prefix}.classifier",
@@ -274,7 +175,7 @@ class LongcatRouter(nn.Module):
 class LongcatMoe(nn.Module):
     def __init__(
         self,
-        config: FlashConfig,
+        config: LongcatFlashConfig,
         num_experts: int,
         top_k: int,
         hidden_size: int,
@@ -286,10 +187,7 @@ class LongcatMoe(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        # Gate always runs at half / full precision for now.
-        self.router_params_dtype = params_dtype
-        if config.router_dtype == "float32":
-            self.router_params_dtype = torch.float32
+        self.router_params_dtype = torch.float32
 
         self.router = LongcatRouter(
             config=config,
@@ -354,7 +252,7 @@ class FlashDecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: FlashConfig,
+        config: LongcatFlashConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -376,9 +274,7 @@ class FlashDecoderLayer(nn.Module):
                     qk_nope_head_dim=config.qk_nope_head_dim,
                     qk_rope_head_dim=config.qk_rope_head_dim,
                     v_head_dim=config.v_head_dim,
-                    q_lora_rank=(
-                        config.q_lora_rank if hasattr(config, "q_lora_rank") else None
-                    ),
+                    q_lora_rank=config.q_lora_rank,
                     kv_lora_rank=config.kv_lora_rank,
                     max_position_embeddings=max_position_embeddings,
                     cache_config=cache_config,
@@ -390,6 +286,8 @@ class FlashDecoderLayer(nn.Module):
                 for i in range(2)
             ]
         )
+        for self_attn in self.self_attn:
+            scale_mla_lora_norms_on_load(self_attn, config)
         self.input_layernorm = nn.ModuleList(
             [RMSNorm(config.hidden_size, eps=config.rms_norm_eps) for i in range(2)]
         )
@@ -415,12 +313,8 @@ class FlashDecoderLayer(nn.Module):
 
         self.mlp = LongcatMoe(
             config=config,
-            num_experts=config.n_routed_experts
-            if hasattr(config, "n_routed_experts")
-            else config.num_experts[self.layer_idx],
-            top_k=config.moe_topk
-            if hasattr(config, "moe_topk")
-            else config.num_experts_per_tok,
+            num_experts=config.n_routed_experts,
+            top_k=config.moe_topk,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             quant_config=quant_config,
@@ -482,7 +376,7 @@ class FlashModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -499,7 +393,7 @@ class FlashModel(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
+            config.num_layers,
             lambda prefix: FlashDecoderLayer(
                 vllm_config,
                 config,
@@ -561,9 +455,7 @@ class FlashModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            if hasattr(self.config, "n_routed_experts")
-            else self.config.num_experts[0],
+            num_experts=self.config.n_routed_experts,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -581,6 +473,9 @@ class FlashModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            # The MTP layers are loaded by LongCatFlashMTP.
+            if name.startswith("mtp."):
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -591,9 +486,6 @@ class FlashModel(nn.Module):
                 if (
                     name.endswith(".bias") or name.endswith("_bias")
                 ) and name not in params_dict:
-                    continue
-                # Skip mtp
-                if ".mtp." in name:
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -609,9 +501,6 @@ class FlashModel(nn.Module):
                         continue
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
-                    # Skip mtp
-                    if ".mtp." in name_mapped:
-                        continue
                     if (
                         name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
                     ) and name not in params_dict:
@@ -646,9 +535,6 @@ class FlashModel(nn.Module):
                     # Skip loading kv_scale from ckpts towards new design.
                     if name.endswith(".kv_scale") and name not in params_dict:
                         continue
-                    # Skip mtp
-                    if ".mtp." in name:
-                        continue
                     if name is None:
                         continue
                     if is_pp_missing_parameter(name, self):
@@ -659,54 +545,6 @@ class FlashModel(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-        for layer_id in range(self.config.num_hidden_layers):
-            for i in range(2):
-                if isinstance(self.layers[layer_id], PPMissingLayer):
-                    continue
-                self_attn = self.layers[layer_id].self_attn[i]
-                if (
-                    self.quant_config is not None
-                    and hasattr(self.quant_config, "weight_block_size")
-                    and self_attn.kv_b_proj.weight.dtype
-                    in (
-                        torch.float8_e4m3fn,
-                        torch.float8_e4m3fnuz,
-                    )
-                ):
-                    weight_block_size = self.quant_config.weight_block_size
-                    if weight_block_size is not None:
-                        assert hasattr(self_attn.kv_b_proj, "weight_scale_inv")
-                        dtype = torch.get_default_dtype()
-                        w = block_dequant(
-                            self_attn.kv_b_proj.weight,
-                            self_attn.kv_b_proj.weight_scale_inv,
-                            weight_block_size,
-                        ).to(dtype)
-                else:
-                    w = self_attn.kv_b_proj.weight
-
-                w_kc, w_vc = w.unflatten(
-                    0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
-                ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
-                self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
-                self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-                # Guard against compounding on incremental load_weights calls:
-                # the in-place ``*=`` would otherwise re-apply the MLA LoRA
-                # scaling to the layernorm weights on each pass.
-                if self.config.mla_scale_q_lora and not getattr(
-                    self_attn, "_mla_q_lora_scaled", False
-                ):
-                    self_attn.q_a_layernorm.weight.data *= (
-                        self.config.hidden_size / self.config.q_lora_rank
-                    ) ** 0.5
-                    self_attn._mla_q_lora_scaled = True
-                if self.config.mla_scale_kv_lora and not getattr(
-                    self_attn, "_mla_kv_lora_scaled", False
-                ):
-                    self_attn.kv_a_layernorm.weight.data *= (
-                        self.config.hidden_size / self.config.kv_lora_rank
-                    ) ** 0.5
-                    self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
 
@@ -727,15 +565,10 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.config = config
-        config.intermediate_size = (
-            config.ffn_hidden_size
-            if hasattr(config, "ffn_hidden_size")
-            else config.intermediate_size
-        )
 
         self.quant_config = quant_config
 

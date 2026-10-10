@@ -397,7 +397,7 @@ class AttentionScheduler {
     int32_t max_num_q_per_iter;  // max Q head num can be hold in registers
     int32_t kv_block_alignment;  // context length alignment requirement
     bool enable_kv_split;
-    bool* dynamic_causal;
+    int32_t* dynamic_causal;
   };
 
   static constexpr int32_t MaxQTileIterNum = 128;
@@ -450,7 +450,7 @@ class AttentionScheduler {
       const int32_t q_token_num =
           input.query_start_loc[req_id + 1] - input.query_start_loc[req_id];
       const bool req_causal =
-          is_dynamic_causal ? input.dynamic_causal[req_id] : causal;
+          is_dynamic_causal ? input.dynamic_causal[req_id] != 0 : causal;
       const int32_t q_start_pos = seq_len - q_token_num;
       const int32_t kv_start_pos = 0;
       const int32_t kv_end_pos = seq_len;
@@ -492,7 +492,7 @@ class AttentionScheduler {
       const int32_t q_token_num =
           input.query_start_loc[req_id + 1] - input.query_start_loc[req_id];
       const bool req_causal =
-          is_dynamic_causal ? input.dynamic_causal[req_id] : causal;
+          is_dynamic_causal ? input.dynamic_causal[req_id] != 0 : causal;
       const int32_t q_start_pos = seq_len - q_token_num;
       const int32_t kv_start_pos = 0;
       const int32_t kv_end_pos = seq_len;
@@ -884,7 +884,7 @@ struct AttentionInput {
   // provided as fp32 and executed in full float precision.
   const void* s_aux;
   bool s_aux_is_bf16;
-  bool* dynamic_causal;
+  int32_t* dynamic_causal;
   float scale;
   bool causal;
   int32_t sliding_window_size;
@@ -1571,7 +1571,7 @@ class AttentionMainLoop {
       const float* alibi_slopes = input->alibi_slopes;
       const void* s_aux = input->s_aux;
       const bool s_aux_is_bf16 = input->s_aux_is_bf16;
-      const bool* dynamic_causal = input->dynamic_causal;
+      const int32_t* dynamic_causal = input->dynamic_causal;
       const bool is_dynamic_causal = dynamic_causal != nullptr;
 
       const bool causal = input->causal;
@@ -1658,7 +1658,8 @@ class AttentionMainLoop {
 
             const int32_t current_group_idx = current_workitem_group->req_id;
             const int32_t current_group_causal =
-                is_dynamic_causal ? dynamic_causal[current_group_idx] : causal;
+                is_dynamic_causal ? dynamic_causal[current_group_idx] != 0
+                                  : causal;
             auto [sliding_window_left, sliding_window_right] =
                 AttentionScheduler::calcu_sliding_window_size(
                     sliding_window_size, current_group_causal);

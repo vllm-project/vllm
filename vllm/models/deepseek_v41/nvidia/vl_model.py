@@ -51,6 +51,7 @@ from ..common.mm_preprocess import (
     DeepseekV4VLProcessingInfo,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
+from ..decoder_replay_layers import DecoderReplayLayers
 from .model import (
     DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
@@ -280,6 +281,10 @@ class DeepseekV41ForCausalLM(
     @property
     def token_lookback_depth(self) -> int:
         return self.language_model.token_lookback_depth
+
+    @property
+    def decoder_replay_layers(self) -> DecoderReplayLayers | None:
+        return self.language_model.decoder_replay_layers
 
     def forward(
         self,

@@ -42,14 +42,22 @@ from vllm.parser.engine.adapters import ParserEngineToolAdapter
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    SamplingParams,
+    StructuredOutputsParams,
+    check_json_nesting,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
-from vllm.tool_parsers.structural_tag_registry import resolve_tool_strictness
+from vllm.tool_parsers.structural_tag_registry import (
+    get_structural_tag_tools,
+    limit_to_single_tool_call,
+    resolve_tool_strictness,
+)
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 logger = init_logger(__name__)
@@ -112,6 +120,7 @@ class Parser:
     tool_parser_cls: type[ToolParser] | None = None
     # Server-side floor for tool-call structural tags (--tool-strict-level).
     tool_strict_level: ToolStrictLevel = ToolStrictLevel.AUTO
+    always_adjust_request: bool = False
 
     def __init__(
         self,
@@ -203,6 +212,10 @@ class Parser:
         """
         return request
 
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        """Provide the exact rendered prompt to parsers that need prefix state."""
+        return
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """Check if the reasoning content ends in the input_ids.
@@ -265,6 +278,7 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
     if params.json is not None:
         schema = params.json
         if isinstance(schema, str):
+            check_json_nesting(schema)
             schema = json.loads(schema)
         return JSONSchemaFormat(json_schema=schema)
     if params.regex is not None:
@@ -286,6 +300,7 @@ def structured_outputs_to_format(params: StructuredOutputsParams) -> Format | No
                 raise VLLMValidationError("Invalid grammar specification.") from e
         return GrammarFormat(grammar=grammar)
     if params.structural_tag is not None:
+        check_json_nesting(params.structural_tag, structural_tag=True)
         s_tag = json.loads(params.structural_tag)
         if "structures" in s_tag:
             # LegacyStructuralTagResponseFormat
@@ -496,13 +511,29 @@ class DelegatingParser(Parser):
 
         structured_outputs = request.extract_structured_outputs()
         is_auto = request.tool_choice == "auto"
+        single_call = request.parallel_tool_calls is False
+        strict_level = self.tool_strict_level
+        if (
+            strict_level == ToolStrictLevel.AUTO
+            and tool_parser.default_tool_strict_level is not None
+        ):
+            strict_level = tool_parser.default_tool_strict_level
+        if single_call and not (is_auto and structured_outputs is not None):
+            # Limiting the call count needs the call envelope in the grammar.
+            # Auto with structured outputs keeps its format-only grammar, so the
+            # flag never makes calls possible that are impossible without it.
+            strict_level = max(strict_level, ToolStrictLevel.FUNCTION)
 
         resolved_tools = None
         if tool_parser.structural_tag_model is not None:
             resolved_tools = resolve_tool_strictness(
-                request.tools,
+                get_structural_tag_tools(
+                    tool_parser.structural_tag_model,
+                    request.tools,
+                    request.tool_choice,
+                ),
                 request.tool_choice,
-                self.tool_strict_level,
+                strict_level,
             )
 
         output_format = None
@@ -529,7 +560,7 @@ class DelegatingParser(Parser):
             tools_structural_tag = tool_parser.get_structural_tag(
                 tag_request,
                 reasoning=False,
-                strict_level=self.tool_strict_level,
+                strict_level=strict_level,
             )
         else:
             tools_structural_tag = None
@@ -544,6 +575,8 @@ class DelegatingParser(Parser):
                 )
             return request
 
+        if single_call:
+            limit_to_single_tool_call(tools_structural_tag)
         structural_tag = tools_structural_tag
         if output_format is not None:
             structural_tag = StructuralTag(
@@ -708,8 +741,6 @@ class DelegatingParser(Parser):
                 extract_required_tool_call_streaming(
                     previous_text=previous_text,
                     current_text=current_text,
-                    delta_text=delta_text,
-                    function_name_returned=function_name_returned,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
                 )
@@ -871,8 +902,17 @@ class DelegatingParser(Parser):
                     (delta_message.content if delta_message else None) or ""
                 ) + ((flush_delta.content if flush_delta else None) or "")
                 if self._engine_based:
-                    if delta_message and self._tool_parser is not None:
-                        delta_message.content = None
+                    if self._tool_parser is not None:
+                        # The tool-call phase below consumes current_text.
+                        if delta_message:
+                            delta_message.content = None
+                    elif current_text:
+                        # No tool phase follows to consume the flushed text,
+                        # and the engine is not fed again after the
+                        # transition, so emit it as content here.
+                        if delta_message is None:
+                            delta_message = DeltaMessage()
+                        delta_message.content = current_text
                 else:
                     delta_text = current_text
 
@@ -910,12 +950,13 @@ class DelegatingParser(Parser):
                 elif not delta_message.reasoning:
                     delta_message.reasoning = reasoning_from_this_batch
 
-            if (
-                delta_message
-                and delta_message.tool_calls
-                and delta_message.tool_calls[0].id is not None
-            ):
-                state.history_tool_call_cnt += 1
+            if delta_message and delta_message.tool_calls:
+                # A delta may start several tool calls at once (e.g. the
+                # "required" path when one delta completes more than one
+                # call), so count every id rather than only the first.
+                state.history_tool_call_cnt += sum(
+                    tc.id is not None for tc in delta_message.tool_calls
+                )
 
         # No phase active: pass through as content.
         # Skip when reasoning just ended in this delta — the engine already

@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
+from vllm.v1.attention.ops.metadata import compute_token_to_req_indices
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -124,6 +125,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             bounded_replay=self.bounded_replay,
             block_size=self.block_size,
             num_kv_heads=1,
+            max_tp_shards=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             sliding_window=self.window_size,
@@ -828,7 +830,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self,
         metadata: DeepseekSparseSWAMetadata,
     ) -> None:
-        if metadata.num_decode_tokens == 0:
+        num_tokens = metadata.num_decode_tokens
+        if num_tokens == 0:
             return
         assert metadata.query_start_loc is not None
         assert metadata.seq_lens is not None
@@ -837,6 +840,17 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert metadata.decode_swa_indices is not None
         assert metadata.decode_swa_lens is not None
         assert metadata.replay_start is not None
+
+        # Recompute the validity mask and token->request map from the device
+        # buffers. Their padding differs from the dummy batch the graph was
+        # captured with.
+        torch.ge(metadata.slot_mapping, 0, out=metadata.is_valid_token)
+        compute_token_to_req_indices(
+            metadata.query_start_loc,
+            metadata.token_to_req_indices,
+            num_tokens,
+            num_tokens,
+        )
 
         _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
             metadata.decode_swa_indices,

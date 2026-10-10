@@ -1,0 +1,301 @@
+{
+  "model_id": "MiniMaxAI/MiniMax-M2.5",
+  "vocab_size": 200064,
+  "all_stop_token_ids": [200020],
+  "cases": {
+    "auto": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "tag",
+                  "begin": "",
+                  "content": {
+                    "type": "any_text",
+                    "excludes": [],
+                    "max_tokens": null,
+                    "max_chars": null
+                  },
+                  "end": "</think>"
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n\n"
+                }
+              ]
+            },
+            {
+              "type": "triggered_tags",
+              "triggers": [
+                "<minimax:tool_call>"
+              ],
+              "tags": [
+                {
+                  "type": "tag",
+                  "begin": "<minimax:tool_call>\n",
+                  "content": {
+                    "type": "tags_with_separator",
+                    "tags": [
+                      {
+                        "type": "tag",
+                        "begin": "<invoke name=\"get_weather\">\n",
+                        "content": {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "location": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "location"
+                            ]
+                          },
+                          "style": "minimax_xml",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": []
+                        },
+                        "end": "</invoke>\n"
+                      },
+                      {
+                        "type": "tag",
+                        "begin": "<invoke name=\"add\">\n",
+                        "content": {
+                          "type": "json_schema",
+                          "json_schema": {
+                            "type": "object",
+                            "properties": {
+                              "y": {
+                                "type": "number"
+                              },
+                              "x": {
+                                "type": "number"
+                              },
+                              "items": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            },
+                            "required": [
+                              "y",
+                              "x",
+                              "items"
+                            ]
+                          },
+                          "style": "minimax_xml",
+                          "any_order": false,
+                          "max_whitespace_cnt": null,
+                          "excludes": []
+                        },
+                        "end": "</invoke>\n"
+                      }
+                    ],
+                    "separator": "",
+                    "at_least_one": true,
+                    "stop_after_first": false
+                  },
+                  "end": "</minimax:tool_call>"
+                }
+              ],
+              "at_least_one": false,
+              "stop_after_first": false,
+              "excludes": [
+                "<think>",
+                "</think>"
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.\n</think>\n\nI will call the tools.\n<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">Shanghai</parameter>\n</invoke>\n<invoke name=\"add\">\n<parameter name=\"y\">1.0</parameter>\n<parameter name=\"x\">2</parameter>\n<parameter name=\"items\">[\"left\", \"right\"]</parameter>\n</invoke>\n</minimax:tool_call>",
+      "generation_token_ids": [42478, 1728, 275, 12562, 306, 1187, 6629, 320, 200051, 367, 73, 715, 1728, 275, 6629, 320, 200052, 10, 60, 88638, 1925, 1139, 848, 95, 51872, 6143, 60, 24662, 1925, 1139, 28415, 3361, 165806, 1579, 24662, 1100, 1579, 88638, 1100, 60, 88638, 1925, 1139, 2132, 6143, 60, 24662, 1925, 1139, 121, 3361, 49, 46, 48, 1579, 24662, 1100, 60, 24662, 1925, 1139, 120, 3361, 50, 1579, 24662, 1100, 60, 24662, 1925, 1139, 12405, 3361, 7795, 2038, 1164, 494, 1581, 8760, 1579, 24662, 1100, 1579, 88638, 1100, 200053, 200020]
+    },
+    "required": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "tag",
+                  "begin": "",
+                  "content": {
+                    "type": "any_text",
+                    "excludes": [],
+                    "max_tokens": null,
+                    "max_chars": null
+                  },
+                  "end": "</think>"
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n\n"
+                }
+              ]
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "\n<minimax:tool_call>\n"
+                },
+                {
+                  "type": "tags_with_separator",
+                  "tags": [
+                    {
+                      "type": "tag",
+                      "begin": "<invoke name=\"get_weather\">\n",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                          "type": "object",
+                          "properties": {
+                            "location": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "location"
+                          ]
+                        },
+                        "style": "minimax_xml",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "</invoke>\n"
+                    },
+                    {
+                      "type": "tag",
+                      "begin": "<invoke name=\"add\">\n",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                          "type": "object",
+                          "properties": {
+                            "y": {
+                              "type": "number"
+                            },
+                            "x": {
+                              "type": "number"
+                            },
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "y",
+                            "x",
+                            "items"
+                          ]
+                        },
+                        "style": "minimax_xml",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "</invoke>\n"
+                    }
+                  ],
+                  "separator": "",
+                  "at_least_one": true,
+                  "stop_after_first": false
+                },
+                {
+                  "type": "const_string",
+                  "value": "</minimax:tool_call>"
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.\n</think>\n\n\n<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">Shanghai</parameter>\n</invoke>\n<invoke name=\"add\">\n<parameter name=\"y\">1.0</parameter>\n<parameter name=\"x\">2</parameter>\n<parameter name=\"items\">[\"left\", \"right\"]</parameter>\n</invoke>\n</minimax:tool_call>",
+      "generation_token_ids": [42478, 1728, 275, 12562, 306, 1187, 6629, 320, 200051, 4368, 200052, 10, 60, 88638, 1925, 1139, 848, 95, 51872, 6143, 60, 24662, 1925, 1139, 28415, 3361, 165806, 1579, 24662, 1100, 1579, 88638, 1100, 60, 88638, 1925, 1139, 2132, 6143, 60, 24662, 1925, 1139, 121, 3361, 49, 46, 48, 1579, 24662, 1100, 60, 24662, 1925, 1139, 120, 3361, 50, 1579, 24662, 1100, 60, 24662, 1925, 1139, 12405, 3361, 7795, 2038, 1164, 494, 1581, 8760, 1579, 24662, 1100, 1579, 88638, 1100, 200053, 200020]
+    },
+    "named": {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "tag",
+                  "begin": "",
+                  "content": {
+                    "type": "any_text",
+                    "excludes": [],
+                    "max_tokens": null,
+                    "max_chars": null
+                  },
+                  "end": "</think>"
+                },
+                {
+                  "type": "const_string",
+                  "value": "\n\n"
+                }
+              ]
+            },
+            {
+              "type": "sequence",
+              "elements": [
+                {
+                  "type": "const_string",
+                  "value": "\n<minimax:tool_call>\n"
+                },
+                {
+                  "type": "tag",
+                  "begin": "<invoke name=\"get_weather\">\n",
+                  "content": {
+                    "type": "json_schema",
+                    "json_schema": {
+                      "type": "object",
+                      "properties": {
+                        "location": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "location"
+                      ]
+                    },
+                    "style": "minimax_xml",
+                    "any_order": false,
+                    "max_whitespace_cnt": null,
+                    "excludes": []
+                  },
+                  "end": "</invoke>\n"
+                },
+                {
+                  "type": "const_string",
+                  "value": "</minimax:tool_call>"
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "completion": "Need call the weather and add tools.\n</think>\n\n\n<minimax:tool_call>\n<invoke name=\"get_weather\">\n<parameter name=\"location\">Shanghai</parameter>\n</invoke>\n</minimax:tool_call>",
+      "generation_token_ids": [42478, 1728, 275, 12562, 306, 1187, 6629, 320, 200051, 4368, 200052, 10, 60, 88638, 1925, 1139, 848, 95, 51872, 6143, 60, 24662, 1925, 1139, 28415, 3361, 165806, 1579, 24662, 1100, 1579, 88638, 1100, 200053, 200020]
+    }
+  }
+}

@@ -6,20 +6,31 @@
 //! The invariant under test is that a structured assistant message rendered as history can be
 //! parsed from the generated assistant completion and then rendered back to the exact same
 //! assistant completion.
+//!
+//! The tool-call fixture also snapshots the output grammar built by the initialized parser for each
+//! tool-choice variant, with the rendered completion as its generation, as one file per model under
+//! `tests/grammar_replay/`. `grammar_replay.rs` replays these cases through the real XGrammar.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
+use std::ops::Range;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use futures::{Stream, StreamExt as _, stream};
+use serde::ser::Error as _;
+use serde::{Serialize, Serializer};
 use serde_json_fmt::JsonFormat as JsonFmt;
 use serial_test::file_serial;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
-    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, FinishReason, GenerationPromptMode,
-    LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection, RendererSelection,
-    load_model_backends,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice, FinishReason,
+    GenerationPromptMode, LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection,
+    RendererSelection, ToolStrictLevel, load_model_backends,
 };
+use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
 
@@ -110,6 +121,33 @@ impl ThinkingBehavior {
                     if thinking { enabled } else { disabled }.into(),
                 );
             }
+        }
+    }
+}
+
+/// Tool-choice variant of the tool-call fixture.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ToolChoiceVariant {
+    /// `auto`, with content before the tool calls.
+    Auto,
+    /// `required`, with tool calls only: builder grammars admit no content
+    /// before the calls.
+    Required,
+    /// Named `get_weather`, with a single call to it and no content.
+    Named,
+}
+
+impl ToolChoiceVariant {
+    const ALL: [Self; 3] = [Self::Auto, Self::Required, Self::Named];
+
+    fn tool_choice(self) -> ChatToolChoice {
+        match self {
+            Self::Auto => ChatToolChoice::Auto,
+            Self::Required => ChatToolChoice::Required,
+            Self::Named => ChatToolChoice::Function {
+                name: "get_weather".to_string(),
+            },
         }
     }
 }
@@ -271,6 +309,15 @@ impl RoundtripCase {
         }
     }
 
+    /// Gemma4 through the checkpoint's `response_template` (`hf` parser).
+    fn gemma4_hf() -> Self {
+        Self {
+            tool_call_parser: ParserSelection::Explicit("hf".to_string()),
+            reasoning_parser: ParserSelection::Explicit("hf".to_string()),
+            ..Self::gemma4()
+        }
+    }
+
     /// Kimi K2.5 tool-call format with `<think>` reasoning tags.
     #[allow(dead_code)]
     fn kimi_k25() -> Self {
@@ -421,6 +468,7 @@ roundtrip_tests! {
     step3p5 => [reasoning_and_content],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
+    gemma4_hf => [tool_call_mix],
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     // K3 drops plain-assistant reasoning in history; tool-call turns keep it.
     kimi_k3 => [tool_call_mix],
@@ -451,6 +499,7 @@ async fn run_roundtrip_reasoning_and_content_inner(
         "roundtrip-reasoning-content",
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
         Vec::new(),
+        None,
         thinking,
         case.thinking_behavior,
     );
@@ -489,11 +538,25 @@ async fn run_roundtrip_reasoning_and_content_inner(
     Ok(())
 }
 
-/// Run the fixed reasoning+multiple-tools fixture for one model/parser case.
+/// Run the fixed reasoning+multiple-tools fixture for one model/parser case,
+/// once per tool-choice variant.
 async fn run_roundtrip_tool_call_mix(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
 ) -> Result<()> {
+    let mut results = Vec::new();
+    for variant in ToolChoiceVariant::ALL {
+        let result = run_roundtrip_tool_call_mix_inner(case, backends, variant).await?;
+        results.push((variant, result));
+    }
+    check_grammar_replay_file(case, backends, results)
+}
+
+async fn run_roundtrip_tool_call_mix_inner(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+    variant: ToolChoiceVariant,
+) -> Result<RoundtripResult> {
     let request = roundtrip_request(
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
@@ -501,41 +564,40 @@ async fn run_roundtrip_tool_call_mix(
             "Check Shanghai weather and add 1.0 plus 2.",
         )],
         test_tools(),
+        Some(variant.tool_choice()),
         Some(true), // always enable thinking in this fixture
         case.thinking_behavior,
     );
     let expected_reasoning = "Need call the weather and add tools.";
-    let expected_text = "I will call the tools.";
+    let (expected_text, tool_call_count) = match variant {
+        ToolChoiceVariant::Auto => (Some("I will call the tools."), 2),
+        ToolChoiceVariant::Required => (None, 2),
+        ToolChoiceVariant::Named => (None, 1),
+    };
 
-    let result = run_roundtrip(
-        case,
-        backends,
-        &request,
-        AssistantMessage {
-            content: vec![
-                AssistantContentBlock::Reasoning {
-                    text: expected_reasoning.to_string(),
-                },
-                AssistantContentBlock::Text {
-                    text: expected_text.to_string(),
-                },
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "functions.get_weather:0".to_string(),
-                    name: "get_weather".to_string(),
-                    arguments: r#"{"location":"Shanghai"}"#.to_string(),
-                }),
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "functions.add:1".to_string(),
-                    name: "add".to_string(),
-                    // Intentionally use a non-lexical order of keys to verify text-level
-                    // fidelity of the roundtrip where JSON formatting remains stable. The
-                    // `items` key also exercises templates that call `arguments.items()`.
-                    arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
-                }),
-            ],
-        },
-    )
-    .await?;
+    let mut content = vec![AssistantContentBlock::Reasoning {
+        text: expected_reasoning.to_string(),
+    }];
+    content.extend(expected_text.map(|text| AssistantContentBlock::Text {
+        text: text.to_string(),
+    }));
+    let tool_calls = [
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "functions.get_weather:0".to_string(),
+            name: "get_weather".to_string(),
+            arguments: r#"{"location":"Shanghai"}"#.to_string(),
+        }),
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "functions.add:1".to_string(),
+            name: "add".to_string(),
+            // Intentionally use a non-lexical order of keys to verify text-level
+            // fidelity of the roundtrip where JSON formatting remains stable. The
+            // `items` key also exercises templates that call `arguments.items()`.
+            arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
+        }),
+    ];
+    content.extend(tool_calls.into_iter().take(tool_call_count));
+    let result = run_roundtrip(case, backends, &request, AssistantMessage { content }).await?;
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref(),
@@ -543,12 +605,15 @@ async fn run_roundtrip_tool_call_mix(
         "parsed message: {:#?}",
         result.parsed_message
     );
-    assert_eq!(result.parsed_message.text(), expected_text);
+    assert_eq!(
+        result.parsed_message.text(),
+        expected_text.unwrap_or_default()
+    );
 
     let tool_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
     assert_eq!(
         tool_calls.len(),
-        2,
+        tool_call_count,
         "parsed message: {:#?}",
         result.parsed_message
     );
@@ -557,18 +622,20 @@ async fn run_roundtrip_tool_call_mix(
         tool_calls[0].arguments,
         expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
     );
-    assert_eq!(tool_calls[1].name, "add");
-    assert_eq!(
-        tool_calls[1].arguments,
-        expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
-    );
+    if let Some(add) = tool_calls.get(1) {
+        assert_eq!(add.name, "add");
+        assert_eq!(
+            add.arguments,
+            expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
+        );
+    }
 
     assert_eq!(
         result.rerendered_closed_completion,
         result.closed_completion
     );
 
-    Ok(())
+    Ok(result)
 }
 
 /// Compact JSON argument formatting used by JSON-native parsers/renderers.
@@ -645,6 +712,9 @@ struct RoundtripResult {
     /// Assistant-completion suffix cut after rendering the parsed assistant
     /// back as history.
     rerendered_closed_completion: Prompt,
+    /// Output grammar built by the same initialized parser that parsed the
+    /// completion.
+    output_grammar: Option<BuiltOutputGrammar>,
 }
 
 /// Render, parse, and rerender one assistant turn through the production
@@ -658,13 +728,17 @@ async fn run_roundtrip(
     let renderer = backends.chat_backend.chat_renderer();
     let rendered = render_closed_completion(renderer.as_ref(), request, &assistant)?;
 
-    let parsed_message = parse_completion(case, backends, request, &rendered).await?;
+    let ParsedCompletion {
+        message: parsed_message,
+        output_grammar,
+    } = parse_completion(case, backends, request, &rendered).await?;
     let rerendered = render_closed_completion(renderer.as_ref(), request, &parsed_message)?;
 
     Ok(RoundtripResult {
         parsed_message,
         closed_completion: rendered.completion,
         rerendered_closed_completion: rerendered.completion,
+        output_grammar,
     })
 }
 
@@ -675,7 +749,7 @@ struct RenderedTurn {
 }
 
 /// Render `history` as a production prompt and `history + assistant` as closed
-/// history, then return the production prompt and assistant-completion suffix.
+/// history, then return the production prompt and the assistant completion.
 fn render_closed_completion(
     renderer: &dyn vllm_chat::ChatRenderer,
     base_request: &ChatRequest,
@@ -692,18 +766,15 @@ fn render_closed_completion(
 
     let completion = match (&prompt, full) {
         (Prompt::Text(prompt), Prompt::Text(full)) => {
-            ensure!(
-                full.starts_with(prompt),
-                "full prompt must extend production prompt\nprompt: {prompt:?}\nfull: {full:?}"
-            );
-            Prompt::Text(full[prompt.len()..].to_string())
+            let range = completion_range(prompt.as_bytes(), full.as_bytes())
+                .with_context(|| format!("prompt: {prompt:?}\nfull: {full:?}"))?;
+            let completion = full.get(range).context("completion splits a UTF-8 character")?;
+            Prompt::Text(completion.to_string())
         }
         (Prompt::TokenIds(prompt), Prompt::TokenIds(full)) => {
-            ensure!(
-                full.starts_with(prompt),
-                "full prompt must extend production prompt\nprompt: {prompt:?}\nfull: {full:?}"
-            );
-            Prompt::TokenIds(full[prompt.len()..].to_vec())
+            let range = completion_range(prompt, &full)
+                .with_context(|| format!("prompt: {prompt:?}\nfull: {full:?}"))?;
+            Prompt::TokenIds(full[range].to_vec())
         }
         (prompt, full) => bail!("prompt kind changed between renders: {prompt:?} vs {full:?}"),
     };
@@ -711,14 +782,81 @@ fn render_closed_completion(
     Ok(RenderedTurn { prompt, completion })
 }
 
+/// Locate the assistant completion in `full`, the history rendered with the
+/// assistant message, given `prompt`, the same history rendered for generation.
+///
+/// Some templates render request-scoped control messages after the whole
+/// history, such as Kimi K3's `tool_choice=required` message. With history `A`,
+/// control messages `C`, generation prompt `G`, and completion `B`, the renders
+/// are `prompt = A + C + G` and `full = A + G + B + C`. `C` is empty for most
+/// templates, which makes `prompt` a prefix of `full`.
+fn completion_range<T: PartialEq + Debug>(prompt: &[T], full: &[T]) -> Result<Range<usize>> {
+    if full.starts_with(prompt) {
+        return Ok(prompt.len()..full.len());
+    }
+    ensure!(
+        full.len() >= prompt.len(),
+        "full prompt is shorter than production prompt"
+    );
+
+    // `A` is a common prefix of both renders; try every split of the remaining
+    // `prompt` into `C + G` and require exactly one to fit `full`.
+    let common_prefix_len = prompt.iter().zip(full).take_while(|(p, f)| p == f).count();
+    let mut control_lens = Vec::new();
+    for history_len in 0..=common_prefix_len {
+        let rest = &prompt[history_len..];
+        for control_len in 1..=rest.len() {
+            let (control, generation) = rest.split_at(control_len);
+            if full[history_len..].starts_with(generation) && full.ends_with(control) {
+                control_lens.push(control_len);
+            }
+        }
+    }
+    let [control_len] = control_lens[..] else {
+        bail!(
+            "full prompt must be `A + G + B + C` for production prompt `A + C + G`; found {} splits",
+            control_lens.len()
+        );
+    };
+
+    Ok(prompt.len() - control_len..full.len() - control_len)
+}
+
+#[test]
+fn completion_range_skips_trailing_control_messages() {
+    let history = "<user>hi</user>";
+    let control = "<system>call tools</system>";
+    let generation = "<assistant>";
+    let completion = "call()</assistant>";
+
+    let prompt = format!("{history}{generation}");
+    let full = format!("{history}{generation}{completion}");
+    let range = completion_range(prompt.as_bytes(), full.as_bytes()).unwrap();
+    assert_eq!(&full[range], completion);
+
+    let prompt = format!("{history}{control}{generation}");
+    let full = format!("{history}{generation}{completion}{control}");
+    let range = completion_range(prompt.as_bytes(), full.as_bytes()).unwrap();
+    assert_eq!(&full[range], completion);
+}
+
+/// Output of one production output processor over a rendered completion.
+struct ParsedCompletion {
+    /// Terminal assistant message.
+    message: AssistantMessage,
+    /// Output grammar built by the processor after initialization.
+    output_grammar: Option<BuiltOutputGrammar>,
+}
+
 /// Feed one rendered assistant completion body into the real output processor
-/// and collect its terminal assistant message.
+/// and collect its terminal assistant message, along with the output grammar
+/// the initialized processor builds for the request.
 async fn parse_completion(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
     base_request: &ChatRequest,
     rendered: &RenderedTurn,
-) -> Result<AssistantMessage> {
+) -> Result<ParsedCompletion> {
     let tokenizer = backends.text_backend.tokenizer();
     let prompt_token_ids = match &rendered.prompt {
         Prompt::Text(prompt) => tokenizer
@@ -731,12 +869,15 @@ async fn parse_completion(
     let mut processor = backends.chat_backend.new_chat_output_processor(
         &mut request,
         NewChatOutputProcessorOptions {
-            tool_strict_level: vllm_chat::ToolStrictLevel::Auto,
+            // Pin every tool schema so that builder-backed parsers build an
+            // output grammar for replay. The strict level does not affect parsing.
+            tool_strict_level: ToolStrictLevel::Parameter,
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },
     )?;
     processor.initialize(&prompt_token_ids)?;
+    let output_grammar = processor.build_output_grammar()?;
 
     let decoded = decoded_completion_stream(
         tokenizer.as_ref(),
@@ -748,7 +889,10 @@ async fn parse_completion(
 
     while let Some(event) = events.next().await {
         if let ChatEvent::Done { message, .. } = event? {
-            return Ok(message);
+            return Ok(ParsedCompletion {
+                message,
+                output_grammar,
+            });
         }
     }
 
@@ -772,14 +916,8 @@ fn decoded_completion_stream(
         prompt_logprobs: None,
     }];
 
-    let chunks = match completion {
-        Prompt::Text(text) => {
-            let body = text.strip_suffix(assistant_stop_suffix).with_context(|| {
-                format!(
-                    "closed assistant completion did not end with {:?}: {:?}",
-                    assistant_stop_suffix, text
-                )
-            })?;
+    let chunks = match completion_body(tokenizer, completion, assistant_stop_suffix)? {
+        CompletionBody::Text(body) => {
             // The engine returns token ids, so attribute the rendered text
             // through the production decoder, then split it into small char
             // chunks to exercise marker splits.
@@ -807,27 +945,12 @@ fn decoded_completion_stream(
                 })
                 .collect()
         }
-        Prompt::TokenIds(token_ids) => {
-            let body = if assistant_stop_suffix.is_empty() {
-                token_ids.as_slice()
-            } else {
-                let stop_token_ids = tokenizer
-                    .encode(assistant_stop_suffix, false)
-                    .context("failed to encode token-id completion stop suffix")?;
-                token_ids.strip_suffix(stop_token_ids.as_slice()).with_context(|| {
-                    format!(
-                        "token-id completion did not end with {:?}: {:?}",
-                        assistant_stop_suffix, token_ids
-                    )
-                })?
-            };
-            incremental_decode_chunks(
-                tokenizer,
-                &prompt_token_ids,
-                body,
-                TOKEN_COMPLETION_CHUNK_TOKENS,
-            )?
-        }
+        CompletionBody::TokenIds(body) => incremental_decode_chunks(
+            tokenizer,
+            &prompt_token_ids,
+            body,
+            TOKEN_COMPLETION_CHUNK_TOKENS,
+        )?,
     };
 
     if chunks.is_empty() {
@@ -866,6 +989,48 @@ fn decoded_completion_stream(
     }
 
     Ok(stream::iter(events).map(Ok).boxed())
+}
+
+/// Generated part of a closed assistant completion, without the rendered stop
+/// suffix.
+enum CompletionBody<'a> {
+    Text(&'a str),
+    TokenIds(&'a [u32]),
+}
+
+/// Strip the rendered stop suffix from a closed assistant completion.
+fn completion_body<'a>(
+    tokenizer: &dyn Tokenizer,
+    completion: &'a Prompt,
+    assistant_stop_suffix: &str,
+) -> Result<CompletionBody<'a>> {
+    match completion {
+        Prompt::Text(text) => {
+            let body = text.strip_suffix(assistant_stop_suffix).with_context(|| {
+                format!(
+                    "closed assistant completion did not end with {:?}: {:?}",
+                    assistant_stop_suffix, text
+                )
+            })?;
+            Ok(CompletionBody::Text(body))
+        }
+        Prompt::TokenIds(token_ids) => {
+            let body = if assistant_stop_suffix.is_empty() {
+                token_ids.as_slice()
+            } else {
+                let stop_token_ids = tokenizer
+                    .encode(assistant_stop_suffix, false)
+                    .context("failed to encode token-id completion stop suffix")?;
+                token_ids.strip_suffix(stop_token_ids.as_slice()).with_context(|| {
+                    format!(
+                        "token-id completion did not end with {:?}: {:?}",
+                        assistant_stop_suffix, token_ids
+                    )
+                })?
+            };
+            Ok(CompletionBody::TokenIds(body))
+        }
+    }
 }
 
 /// One decoded completion chunk fed into the output processor.
@@ -941,15 +1106,160 @@ fn incremental_decode_chunks(
     Ok(chunks)
 }
 
+/// Grammar replay cases of one model, replayed through the real XGrammar by
+/// `grammar_replay.py`.
+#[derive(Serialize)]
+struct GrammarReplayFile {
+    /// Hugging Face model id whose tokenizer the replay loads.
+    model_id: &'static str,
+    /// Model vocabulary size, which sizes the XGrammar token mask.
+    vocab_size: usize,
+    /// Request stop set, passed to the matcher as `override_stop_tokens`.
+    #[serde(serialize_with = "serialize_one_line")]
+    all_stop_token_ids: BTreeSet<u32>,
+    /// Cases keyed by tool-choice variant.
+    cases: BTreeMap<ToolChoiceVariant, GrammarReplayCase>,
+}
+
+/// One parser-built output grammar with the generation it must accept.
+#[derive(Serialize)]
+struct GrammarReplayCase {
+    /// Parser-built grammar; only token-zero grammars are replayed from the
+    /// first generated token.
+    grammar: BuiltOutputGrammar,
+    /// Generated completion text, without the stop token.
+    completion: String,
+    /// Generated token IDs presented to the matcher, ending with a stop token.
+    #[serde(serialize_with = "serialize_one_line")]
+    generation_token_ids: Vec<u32>,
+}
+
+/// Serialize a token ID list on one line inside the pretty-printed file.
+fn serialize_one_line<S: Serializer>(
+    token_ids: &impl Serialize,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let json = spaced_json_fmt().format_to_string(token_ids).map_err(S::Error::custom)?;
+    serde_json::value::RawValue::from_string(json)
+        .map_err(S::Error::custom)?
+        .serialize(serializer)
+}
+
+/// Directory of checked-in grammar replay files.
+fn grammar_replay_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/grammar_replay")
+}
+
+/// Snapshot the output grammars of one model's roundtrips, keyed by variant,
+/// as its grammar replay file, or check that no stale file remains when the
+/// parser builds none.
+fn check_grammar_replay_file(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+    results: Vec<(ToolChoiceVariant, RoundtripResult)>,
+) -> Result<()> {
+    let model_name = case.model_id.rsplit_once('/').map_or(case.model_id, |(_, name)| name);
+    let path = grammar_replay_dir().join(format!("{model_name}.json"));
+    let outline_path = path.with_extension("txt");
+    let results = results
+        .into_iter()
+        .filter_map(|(variant, result)| {
+            Some((variant, result.output_grammar?, result.closed_completion))
+        })
+        .collect::<Vec<_>>();
+    if results.is_empty() {
+        for path in [&path, &outline_path] {
+            ensure!(
+                !path.exists(),
+                "{} builds no output grammar, but grammar replay file {path:?} exists",
+                case.model_id
+            );
+        }
+        return Ok(());
+    }
+
+    let tokenizer = backends.text_backend.tokenizer();
+    let hints = backends.text_backend.sampling_hints()?;
+    // Lowered `_all_stop_token_ids` of a request without user stop tokens.
+    let mut all_stop_token_ids = hints.extra_eos_token_ids;
+    all_stop_token_ids.extend(hints.primary_eos_token_id);
+
+    // The generation ends with the first token of the rendered stop suffix, or
+    // with the primary EOS for templates that render none.
+    let stop_token_id = if case.assistant_stop_suffix.is_empty() {
+        hints.primary_eos_token_id.context("model has no primary EOS token")?
+    } else {
+        tokenizer.encode(case.assistant_stop_suffix, false)?[0]
+    };
+    ensure!(
+        all_stop_token_ids.contains(&stop_token_id),
+        "stop token {stop_token_id} of {:?} is not in the stop set {all_stop_token_ids:?}",
+        case.assistant_stop_suffix
+    );
+
+    let mut cases = BTreeMap::new();
+    for (variant, grammar, closed_completion) in results {
+        let (completion, mut generation_token_ids) = match completion_body(
+            tokenizer.as_ref(),
+            &closed_completion,
+            case.assistant_stop_suffix,
+        )? {
+            CompletionBody::Text(body) => (body.to_string(), tokenizer.encode(body, false)?),
+            CompletionBody::TokenIds(body) => (tokenizer.decode(body, false)?, body.to_vec()),
+        };
+        generation_token_ids.push(stop_token_id);
+        cases.insert(
+            variant,
+            GrammarReplayCase {
+                grammar,
+                completion,
+                generation_token_ids,
+            },
+        );
+    }
+
+    // A readable outline of the same grammars, for review only.
+    let mut outline = String::new();
+    for (variant, case) in &cases {
+        if !outline.is_empty() {
+            outline.push('\n');
+        }
+        let variant = serde_json::to_value(variant)?;
+        let coverage = serde_json::to_value(case.grammar.coverage)?;
+        outline.push_str(&format!(
+            "# {} ({})\n",
+            variant.as_str().context("variant name")?,
+            coverage.as_str().context("coverage name")?,
+        ));
+        outline.push_str(&vllm_parser::output_grammar::test_utils::outline(
+            &case.grammar.format,
+        ));
+    }
+    expect_test::expect_file![outline_path].assert_eq(&outline);
+
+    let file = GrammarReplayFile {
+        model_id: case.model_id,
+        vocab_size: backends.text_backend.model_vocab_size(),
+        all_stop_token_ids,
+        cases,
+    };
+    let mut json = serde_json::to_string_pretty(&file)?;
+    json.push('\n');
+    expect_test::expect_file![path].assert_eq(&json);
+
+    Ok(())
+}
+
 /// Build a chat request fixture with parser-enabling tool-choice semantics.
 fn roundtrip_request(
     request_id: impl Into<String>,
     messages: Vec<ChatMessage>,
     tools: Vec<ChatTool>,
+    tool_choice: Option<ChatToolChoice>,
     thinking: Option<bool>,
     thinking_behavior: ThinkingBehavior,
 ) -> ChatRequest {
-    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, None, true)
+    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, tool_choice, true)
         .expect("tool context should resolve");
     let mut request = ChatRequest {
         request_id: request_id.into(),
@@ -979,6 +1289,7 @@ fn test_tools() -> Vec<ChatTool> {
                 "required": ["location"]
             }),
             strict: None,
+            defer_loading: None,
         },
         ChatTool {
             name: "add".to_string(),
@@ -996,6 +1307,7 @@ fn test_tools() -> Vec<ChatTool> {
                 "required": ["y", "x", "items"]
             }),
             strict: None,
+            defer_loading: None,
         },
     ]
 }

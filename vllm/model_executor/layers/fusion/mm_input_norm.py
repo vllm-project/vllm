@@ -147,6 +147,12 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     rescale_factor)`` from the processor config."""
     config = get_processor_config(model_config.model, revision=model_config.revision)
     config = config.get("image_processor", config)
+    if not any(
+        key in config
+        for key in ("do_normalize", "do_rescale", "image_mean", "image_std")
+    ):
+        config = model_config.hf_image_processor_config
+    config = config.get("media_proc_cfg", config)
 
     has_norm_params = "image_mean" in config and "image_std" in config
     do_normalize = bool(config.get("do_normalize", has_norm_params))
@@ -241,6 +247,10 @@ class FusedMMInputNorm(CustomOp):
         self.register_buffer("weight", (rescale_factor / std).to(device))
         self.register_buffer("bias", (-mean / std).to(device))
 
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
+
     @property
     def input_dtype(self) -> torch.dtype | None:
         return torch.uint8
@@ -303,19 +313,15 @@ class FusedMMInputNorm(CustomOp):
     def forward_xpu(
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
-        """XPU fused custom kernel path.
-
-        On XPU, fuse the whole rescale + normalise into a single custom
-        kernel. The eager path materializes an fp32 intermediate and then
-        casts back, which adds device-side compute that cancels the
-        bandwidth saving of transferring uint8 pixel_values. The fused
-        kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
+        """XPU fused custom kernel path for uint8 and Triton kernel path
+        for others.
         """
-        # The out-of-tree XPU kernel only supports the uint8 input that
-        # device-side normalisation guarantees; fail loudly otherwise.
-        assert pixel_values.dtype == torch.uint8, (
-            f"xpu_fused_input_norm requires uint8 input, got {pixel_values.dtype}"
-        )
+        if pixel_values.dtype != torch.uint8:
+            return self.forward_cuda(pixel_values, visual_dtype)
+
+        # For uint8 input, falls to xpu_fused_input_norm from xpu kernels
+        import vllm._xpu_ops  # noqa: F401
+
         return torch.ops.vllm.xpu_fused_input_norm(
             pixel_values, self.weight, self.bias, visual_dtype
         )
