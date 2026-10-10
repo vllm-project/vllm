@@ -83,6 +83,20 @@ def test_sample_within_kept_set(top_p):
         assert kept.gather(1, tokens[:, None]).all()
 
 
+def test_sample_preserves_nonuniform_probabilities():
+    """Catch biased draws that a support-only check misses."""
+    torch.manual_seed(4)
+    batch_size = 128
+    logits = torch.full((batch_size, 32000), -torch.inf, device=DEVICE)
+    probabilities = torch.tensor([0.4, 0.3, 0.2, 0.1], device=DEVICE)
+    logits[:, :4] = probabilities.log()
+    k, p = _params(batch_size, 4, 1.0)
+    draws = torch.cat([cake_sample(logits, k, p, 4).clone() for _ in range(128)])
+    observed = draws.long().bincount(minlength=32000).float() / draws.numel()
+    assert observed[4:].sum() == 0
+    torch.testing.assert_close(observed[:4], probabilities, atol=0.03, rtol=0)
+
+
 @pytest.mark.parametrize("batch_size", [8, 128])
 def test_dispatch_matches_reference(batch_size):
     """Small batches take Cake, large ones Triton; both match the reference."""
