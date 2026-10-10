@@ -95,7 +95,9 @@ class TieringMetricsTracker:
             LookupResult.HIT,
             LookupResult.MISS,
         ):
-            observed = state.observed_lookups.setdefault(tier_label, {})
+            observed = state.observed_lookups.get(tier_label)
+            if observed is None:
+                observed = state.observed_lookups[tier_label] = {}
             start_time = observed.get(key)
             if key not in observed or start_time is not None:
                 observed[key] = None
@@ -106,7 +108,9 @@ class TieringMetricsTracker:
                     start_time,
                 )
         elif result is LookupResult.RETRY and state.observed_lookups is not None:
-            observed = state.observed_lookups.setdefault(tier_label, {})
+            observed = state.observed_lookups.get(tier_label)
+            if observed is None:
+                observed = state.observed_lookups[tier_label] = {}
             observed.setdefault(key, time.monotonic() - lookup_duration)
 
     def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
