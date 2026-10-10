@@ -1065,6 +1065,13 @@ class WorkerProc:
             # containing its string representation before transport.
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(e)
+            elif output_rank is not None:
+                # A non-output rank has no response queue consumed by the
+                # caller. Continuing the dequeue loop would let this rank
+                # execute the next collective RPC while its peers are still
+                # handling the failed one, causing rank desynchronization and
+                # potentially a cross-rank deadlock.
+                raise
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:

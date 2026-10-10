@@ -69,6 +69,21 @@ def test_execute_worker_rpc_returns_worker_exception():
     assert str(outputs[0]) == "test error"
 
 
+def test_non_output_worker_rpc_exception_stops_worker():
+    def fail():
+        raise RuntimeError("non-output rank failure")
+
+    worker_proc: Any = WorkerProc.__new__(WorkerProc)
+    worker_proc.rank = 0
+    worker_proc.worker = SimpleNamespace(fail=fail)
+    worker_proc.handle_output = lambda output: pytest.fail(
+        "non-output workers must not publish a successful response"
+    )
+
+    with pytest.raises(RuntimeError, match="non-output rank failure"):
+        worker_proc._execute_worker_rpc(("fail", (), {}, 1))
+
+
 @pytest.mark.parametrize("stalled", [False, True])
 @pytest.mark.parametrize(
     "method,result",
