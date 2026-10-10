@@ -175,6 +175,7 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
+- `/v1/systemone` - Structured decisions API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`)
@@ -550,6 +551,15 @@ ensure that only trusted principals can submit work to the cluster:
 - Place the Ray cluster on an isolated network segment.
 - Do not expose the Ray client port or dashboard to untrusted networks.
 
+## Multi-Tenant Deployments
+
+vLLM does not provide isolation between tenants that share the same server process. Requests from different callers are scheduled together and share the same caches. Options such as `cache_salt` reduce specific cross-tenant risks, but they are not an isolation boundary.
+
+If tenants must be isolated from each other, enforce it in the deployment architecture:
+
+- Run a dedicated vLLM instance per tenant.
+- Place a gateway in front of vLLM that authenticates callers and scopes client-supplied cache identifiers, such as `cache_salt` and multimodal `uuid` values, per tenant.
+
 ## Prefix Cache Timing Side-Channel Mitigation (Cache Salting)
 
 ### Background
@@ -562,7 +572,7 @@ An attacker sharing the same backend can measure differences in Time to First To
 
 vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
 
-`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
+`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, the Anthropic `/v1/messages` endpoint, the structured decisions `/v1/systemone` endpoint, and the generative scoring `/generative_scoring` endpoint.
 
 #### Usage with the OpenAI Python client
 
@@ -633,7 +643,7 @@ For additional cross-tenant isolation, set `cache_salt` on each request (see [Pr
 
 - **Multi-tenant deployments**: Always generate cryptographically random UUIDs per media item. Additionally, set `cache_salt` to a per-tenant secret for defense in depth.
 - **Single-tenant deployments**: Ensure UUIDs are unique per distinct media content. `cache_salt` is unnecessary when there is no cross-tenant threat.
-- **Default behavior**: Omitting `uuid` entirely preserves the default content-hash-based identity, which is safe against this class of collision but requires hashing the media bytes on every request.
+- **Default behavior**: Omitting `uuid` uses a hash of the media bytes as the cache identity, which requires hashing the media on every request. This avoids accidental collisions between callers, but it does not isolate tenants from each other. See [Multi-Tenant Deployments](#multi-tenant-deployments).
 
 ## Reporting Security Vulnerabilities
 

@@ -12,6 +12,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  - vllm/models/deepseek_v41/quant_config.py
   - tests/quantization
   commands:
   # Pin torchao to the version compatible with the CI PyTorch and CUDA stack.
@@ -79,6 +80,7 @@ steps:
 
 - label: ":nvidia: (B200) Quantized MoE"
   key: quantized-moe-test-b200
+  automatic_shard: true
   timeout_in_minutes: 120
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -126,6 +128,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb
   key: quantized-models-test
+  automatic_shard: true
   timeout_in_minutes: 65
   env:
     VLLM_USE_V2_MODEL_RUNNER: "0"
