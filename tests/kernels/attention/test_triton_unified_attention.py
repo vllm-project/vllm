@@ -984,3 +984,292 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     ref = soft_cap * torch.tanh(scores / soft_cap)
     assert torch.isfinite(out).all(), out
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@triton.jit
+def _compute_mm_tile_bounds(
+    output_ptr,
+    mm_prefix_range_ptr,
+    SLIDING_WINDOW: tl.constexpr,
+    MM_PREFIX_CLAMP_SW: tl.constexpr,
+):
+    loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
+        0,  # context_len
+        4096,  # seq_len
+        4096,  # cur_batch_query_len
+        140,  # q_block_local_idx: query positions [1120, 1127]
+        0,  # segm_idx_or_0
+        0,  # tiles_per_segment_or_0
+        32,  # TILE_SIZE
+        16,  # BLOCK_M
+        8,  # BLOCK_Q
+        2,  # num_queries_per_kv
+        SLIDING_WINDOW,
+        True,  # USE_MM_PREFIX
+        False,  # IS_3D
+        True,  # USE_CAUSAL
+        False,  # USE_PER_SEQ_CAUSAL
+        -1,  # CHUNK_LOOKBACK
+        -1,  # CHUNK_SIZE
+        False,  # USE_R_SWA
+        MM_PREFIX_CLAMP_SW,
+        2,  # MAX_MM_RANGES
+        mm_prefix_range_ptr,
+        0,  # seq_idx
+    )
+    tl.store(output_ptr, loop_lo)
+    tl.store(output_ptr + 1, loop_hi)
+    tl.store(output_ptr + 2, max_seq_prefix_len)
+
+
+def _mm_tile_bounds(
+    ranges: list[list[int]], sliding_window: int, clamp: bool
+) -> list[int]:
+    mm_prefix_ranges = torch.tensor([ranges], dtype=torch.int32, device=DEVICE_TYPE)
+    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+    _compute_mm_tile_bounds[(1,)](
+        bounds,
+        mm_prefix_ranges,
+        SLIDING_WINDOW=sliding_window,
+        MM_PREFIX_CLAMP_SW=clamp,
+    )
+    return bounds.tolist()
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        # No image: only the window [97, 1127] -> tiles [3, 36).
+        ([[0, 0], [0, 0]], [3, 36, 4096]),
+        # Image wider than the window and intersecting the block: keep it whole.
+        ([[1024, 2303], [0, 0]], [3, 72, 4096]),
+        # Image starting before the window: rows inside it may reach back to
+        # its first token, so the lower bound drops to tile 2.
+        ([[64, 1500], [0, 0]], [2, 47, 4096]),
+        # Image that ends before this block: no row of the block is inside it.
+        ([[0, 600], [0, 0]], [3, 36, 4096]),
+    ],
+)
+def test_unclamped_mm_prefix_prunes_sliding_window_tiles(
+    ranges: list[list[int]], expected: list[int]
+) -> None:
+    """Prefix-LM models without the Gemma4 clamp (Gemma3, PaliGemma, ...) must
+    still skip the tiles no row of the Q-block can attend: before
+    min(window start, image start) and after max(query, image end). Without the
+    pruning every tile in [0, 128) is visited."""
+    assert _mm_tile_bounds(ranges, 1024, False) == expected
+
+
+@pytest.mark.parametrize("clamp", [False, True])
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        ([[0, 0], [0, 0]], [0, 36, 4096]),
+        ([[1024, 2303], [0, 0]], [0, 72, 4096]),
+        ([[0, 600], [0, 0]], [0, 36, 4096]),
+    ],
+)
+def test_mm_prefix_prunes_causal_tiles_on_full_attention_layers(
+    ranges: list[list[int]], expected: list[int], clamp: bool
+) -> None:
+    """Full-attention layers keep the causal upper bound, extended only by the
+    image ranges intersecting the Q-block, instead of scanning to seq_len. The
+    clamp flag only concerns sliding layers, so both settings agree here."""
+    assert _mm_tile_bounds(ranges, 0, clamp) == expected
+
+
+def ref_paged_unclamped_mm_attn(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    query_lens: list[int],
+    kv_lens: list[int],
+    block_tables: torch.Tensor,
+    mm_ranges: list[list[tuple[int, int]]],
+    scale: float,
+    sliding_window: int | None,
+) -> torch.Tensor:
+    """(causal AND window) OR (query and key inside the same image range)."""
+    block_tables_cpu = block_tables.cpu().numpy()
+    _, block_size, num_kv_heads, head_size = key_cache.shape
+
+    outputs: list[torch.Tensor] = []
+    query_start = 0
+    for req_idx, (query_len, kv_len) in enumerate(zip(query_lens, kv_lens)):
+        query_i = query[query_start : query_start + query_len].float()
+        context_len = kv_len - query_len
+        query_pos = torch.arange(query_len, device=query.device) + context_len
+        key_pos = torch.arange(kv_len, device=query.device)
+
+        num_kv_blocks = (kv_len + block_size - 1) // block_size
+        block_indices = block_tables_cpu[req_idx, :num_kv_blocks]
+        key_i = key_cache[block_indices].view(-1, num_kv_heads, head_size)[:kv_len]
+        value_i = value_cache[block_indices].view(-1, num_kv_heads, head_size)[:kv_len]
+        if query_i.shape[1] != key_i.shape[1]:
+            repeats = query_i.shape[1] // key_i.shape[1]
+            key_i = torch.repeat_interleave(key_i, repeats, dim=1)
+            value_i = torch.repeat_interleave(value_i, repeats, dim=1)
+
+        delta = query_pos[:, None] - key_pos[None, :]
+        keep = delta >= 0
+        if sliding_window is not None:
+            keep &= delta < sliding_window
+        for range_start, range_end in mm_ranges[req_idx]:
+            q_in_range = (query_pos >= range_start) & (query_pos <= range_end)
+            k_in_range = (key_pos >= range_start) & (key_pos <= range_end)
+            keep |= q_in_range[:, None] & k_in_range[None, :]
+
+        scores = torch.einsum("qhd,khd->hqk", query_i, key_i.float()) * scale
+        scores.masked_fill_(~keep[None], float("-inf"))
+        probs = scores.softmax(-1).to(value_i.dtype)
+        outputs.append(torch.einsum("hqk,khd->qhd", probs, value_i))
+        query_start += query_len
+
+    return torch.cat(outputs)
+
+
+@pytest.mark.parametrize("sliding_window", [None, 128])
+@torch.inference_mode()
+def test_triton_unified_attn_unclamped_mm_matches_dense_reference(
+    sliding_window: int | None,
+) -> None:
+    """Tile pruning under unclamped mm_prefix must not drop any key a row can
+    attend: Q-blocks cutting through an image range (request 1), a range
+    spanning the context/query boundary (request 2), and image keys past the
+    causal bound still match the dense reference. Ranges are no longer than
+    the window, as the model runner drops longer ones for unclamped models."""
+    set_random_seed(0)
+    query_lens = [384, 96]
+    kv_lens_list = [384, 320]
+    mm_ranges = [[(100, 227)], [(200, 300)]]
+    block_size = 16
+    num_query_heads = 4
+    num_kv_heads = 2
+    head_size = 128
+    scale = head_size**-0.5
+
+    query = torch.randn(
+        sum(query_lens),
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=DEVICE_TYPE,
+    )
+    num_blocks_per_req = [
+        (kv_len + block_size - 1) // block_size for kv_len in kv_lens_list
+    ]
+    total_blocks = sum(num_blocks_per_req)
+    key_cache = torch.randn(
+        total_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=DEVICE_TYPE,
+    )
+    value_cache = torch.randn_like(key_cache)
+
+    block_tables = torch.zeros(
+        len(query_lens),
+        max(num_blocks_per_req),
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    block_start = 0
+    for req_idx, num_blocks in enumerate(num_blocks_per_req):
+        block_tables[req_idx, :num_blocks] = torch.arange(
+            block_start,
+            block_start + num_blocks,
+            dtype=torch.int32,
+            device=DEVICE_TYPE,
+        )
+        block_start += num_blocks
+
+    cu_seqlens_q = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
+    ).cumsum(0, dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32, device=DEVICE_TYPE)
+    mm_prefix_range = torch.tensor(mm_ranges, dtype=torch.int32, device=DEVICE_TYPE)
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    actual = torch.empty_like(query)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=actual,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max(query_lens),
+        seqused_k=kv_lens,
+        max_seqlen_k=max(kv_lens_list),
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        mm_prefix_range=mm_prefix_range,
+        mm_prefix_clamp_sliding_window=False,
+    )
+
+    expected = ref_paged_unclamped_mm_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens_list,
+        block_tables,
+        mm_ranges,
+        scale,
+        sliding_window,
+    )
+    without_images = ref_paged_unclamped_mm_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens_list,
+        block_tables,
+        [[], []],
+        scale,
+        sliding_window,
+    )
+
+    torch.testing.assert_close(actual.float(), expected.float(), atol=2e-2, rtol=2e-2)
+    assert not torch.allclose(expected, without_images, atol=2e-2, rtol=2e-2)
+
+
+@triton.jit
+def _compute_tile_bounds_without_ranges(
+    output_ptr,
+    SLIDING_WINDOW: tl.constexpr,
+):
+    loop_lo, loop_hi, _ = compute_tile_loop_bounds(
+        0,  # context_len
+        4096,  # seq_len
+        4096,  # cur_batch_query_len
+        140,  # q_block_local_idx: query positions [1120, 1127]
+        0,  # segm_idx_or_0
+        0,  # tiles_per_segment_or_0
+        32,  # TILE_SIZE
+        16,  # BLOCK_M
+        8,  # BLOCK_Q
+        2,  # num_queries_per_kv
+        SLIDING_WINDOW,
+        True,  # USE_MM_PREFIX, ranges applied by the caller's mask only
+        False,  # IS_3D
+    )
+    tl.store(output_ptr, loop_lo)
+    tl.store(output_ptr + 1, loop_hi)
+
+
+@pytest.mark.parametrize("sliding_window", [0, 1024])
+def test_mm_prefix_without_ranges_keeps_full_scan(sliding_window: int) -> None:
+    """Callers that apply mm_prefix in their mask without passing the ranges
+    to compute_tile_loop_bounds (the INT4 per-token-head kernel) must compile
+    and keep scanning every tile."""
+    bounds = torch.empty(2, dtype=torch.int32, device=DEVICE_TYPE)
+    _compute_tile_bounds_without_ranges[(1,)](bounds, SLIDING_WINDOW=sliding_window)
+    assert bounds.tolist() == [0, 128]
