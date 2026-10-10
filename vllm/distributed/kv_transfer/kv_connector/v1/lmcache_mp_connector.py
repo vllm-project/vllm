@@ -934,15 +934,16 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             and return_params is not None
             and "num_lmcache_extra_cached_tokens" in params
         ):
-            request_tracker = self._get_request_tracker(request.request_id)
-            num_extra_cached_blocks = max(
-                0,
-                request_tracker.num_lmcache_hit_blocks
-                - request_tracker.num_vllm_hit_blocks,
-            )
-            return_params["num_lmcache_extra_cached_tokens"] = (
-                num_extra_cached_blocks * self.vllm_block_size
-            )
+            request_tracker = self.request_trackers.get(request.request_id)
+            if request_tracker is not None:
+                num_extra_cached_blocks = max(
+                    0,
+                    request_tracker.num_lmcache_hit_blocks
+                    - request_tracker.num_vllm_hit_blocks,
+                )
+                return_params["num_lmcache_extra_cached_tokens"] = (
+                    num_extra_cached_blocks * self.vllm_block_size
+                )
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
