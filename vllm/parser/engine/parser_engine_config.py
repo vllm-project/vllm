@@ -33,6 +33,12 @@ class ParserState(Enum):
     TOOL_NAME = auto()
     TOOL_ARGS = auto()
     TOOL_BETWEEN = auto()
+    # Swallowing the attribute region of a bare parameter opener that
+    # arrived with no open invoke (entered from CONTENT or REASONING
+    # respectively); the tag's closing "> returns to the origin state
+    # so the parameter value is still surfaced.
+    STRAY_PARAM = auto()
+    STRAY_PARAM_REASONING = auto()
 
 
 @dataclass(frozen=True, slots=True)
