@@ -263,6 +263,34 @@ _NATIVE_CPRR_HEADS: Final = (16, 32, 64, 128)
 _MIN_CPRR_QLEN: Final = 3
 
 
+def _int64_rows(t: torch.Tensor) -> torch.Tensor | None:
+    """Reinterpret ``t`` as int64 along its last dim, or None if not aligned."""
+    size = t.element_size()
+    if size >= 8 or t.dim() == 0 or t.stride(-1) != 1:
+        return None
+    ratio = 8 // size
+    if t.shape[-1] % ratio or t.storage_offset() % ratio:
+        return None
+    if any(s % ratio for s in t.stride()[:-1]):
+        return None
+    return t.view(torch.int64)
+
+
+def _copy_rows(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """``dst.copy_(src)`` through int64 rows when the layout allows it.
+
+    A strided copy of a byte-sized dtype (an FP8 query) otherwise moves one
+    element per lane, which is slow on MI355X.
+    """
+    assert dst.dtype == src.dtype
+    wide_dst = _int64_rows(dst)
+    wide_src = _int64_rows(src)
+    if wide_dst is not None and wide_src is not None:
+        wide_dst.copy_(wide_src)
+    else:
+        dst.copy_(src)
+
+
 class _DCPDecodeRoute(Enum):
     PLAIN = "plain"
     SEGMENTED = "segmented"
@@ -1761,13 +1789,19 @@ class AiterMLAHelper:
         if m % num_heads == 0:
             return q.repeat_interleave(m // num_heads, dim=1)
         # Non-divisor head counts cannot be padded by repeat_interleave. Tile
-        # the query heads and slice to exactly m. MLA attention is independent
-        # per query head over the shared KV, so padding heads cannot affect
-        # heads [0:num_heads]; they are sliced back off the output.
-        reps = -(-m // num_heads)  # ceil(m / num_heads)
-        # Slicing a tiled tensor yields a non-contiguous view. The asm decode
-        # reads q as packed [tokens, m, head_dim], so materialize it.
-        return q.repeat(1, reps, 1)[:, :m, :].contiguous()
+        # the query heads up to exactly m. MLA attention is independent per
+        # query head over the shared KV, so padding heads cannot affect heads
+        # [0:num_heads]; they are sliced back off the output. Writing the
+        # packed [tokens, m, head_dim] buffer directly avoids materializing
+        # ceil(m / num_heads) full copies and then a second contiguous copy.
+        padded = q.new_empty((q.shape[0], m, q.shape[2]))
+        _copy_rows(padded[:, :num_heads], q)
+        filled = num_heads
+        while filled < m:
+            n = min(filled, m - filled)
+            _copy_rows(padded[:, filled : filled + n], padded[:, :n])
+            filled += n
+        return padded
 
     @staticmethod
     def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
