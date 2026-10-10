@@ -529,7 +529,7 @@ def select_indexer_impl_cls(
         )
 
         logger.info_once(
-            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + top-k) "
+            "MiniMax M3 indexer: selected MSA (shared score buffer + native top-k) "
             "[topk_blocks=%d, indexer_kv_dtype=%s]",
             topk_blocks,
             indexer_kv_dtype,

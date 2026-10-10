@@ -9,9 +9,8 @@ selects the top-k blocks for the whole batch (decode ``[:nd]`` + prefill
 causal page count and force-includes the init/local blocks, so the unwritten
 tail of the buffer is pre-filled with ``-inf``.
 
-Prefill scores with ``fmha_sm100``'s score-only (``OnlyScore``) path (much faster
-than Triton for the wide prefill score, benchmarked ~3-5x), writing its
-``max_score`` straight into the buffer's prefill region (stride-aware, no copy).
+Prefill defaults to MSA's dedicated CuTe scorer for supported FP8 indexer Q/K
+and FMHA ``OnlyScore`` for BF16. Both write into the buffer's prefill region.
 
 Decode scores with CuteDSL when the flattened query tile is supported and fall
 back to Triton otherwise, writing into the decode region. Only the top-k is
@@ -22,12 +21,13 @@ AMD / non-SM100.
 """
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
     MiniMaxM3IndexerDecodeMetadata,
@@ -39,6 +39,7 @@ from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode_score,
 )
 from vllm.models.minimax_m3.nvidia.ops import minimax_m3_index_decode_score_cutedsl
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -46,6 +47,11 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+if TYPE_CHECKING:
+    from vllm.third_party.fmha_sm100 import BatchPrefillIndexerQ8KV8Wrapper
+
+logger = init_logger(__name__)
 
 # Page size == sparse block size == index-K block; fmha tile id == M3 block id.
 PAGE_SIZE = 128
@@ -72,7 +78,7 @@ class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
 
 @dataclass
 class MiniMaxM3IndexerMSAPrefillMetadata:
-    """fmha score plan + Triton top-k inputs for the prefill side (eager)."""
+    """FMHA score plan for the prefill side (eager)."""
 
     plan: dict  # fmha_sm100 PlanInfo
     cu_seqlens_q: torch.Tensor  # [num_prefills + 1] int32, rebased to 0
@@ -84,10 +90,13 @@ class MiniMaxM3IndexerMSAPrefillMetadata:
 @dataclass
 class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     """Decode reuses the inherited base ``decode`` field (the Triton decode
-    metadata); ``prefill_msa`` carries the fmha score plan for the prefill side
+    metadata); prefill uses either ``prefill_msa`` or ``prefill_cute``
     (the base ``prefill`` field is unused on this path)."""
 
     prefill_msa: MiniMaxM3IndexerMSAPrefillMetadata | None = None
+    # Planned once per batch and reused by all indexer layers. Writes directly
+    # into the prefill slice of unified_scores; selection stays in vLLM.
+    prefill_cute: "BatchPrefillIndexerQ8KV8Wrapper | None" = None
     # Per-forward view (``[:num_tokens]``) of the builder's persistent unified
     # score buffer ``[total_q, H, MAX_K_TILES]``, shared by decode and prefill
     # and reused across all layers. Pre-filled with the -inf sentinel in
@@ -110,8 +119,7 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
 
 
 class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
-    """Decode metadata is the cudagraph-safe Triton decode metadata; the prefill
-    fmha plan is built eagerly (prefill batches are not captured)."""
+    """Decode metadata is cudagraph-safe; prefill plans are built eagerly."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -123,6 +131,54 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        prefill_backend = (
+            vllm_config.attention_config.minimax_m3_indexer_prefill_backend
+        )
+        hf_config = vllm_config.model_config.hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
+        local_blocks = text_config.sparse_attention_config.get("sparse_local_block", 0)
+        capability = current_platform.get_device_capability(device.index or 0)
+        # The model emits indexer Q in the index-cache dtype, independently of
+        # main-attention Q. Select the scorer once for that precision.
+        # The dedicated scorer skips the current page. Native Top16 must force
+        # it into the result, even when a different number of local blocks is used.
+        supports_cute = (
+            capability is not None
+            and capability.to_int() in (100, 103, 107)
+            and kv_cache_spec.dtype == torch.float8_e4m3fn
+            and kv_cache_spec.head_size == 128
+            and kv_cache_spec.block_size == PAGE_SIZE
+            and self.num_index_heads in (1, 2, 4)
+            and local_blocks >= 1
+        )
+        if prefill_backend == "cute" and not supports_cute:
+            raise ValueError(
+                "MiniMax M3 CuTe prefill scoring requires SM100/SM103/SM107, "
+                "FP8 E4M3 indexer Q/K, head dimension 128, page size 128, "
+                "1/2/4 index heads per rank, and sparse_local_block >= 1."
+            )
+        self.use_cute_prefill = supports_cute and prefill_backend != "fmha"
+        if self.use_cute_prefill:
+            from vllm.third_party import fmha_sm100
+
+            # Older MSA builds may lack the wrapper or its score-only API.
+            wrapper_cls = getattr(fmha_sm100, "BatchPrefillIndexerQ8KV8Wrapper", None)
+            if not hasattr(wrapper_cls, "run_scores"):
+                if prefill_backend == "cute":
+                    raise ValueError(
+                        "The installed MSA lacks the prefill run_scores API. "
+                        "Update MSA or select minimax_m3_indexer_prefill_backend=fmha."
+                    )
+                self.use_cute_prefill = False
+                logger.warning_once(
+                    "MSA lacks the prefill run_scores API; using FMHA OnlyScore."
+                )
+        logger.info_once(
+            "MiniMax M3 indexer prefill scorer: %s (Q/K dtype=%s, policy=%s)",
+            "CuTe" if self.use_cute_prefill else "FMHA OnlyScore",
+            kv_cache_spec.dtype,
+            prefill_backend,
+        )
         # Persistent unified score buffer [T, H, MAX_K_TILES] shared by all
         # indexer layers and reused across forwards. Stable address (required
         # for the captured decode path) + fixed tile dim so the decode score
@@ -196,7 +252,28 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             )
 
         prefill: MiniMaxM3IndexerMSAPrefillMetadata | None = None
-        if num_prefills > 0:
+        prefill_cute = None
+        if num_prefills > 0 and self.use_cute_prefill:
+            from vllm.third_party.fmha_sm100 import BatchPrefillIndexerQ8KV8Wrapper
+
+            lo, hi = num_decodes, num_reqs
+            prefill_cute = BatchPrefillIndexerQ8KV8Wrapper(
+                num_heads=self.num_index_heads
+            )
+            # Keep the page table rectangular and build tasks from device
+            # lengths. The output pitch is independent of the KV length bound.
+            prefill_cute.plan(
+                query_start_loc[lo : hi + 1] - query_start_loc[lo],
+                seq_lens[lo:hi],
+                block_table[lo:hi],
+                total_q=num_prefill_tokens,
+                max_seqlen_q=common_attn_metadata.max_query_len,
+                max_seqlen_k=min(
+                    common_attn_metadata.max_seq_len, block_table.shape[1] * PAGE_SIZE
+                ),
+                score_out=unified_scores[num_decode_tokens:].view(-1, MAX_K_TILES),
+            )
+        elif num_prefills > 0:
             # Prefill is eager (not captured); the host lengths it needs (and the
             # _fmha_sm100_plan .tolist() inside) make the D->H sync acceptable.
             from vllm.third_party.fmha_sm100.api import _fmha_sm100_plan
@@ -247,6 +324,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             decode=decode,
             prefill_msa=prefill,
+            prefill_cute=prefill_cute,
             unified_scores=unified_scores,
             max_k_tiles=max_k_tiles,
             topk_cu_seqlens_q=query_start_loc[: num_reqs + 1],
@@ -257,7 +335,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
 
 class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
-    """Decode: CuteDSL/Triton score. Prefill: fmha_sm100 OnlyScore + top-k."""
+    """CuTe/FMHA prefill and CuTe/Triton decode scores with shared native Top16."""
 
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerMSABackend
 
@@ -277,6 +355,11 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             -1, self.num_index_heads, self.index_head_dim
         )
         kv = self.index_cache.kv_cache
+        if index_q.dtype != kv.dtype:
+            raise ValueError(
+                "MiniMax M3 MSA indexer requires matching Q and K cache dtypes; "
+                f"got Q={index_q.dtype}, K={kv.dtype}."
+            )
         # Shared persistent top-k output buffer; the unified top-k below writes
         # the selected block ids into buf[:num_tokens].
         buf = self.topk_indices_buffer
@@ -317,7 +400,9 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 score_out=unified_scores[:nd].transpose(0, 1),
             )
 
-        if md.prefill_msa is not None:
+        if md.prefill_cute is not None:
+            md.prefill_cute.run_scores(index_q[nd:], kv)
+        elif md.prefill_msa is not None:
             from vllm.third_party.fmha_sm100.api import _fmha_sm100
 
             p = md.prefill_msa

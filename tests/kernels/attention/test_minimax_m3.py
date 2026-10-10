@@ -822,20 +822,44 @@ def test_fmha_sm100_indexer_matches_reference(q_lens, prefix_lens, index_dtype):
     _assert_topk_indices_equal_unordered(actual, expected)
 
 
-# Full impl-level parity: drive both MiniMaxM3IndexerMSAImpl (fmha/CuteDSL score
-# + unified top-k) and MiniMaxM3IndexerTritonImpl through their real metadata
-# builders on the SAME CommonAttentionMetadata + index cache, and assert the
-# selected blocks agree. This exercises all the metadata the impl/kernels consume
-# (decode/prefill split, cu_seqlens_q rebasing, prefix_lens, kv_indices gather,
-# decode_pages split) -- a metadata bug on either side shifts the causal window
-# or the block->page mapping and breaks the comparison.
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="fmha_sm100 indexer requires SM100 (Blackwell).",
+    not current_platform.is_cuda()
+    or current_platform.get_device_capability() not in ((10, 0), (10, 3), (10, 7)),
+    reason="MSA CuTe prefill indexer requires SM100, SM103, or SM107.",
 )
-@pytest.mark.parametrize("topk", [16])
-@pytest.mark.parametrize("index_dtype", [torch.bfloat16, torch.float8_e4m3fn])
-def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
+@pytest.mark.parametrize(
+    (
+        "prefill_backend",
+        "index_dtype",
+        "num_idx_heads",
+        "init_blocks",
+        "local_blocks",
+        "expect_cute",
+    ),
+    [
+        pytest.param(None, torch.float8_e4m3fn, 1, 0, 1, True, id="default-cute-h1"),
+        pytest.param("cute", torch.float8_e4m3fn, 2, 1, 2, True, id="cute-h2"),
+        pytest.param("auto", torch.float8_e4m3fn, 4, 2, 1, True, id="auto-cute-h4"),
+        pytest.param("fmha", torch.float8_e4m3fn, 4, 2, 1, False, id="fmha-override"),
+        pytest.param("auto", torch.bfloat16, 4, 0, 1, False, id="bf16-fallback"),
+        pytest.param("fmha", torch.bfloat16, 4, 0, 1, False, id="fmha-bf16"),
+        pytest.param("auto", torch.float8_e4m3fn, 2, 0, 0, False, id="tail-fallback"),
+        pytest.param("cute", torch.bfloat16, 4, 0, 1, None, id="cute-rejects-bf16"),
+        pytest.param("cute", torch.float8_e4m3fn, 2, 0, 0, None, id="cute-reject-tail"),
+    ],
+)
+@pytest.mark.parametrize("mixed_batch", [False, True], ids=["prefill", "mixed"])
+def test_msa_indexer_impl_matches_triton(
+    prefill_backend,
+    index_dtype,
+    num_idx_heads,
+    init_blocks,
+    local_blocks,
+    expect_cute,
+    mixed_batch,
+    monkeypatch,
+):
+    """Real builders and native Top16 must preserve ragged, padded batch selection."""
     import vllm.models.minimax_m3.common.indexer as indexer_mod
     from tests.v1.attention.utils import (
         BatchSpec,
@@ -850,25 +874,34 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     )
     from vllm.models.minimax_m3.nvidia.indexer_msa import (
         MiniMaxM3IndexerMSAImpl,
+        MiniMaxM3IndexerMSAMetadata,
         MiniMaxM3IndexerMSAMetadataBuilder,
     )
 
     torch.manual_seed(0)
     device = torch.device("cuda")
-    num_idx_heads, head_dim = 4, HEAD_DIM
+    head_dim, topk = HEAD_DIM, TOPK
     # TP=1: avoid requiring an initialized distributed group in a unit test.
     monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
 
     vllm_config = create_vllm_config(
-        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=512
     )
+    if prefill_backend is not None:
+        vllm_config.attention_config.minimax_m3_indexer_prefill_backend = (
+            prefill_backend
+        )
     vllm_config.model_config.hf_config.sparse_attention_config = {
-        "sparse_num_index_heads": num_idx_heads
+        "sparse_num_index_heads": num_idx_heads,
+        "sparse_init_block": init_blocks,
+        "sparse_local_block": local_blocks,
     }
 
-    # Decode-first mixed batch: 2 decode reqs (q_len 1) then 2 prefill reqs. Long
-    # prefixes so every token sees > TOPK causal blocks (non-trivial selection).
-    batch = BatchSpec(seq_lens=[2305, 2561, 2624, 2720], query_lens=[1, 1, 64, 96])
+    # Fresh prefill and unequal cached prefixes cross both page and Q-tile tails.
+    batch = BatchSpec(seq_lens=[129, 2831, 4097], query_lens=[129, 255, 31])
+    if mixed_batch:
+        batch.seq_lens[:0] = [2305, 2561]
+        batch.query_lens[:0] = [1, 1]
     common = create_common_attn_metadata(
         batch, BLOCK_SIZE, device, arange_block_indices=True
     )
@@ -882,22 +915,30 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
         ]
     )
 
-    # Deterministic index cache: distinct, monotonic per-logical-block values so
-    # the top-k is unambiguous (both kernels pick the same blocks, no fp ties).
     block_table = common.block_table_tensor
     num_pages = int(block_table.max().item()) + 1
+    block_table.copy_(
+        torch.randperm(num_pages, device=device, dtype=torch.int32).view_as(block_table)
+    )
     index_cache = torch.zeros(
         num_pages, BLOCK_SIZE, head_dim, device=device, dtype=index_dtype
     )
     for r, seq_len in enumerate(batch.seq_lens):
-        for b in range((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE):
-            index_cache[block_table[r, b]] = float(b + 1)
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        for b in range(num_blocks):
+            # Distinct request rankings expose crossed block-table rows.
+            rank = (b + 7 * r) % num_blocks
+            index_cache[block_table[r, b]] = float(_E4M3_EXACT_VALUES[rank])
+    padded_tokens = num_tokens + 7
     index_q = torch.ones(
-        num_tokens, num_idx_heads * head_dim, device=device, dtype=index_dtype
+        padded_tokens, num_idx_heads, head_dim, device=device, dtype=torch.float32
     )
+    # Different heads select opposite ends of the ranking, exposing head strides.
+    index_q[:, 1::2].neg_()
+    index_q = index_q.to(index_dtype).view(padded_tokens, -1)
 
     spec = MLAAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=head_dim, dtype=DTYPE
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=head_dim, dtype=index_dtype
     )
     impl_kwargs = dict(
         num_kv_heads=num_idx_heads,
@@ -906,12 +947,19 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
         sparse_block_size=BLOCK_SIZE,
         num_index_heads=num_idx_heads,
         index_head_dim=head_dim,
-        init_blocks=0,
-        local_blocks=0,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        indexer_kv_dtype="fp8" if index_dtype == torch.float8_e4m3fn else "bf16",
     )
 
     with set_current_vllm_config(vllm_config):
         msa_impl = MiniMaxM3IndexerMSAImpl(prefix="idx_msa", **impl_kwargs)
+        if expect_cute is None:
+            with pytest.raises(ValueError, match="CuTe prefill scoring requires"):
+                MiniMaxM3IndexerMSAMetadataBuilder(
+                    spec, [msa_impl.index_cache.prefix], vllm_config, device
+                )
+            return
         triton_impl = MiniMaxM3IndexerTritonImpl(prefix="idx_triton", **impl_kwargs)
         msa_builder = MiniMaxM3IndexerMSAMetadataBuilder(
             spec, [msa_impl.index_cache.prefix], vllm_config, device
@@ -929,31 +977,52 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     # only) return views. Separate buffers so the two forwards don't clobber.
     nd = sum(q for q in batch.query_lens if q <= 1)
     msa_impl.topk_indices_buffer = torch.full(
-        (num_tokens, num_idx_heads, topk), -2, dtype=torch.int32, device=device
+        (padded_tokens, num_idx_heads, topk), -2, dtype=torch.int32, device=device
     )
     triton_impl.topk_indices_buffer = torch.full(
-        (num_tokens, num_idx_heads, topk), -2, dtype=torch.int32, device=device
+        (padded_tokens, num_idx_heads, topk), -2, dtype=torch.int32, device=device
     )
 
     attn_metadata = {
         msa_impl.index_cache.prefix: msa_builder.build(0, common),
         triton_impl.index_cache.prefix: triton_builder.build(0, common),
     }
-    with set_forward_context(attn_metadata, vllm_config):
-        msa_decode, msa_prefill = msa_impl(index_q)
-        tri_decode, tri_prefill = triton_impl(index_q)
+    msa_metadata = attn_metadata[msa_impl.index_cache.prefix]
+    assert isinstance(msa_metadata, MiniMaxM3IndexerMSAMetadata)
+    assert (msa_metadata.prefill_cute is not None) == expect_cute
 
-    # MSA's return is vestigial; the attend reads its buffer directly.
-    assert msa_decode is None and msa_prefill is None
-    assert tri_decode is not None and tri_prefill is not None
-    _assert_topk_indices_equal_unordered(
-        msa_impl.topk_indices_buffer[:num_tokens],
-        triton_impl.topk_indices_buffer[:num_tokens],
+    # A mixed-dtype query must be rejected before either scorer reads the cache.
+    other_dtype = (
+        torch.bfloat16 if index_dtype == torch.float8_e4m3fn else torch.float8_e4m3fn
     )
+    with (
+        set_forward_context(attn_metadata, vllm_config),
+        pytest.raises(ValueError, match="requires matching Q and K cache dtypes"),
+    ):
+        msa_impl(index_q.to(other_dtype))
+
+    # Reuse one plan/arena for two layers with opposite score rankings.
+    for _ in range(2):
+        with set_forward_context(attn_metadata, vllm_config):
+            msa_decode, msa_prefill = msa_impl(index_q)
+            tri_decode, tri_prefill = triton_impl(index_q)
+
+        assert msa_decode is None and msa_prefill is None
+        assert (tri_decode is not None) == mixed_batch
+        assert tri_prefill is not None
+        _assert_topk_indices_equal_unordered(
+            msa_impl.topk_indices_buffer[:num_tokens],
+            triton_impl.topk_indices_buffer[:num_tokens],
+        )
+        assert torch.all(msa_impl.topk_indices_buffer[num_tokens:] == -2)
+        assert torch.all(triton_impl.topk_indices_buffer[num_tokens:] == -2)
+        index_q.copy_(index_q.float().neg().to(index_dtype))
+
     # Triton's decode/prefill outputs are views into its persistent buffer.
     buf_htk = triton_impl.topk_indices_buffer.transpose(0, 1)
-    assert tri_decode.data_ptr() == buf_htk[:, :nd, :].data_ptr()
-    assert tri_prefill.data_ptr() == buf_htk[:, nd:, :].data_ptr()
+    if mixed_batch:
+        assert tri_decode.data_ptr() == buf_htk[:, :nd, :].data_ptr()
+    assert tri_prefill.data_ptr() == buf_htk[:, nd:num_tokens, :].data_ptr()
 
 
 @pytest.mark.parametrize(

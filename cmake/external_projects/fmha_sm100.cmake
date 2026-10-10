@@ -46,6 +46,16 @@ install(FILES
   DESTINATION vllm/third_party/fmha_sm100
   COMPONENT fmha_sm100)
 
+# Newer MSA revisions import these helpers from api.py and jit.py. Keep older
+# source overrides usable while the score-only API prerequisite is integrated.
+install(FILES
+  "${FMHA_SM100_PY_ROOT}/_jit_cache.py"
+  "${FMHA_SM100_PY_ROOT}/msa_warmup.py"
+  "${FMHA_SM100_PY_ROOT}/q8kv4_prefill_adapter.py"
+  DESTINATION vllm/third_party/fmha_sm100
+  COMPONENT fmha_sm100
+  OPTIONAL)
+
 install(DIRECTORY "${FMHA_SM100_PY_ROOT}/csrc/"
   DESTINATION vllm/third_party/fmha_sm100/csrc
   COMPONENT fmha_sm100
@@ -68,6 +78,14 @@ install(DIRECTORY "${FMHA_SM100_PY_ROOT}/kvouter/"
 install(DIRECTORY "${FMHA_SM100_PY_ROOT}/cute/"
   DESTINATION vllm/third_party/fmha_sm100/cute
   COMPONENT fmha_sm100
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+  PATTERN ".git*" EXCLUDE)
+
+install(DIRECTORY "${FMHA_SM100_PY_ROOT}/prefill_q8kv4/"
+  DESTINATION vllm/third_party/fmha_sm100/prefill_q8kv4
+  COMPONENT fmha_sm100
+  OPTIONAL
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE
   PATTERN ".git*" EXCLUDE)
