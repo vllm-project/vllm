@@ -58,6 +58,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
@@ -78,6 +79,100 @@ from .interfaces import (
 logger = init_logger(__name__)
 
 
+@triton.jit
+def _sc_rmsnorm_kernel(
+    x_ptr,
+    w_ptr,
+    out_ptr,
+    stride_x_m,
+    stride_x_h,
+    stride_w,
+    stride_out_m,
+    stride_out_h,
+    H: int,
+    eps: float,
+    BLOCK_H: tl.constexpr,
+    CAST_INPUT_FIRST: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    offs_h = tl.arange(0, BLOCK_H)
+    mask = offs_h < H
+    x_ptrs = x_ptr + row_idx * stride_x_m + offs_h * stride_x_h
+    x_val = tl.load(x_ptrs, mask=mask, other=0.0)
+    if CAST_INPUT_FIRST:
+        x_f = x_val.to(out_ptr.dtype.element_ty).to(tl.float32)
+    else:
+        x_f = x_val.to(tl.float32)
+    w_val = tl.load(w_ptr + offs_h * stride_w, mask=mask, other=0.0)
+    var = tl.sum(x_f * x_f, axis=0) / H
+    rstd = tl.rsqrt(var + eps)
+    y = (x_f * rstd).to(w_val.dtype) * w_val
+    out_ptrs = out_ptr + row_idx * stride_out_m + offs_h * stride_out_h
+    tl.store(out_ptrs, y.to(out_ptr.dtype.element_ty), mask=mask)
+
+
+@triton.jit
+def _gelu_tanh_and_mul_kernel(
+    gate_up_ptr,
+    out_ptr,
+    stride_m,
+    stride_out_m,
+    inter_size: int,
+    BLOCK_I: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    col_block_idx = tl.program_id(1)
+    offs_i = col_block_idx * BLOCK_I + tl.arange(0, BLOCK_I)
+    mask = offs_i < inter_size
+    g = tl.load(gate_up_ptr + row_idx * stride_m + offs_i, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    u = tl.load(
+        gate_up_ptr + row_idx * stride_m + inter_size + offs_i,
+        mask=mask,
+        other=0.0,
+    )
+    inner = 0.7978845608028654 * (g + 0.044715 * g * g * g)
+    gelu_g = (0.5 * g * (1.0 + tl.extra.cuda.libdevice.tanh(inner))).to(u.dtype)
+    res = gelu_g * u
+    tl.store(out_ptr + row_idx * stride_out_m + offs_i, res, mask=mask)
+
+
+@triton.jit
+def _sc_add_rmsnorm_kernel(
+    inp_ptr,
+    sig_ptr,
+    out_ptr,
+    stride_inp_m,
+    stride_inp_h,
+    stride_sig_m,
+    stride_sig_h,
+    stride_out_m,
+    stride_out_h,
+    H: int,
+    eps: float,
+    BLOCK_H: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    offs_h = tl.arange(0, BLOCK_H)
+    mask = offs_h < H
+    inp = tl.load(
+        inp_ptr + row_idx * stride_inp_m + offs_h * stride_inp_h,
+        mask=mask,
+        other=0.0,
+    )
+    sig = tl.load(
+        sig_ptr + row_idx * stride_sig_m + offs_h * stride_sig_h,
+        mask=mask,
+        other=0.0,
+    )
+    s = (inp + sig).to(tl.float32)
+    var = tl.sum(s * s, axis=0) / H
+    rstd = tl.rsqrt(var + eps)
+    res = (s * rstd).to(inp.dtype)
+    tl.store(out_ptr + row_idx * stride_out_m + offs_h * stride_out_h, res, mask=mask)
+
+
 class DiffusionGemmaSelfConditioning(nn.Module):
     """Gated MLP that processes soft embeddings from the previous denoising step.
 
@@ -95,15 +190,103 @@ class DiffusionGemmaSelfConditioning(nn.Module):
         self.up_proj = nn.Linear(hidden_size, self_conditioning_size, bias=False)
         self.down_proj = nn.Linear(self_conditioning_size, hidden_size, bias=False)
 
+    def _get_merged_gate_up_weight(self) -> torch.Tensor:
+        gw = self.gate_proj.weight
+        uw = self.up_proj.weight
+        key = (
+            gw._version,
+            uw._version,
+            gw.data_ptr(),
+            uw.data_ptr(),
+            gw.device,
+            gw.dtype,
+        )
+        if getattr(self, "_merged_gate_up_key", None) != key:
+            self._merged_gate_up_w = torch.cat([gw, uw], dim=0)
+            self._merged_gate_up_key = key
+        return self._merged_gate_up_w
+
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         soft_embeds: torch.Tensor,
     ) -> torch.Tensor:
+        if inputs_embeds.numel() == 0:
+            return inputs_embeds.clone()
+
+        if inputs_embeds.stride(-1) != 1:
+            inputs_embeds = inputs_embeds.contiguous()
+        if soft_embeds.stride(-1) != 1:
+            soft_embeds = soft_embeds.contiguous()
+
+        H = inputs_embeds.shape[-1]
+        if HAS_TRITON and inputs_embeds.is_cuda and soft_embeds.is_cuda and H <= 16384:
+            orig_shape = inputs_embeds.shape
+            inp_flat = inputs_embeds.reshape(-1, H)
+            soft_flat = soft_embeds.reshape(-1, H)
+            M = inp_flat.shape[0]
+            if M == 0:
+                return inputs_embeds.clone()
+
+            cast_first = soft_flat.dtype != inp_flat.dtype
+            normed_x = torch.empty((M, H), device=inp_flat.device, dtype=inp_flat.dtype)
+            BLOCK_H = triton.next_power_of_2(H)
+            _sc_rmsnorm_kernel[(M,)](
+                soft_flat,
+                self.pre_norm.weight,
+                normed_x,
+                soft_flat.stride(0),
+                soft_flat.stride(1),
+                self.pre_norm.weight.stride(0),
+                normed_x.stride(0),
+                normed_x.stride(1),
+                H,
+                self.pre_norm.variance_epsilon,
+                BLOCK_H=BLOCK_H,
+                CAST_INPUT_FIRST=cast_first,
+            )
+
+            gate_up = F.linear(normed_x, self._get_merged_gate_up_weight())
+            inter_size = self.down_proj.in_features
+            act = torch.empty(
+                (M, inter_size), device=inp_flat.device, dtype=inp_flat.dtype
+            )
+            BLOCK_I = 1024
+            grid_i = (M, triton.cdiv(inter_size, BLOCK_I))
+            _gelu_tanh_and_mul_kernel[grid_i](
+                gate_up,
+                act,
+                gate_up.stride(0),
+                act.stride(0),
+                inter_size,
+                BLOCK_I=BLOCK_I,
+            )
+
+            sc_signal = self.down_proj(act)
+            out = torch.empty_like(inp_flat)
+            _sc_add_rmsnorm_kernel[(M,)](
+                inp_flat,
+                sc_signal,
+                out,
+                inp_flat.stride(0),
+                inp_flat.stride(1),
+                sc_signal.stride(0),
+                sc_signal.stride(1),
+                out.stride(0),
+                out.stride(1),
+                H,
+                self.post_norm.variance_epsilon,
+                BLOCK_H=BLOCK_H,
+            )
+            return out.reshape(orig_shape)
+
+        # Fallback
+        if soft_embeds.dtype != inputs_embeds.dtype:
+            soft_embeds = soft_embeds.to(inputs_embeds.dtype)
         x = self.pre_norm(soft_embeds)
-        sc_signal = self.down_proj(
-            F.gelu(self.gate_proj(x), approximate="tanh") * self.up_proj(x)
-        )
+        gate_up = F.linear(x, self._get_merged_gate_up_weight())
+        gate, up = gate_up.chunk(2, dim=-1)
+        sc_signal = self.down_proj(F.gelu(gate, approximate="tanh") * up)
         return self.post_norm(inputs_embeds + sc_signal)
 
 
@@ -738,7 +921,9 @@ class DiffusionGemmaRequestStates:
         self.single_step_slots: set[int] = set()
         # Per-slot canvas width, at most canvas_length. The scheduler schedules
         # this many draft tokens for the slot and the sampler pads the rest.
-        self.canvas_width_np = np.full(max_num_reqs, canvas_length, dtype=np.int32)
+        self.canvas_width_np: np.ndarray = np.full(
+            max_num_reqs, canvas_length, dtype=np.int32
+        )
 
         # Per-slot self-conditioning soft embedding (probs @ embed_weight) from
         # the previous denoise step. Storing the [.., hidden] soft embed instead
@@ -1012,14 +1197,62 @@ class DiffusionGemmaModelState(ModelState):
         # positions. sc_embeds already holds probs @ embed_weight from the prior
         # denoise step, masked to zero by the sampler for slots not denoising
         # this step; only the MLP runs here. CPU metadata -> no GPU syncs.
-        for slot, idx in zip(decode_slots_np.tolist(), decode_idx_np.tolist()):
+        n_dec = len(decode_slots_np)
+        if n_dec == 0:
+            return
+        if n_dec == 1:
+            slot = int(decode_slots_np[0])
+            idx = int(decode_idx_np[0])
             start = int(query_start_loc_np[idx])
             end = int(query_start_loc_np[idx + 1])
             canvas = slice(start, end)
-            soft = sc_embeds[slot, : end - start]
             inputs_embeds[canvas] = self.model.self_conditioning(
-                inputs_embeds[canvas], soft.to(inputs_embeds.dtype)
+                inputs_embeds[canvas], sc_embeds[slot, : end - start]
             )
+            return
+
+        cl = sc_embeds.shape[1]
+        starts = query_start_loc_np[decode_idx_np]
+        ends = query_start_loc_np[decode_idx_np + 1]
+        start_0 = int(starts[0])
+        end_last = int(ends[-1])
+
+        if (
+            end_last - start_0 == n_dec * cl
+            and bool((ends - starts == cl).all())
+            and bool((starts[1:] == ends[:-1]).all())
+        ):
+            if int(decode_slots_np[-1]) - int(decode_slots_np[0]) == n_dec - 1 and bool(
+                (np.diff(decode_slots_np) == 1).all()
+            ):
+                s0 = int(decode_slots_np[0])
+                soft_batch = sc_embeds[s0 : s0 + n_dec].reshape(n_dec * cl, -1)
+            else:
+                slots_t = async_tensor_h2d(
+                    decode_slots_np.tolist(),
+                    dtype=torch.long,
+                    device=sc_embeds.device,
+                )
+                soft_batch = sc_embeds.index_select(0, slots_t).reshape(n_dec * cl, -1)
+            span = slice(start_0, end_last)
+            inputs_embeds[span] = self.model.self_conditioning(
+                inputs_embeds[span], soft_batch
+            )
+            return
+
+        spans = [slice(int(s), int(e)) for s, e in zip(starts.tolist(), ends.tolist())]
+        lengths = [int(e - s) for s, e in zip(starts.tolist(), ends.tolist())]
+        inp_cat = torch.cat([inputs_embeds[sp] for sp in spans], dim=0)
+        soft_cat = torch.cat(
+            [
+                sc_embeds[int(slot), :ln]
+                for slot, ln in zip(decode_slots_np.tolist(), lengths)
+            ],
+            dim=0,
+        )
+        out_cat = self.model.self_conditioning(inp_cat, soft_cat)
+        for sp, chunk in zip(spans, torch.split(out_cat, lengths, dim=0), strict=True):
+            inputs_embeds[sp] = chunk
 
     def prepare_inputs(self, input_batch, req_states) -> dict[str, Any]:
         states = self.diffusion_states
