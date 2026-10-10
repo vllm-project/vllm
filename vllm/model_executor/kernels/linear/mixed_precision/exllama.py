@@ -3,6 +3,8 @@
 
 
 import torch
+import torch.nn.functional as F
+from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -11,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -70,13 +73,26 @@ class ExllamaLinearKernel(MPLinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         c = self.config
+        out_features = c.partition_weight_shape[1]
+
+        # The exllama kernels walk each 128-row block of K in steps of 32 rows
+        # and assume the next quantization group starts group_size rows after the
+        # block start, which only holds for group sizes 32, 64, multiples of 128
+        # and a single group. Other group sizes use the plain GPTQ kernels. These take
+        # the weight unshuffled, and the small-batch one writes whole blocks of
+        # 128 output features without a bounds check.
+        self.use_exllama = (
+            c.group_size in (32, 64)
+            or c.group_size % 128 == 0
+            or c.group_size == c.partition_weight_shape[0]
+        )
+        pad_n = 0 if self.use_exllama else round_up(out_features, 128) - out_features
 
         # For Exllama, we need to set a zero-point tensor if there is not one
         if not c.zero_points:
             self.w_zp_name = "qzeros"
             device = getattr(layer, self.w_q_name).device
             groups = c.partition_weight_shape[0] // c.group_size
-            out_features = c.partition_weight_shape[1]
 
             if c.weight_type.has_bias():
                 # if the type has a bias we have to create a zeros tensor that
@@ -106,19 +122,24 @@ class ExllamaLinearKernel(MPLinearKernel):
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
-            x_cont = x.data.contiguous()
-            ops.gptq_shuffle(x_cont, c.weight_type.size_bits)
+            x_cont = F.pad(x.data, (0, pad_n)).contiguous()
+            if self.use_exllama:
+                ops.gptq_shuffle(x_cont, c.weight_type.size_bits)
             return x_cont
 
         def transform_w_s(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1)
-            x.data = x.data.contiguous()
+            x.data = F.pad(x.data, (0, pad_n)).contiguous()
             return x.to(dtype=c.act_type)
+
+        def transform_w_zp(x):
+            return F.pad(x.data, (0, pad_n // (32 // c.weight_type.size_bits)))
 
         # Repack weights and scales for Machete
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
+        self._transform_param(layer, self.w_zp_name, transform_w_zp)
 
     def apply_weights(
         self,
@@ -138,9 +159,20 @@ class ExllamaLinearKernel(MPLinearKernel):
         use_v2_format = False
 
         assert w_zp is not None, "Zero points are required by Exllama"
+        # The plain small-batch kernel cannot be launched with no rows.
+        if not self.use_exllama and guard_or_false(x_2d.shape[0] == 0):
+            return x.new_empty(out_shape)
         output = ops.gptq_gemm(
-            x_2d, w_q, w_zp, w_s, True, use_v2_format, c.weight_type.size_bits
+            x_2d,
+            w_q,
+            w_zp,
+            w_s,
+            self.use_exllama,
+            use_v2_format,
+            c.weight_type.size_bits,
         )
+        if not self.use_exllama:
+            output = output[:, : c.partition_weight_shape[1]].contiguous()
 
         if bias is not None:
             output.add_(bias)
