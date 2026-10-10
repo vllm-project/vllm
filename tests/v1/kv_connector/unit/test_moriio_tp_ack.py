@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import socket
 import threading
 from types import SimpleNamespace
 
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    HandshakeError,
     MoRIIOMode,
     MoRIIOTransferAck,
     TransferError,
@@ -22,6 +24,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+
+
+def test_notify_listener_bind_failure_reaches_caller():
+    wrapper = MoRIIOWrapper(moriio_engine=object())
+
+    with socket.socket() as occupied_port:
+        occupied_port.bind(("", 0))
+        occupied_port.listen()
+        wrapper.notify_port = occupied_port.getsockname()[1]
+
+        with pytest.raises(HandshakeError, match="Address already in use"):
+            wrapper.async_wait_reqid()
+
+    assert wrapper.notify_thread is None
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():
