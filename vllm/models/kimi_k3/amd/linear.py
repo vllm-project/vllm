@@ -163,6 +163,7 @@ def _apply_attn_res(
     output_norm: RMSNorm | None = None,
     block_write_idx: int = -1,
     quant_key: QuantKey | None = None,
+    prefix_snapshot: torch.Tensor | None = None,
 ) -> torch.Tensor | QuantizedActivation:
     fuse_quant = quant_key == kFp8DynamicTokenSym and not envs.VLLM_BATCH_INVARIANT
     result = attn_res(
@@ -179,6 +180,7 @@ def _apply_attn_res(
         quant_dtype=cast(torch.dtype, kFp8DynamicTokenSym.dtype)
         if fuse_quant
         else None,
+        prefix_snapshot=prefix_snapshot,
     )
     if fuse_quant:
         assert isinstance(result, tuple)
@@ -643,6 +645,7 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         prefix_delta: torch.Tensor | None = None,
+        prefix_snapshot: torch.Tensor | None = None,
         **kwargs,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
@@ -651,7 +654,11 @@ class KimiDecoderLayer(nn.Module):
         if self.use_attn_residuals:
             assert residual is not None
             return self.forward_attn_residual(
-                positions, hidden_states, residual, prefix_delta
+                positions,
+                hidden_states,
+                residual,
+                prefix_delta,
+                prefix_snapshot,
             )
 
         assert prefix_delta is None
@@ -675,6 +682,7 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
         prefix_delta: torch.Tensor | None,
+        prefix_snapshot: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prefix_sum = hidden_states
         attention_quant_key = (
@@ -692,6 +700,7 @@ class KimiDecoderLayer(nn.Module):
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
             quant_key=attention_quant_key,
+            prefix_snapshot=prefix_snapshot,
         )
 
         if self.is_block_write_layer:
@@ -880,6 +889,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
         prefix_delta = None
+        # Filled by the next AttnRes, which already adds this layer's output.
+        prefix_snapshot: torch.Tensor | None = None
 
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
@@ -890,17 +901,24 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 hidden_states=hidden_states,
                 residual=residual,
                 prefix_delta=prefix_delta,
+                prefix_snapshot=prefix_snapshot,
             )
+            prefix_snapshot = None
             if (layer_idx + 1) in self.aux_hidden_state_layers:
+                prefix_snapshot = hidden_states.new_empty(hidden_states.shape)
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
                     layer_idx + 1,
-                    hidden_states + prefix_delta,
+                    prefix_snapshot,
                     residual,
                 )
 
         if not get_pp_group().is_last_rank:
-            hidden_states = hidden_states + prefix_delta
+            if prefix_snapshot is not None:
+                torch.add(hidden_states, prefix_delta, out=prefix_snapshot)
+                hidden_states = prefix_snapshot
+            else:
+                hidden_states = hidden_states + prefix_delta
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -912,6 +930,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.output_attn_res_norm,
             attn_res_block_num,
             delta=prefix_delta,
+            prefix_snapshot=prefix_snapshot,
         )
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
