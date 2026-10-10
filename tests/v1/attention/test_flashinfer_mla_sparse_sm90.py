@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the FlashInfer SM90 sparse MLA backend wiring and index packing.
 
-The FlashInfer wrapper and top-k conversion are replaced by CPU recorders;
-the tests pin the contract between the impl and the kernel API: page_size=1
-varlen rows, reserved-buffer refresh, plan parameters (dims, NoPE/rope scale,
-causality), ckv/kpe cache splitting, and the backend's model-shape gates.
+CPU recorders check API wiring; GPU tests exercise index packing and real
+FlashInfer plans, including async upper bounds and multi-chunk graph replay.
 """
 
 from types import SimpleNamespace
@@ -67,6 +65,7 @@ class FakeWrapper:
 
 class FakeState:
     def __init__(self, width, max_tokens=64):
+        self.max_tokens = max_tokens
         self.kv_indices = torch.zeros(max_tokens * width, dtype=torch.int32)
         self.kv_len_arr = torch.zeros(max_tokens, dtype=torch.int32)
         self.kv_indptr = torch.zeros(max_tokens + 1, dtype=torch.int32)
@@ -131,6 +130,7 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     state.kv_indptr[5:] = 17
     meta = make_batch(rows, topk_rows, [3])
     meta.state = state
+    meta.chunk_states = None
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
     q_rope = torch.randn(rows, impl.num_heads, qk_rope)
     dtype = torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16
@@ -169,9 +169,11 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
         assert kwargs == {}
 
 
-@pytest.mark.parametrize("use_mha", [False, True])
+@pytest.mark.parametrize("use_mha,prefill_rows", [(False, 5), (True, 5), (True, 32769)])
 @pytest.mark.parametrize("num_decodes", [0, 1])
-def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_decodes):
+def test_builder_plans_only_rows_dispatched_to_mqa(
+    monkeypatch, use_mha, prefill_rows, num_decodes
+):
     """MHA prefill rows must not make the MQA kernel read beyond its query."""
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._adaptive_verification = False
@@ -190,10 +192,11 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
     cam = SimpleNamespace(
         num_reqs=num_decodes + 1,
         query_start_loc_cpu=torch.tensor(
-            [0, 1, 6] if num_decodes else [0, 5], dtype=torch.int32
+            [0, 1, prefill_rows + 1] if num_decodes else [0, prefill_rows],
+            dtype=torch.int32,
         ),
         seq_lens_cpu_upper_bound=torch.tensor(
-            [1402, 5] if num_decodes else [5], dtype=torch.int32
+            [1402, prefill_rows] if num_decodes else [prefill_rows], dtype=torch.int32
         ),
         positions=None,
     )
@@ -201,6 +204,7 @@ def test_builder_plans_only_rows_dispatched_to_mqa(monkeypatch, use_mha, num_dec
     result = builder.build(0, cam)
 
     assert result.state is builder.state
+    assert result.chunk_states is None
     expected_lens = [1402] if num_decodes else []
     if not use_mha:
         expected_lens += [1, 2, 3, 4, 5]
@@ -533,6 +537,132 @@ def test_upper_bound_plan_reused_across_steps(monkeypatch):
             state.pack_indices(slots)
             outs.append(state.wrapper.run(q, q[..., :0], kv, kv[..., :0]))
         torch.testing.assert_close(outs[0], outs[1], atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+@pytest.mark.parametrize("qk_rope,kv_dtype", [(0, "fp8_e4m3"), (64, "auto")])
+def test_chunked_plan_matches_exact_and_replays(monkeypatch, qk_rope, kv_dtype):
+    """>16K rows use global clamp offsets and independent plans sharing scratch."""
+    torch.manual_seed(0)
+    rows = 16600
+    heads, topk, kpool, width = SM90_HEADS, SM90_TOPK, SM90_KPOOL, SM90_WIDTH
+    ctx, _, cam, req_id, slots = _clamp_batch(rows, 1, 1, 3000, topk, kpool, width)
+    impl, _ = make_impl(qk_rope, kv_dtype, heads, width)
+    impl.topk_indices_buffer = slots
+    builder = object.__new__(FlashInferMLASparseSM90Builder)
+    builder._adaptive_verification = True
+    builder._attention_layer = SimpleNamespace(_use_sparse_mha=lambda _: False)
+    chunk_size = sm90_mod._max_plan_chunk_rows(heads)
+    dtype = torch.float8_e4m3fn if impl.use_fp8_kv_cache else torch.bfloat16
+    builder.state = sm90_mod._SM90State(
+        torch.device("cuda"),
+        heads,
+        dtype,
+        chunk_size,
+        width,
+        HEAD,
+        qk_rope,
+        impl.scale,
+        topk,
+        kpool,
+    )
+    builder._chunk_states = [builder.state]
+    meta = object.__new__(sm90_mod.FlashInferMLASparseSM90Metadata)
+    meta.num_prefills = rows
+    meta.num_decode_tokens = 0
+    meta.req_id_per_token = req_id
+    meta.block_size = BLOCK_SIZE
+    # Identity mapping: the request-local indices address the shared KV cache.
+    meta.block_table = (
+        torch.arange((1 << 16) // BLOCK_SIZE, dtype=torch.int32, device="cuda")
+        .expand(rows, -1)
+        .contiguous()
+    )
+    monkeypatch.setattr(
+        sm90_mod.FlashInferMLASparseMetadataBuilder,
+        "build",
+        lambda *_args, **_kwargs: meta,
+    )
+    cam.num_reqs = rows
+    cam.query_start_loc_cpu = torch.arange(rows + 1, dtype=torch.int32)
+    cam.seq_lens_cpu_upper_bound = (ctx + 5).to(torch.int32)
+    builder.build(0, cam)
+    assert len(meta.chunk_states) == 3
+    assert all(
+        state.workspace.data_ptr() == builder.state.workspace.data_ptr()
+        for _, _, state in meta.chunk_states
+    )
+    exact = sm90_mod._SM90State(
+        torch.device("cuda"),
+        heads,
+        dtype,
+        chunk_size,
+        width,
+        HEAD,
+        qk_rope,
+        impl.scale,
+        topk,
+        kpool,
+    )
+    q = torch.randn(rows, heads, HEAD, device="cuda", dtype=torch.bfloat16)
+    q_pe = torch.randn(rows, heads, qk_rope, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(1 << 16, 1, HEAD + qk_rope, device="cuda").to(dtype)
+    layer = SimpleNamespace(_k_scale_float=0.5)
+    cache = kv.view(torch.uint8) if impl.use_fp8_kv_cache else kv
+    scale = {"ckv_scale": 0.5, "kpe_scale": 1.0} if impl.use_fp8_kv_cache else {}
+    impl.forward_mqa((q, q_pe), cache, meta, layer)
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out, _ = impl.forward_mqa((q, q_pe), cache, meta, layer)
+
+    for step in range(2):
+        step_ctx = ctx + step
+        valid = torch.where(step_ctx <= topk, step_ctx, topk + step_ctx % kpool)
+        refreshed = torch.randint(0, 1 << 16, (rows, width), dtype=torch.int32)
+        refreshed[torch.arange(width) >= valid[:, None]] = -1
+        slots.copy_(refreshed)
+        cam.seq_lens.copy_(step_ctx)
+        cam.seq_lens_cpu_upper_bound = (step_ctx + 5).to(torch.int32)
+        builder.build(0, cam)
+        q.add_(0.01)
+        graph.replay()
+        for start, end, _ in meta.chunk_states:
+            exact.plan(end - start, valid[start:end].to(torch.int32), None, None)
+            exact.pack_indices(slots[start:end])
+            expected = exact.wrapper.run(
+                q[start:end], q_pe[start:end], kv[..., :HEAD], kv[..., HEAD:], **scale
+            )
+            torch.testing.assert_close(out[start:end], expected, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not _sm90_flashinfer_available(), reason="Requires SM90 FlashInfer MLA"
+)
+@pytest.mark.parametrize("heads", [64, 65, 128, 384])
+def test_chunk_capacity_bounds_planner_work_items(heads):
+    """Multiple head tiles per query must fit the planner's fixed work list."""
+    rows = sm90_mod._max_plan_chunk_rows(heads)
+    state = sm90_mod._SM90State(
+        torch.device("cuda"),
+        heads,
+        torch.bfloat16,
+        rows,
+        TOPK,
+        HEAD,
+        0,
+        HEAD**-0.5,
+        TOPK,
+        1,
+    )
+    for live_rows in (rows, rows // 2 + 1, 1):
+        state.plan(
+            live_rows, torch.full((live_rows,), TOPK, dtype=torch.int32), None, None
+        )
+        num_works_idx = state._plan_offsets[0]
+        assert 0 < int(state._int_ws[num_works_idx]) <= 8192
 
 
 def test_supports_combination_gates(monkeypatch, default_vllm_config):
