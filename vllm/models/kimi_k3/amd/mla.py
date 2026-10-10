@@ -23,8 +23,8 @@ _OPT_MIN_SIZE = 2048
 
 
 class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
-    """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm fusion and a fused
-    decode Q-prep path."""
+    """Kimi-K3 MLA wrapper with eager AITER q/kv RMSNorm and output gate
+    fusions and a fused decode Q-prep path."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -302,6 +302,12 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            gate = self.g_proj(hidden_states)[0]
+            if rocm_aiter_ops.is_enabled():
+                from aiter.ops.triton.fusions.fused_sigmoid_mul import fused_sigmoid_mul
+
+                attn_out = fused_sigmoid_mul(attn_out, gate)
+            else:
+                attn_out = attn_out * gate.sigmoid()
 
         return self.o_proj(attn_out)[0]
