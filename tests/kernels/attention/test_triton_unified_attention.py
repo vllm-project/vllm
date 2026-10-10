@@ -11,6 +11,7 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_softcap,
+    compute_3d_segments,
     compute_tile_loop_bounds,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
@@ -390,6 +391,308 @@ def test_triton_unified_attn_clamped_mm_matches_dense_reference() -> None:
 
     torch.testing.assert_close(actual.float(), expected.float(), atol=2e-2, rtol=2e-2)
     assert not torch.allclose(expected, chunk_only, atol=2e-2, rtol=2e-2)
+
+
+@triton.jit
+def _compute_3d_segments(
+    output_ptr,
+    seq_len,
+    TILE_SIZE: tl.constexpr,
+    NUM_SEGMENTS_PER_SEQ: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    WINDOW_SEGMENTS: tl.constexpr,
+):
+    segm_tile_start, tiles_per_segment = compute_3d_segments(
+        seq_len,
+        seq_len - 1,  # context_len: one decode query at position seq_len - 1
+        TILE_SIZE,
+        NUM_SEGMENTS_PER_SEQ,
+        SLIDING_WINDOW,
+        WINDOW_SEGMENTS,
+    )
+    tl.store(output_ptr, segm_tile_start)
+    tl.store(output_ptr + 1, tiles_per_segment)
+
+
+@pytest.mark.parametrize(
+    "seq_len,window_segments,expected,num_segments",
+    [
+        # Window-blind: the 16 segments split all 1024 tiles, so the
+        # window's 32 tiles all fall in the last segment.
+        (32768, False, (0, 64), 16),
+        # Window-relative: the 16 segments split the window's 32 tiles.
+        (32768, True, (992, 2), 16),
+        # The window starts mid-tile (key 3976) and spans 33 tiles.
+        (5000, True, (124, 3), 11),
+        # Shorter than the window: the same as window-blind.
+        (700, True, (0, 2), 11),
+    ],
+)
+def test_3d_segments_split_only_the_window(
+    seq_len: int,
+    window_segments: bool,
+    expected: tuple[int, int],
+    num_segments: int,
+) -> None:
+    tile_size = 32
+    out = torch.empty(2, dtype=torch.int32, device=DEVICE_TYPE)
+    _compute_3d_segments[(1,)](
+        out,
+        seq_len,
+        TILE_SIZE=tile_size,
+        NUM_SEGMENTS_PER_SEQ=16,
+        SLIDING_WINDOW=1024,
+        WINDOW_SEGMENTS=window_segments,
+    )
+    segm_tile_start, tiles_per_segment = out.tolist()
+    assert (segm_tile_start, tiles_per_segment) == expected
+    # A segment holds tiles iff its first key is below seq_len.
+    first_tiles = [segm_tile_start + i * tiles_per_segment for i in range(16)]
+    assert sum(t * tile_size < seq_len for t in first_tiles) == num_segments
+
+
+def _make_decode_batch(kv_lens, num_query_heads, num_kv_heads, head_size):
+    """One query token per sequence; each sequence owns its own KV blocks."""
+    block_size = 16
+    blocks_per_seq = [(kv_len + block_size - 1) // block_size for kv_len in kv_lens]
+    num_blocks = sum(blocks_per_seq)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_ids = torch.randperm(num_blocks).to(torch.int32)
+    block_tables = torch.zeros(len(kv_lens), max(blocks_per_seq), dtype=torch.int32)
+    start = 0
+    for i, n in enumerate(blocks_per_seq):
+        block_tables[i, :n] = block_ids[start : start + n]
+        start += n
+    query = torch.randn(len(kv_lens), num_query_heads, head_size, dtype=torch.bfloat16)
+    return query, key_cache, value_cache, block_tables
+
+
+def _run_decode(
+    query, key_cache, value_cache, kv_lens, block_tables, use_3d=True, **kwargs
+):
+    num_seqs, num_query_heads, head_size = query.shape
+    num_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    output = torch.empty_like(query)
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=torch.arange(num_seqs + 1, dtype=torch.int32),
+        max_seqlen_q=1,
+        seqused_k=torch.tensor(kv_lens, dtype=torch.int32),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=head_size**-0.5,
+        causal=True,
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        # num_seqs <= seq_threshold_3D: the 3D (segmented) decode path
+        seq_threshold_3D=num_seqs if use_3d else 0,
+        num_par_softmax_segments=num_segments,
+        softmax_segm_output=torch.empty(
+            num_seqs, num_query_heads, num_segments, head_size_padded
+        ),
+        softmax_segm_max=torch.empty(num_seqs, num_query_heads, num_segments),
+        softmax_segm_expsum=torch.empty(num_seqs, num_query_heads, num_segments),
+        **kwargs,
+    )
+    return output
+
+
+def ref_decode(query, key_cache, value_cache, block_tables, visible_keys, sinks=None):
+    """Reference for one query token per sequence, at its last position.
+
+    ``visible_keys[i]`` is a bool mask over sequence ``i``'s keys.
+    """
+    _, block_size, num_kv_heads, head_size = key_cache.shape
+    outputs = []
+    for i, visible in enumerate(visible_keys):
+        kv_len = visible.numel()
+        blocks = block_tables[i, : (kv_len + block_size - 1) // block_size]
+        k = key_cache[blocks].view(-1, num_kv_heads, head_size)[:kv_len][visible]
+        v = value_cache[blocks].view(-1, num_kv_heads, head_size)[:kv_len][visible]
+        repeats = query.shape[1] // num_kv_heads
+        k = torch.repeat_interleave(k.float(), repeats, dim=1)
+        v = torch.repeat_interleave(v.float(), repeats, dim=1)
+        scores = torch.einsum("hd,khd->hk", query[i].float(), k) * head_size**-0.5
+        if sinks is not None:
+            scores = torch.cat([scores, sinks[:, None]], dim=1)
+        probs = scores.softmax(dim=-1)[:, : k.shape[0]]
+        outputs.append(torch.einsum("hk,khd->hd", probs, v))
+    return torch.stack(outputs).to(query.dtype)
+
+
+def window_keys(kv_len, sliding_window):
+    return torch.arange(kv_len) >= kv_len - sliding_window
+
+
+@pytest.mark.parametrize("num_heads", [(16, 8), (8, 1)])
+@pytest.mark.parametrize("head_size", [128, 256])
+@pytest.mark.parametrize("sliding_window", [128, 1024])
+@pytest.mark.parametrize("use_sinks", [False, True])
+@torch.inference_mode()
+def test_triton_unified_attn_3d_decode_sliding_window(
+    num_heads: tuple[int, int], head_size: int, sliding_window: int, use_sinks: bool
+) -> None:
+    # Decode on the 3D path with contexts up to far past the window: shorter
+    # than, exactly, and just past the window; mid-tile window starts; 32K.
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    w = sliding_window
+    kv_lens = [1, 17, w - 1, w, w + 1, w + 23, 5000, 32768]
+    num_query_heads, num_kv_heads = num_heads
+    query, key_cache, value_cache, block_tables = _make_decode_batch(
+        kv_lens, num_query_heads, num_kv_heads, head_size
+    )
+    sinks = torch.randn(num_query_heads, dtype=torch.float32) if use_sinks else None
+    expected = ref_decode(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        [window_keys(kv_len, w) for kv_len in kv_lens],
+        sinks,
+    )
+    # Blocks wholly before a window may be freed and reused by vLLM: poison
+    # them, so any read outside the window shows up as NaN.
+    block_size = key_cache.shape[1]
+    for i, kv_len in enumerate(kv_lens):
+        freed = block_tables[i, : max(0, kv_len - w) // block_size]
+        key_cache[freed] = float("nan")
+        value_cache[freed] = float("nan")
+
+    actual = _run_decode(
+        query,
+        key_cache,
+        value_cache,
+        kv_lens,
+        block_tables,
+        window_size=(w - 1, 0),
+        sinks=sinks,
+    )
+
+    assert not actual.isnan().any()
+    torch.testing.assert_close(actual, expected, atol=1.5e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("chunk_lookback", [0, 1])
+@torch.inference_mode()
+def test_triton_unified_attn_3d_decode_chunked(chunk_lookback: int) -> None:
+    # Chunked (block-local) attention prunes to whole chunks inside the
+    # window, so window-relative segments must still cover every chunk key.
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    sliding_window = 1024
+    kv_lens = [1, 700, 1024, 1025, 1500, 2049, 9000, 20000]
+    query, key_cache, value_cache, block_tables = _make_decode_batch(
+        kv_lens, 16, 8, 256
+    )
+
+    actual = _run_decode(
+        query,
+        key_cache,
+        value_cache,
+        kv_lens,
+        block_tables,
+        window_size=(sliding_window - 1, 0),
+        chunk_lookback=chunk_lookback,
+    )
+
+    expected = ref_paged_clamped_mm_attn(
+        query,
+        key_cache,
+        value_cache,
+        [1] * len(kv_lens),
+        kv_lens,
+        block_tables,
+        [[] for _ in kv_lens],
+        256**-0.5,
+        sliding_window,
+        chunk_lookback,
+    )
+    torch.testing.assert_close(actual.float(), expected.float(), atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+def test_triton_unified_attn_3d_decode_clamped_mm_prefix() -> None:
+    # Gemma 4 image ranges with the window clamp: a decode token sees only
+    # cached keys, so the result is plain sliding-window attention.
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    sliding_window = 1024
+    kv_lens = [300, 1100, 5000, 32768]
+    query, key_cache, value_cache, block_tables = _make_decode_batch(
+        kv_lens, 16, 8, 256
+    )
+    mm_prefix_range = torch.tensor(
+        [
+            [[250, 299], [0, 0]],  # the new token ends an image
+            [[10, 200], [1050, 1150]],  # before the window; past the cache
+            [[100, 400], [4990, 4999]],
+            [[31000, 32767], [0, 0]],
+        ],
+        dtype=torch.int32,
+    )
+
+    actual = _run_decode(
+        query,
+        key_cache,
+        value_cache,
+        kv_lens,
+        block_tables,
+        window_size=(sliding_window - 1, 0),
+        mm_prefix_range=mm_prefix_range,
+        mm_prefix_clamp_sliding_window=True,
+    )
+
+    expected = ref_decode(
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        [window_keys(kv_len, sliding_window) for kv_len in kv_lens],
+    )
+    torch.testing.assert_close(actual, expected, atol=1.5e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("mask", ["mm_prefix", "rswa"])
+@torch.inference_mode()
+def test_triton_unified_attn_3d_decode_keys_before_the_window(mask: str) -> None:
+    # Masks under which keys before the sliding window stay in the softmax:
+    # the 3D path must still split the whole sequence, matching one unsplit
+    # (2D) pass.
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    sliding_window = 1024
+    kv_lens = [300, 5000, 32768]
+    query, key_cache, value_cache, block_tables = _make_decode_batch(
+        kv_lens, 16, 8, 256
+    )
+    if mask == "mm_prefix":
+        # PrefixLM image ranges override the window; the new tokens of the
+        # last two sequences sit inside ranges that start before it.
+        ranges = [[[100, 200]], [[1000, 4999]], [[20000, 32767]]]
+        kwargs = dict(mm_prefix_range=torch.tensor(ranges, dtype=torch.int32))
+    else:
+        # R-SWA: a per-sequence prefix plus its own window.
+        kwargs = dict(
+            rswa_window=512,
+            rswa_prefix_lens=torch.tensor([64, 2000, 100], dtype=torch.int32),
+        )
+    inputs = (query, key_cache, value_cache, kv_lens, block_tables)
+    kwargs["window_size"] = (sliding_window - 1, 0)
+
+    actual = _run_decode(*inputs, **kwargs)
+
+    expected = _run_decode(*inputs, use_3d=False, **kwargs)
+    torch.testing.assert_close(actual, expected, atol=1.5e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize(

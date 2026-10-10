@@ -18,7 +18,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
-    cdiv_fn,
+    compute_3d_segments,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
     find_seq_idx,
@@ -289,6 +289,10 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    # 3D: split only the sliding window's tiles into segments, not the whole
+    # sequence (see ``compute_3d_segments``). Set iff the tile loop is pruned
+    # to the window; ``reduce_segments`` must get the same value.
+    WINDOW_SEGMENTS: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -320,10 +324,18 @@ def kernel_unified_attention(
         return
 
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+        segm_tile_start, tiles_per_segment = compute_3d_segments(
+            seq_len,
+            seq_len - cur_batch_query_len,
+            TILE_SIZE,
+            NUM_SEGMENTS_PER_SEQ,
+            SLIDING_WINDOW,
+            WINDOW_SEGMENTS,
+        )
+        if (segm_tile_start + segm_idx * tiles_per_segment) * TILE_SIZE >= seq_len:
             return
     else:
+        segm_tile_start = 0
         tiles_per_segment = 0
 
     # Number of valid query rows in this block (used by TD descriptor
@@ -419,6 +431,7 @@ def kernel_unified_attention(
         MAX_MM_RANGES,
         mm_prefix_range_ptr,
         seq_idx,
+        segm_tile_start,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -717,6 +730,9 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # As passed to the attention kernel.
+    SLIDING_WINDOW: tl.constexpr = 0,  # int
+    WINDOW_SEGMENTS: tl.constexpr = False,  # bool
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -729,14 +745,23 @@ def reduce_segments(
     seq_len = tl.load(seq_lens_ptr + seq_idx)
 
     # number of segments for this particular sequence
-    num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
+    query_len = tl.load(query_start_len_ptr + seq_idx + 1) - tl.load(
+        query_start_len_ptr + seq_idx
+    )
+    segm_tile_start, tiles_per_segment = compute_3d_segments(
+        seq_len,
+        seq_len - query_len,
+        TILE_SIZE,
+        NUM_SEGMENTS_PER_SEQ,
+        SLIDING_WINDOW,
+        WINDOW_SEGMENTS,
+    )
 
     # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
-    segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
-        [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
+    segm_first_tile = (
+        segm_tile_start + tl.arange(0, NUM_SEGMENTS_PER_SEQ) * tiles_per_segment
     )
+    segm_mask = segm_first_tile * TILE_SIZE < seq_len
     dim_mask = tl.where(tl.arange(0, HEAD_SIZE_PADDED) < HEAD_SIZE, 1, 0).to(tl.int1)
 
     # load segment maxima
@@ -1062,6 +1087,16 @@ def unified_attention(
         or is_batch_invariant
     )
 
+    # 3D: when the kernel prunes its tile loop to the sliding window, split
+    # only the window into segments; otherwise, far past the window, one
+    # segment gets all the work.
+    window_segments = (
+        use_3d
+        and sliding_window_val > 0
+        and not use_rswa
+        and (not use_mm_prefix or mm_prefix_clamp_sliding_window)
+    )
+
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
     # caches and their strides are passed as ``None`` when the
@@ -1176,6 +1211,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        WINDOW_SEGMENTS=window_segments,
         **launch_kwargs,
     )
 
@@ -1199,4 +1235,6 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
+            SLIDING_WINDOW=sliding_window_val,
+            WINDOW_SEGMENTS=window_segments,
         )
