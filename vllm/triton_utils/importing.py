@@ -15,7 +15,11 @@ HAS_TRITON = (
     find_spec("triton") is not None
     or find_spec("pytorch-triton-xpu") is not None  # Not compatible
 )
-if HAS_TRITON:
+# Triton's interpreter (TRITON_INTERPRET=1) runs kernels on CPU tensors with
+# numpy and needs no active GPU driver, so skip the driver checks below. This
+# lets Triton kernels be unit-tested on CPU-only machines.
+TRITON_INTERPRET = os.environ.get("TRITON_INTERPRET", "0") == "1"
+if HAS_TRITON and not TRITON_INTERPRET:
     try:
         from triton.backends import backends
 
