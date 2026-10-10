@@ -74,7 +74,10 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.deepseek_v4.amd.mega_moe import DeepseekV4AiterMegaMoEExperts
+from vllm.models.deepseek_v4.amd.mega_moe import (
+    DeepseekV4AiterMegaMoEExperts,
+    finalize_mega_moe_weights,
+)
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
@@ -690,6 +693,10 @@ class DeepseekV4MoE(nn.Module):
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
                 swiglu_limit=self.swiglu_limit,
+                fuse_shared_expert=(
+                    config.n_shared_experts == 1
+                    and envs.VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS
+                ),
                 prefix=f"{prefix}.experts",
             )
             return
@@ -1524,6 +1531,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
+        # Must precede the gate_up preshuffle of the fused shared experts.
+        finalize_mega_moe_weights(self)
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
         fused_compressor_layers = 0
         for module in self.modules():
@@ -1532,8 +1541,6 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
-            elif isinstance(module, DeepseekV4AiterMegaMoEExperts):
-                module.finalize_weights()
         if fused_compressor_layers:
             logger.info(
                 "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",
