@@ -686,3 +686,81 @@ def test_disk_backend_alignment_only_required_for_direct_io(
         assert disk_path.stat().st_size == num_blocks * block_bytes
     finally:
         backend.shutdown()
+
+
+@pytest.mark.parametrize("hugepages", [False, True])
+def test_register_cpu_caches_in_one_host_buffer(hugepages: bool):
+    from tests.v1.simple_kv_offload.test_host_buffer import hugepage_with_free
+
+    page = hugepage_with_free(1) if hugepages else None
+    layout = KVCacheLayout.LHBNC
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float16,
+        num_head_slots=2,
+        state_content_bytes=2 * 2 * 2,
+    )
+    raw = (
+        torch.arange(num_blocks * num_layers * spec.page_size_bytes, device="cuda")
+        % 127
+    ).to(torch.int8)
+    caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
+    layer_names = [f"layer.{i}" for i in range(num_layers)]
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=MagicMock(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                dense_kv_cache_tensor(
+                    raw, spec, num_blocks, num_layers, layout, layer_names
+                )
+            ],
+        ),
+        cpu_capacity_bytes=raw.nbytes,
+        cpu_hugepage_size=page,
+    )
+
+    worker.register_kv_caches(
+        {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+    )
+
+    buf = worker._host_buffer
+    assert buf is not None and (buf.page_size == page if page else True)
+    assert worker.cpu_kv_caches is not None and worker.gpu_kv_caches is not None
+    assert worker.cpu_kv_caches.keys() == worker.gpu_kv_caches.keys()
+    base = buf.tensor.data_ptr()
+    for name, cpu in worker.cpu_kv_caches.items():
+        gpu = worker.gpu_kv_caches[name]
+        assert cpu.shape == (worker.num_cpu_blocks,) + gpu.shape[1:]
+        assert cpu.is_contiguous()
+        assert base <= cpu.data_ptr() < base + buf.nbytes
+
+    # Round-trip every block GPU -> hugepage CPU -> GPU through the backend.
+    backend = worker._backend
+    assert isinstance(backend, DmaCopyBackend)
+
+    def copy(is_store: bool) -> None:
+        events: list = []
+        blocks = list(range(num_blocks))
+        backend.launch_copy(blocks, blocks, is_store, 0, events)
+        deadline = time.monotonic() + 10
+        while not events and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert events, "copy thread did not record an event"
+        events[0][1].synchronize()
+
+    expected = {n: g.cpu() for n, g in worker.gpu_kv_caches.items()}
+    try:
+        copy(is_store=True)
+        for name, cpu in worker.cpu_kv_caches.items():
+            assert torch.equal(cpu[:num_blocks], expected[name])
+        raw.zero_()
+        copy(is_store=False)
+        for name, gpu in worker.gpu_kv_caches.items():
+            assert torch.equal(gpu.cpu(), expected[name])
+    finally:
+        backend.shutdown()
