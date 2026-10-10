@@ -192,3 +192,8 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
             "LM Format Enforcer structured outputs backend "
             "does not support grammar specifications"
         )
+    elif so_params.structural_tag:
+        raise VLLMValidationError(
+            "LM Format Enforcer structured outputs backend "
+            "does not support structural_tag specifications"
+        )
