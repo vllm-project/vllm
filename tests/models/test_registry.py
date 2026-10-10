@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import subprocess
+import sys
 import warnings
 
 import pytest
@@ -211,6 +214,96 @@ def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
     assert result is cached_model_info
     assert len(loaded_hashes) == 1
     assert loaded_hashes[0]
+
+
+# Runs in a fresh interpreter (see the test below) so that nothing imported by
+# this test module or its conftest can mask what the registry itself imports.
+_MODELINFO_CACHE_IMPORT_BOUNDARY_SCRIPT = """
+import json
+import sys
+from dataclasses import asdict
+
+# A model-info cache miss is handled in the parent (API-server) process. Its
+# JSON save/read must stay stdlib-only: neither the model loader nor the
+# attention layer may be imported as a side effect.
+FORBIDDEN = (
+    "vllm.model_executor.model_loader",
+    "vllm.model_executor.layers.attention.attention",
+)
+
+
+def assert_clean(stage):
+    imported = [name for name in FORBIDDEN if name in sys.modules]
+    assert not imported, f"{stage}: unexpectedly imported {imported}"
+
+
+assert_clean("before importing vLLM")
+
+from vllm.model_executor.models import registry
+
+assert_clean("after importing the registry")
+
+model = registry._LazyRegisteredModel(
+    module_name="vllm.model_executor.models.llama",
+    class_name="LlamaForCausalLM",
+)
+cache_file = model._get_cache_dir() / model._get_cache_filename()
+assert not cache_file.exists(), "VLLM_CACHE_ROOT is not empty"
+
+# Cache miss: the model class is inspected in a subprocess and the result is
+# written to VLLM_CACHE_ROOT/modelinfos/<module>-<class>.json.
+saved = model.inspect_model_cls()
+assert cache_file.exists(), "model-info cache file was not written"
+assert_clean("after the model-info cache save")
+
+
+def _no_subprocess(fn):
+    raise AssertionError("second inspect_model_cls() should hit the cache")
+
+
+# Cache hit: must be served from the JSON file, not by inspecting again.
+registry._run_in_subprocess = _no_subprocess
+loaded = model.inspect_model_cls()
+assert_clean("after the model-info cache read")
+
+
+def normalize(mi):
+    # JSON turns tuples into lists; compare the JSON-normalized dicts.
+    return json.loads(json.dumps(asdict(mi)))
+
+
+assert normalize(loaded) == normalize(saved)
+"""
+
+
+def test_lazy_modelinfo_cache_roundtrip_stays_light(tmp_path):
+    """The model-info JSON save/read must not import the model loader or the
+    attention layer into the parent process. Importing attention before the
+    engine has finished configuring itself (e.g. before breakable CUDA graphs
+    are enabled) leaks into forked workers, so the boundary is checked in a
+    genuinely clean subprocess interpreter."""
+    env = {
+        **os.environ,
+        "VLLM_CACHE_ROOT": str(tmp_path),
+        "VLLM_LOGGING_LEVEL": "ERROR",
+    }
+    subprocess.run(
+        [sys.executable, "-c", _MODELINFO_CACHE_IMPORT_BOUNDARY_SCRIPT],
+        check=True,
+        env=env,
+    )
+
+
+def test_weight_utils_atomic_writer_reexport():
+    """`weight_utils.atomic_writer` keeps working for existing users. Checked
+    in its own process: importing `weight_utils` pulls in the model loader,
+    which must not happen in the import-boundary test above."""
+    code = (
+        "from vllm.model_executor.model_loader import weight_utils\n"
+        "from vllm.utils.file_utils import atomic_writer\n"
+        "assert weight_utils.atomic_writer is atomic_writer\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 def test_hf_registry_coverage():
