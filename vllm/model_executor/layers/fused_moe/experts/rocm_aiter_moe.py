@@ -483,29 +483,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         return False
 
     @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        SUPPORTED_W_A = [
-            (None, None),
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-            (kMxfp4Static, None),
-            (kMxfp4Static, kMxfp4Dynamic),
-        ]
-        if (weight_key, activation_key) not in SUPPORTED_W_A:
-            return False
-        if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950, on_gfx1250
-
-            if not on_gfx950() or on_gfx1250():
-                return False
-        return True
-
-    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,
@@ -597,3 +574,77 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
+
+
+class AiterUnquantizedExperts(AiterExperts):
+    """Unquantized (bf16/fp16) weights and activations."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [(None, None)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterFp8BlockExperts(AiterExperts):
+    """128x128 block-quantized weight scale, 128-grouped dynamic
+    activation scale."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [(kFp8Static128BlockSym, kFp8Dynamic128Sym)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterFp8TensorExperts(AiterExperts):
+    """Per-tensor static weight scale, either per-tensor static or
+    per-tensor dynamic activation scale."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterFp8ChannelExperts(AiterExperts):
+    """Per-output-channel static weight scale, per-token dynamic
+    activation scale."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [(kFp8StaticChannelSym, kFp8DynamicTokenSym)]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class AiterMxfp4Experts(AiterExperts):
+    """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
+    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250)."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
+        ]
+        if (weight_key, activation_key) not in SUPPORTED_W_A:
+            return False
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
+
+        return on_gfx950() and not on_gfx1250()

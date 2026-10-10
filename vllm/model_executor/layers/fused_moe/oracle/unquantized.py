@@ -126,10 +126,10 @@ def backend_to_kernel_cls(
 
     elif backend == UnquantizedMoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
+            AiterUnquantizedExperts,
         )
 
-        return [AiterExperts]
+        return [AiterUnquantizedExperts]
 
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.experts.triton_moe import (

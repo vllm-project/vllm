@@ -284,10 +284,10 @@ def backend_to_kernel_cls(
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
+            AiterMxfp4Experts,
         )
 
-        return [AiterExperts]
+        return [AiterMxfp4Experts]
 
     elif backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
@@ -305,10 +305,10 @@ def backend_to_kernel_cls(
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
+            AiterMxfp4Experts,
         )
 
-        return [AiterExperts]
+        return [AiterMxfp4Experts]
 
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
