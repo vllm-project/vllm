@@ -164,7 +164,9 @@ class AttentionConfig:
             # layers still use the platform's normal automatic backend.
             self.backend = None
 
-    def resolve_indexer_kv_dtype(self, default: IndexerKVDType | str) -> IndexerKVDType | str:
+    def resolve_indexer_kv_dtype(
+        self, default: IndexerKVDType | str
+    ) -> IndexerKVDType | str:
         """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
         if self.indexer_kv_dtype == "auto":
             return default

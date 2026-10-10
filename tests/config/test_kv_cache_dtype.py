@@ -6,10 +6,10 @@ Run `pytest tests/config/test_kv_cache_dtype.py`.
 """
 
 import logging
-import regex as re
 from pathlib import Path
 
 import pytest
+import regex as re
 import torch
 
 from vllm.config.cache import (

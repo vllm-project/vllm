@@ -7,7 +7,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.attention.ops.common import pack_ue8m0_x4
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the

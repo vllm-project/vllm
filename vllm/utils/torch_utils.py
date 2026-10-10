@@ -88,14 +88,6 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return (
-        kv_cache_dtype.startswith("fp8")
-        or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype.startswith("nvfp4")
-    )
-
-
 def is_meta_module(module: torch.nn.Module) -> bool:
     """Return True if module contains any meta parameters or buffers."""
     return any(p.is_meta for p in module.parameters()) or any(

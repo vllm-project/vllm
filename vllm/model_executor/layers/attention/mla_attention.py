@@ -272,7 +272,6 @@ from vllm.utils.torch_utils import (
     async_tensor_h2d,
     direct_register_custom_op,
     get_dtype_size,
-    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -308,6 +307,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 if TYPE_CHECKING:
