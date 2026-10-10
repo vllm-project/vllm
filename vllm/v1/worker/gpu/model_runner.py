@@ -1025,7 +1025,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
-        return _profile_cudagraph_memory(self)
+        # Runs before the KV cache exists, outside compile_or_warm_up_model.
+        with self.eplb.suppress():
+            return _profile_cudagraph_memory(self)
 
     def needs_cudagraph_capture(self) -> bool:
         """Whether capture_model() has any CUDA graphs left to capture."""
