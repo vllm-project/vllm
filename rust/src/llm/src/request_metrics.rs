@@ -55,7 +55,6 @@ struct RequestMetricHandles {
     labels: EngineLabels,
 
     // Request-derived counters.
-    num_preemptions: U64Counter,
     prompt_tokens: U64Counter,
     prompt_tokens_local_compute: U64Counter,
     prompt_tokens_local_cache_hit: U64Counter,
@@ -70,16 +69,27 @@ struct RequestMetricHandles {
     request_max_num_generation_tokens: HistogramMetric,
     request_params_max_tokens: HistogramMetric,
     request_params_n: HistogramMetric,
-    request_num_preemptions: HistogramMetric,
     request_prefill_kv_computed_tokens: HistogramMetric,
     time_to_first_token_seconds: HistogramMetric,
     inter_token_latency_seconds: HistogramMetric,
     e2e_request_latency_seconds: HistogramMetric,
+    request_decode_time_seconds: HistogramMetric,
+    request_time_per_output_token_seconds: HistogramMetric,
+
+    /// Present only when engines record stats.
+    events: Option<EventMetricHandles>,
+}
+
+/// Cached handles for request metrics derived from engine-core lifecycle
+/// events (`QUEUED`, `SCHEDULED`, `PREEMPTED`), which engines only emit when
+/// they record stats.
+#[derive(Clone)]
+struct EventMetricHandles {
+    num_preemptions: U64Counter,
+    request_num_preemptions: HistogramMetric,
     request_queue_time_seconds: HistogramMetric,
     request_prefill_time_seconds: HistogramMetric,
-    request_decode_time_seconds: HistogramMetric,
     request_inference_time_seconds: HistogramMetric,
-    request_time_per_output_token_seconds: HistogramMetric,
 }
 
 impl RequestMetricsTracker {
@@ -92,9 +102,14 @@ impl RequestMetricsTracker {
         prompt_len: u32,
         max_tokens_param: Option<u32>,
         n_param: u32,
+        engine_stats_enabled: bool,
     ) -> Self {
         Self {
-            handles: resolve_request_metric_handles(&model_name, engine_index),
+            handles: resolve_request_metric_handles(
+                &model_name,
+                engine_index,
+                engine_stats_enabled,
+            ),
             arrival_time,
             prompt_len,
             max_tokens_param,
@@ -163,10 +178,7 @@ impl RequestMetricsTracker {
         let prefill_kv_computed_tokens =
             self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
         let e2e_latency_seconds = received_at - self.arrival_time;
-        let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
-        let prefill_time_seconds = diff_or_zero(self.first_token_ts, self.scheduled_ts);
         let decode_time_seconds = diff_or_zero(self.last_token_ts, self.first_token_ts);
-        let inference_time_seconds = diff_or_zero(self.last_token_ts, self.scheduled_ts);
         let time_per_output_token_seconds = if self.num_generation_tokens > 1 {
             diff_or_zero(self.last_token_ts, self.first_token_ts)
                 / (self.num_generation_tokens - 1) as f64
@@ -187,18 +199,25 @@ impl RequestMetricsTracker {
             self.handles.request_params_max_tokens.observe(max_tokens_param as f64);
         }
         self.handles.request_params_n.observe(self.n_param as f64);
-        self.handles.request_num_preemptions.observe(self.num_preemptions as f64);
         self.handles
             .request_prefill_kv_computed_tokens
             .observe(prefill_kv_computed_tokens as f64);
         self.handles.e2e_request_latency_seconds.observe(e2e_latency_seconds);
-        self.handles.request_queue_time_seconds.observe(queue_time_seconds);
-        self.handles.request_prefill_time_seconds.observe(prefill_time_seconds);
         self.handles.request_decode_time_seconds.observe(decode_time_seconds);
-        self.handles.request_inference_time_seconds.observe(inference_time_seconds);
         self.handles
             .request_time_per_output_token_seconds
             .observe(time_per_output_token_seconds);
+
+        if let Some(events) = &self.handles.events {
+            let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
+            let prefill_time_seconds = diff_or_zero(self.first_token_ts, self.scheduled_ts);
+            let inference_time_seconds = diff_or_zero(self.last_token_ts, self.scheduled_ts);
+
+            events.request_num_preemptions.observe(self.num_preemptions as f64);
+            events.request_queue_time_seconds.observe(queue_time_seconds);
+            events.request_prefill_time_seconds.observe(prefill_time_seconds);
+            events.request_inference_time_seconds.observe(inference_time_seconds);
+        }
     }
 
     /// Record prompt token counters through cached metric handles.
@@ -228,7 +247,9 @@ impl RequestMetricsTracker {
                 }
                 EngineCoreEventType::Preempted => {
                     self.num_preemptions += 1;
-                    self.handles.num_preemptions.inc();
+                    if let Some(events) = &self.handles.events {
+                        events.num_preemptions.inc();
+                    }
                 }
             }
         }
@@ -248,7 +269,11 @@ impl RequestMetricsTracker {
 }
 
 /// Resolve fixed request metric handles for one model and engine index.
-fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetricHandles {
+fn resolve_request_metric_handles(
+    model_name: &str,
+    engine: u32,
+    engine_stats_enabled: bool,
+) -> RequestMetricHandles {
     let metrics = &METRICS.request;
     let labels = EngineLabels {
         model_name: model_name.to_string(),
@@ -256,7 +281,6 @@ fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetri
     };
 
     RequestMetricHandles {
-        num_preemptions: metrics.num_preemptions.get_or_create_owned(&labels),
         prompt_tokens: metrics.prompt_tokens.get_or_create_owned(&labels),
         prompt_tokens_local_compute: metrics.prompt_tokens_by_source.get_or_create_owned(
             &prompt_token_source_labels(model_name, engine, PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE),
@@ -281,7 +305,6 @@ fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetri
             .get_or_create_owned(&labels),
         request_params_max_tokens: metrics.request_params_max_tokens.get_or_create_owned(&labels),
         request_params_n: metrics.request_params_n.get_or_create_owned(&labels),
-        request_num_preemptions: metrics.request_num_preemptions.get_or_create_owned(&labels),
         request_prefill_kv_computed_tokens: metrics
             .request_prefill_kv_computed_tokens
             .get_or_create_owned(&labels),
@@ -294,19 +317,25 @@ fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetri
         e2e_request_latency_seconds: metrics
             .e2e_request_latency_seconds
             .get_or_create_owned(&labels),
-        request_queue_time_seconds: metrics.request_queue_time_seconds.get_or_create_owned(&labels),
-        request_prefill_time_seconds: metrics
-            .request_prefill_time_seconds
-            .get_or_create_owned(&labels),
         request_decode_time_seconds: metrics
             .request_decode_time_seconds
-            .get_or_create_owned(&labels),
-        request_inference_time_seconds: metrics
-            .request_inference_time_seconds
             .get_or_create_owned(&labels),
         request_time_per_output_token_seconds: metrics
             .request_time_per_output_token_seconds
             .get_or_create_owned(&labels),
+        events: engine_stats_enabled.then(|| EventMetricHandles {
+            num_preemptions: metrics.num_preemptions.get_or_create_owned(&labels),
+            request_num_preemptions: metrics.request_num_preemptions.get_or_create_owned(&labels),
+            request_queue_time_seconds: metrics
+                .request_queue_time_seconds
+                .get_or_create_owned(&labels),
+            request_prefill_time_seconds: metrics
+                .request_prefill_time_seconds
+                .get_or_create_owned(&labels),
+            request_inference_time_seconds: metrics
+                .request_inference_time_seconds
+                .get_or_create_owned(&labels),
+        }),
         labels,
     }
 }
@@ -356,7 +385,7 @@ mod tests {
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
         let mut tracker =
-            RequestMetricsTracker::new("model".to_string(), 2, 100.0, 64, Some(128), 1);
+            RequestMetricsTracker::new("model".to_string(), 2, 100.0, 64, Some(128), 1, true);
 
         tracker.observe_output(
             10.0,
@@ -375,14 +404,14 @@ mod tests {
                         timestamp: 9.0,
                     },
                 ]),
-                prefill_stats: Some(PrefillStats {
+                prefill_stats: Some(Box::new(PrefillStats {
                     num_prompt_tokens: 64,
                     num_computed_tokens: 60,
                     num_cached_tokens: 4,
                     num_local_cached_tokens: 4,
                     num_external_cached_tokens: 0,
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             },
         );

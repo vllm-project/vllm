@@ -6,7 +6,7 @@ import dataclasses
 import glob
 import os
 import time
-from collections.abc import Generator, Iterable
+from collections.abc import Callable, Generator, Iterable
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -16,6 +16,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
@@ -28,6 +29,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
     filter_mm_encoder_only_safetensors_files,
+    filter_safetensors_files_by_weight_name,
     get_quant_config,
     instanttensor_weights_iterator,
     maybe_download_from_modelscope,
@@ -45,6 +47,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+# fbgemm_fp8 builds input_scale_ub from its config; checkpoints do not carry it.
+_CONFIG_BUILT_PARAMS = ("input_scale_ub",)
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -74,6 +79,10 @@ class DefaultModelLoader(BaseModelLoader):
 
         allow_patterns_overrides: list[str] | None = None
         """If defined, weights will load exclusively using these patterns."""
+
+        is_unused_weight: Callable[[str], bool] | None = None
+        """If defined, safetensors shards holding only weights whose checkpoint
+        name (before *prefix*) it accepts are not read."""
 
     counter_before_loading_weights: float = 0.0
     counter_after_loading_weights: float = 0.0
@@ -283,6 +292,10 @@ class DefaultModelLoader(BaseModelLoader):
                     f"`{source.model_or_path}`; check language_model prefixes "
                     f"{self._encoder_only_lm_prefixes}"
                 )
+        if source.is_unused_weight is not None and use_safetensors:
+            hf_weights_files = filter_safetensors_files_by_weight_name(
+                hf_weights_files, source.is_unused_weight
+            )
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
@@ -359,6 +372,7 @@ class DefaultModelLoader(BaseModelLoader):
             prefix="",
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
+            is_unused_weight=getattr(model, "is_unused_checkpoint_weight", None),
         )
         yield from self._get_weights_iterator(primary_weights)
 
@@ -496,10 +510,15 @@ class DefaultModelLoader(BaseModelLoader):
             else default_enable_weights_track
         )
         if enable_weights_track:
-            self.track_weights_loading(model, loaded_weights)
+            self.track_weights_loading(
+                model, loaded_weights, quantized=model_config.quantization is not None
+            )
 
     def track_weights_loading(
-        self, model: nn.Module, loaded_weights: set[str] | None
+        self,
+        model: nn.Module,
+        loaded_weights: set[str] | None,
+        quantized: bool = False,
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
@@ -513,7 +532,28 @@ class DefaultModelLoader(BaseModelLoader):
                 # ignore kv_cache scale and online quant scale,
                 # which can be missing in checkpoints
                 if has_online_quant or has_postprocess_quant:
-                    for param_name, _ in module.named_parameters():
+                    for param_name, param in module.named_parameters():
+                        # On a quantized model, every parameter has to come from
+                        # the checkpoint except those a checkpoint cannot carry:
+                        # - online quantization (uses_meta_device) quantizes the
+                        #   weights while loading, so its parameters do not map
+                        #   to checkpoint tensors;
+                        # - KV-cache quantization parameters (BaseKVCacheMethod)
+                        #   fall back to defaults when a checkpoint has none;
+                        # - empty placeholders hold no data, e.g. the qzeros
+                        #   moe_wna16 registers for symmetric GPTQ;
+                        # - _CONFIG_BUILT_PARAMS come from the quantization config.
+                        # Unquantized models, where this check runs by default,
+                        # keep the module-wide exemption.
+                        if (
+                            quantized
+                            and not has_online_quant
+                            and not isinstance(quant_method, BaseKVCacheMethod)
+                            and param.numel() > 0
+                            and param_name.rsplit(".", 1)[-1]
+                            not in _CONFIG_BUILT_PARAMS
+                        ):
+                            continue
                         full_name = f"{name}.{param_name}" if name else param_name
                         loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights

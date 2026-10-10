@@ -62,7 +62,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py &&
+      pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py --ignore v1/engine/test_core_engine_actor_manager.py &&
       pytest -v -s test_config.py'
 
 - label: V1 e2e (2 GPUs)

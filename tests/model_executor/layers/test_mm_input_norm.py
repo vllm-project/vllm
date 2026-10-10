@@ -6,6 +6,8 @@
 import pytest
 import torch
 
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
     IdentityInputNorm,
@@ -262,6 +264,23 @@ class TestFusedMMInputNormKernel:
 @requires_vllm_config
 class TestFusedMMInputNormConstruction:
     """Weight/bias buffer semantics at init time."""
+
+    def test_input_norm_is_always_enabled(self):
+        config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                compile_mm_encoder=True,
+                custom_ops=["none"],
+            )
+        )
+        with set_current_vllm_config(config):
+            FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE)
+            assert (
+                config.compilation_config.enabled_custom_ops["fused_mm_input_norm"] == 1
+            )
+            assert not config.compilation_config.disabled_custom_ops[
+                "fused_mm_input_norm"
+            ]
 
     def test_identity_config_buffers(self):
         """Numerically identity parameters still build plain weight/bias

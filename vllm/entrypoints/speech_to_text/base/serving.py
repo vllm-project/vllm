@@ -229,6 +229,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             max_tokens=1,
             temperature=0.0,
             allowed_token_ids=allowed_token_ids,
+            watermarking=False,
         )
 
         result_generator = self.engine_client.generate(

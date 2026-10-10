@@ -11,7 +11,6 @@ These tests verify correct behavior in three scenarios:
 """
 
 from collections.abc import Callable
-from unittest.mock import Mock
 
 import pytest
 
@@ -19,6 +18,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import FinishReason, Request, RequestStatus
 
 from .utils import (
+    create_mock_connector,
     create_model_runner_output,
     create_request,
     create_scheduler,
@@ -83,7 +83,7 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     }
 
     # mock connector indicating sync load
-    recompute_scheduler.connector = Mock()
+    recompute_scheduler.connector = create_mock_connector()
     recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )
@@ -206,7 +206,7 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     }
 
     # mock connector indicating sync load
-    fail_scheduler.connector = Mock()
+    fail_scheduler.connector = create_mock_connector()
     fail_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
     )
@@ -323,17 +323,18 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     }
 
     # mock connector indicating async load
-    recompute_scheduler.connector = Mock()
+    recompute_scheduler.connector = create_mock_connector()
     recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, True)
     )
+    recompute_scheduler.connector.get_loaded_kv_cache_group_ids.return_value = (0,)
     recompute_scheduler.connector.request_finished.return_value = (False, None)
     recompute_scheduler.connector.take_events.return_value = ()
 
     scheduler_output = recompute_scheduler.schedule()
 
     # request should be waiting for remote KVs
-    assert len(recompute_scheduler.skipped_waiting) == 1
+    assert len(recompute_scheduler.kv_holding_waiting) == 1
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert request.num_computed_tokens == num_external_computed_tokens
 
