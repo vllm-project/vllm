@@ -450,7 +450,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Fold the global physical device index into the replica-local
             # [0, world_size) slot range.
             rank = torch.accelerator.current_device_index() % world_size
-        worker_mmap: TensorViewRegion
+        worker_mmap: TensorViewRegion | None = None
         try:
             if self.config.canonical_layout:
                 worker_mmap = CanonicalRegion(
@@ -486,7 +486,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 canonical_layout=self.config.canonical_layout,
             )
         except Exception:
-            worker_mmap.cleanup()
+            if worker_mmap is not None:
+                worker_mmap.cleanup()
             raise
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
