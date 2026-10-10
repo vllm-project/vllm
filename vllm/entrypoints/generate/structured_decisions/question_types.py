@@ -55,8 +55,7 @@ class QuestionType(ABC):
         ``question.labels[i]`` among the labels, and the list sums to 1.
         ``label_mass`` is the labels' total probability over the vocabulary."""
 
-    def reply_line(self, label: str, option: Option) -> str | None:
-        """The option's line in the prompt, or None to leave it out."""
+    def reply_line(self, label: str, option: Option) -> str:
         return (
             f"{label}: {option.name} - {option.description}"
             if option.description
@@ -67,9 +66,7 @@ class QuestionType(ABC):
         """The question as the model reads it, after the state."""
         lines = [f"Question: {question.instructions}"] if question.instructions else []
         for label, o in zip(question.labels, question.options):
-            line = self.reply_line(label, o)
-            if line is not None:
-                lines.append(line)
+            lines.append(self.reply_line(label, o))
         lines.append(self.reply_instruction)
         return "\n".join(lines)
 
@@ -192,8 +189,10 @@ class NoulQuestion(QuestionType):
             Option("no", None if false is None else str(false)),
         ]
 
-    def reply_line(self, label: str, option: Option) -> str | None:
-        return f"{label}: {option.description}" if option.description else None
+    def reply_line(self, label: str, option: Option) -> str:
+        # A side without a description still shows its label. Without the
+        # label in the prompt, models answer "Yes" or "No" instead.
+        return f"{label}: {option.description}" if option.description else label
 
     def answer(
         self, question: Question, probs: list[float], label_mass: float
