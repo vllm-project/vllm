@@ -39,6 +39,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+    _select_marlin_moe_block_size,
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
@@ -67,6 +68,26 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("estimated_tokens_per_expert", "input_dtype", "expected"),
+    [
+        (1.0, None, 8),
+        (10.0, None, 16),
+        (1.0, torch.int8, 16),
+        (58.0, None, 64),
+    ],
+)
+def test_select_marlin_moe_block_size(
+    estimated_tokens_per_expert: float,
+    input_dtype: torch.dtype | None,
+    expected: int,
+):
+    assert (
+        _select_marlin_moe_block_size(estimated_tokens_per_expert, input_dtype)
+        == expected
+    )
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
