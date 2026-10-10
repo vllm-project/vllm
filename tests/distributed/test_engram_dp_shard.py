@@ -204,7 +204,7 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
         # Reuse the processes and communication groups across storage modes.
         for (cpu_offload, dp_shared_memory), n_heads, sequence_parallel in product(
             [(False, False), (True, False), (True, True)],
-            [8, 7],
+            [8, 7, 1],
             [False, True] if tp_size > 1 else [False],
         ):
             _check_table(
@@ -458,7 +458,10 @@ def _check_table(
             if dp_shared_memory:
                 assert layer.dp_size == 1
                 assert layer.head_start == tp_rank * layer.part_n_hash_cols
-                assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+                if layer.part_num_embeddings:
+                    assert (
+                        layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+                    )
 
                 def unexpected_collective(*args, **kwargs):
                     raise AssertionError("shared lookup must not use DP collectives")
@@ -517,7 +520,7 @@ def _check_table(
                 dp_shared_memory,
             )
 
-        replay = n_heads == 7 and (
+        replay = n_heads in (7, 1) and (
             (dp_shared_memory and sequence_parallel == (tp_size > 1))
             or (
                 cpu_offload

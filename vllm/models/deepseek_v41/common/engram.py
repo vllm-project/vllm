@@ -606,6 +606,8 @@ def _engram_head_shard_weight_loader(
 ) -> None:
     """Load this rank's complete head buckets. ue8m0 scales arrive as
     float8_e8m0fnu; keep the raw bytes (the param stores uint8)."""
+    if param.numel() == 0:
+        return
     part_rows = param.shape[0]
     if loaded_weight.dtype == torch.float8_e8m0fnu:
         loaded_weight = loaded_weight.view(torch.uint8)
@@ -990,10 +992,6 @@ class ParallelEngramEmbedding(nn.Module):
         num_shards, head_rank = self._get_shard_info()
         self.part_n_hash_cols = triton.cdiv(self.n_hash_cols, num_shards)
         # TODO: Support row-wise sharding when there are too few hash heads.
-        assert (num_shards - 1) * self.part_n_hash_cols < self.n_hash_cols, (
-            f"Engram sharding leaves ranks without hash heads: "
-            f"{self.n_hash_cols} heads over {num_shards} shards"
-        )
         self.head_start = head_rank * self.part_n_hash_cols
         head_end = self.head_start + self.part_n_hash_cols
         self.vocab_start_idx = sum(head_sizes[: self.head_start])
@@ -1033,6 +1031,14 @@ class ParallelEngramEmbedding(nn.Module):
         return self.tp_size * self.dp_size, engram_head_shard_rank()
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.part_num_embeddings == 0:
+            device = "cpu" if self.cpu_offload else None
+            return (
+                torch.empty(0, self.dim, dtype=torch.float8_e4m3fn, device=device),
+                torch.empty(
+                    0, self.dim // self.block_size, dtype=torch.uint8, device=device
+                ),
+            )
         if self.dp_shared_memory:
             group = get_engram_dp_group()
             assert group is not None
@@ -1116,6 +1122,9 @@ class ParallelEngramEmbedding(nn.Module):
         """
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
+            return
+        if self.part_num_embeddings == 0:
+            out.zero_()
             return
         weight, scales = self._storage()
         ids_stride_t, ids_stride_h = indices.stride()

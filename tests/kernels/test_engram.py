@@ -585,18 +585,63 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     return layer
 
 
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
+    "tp_size,dp_size,n_heads,cpu_offload,dp_shared_memory,use_thp",
+    [
+        (1, 4, 5, False, False, False),
+        (2, 2, 5, True, False, False),
+        (4, 1, 6, False, False, False),
+        (8, 1, 6, True, False, True),
+        (16, 1, 24, True, False, False),
+        (32, 1, 24, False, False, False),
+        (2, 2, 1, True, True, False),
+    ],
 )
-def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch):
-    """Reject empty owners before allocating weights or accessing CUDA."""
+def test_engram_empty_head_shards_zero_pad_lookup(
+    tp_size, dp_size, n_heads, cpu_offload, dp_shared_memory, use_thp, monkeypatch
+):
+    """Empty owners load no weights and contribute zeros to head gathering."""
     monkeypatch.setattr(
         engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
     )
     monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: dp_size)
-    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
-    with pytest.raises(AssertionError, match="ranks without hash heads"):
-        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
+    monkeypatch.setattr(
+        engram_ops, "get_tensor_model_parallel_rank", lambda: tp_size - 1
+    )
+    monkeypatch.setattr(
+        engram_ops, "engram_head_shard_rank", lambda: tp_size * dp_size - 1
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _: SimpleNamespace(multi_processor_count=1),
+    )
+    monkeypatch.setattr(engram_ops, "is_uva_available", lambda: True)
+    layer = ParallelEngramEmbedding(
+        n_heads * 17,
+        64,
+        (17,) * n_heads,
+        cpu_offload=cpu_offload,
+        dp_shared_memory=dp_shared_memory,
+        use_thp=use_thp,
+    )
+    assert layer.part_num_embeddings == 0
+    assert layer.weight.shape == (0, 64)
+    assert layer.weight_scale_inv.shape == (0, 2)
+    layer.weight.weight_loader(layer.weight, None)
+    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, None)
+
+    def unexpected_storage():
+        pytest.fail("Empty head shards must not access table storage")
+
+    monkeypatch.setattr(layer, "_storage", unexpected_storage)
+    ids = torch.zeros(3, n_heads, dtype=torch.int32)
+    out = torch.full((3, layer.part_n_hash_cols, 64), float("nan"))
+    layer.lookup(ids, out)
+    assert torch.count_nonzero(out) == 0
 
 
 @pytest.mark.skipif(
@@ -605,9 +650,11 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
 @pytest.mark.parametrize(
     "cpu_offload,sort_rows", [(False, False), (True, False), (True, True)]
 )
-@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
+@pytest.mark.parametrize(
+    "tp_size,n_heads", [(1, 15), (2, 15), (4, 15), (8, 15), (16, 24), (32, 24)]
+)
 def test_engram_head_shards_reconstruct_checkpoint(
-    cpu_offload, sort_rows, tp_size, monkeypatch
+    cpu_offload, sort_rows, tp_size, n_heads, monkeypatch
 ):
     """Keep complete buckets and reconstruct head order, including TP padding,
     whether or not the host lookup sorts its rows by table offset."""
@@ -616,6 +663,7 @@ def test_engram_head_shards_reconstruct_checkpoint(
             engram_ops, "_engram_lookup_thresholds", lambda _: (0, None)
         )
     head_sizes = (17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73)
+    head_sizes = (head_sizes + (79, 83, 89, 97, 101, 103, 107, 109, 113))[:n_heads]
     num_rows, dim = sum(head_sizes), 64
     torch.manual_seed(0)
     weight = torch.randn(num_rows + 7, dim).to(torch.float8_e4m3fn)
@@ -661,12 +709,16 @@ def test_engram_head_shards_reconstruct_checkpoint(
     assert torch.count_nonzero(gathered[:, len(head_sizes) :]) == 0
     assert sum(layer.part_num_embeddings for layer in layers) == num_rows
 
+    shard_index = 0
+
     def gather(local, dim):
-        torch.testing.assert_close(local, shards[0], rtol=0, atol=0)
+        torch.testing.assert_close(local, shards[shard_index], rtol=0, atol=0)
         return torch.cat(shards, dim=dim)
 
     monkeypatch.setattr(engram_ops, "tensor_model_parallel_all_gather", gather)
-    torch.testing.assert_close(layers[0](ids), expected, rtol=0, atol=0)
+    for shard_index in (0, tp_size - 1):
+        torch.testing.assert_close(layers[shard_index](ids), expected, rtol=0, atol=0)
+    shard_index = 0
     module = Engram.__new__(Engram)
     torch.nn.Module.__init__(module)
     module.embed_tokens = layers[0]
