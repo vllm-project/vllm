@@ -9,6 +9,7 @@ import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.parser_manager import ParserManager
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
@@ -417,3 +418,58 @@ def test_parse_auto_tools_no_calls_returns_none(tokenizer):
     assert reasoning is None
     assert content == PLAIN_TEXT
     assert tool_calls is None
+
+
+def test_parser_manager_get_tool_parser_without_auto_tools():
+    parser_cls = ParserManager.get_tool_parser(
+        tool_parser_name="hermes",
+        enable_auto_tools=False,
+    )
+    assert parser_cls is not None
+    assert parser_cls is Hermes2ProToolParser
+
+
+def test_parser_manager_get_parser_without_auto_tools():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="hermes",
+        enable_auto_tools=False,
+    )
+    assert parser_cls is not None
+    assert parser_cls.tool_parser_cls is Hermes2ProToolParser
+
+
+def test_parse_forced_named_tool_choice_without_auto_tools(tokenizer, monkeypatch):
+    monkeypatch.setattr(Hermes2ProToolParser, "supports_required_and_named", False)
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    request = make_request(
+        tools=TOOLS,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "get_weather"},
+        },
+    )
+    reasoning, content, tool_calls = parser.parse(
+        TOOL_CALL_ONLY, request, enable_auto_tools=False
+    )
+    assert reasoning is None
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "get_weather"
+    assert json.loads(tool_calls[0].arguments) == {"city": "Dallas"}
+
+
+def test_parse_forced_required_tool_choice_without_auto_tools(tokenizer, monkeypatch):
+    monkeypatch.setattr(Hermes2ProToolParser, "supports_required_and_named", False)
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    request = make_request(
+        tools=TOOLS,
+        tool_choice="required",
+    )
+    reasoning, content, tool_calls = parser.parse(
+        TOOL_CALL_ONLY, request, enable_auto_tools=False
+    )
+    assert reasoning is None
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "get_weather"
+    assert json.loads(tool_calls[0].arguments) == {"city": "Dallas"}
