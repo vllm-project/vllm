@@ -126,9 +126,12 @@ def minimax_m2_config() -> ParserEngineConfig:
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
             ),
+            # A bare </think> in content is literal text for M2, not
+            # structure; pass it through instead of absorbing it.
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+                emit_terminal=True,
             ),
             (ParserState.REASONING, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,

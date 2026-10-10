@@ -26,6 +26,10 @@ class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore
 class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     """Reasoning parser for MiniMax M2 model."""
 
+    # Everything stays in content by design, so a composed tool parser must
+    # pass reasoning markup through instead of eating it as a boundary.
+    keeps_reasoning_markup_in_content = True
+
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         self.end_token_id = self.vocab.get("</think>")
