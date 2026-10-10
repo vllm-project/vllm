@@ -55,8 +55,9 @@ def resolve_hisparse_specs(
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
     backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
+    specs = list(mla_specs.values())
     try:
-        block_size = select_common_block_size(block_sizes.pop(), backends)
+        block_size = select_common_block_size(block_sizes.pop(), backends, specs)
     except ValueError as error:
         raise ValueError(
             "HiSparse requires a GPU block size supported by every sparse "
@@ -104,16 +105,13 @@ def allocate_hisparse_kv_caches(
             if isinstance(host_spec, UniformTypeKVCacheSpecs)
             else host_spec
         )
-        kernel_block_size = kernel_block_sizes[host_group_id]
-        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
-            kernel_block_size = spec.storage_block_size
         views = create_kv_cache_views(
             backing,
             spec,
             kv_cache_config.num_blocks_of(tensor),
             layout,
             tensor,
-            kernel_block_size=kernel_block_size,
+            kernel_block_size=kernel_block_sizes[host_group_id],
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
@@ -216,10 +214,26 @@ def bind_hisparse_kv_caches(
         for tensor_config in kv_cache_config.kv_cache_tensors
         for layer_index, name in enumerate(tensor_config.layers)
     }
-    resident_source_index = 0
-    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
-            continue
+    resident_groups = [
+        (group_id, group)
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+    ]
+    residency: torch.Tensor | None = None
+    if resident_groups:
+        table_shapes = {
+            block_tables.input_block_tables[group_id].shape
+            for group_id, _ in resident_groups
+        }
+        assert len(table_shapes) == 1
+        max_num_reqs, max_num_pages = table_shapes.pop()
+        residency = torch.zeros(
+            (max_num_reqs, len(resident_groups), max_num_pages),
+            dtype=torch.int32,
+            device=block_tables.input_block_tables[resident_groups[0][0]].device,
+        )
+    for resident_source_index, (group_id, group) in enumerate(resident_groups):
+        assert residency is not None
         for cache_name in group.layer_names:
             assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
             layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
@@ -232,13 +246,13 @@ def bind_hisparse_kv_caches(
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
-                block_table=block_tables.input_block_tables[group_id],
+                block_table=residency[:, resident_source_index],
                 slot_mapping=block_tables.slot_mappings[group_id],
             )
+            cache_handle.residency = residency
             assert cache_handle.view is not None
             kv_caches[cache_name] = cache_handle.view.cache
             cache_handle.runtime.resident_source_index = resident_source_index
-        resident_source_index += 1
 
     hot_backing: torch.Tensor | None = None
     cache_handles: list[HiSparseCacheHandle] = []

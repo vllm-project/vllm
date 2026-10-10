@@ -5,6 +5,7 @@
 import json
 
 import pytest
+from transformers import MistralCommonBackend, TokenizersBackend
 
 from vllm.config import StructuredOutputsConfig
 from vllm.exceptions import VLLMClientError, VLLMValidationError
@@ -14,6 +15,8 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
 )
+from vllm.tokenizers import mistral as mistral_tokenizers
+from vllm.v1.structured_output import backend_guidance
 
 pytestmark = pytest.mark.cpu_test
 
@@ -278,10 +281,102 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
 def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend):
     """`auto` falls back on rejection, so it must catch what the validators raise."""
     params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
+    # trick to create tokenizer that guidance backend accepts
+    tokenizer = object.__new__(TokenizersBackend)
     params._validate_structured_outputs(
         _StubModelConfig(is_diffusion=False),
         StructuredOutputsConfig(backend="auto"),
-        tokenizer=object(),
+        tokenizer=tokenizer,
     )
     assert params.structured_outputs is not None
     assert params.structured_outputs._backend == expected_backend
+
+
+# ================================================
+# Test validate_structured_outputs functionality
+# ================================================
+
+
+class TestValidateStructuredOutputs:
+    class TestPR52298Regression:
+        class _StubSlowTokenizer:
+            is_fast = False
+
+        class _StubVllmMistralTokenizer:
+            IS_MISTRAL_TOKENIZER = True
+
+            def __init__(self, is_tekken: bool):
+                self.is_tekken = is_tekken
+                self.llg_tokenizer = object()
+
+        @staticmethod
+        def _validate_guidance(tokenizer):
+            params = SamplingParams(
+                structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA)
+            )
+            params._validate_structured_outputs(
+                _StubModelConfig(is_diffusion=False),
+                StructuredOutputsConfig(backend="guidance"),
+                tokenizer=tokenizer,
+            )
+            return params
+
+        def _make_tokenizer(self, tokenizer_id: str):
+            if tokenizer_id == "slow-hf":
+                return self._StubSlowTokenizer()
+            if tokenizer_id == "plain-object":
+                return object()
+            if tokenizer_id == "raw-mistral-common":
+                return object.__new__(MistralCommonBackend)
+            if tokenizer_id == "vllm-mistral-non-tekken":
+                return self._StubVllmMistralTokenizer(is_tekken=False)
+            if tokenizer_id == "fast-hf":
+                return object.__new__(TokenizersBackend)
+            if tokenizer_id == "vllm-mistral-tekken":
+                return self._StubVllmMistralTokenizer(is_tekken=True)
+            raise ValueError(tokenizer_id)
+
+        @pytest.mark.parametrize(
+            "tokenizer_id, patch_mistral",
+            [
+                pytest.param("slow-hf", False, id="slow-hf"),
+                pytest.param("plain-object", False, id="plain-object"),
+                pytest.param("raw-mistral-common", False, id="raw-mistral-common"),
+                pytest.param(
+                    "vllm-mistral-non-tekken",
+                    True,
+                    id="vllm-mistral-non-tekken",
+                ),
+            ],
+        )
+        def test_unsupported_tokenizer(self, monkeypatch, tokenizer_id, patch_mistral):
+            if patch_mistral:
+                monkeypatch.setattr(
+                    mistral_tokenizers,
+                    "MistralTokenizer",
+                    self._StubVllmMistralTokenizer,
+                )
+            with pytest.raises(VLLMValidationError):
+                self._validate_guidance(self._make_tokenizer(tokenizer_id))
+
+        @pytest.mark.parametrize(
+            "tokenizer_id, patch_mistral",
+            [
+                pytest.param("fast-hf", False, id="fast-hf"),
+                pytest.param("vllm-mistral-tekken", True, id="vllm-mistral-tekken"),
+            ],
+        )
+        def test_supported_tokenizer(self, monkeypatch, tokenizer_id, patch_mistral):
+            if patch_mistral:
+                monkeypatch.setattr(
+                    mistral_tokenizers,
+                    "MistralTokenizer",
+                    self._StubVllmMistralTokenizer,
+                )
+                monkeypatch.setattr(
+                    backend_guidance,
+                    "validate_guidance_grammar",
+                    lambda *_args, **_kwargs: None,
+                )
+            params = self._validate_guidance(self._make_tokenizer(tokenizer_id))
+            assert params.structured_outputs._backend == "guidance"

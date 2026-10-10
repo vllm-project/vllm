@@ -153,7 +153,7 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
         && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
         && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl; \
     fi
 
@@ -936,13 +936,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
-# https://docs.flashinfer.ai/installation.html
-# From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.7.0.post1
-RUN --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+# Install FlashInfer's precompiled kernels for all GPU architectures (the default).
+# `vllm download-kernels` wraps this command but vLLM is only installed in later
+# stages, and running it there would rebuild this large layer for every wheel.
+RUN --mount=type=cache,target=/opt/pip/cache \
+    PIP_CACHE_DIR=/opt/pip/cache flashinfer download-kernels
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES

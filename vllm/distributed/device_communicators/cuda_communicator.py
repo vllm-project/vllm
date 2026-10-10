@@ -151,6 +151,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                register_graph_buffers=register,
             )
 
         if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
@@ -174,6 +175,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                register_graph_buffers=register,
             )
             if self.aiter_ar_comm.disabled:
                 self.aiter_ar_comm = None
@@ -812,12 +814,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return bd is not None and bd.uniform
 
     def suspend(self) -> None:
+        from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
+
+        # FlashInfer AR syncs over the gloo cpu_group, so order vs. NCCL is free.
+        checkpoint_prepare_fi_ar_workspaces(self.cpu_group, skip_unsupported=True)
         if self.pynccl_comm is not None:
             self.pynccl_comm.suspend()
 
     def resume(self) -> None:
+        from .flashinfer_all_reduce import checkpoint_restore_fi_ar_workspaces
+
         if self.pynccl_comm is not None:
             self.pynccl_comm.resume()
+        checkpoint_restore_fi_ar_workspaces(self.cpu_group, skip_unsupported=True)
 
     def checkpoint_prepare(self) -> None:
         # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.

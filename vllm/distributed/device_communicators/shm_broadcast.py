@@ -61,6 +61,10 @@ SPINLOOP_TIMEOUT_SECONDS = 0.1
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
+    from vllm.distributed.device_communicators.shm_tensor_arena import (
+        ShmTensorArena,
+    )
+
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 # Cap on how long an idle reader parks before re-reading the authoritative SHM
 # written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
@@ -471,6 +475,7 @@ class Handle:
     local_notify_addr: str | None = None
     remote_subscribe_addr: str | None = None
     remote_addr_ipv6: bool = False
+    tensor_arena_handle: tuple[int, int, int, str] | None = None
 
 
 def _close_zmq(context: zmq.Context, sockets: list[zmq.Socket]) -> None:
@@ -490,6 +495,7 @@ class MessageQueue:
         max_chunk_bytes: int = 1024 * 1024 * 24,
         max_chunks: int = 10,
         connect_ip: str | None = None,
+        enable_shm_tensor_arena: bool = False,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -501,11 +507,21 @@ class MessageQueue:
         self.shutting_down = False
         context = Context()
 
+        self.tensor_arena: ShmTensorArena | None = None
         if n_local_reader > 0:
             # for local readers, we will:
             # 1. create a shared memory ring buffer to communicate small data
             # 2. create a publish-subscribe socket to communicate large data
             self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes, max_chunks)
+
+            # Zero-copy arena for large CPU tensors (see ShmTensorArena).
+            # Local readers only: remote readers receive the pickled bytes
+            # over a socket and cannot map the arena, so the substitution
+            # would break them.
+            if enable_shm_tensor_arena and n_remote_reader == 0:
+                from vllm.distributed.device_communicators import shm_tensor_arena
+
+                self.tensor_arena = shm_tensor_arena.ShmTensorArena(n_local_reader)
 
             # XPUB is very similar to PUB,
             # except that it can receive subscription messages
@@ -567,6 +583,9 @@ class MessageQueue:
             local_notify_addr=local_notify_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
+            tensor_arena_handle=(
+                self.tensor_arena.handle() if self.tensor_arena is not None else None
+            ),
         )
         self._close_zmq_on_collect(context)
 
@@ -599,6 +618,7 @@ class MessageQueue:
 
         context = Context()
 
+        self.tensor_arena = None
         if rank in handle.local_reader_ranks:
             assert handle.buffer_handle is not None
             self.buffer = ShmRingBuffer(*handle.buffer_handle)
@@ -606,6 +626,23 @@ class MessageQueue:
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
             self._is_remote_reader = False
+
+            arena_handle = handle.tensor_arena_handle
+            if arena_handle is not None:
+                from vllm.distributed.device_communicators import shm_tensor_arena
+
+                self.tensor_arena = shm_tensor_arena.ShmTensorArena(
+                    *arena_handle, reader_rank=self.local_reader_rank
+                )
+                # `shared_memory` is unset (not just None) if attaching to
+                # the writer's segment raised FileNotFoundError -- see
+                # ShmTensorArena.__init__'s reader branch. Registering a
+                # broken arena is a no-op deferred failure (same convention
+                # ShmRingBuffer uses above), not a crash here.
+                if hasattr(self.tensor_arena, "shared_memory"):
+                    shm_tensor_arena._TENSOR_ARENAS[
+                        self.tensor_arena.shared_memory.name
+                    ] = self.tensor_arena
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
@@ -880,12 +917,21 @@ class MessageQueue:
         # dispatch table would otherwise shadow them.
         dispatch_table = dict(copyreg.dispatch_table)
         dispatch_table[torch.Tensor] = _reduce_tensor
+        arena = self.tensor_arena
         with io.BytesIO() as bio:
-            pickler = pickle.Pickler(
-                bio,
-                protocol=pickle.HIGHEST_PROTOCOL,
-                buffer_callback=oob_callback,
-            )
+            pickler: pickle.Pickler
+            if arena is not None:
+                from vllm.distributed.device_communicators.shm_tensor_arena import (
+                    _ArenaPickler,
+                )
+
+                pickler = _ArenaPickler(bio, arena, buffer_callback=oob_callback)
+            else:
+                pickler = pickle.Pickler(
+                    bio,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                    buffer_callback=oob_callback,
+                )
             pickler.dispatch_table = dispatch_table
             pickler.dump(obj)
             all_buffers[0] = bio.getvalue()
@@ -922,6 +968,9 @@ class MessageQueue:
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
+            # See ShmTensorArena.flush_releases for what this retires and why.
+            if self.tensor_arena is not None:
+                self.tensor_arena.flush_releases()
             with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:

@@ -5,6 +5,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) LM Eval Small Models"
   device: h200_35gb
   key: lm-eval-small-models
+  automatic_shard: true
   timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/
@@ -208,7 +209,6 @@ steps:
       - tests/evals/gsm8k/
       - tests/utils.py
       - vllm/distributed/
-      - vllm/transformers_utils/configs/diffusion_gemma.py
       - vllm/v1/attention/ops/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
@@ -417,8 +417,6 @@ steps:
       - vllm/model_executor/models/qwen3_next_mtp.py
       - vllm/model_executor/models/nemotron_h.py
       - vllm/model_executor/models/nemotron_h_mtp.py
-      - vllm/transformers_utils/configs/qwen3_next.py
-      - vllm/transformers_utils/configs/nemotron_h.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/quantization/
       - vllm/model_executor/layers/fused_moe/
@@ -445,8 +443,6 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
   - vllm/third_party/flash_linear_attention/ops/
@@ -463,8 +459,6 @@ steps:
       source_file_dependencies:
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
-      - vllm/transformers_utils/configs/qwen3_5.py
-      - vllm/transformers_utils/configs/qwen3_5_moe.py
       - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_next.py

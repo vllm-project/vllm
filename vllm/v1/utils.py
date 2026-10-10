@@ -213,6 +213,14 @@ class APIServerProcessManager:
                 SharedAdmissionStats.num_counters(num_servers),
             )
 
+        # Open connections per API server, to accept on the least loaded one;
+        # a server that has not started yet is never the least loaded.
+        api_server_loads = (
+            spawn_context.RawArray("i", [2**31 - 1] * num_servers)
+            if num_servers > 1
+            else None
+        )
+
         listeners = [*input_listeners, *output_listeners]
         self._listeners = listeners
         try:
@@ -228,6 +236,8 @@ class APIServerProcessManager:
                     "client_count": num_servers,
                     "client_index": i,
                 }
+                if api_server_loads is not None:
+                    client_config["api_server_loads"] = api_server_loads
                 if admission_counters is not None:
                     client_config["mp_admission_counters"] = admission_counters
                 if stats_update_address is not None:

@@ -503,6 +503,12 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
 
+    args = parser.parse_args(
+        ["--attention-config", '{"tokenspeed_mla_min_split_kv": 8}']
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config.tokenspeed_mla_min_split_kv == 8
+
     # set backend via dot notation
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
     assert args is not None
