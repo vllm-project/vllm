@@ -4,6 +4,7 @@ from typing import cast
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -94,8 +95,17 @@ class ROCmLatentMoERunner(MoERunner):
         hidden_shard = shared_output.narrow(-1, shard_start, shard_size)
 
         # hidden_shard += latent @ up_proj_shard.T, accumulated in the GEMM's
-        # beta-add epilogue so folding in the shared partial costs no kernel.
-        hidden_shard.addmm_(latent, up_proj_shard.t())
+        # epilogue so folding in the shared partial costs no kernel.
+        if rocm_aiter_ops.is_linear_enabled():
+            from aiter.ops.triton.gemm.basic.gemm_a16w16_atomic import (
+                gemm_a16w16_atomic,
+            )
+
+            gemm_a16w16_atomic(
+                latent, up_proj_shard, hidden_shard.dtype, hidden_shard, accumulate=True
+            )
+        else:
+            hidden_shard.addmm_(latent, up_proj_shard.t())
 
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
