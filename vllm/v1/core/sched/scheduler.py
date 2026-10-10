@@ -1654,13 +1654,15 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
-        # Current streaming input behaviour: Keep only computed output tokens
-        # (discard final sampled output token).
+        # Keep the computed output tokens (all tokens but the final sampled one).
+        # Cannot rely on num_computed_tokens because it may be 0 after preemption.
         num_computed_tokens = session.num_computed_tokens
+        keep_end = session.num_tokens - 1
+        assert keep_end >= num_computed_tokens
         kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : num_computed_tokens
+            session.num_prompt_tokens : keep_end
         ]
-        del session._all_token_ids[num_computed_tokens:]
+        del session._all_token_ids[keep_end:]
         del session.block_hashes[num_computed_tokens // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
@@ -2289,14 +2291,23 @@ class Scheduler(SchedulerInterface):
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
 
-        # Remove the stopped requests from the running and waiting queues.
+        # Remove stopped running requests from the running queue and enqueue
+        # the unfinished ones.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
+            for request in stopped_running_reqs:
+                if not request.is_finished():
+                    self._enqueue_waiting_request(request)
+
+        # Remove stopped preempted requests from the waiting queues and update
+        # unfinished ones.
         if stopped_preempted_reqs:
-            # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.kv_holding_waiting.remove_requests(stopped_preempted_reqs)
             self.deferred_waiting.difference_update(stopped_preempted_reqs)
+            for request in stopped_preempted_reqs:
+                if not request.is_finished():
+                    self._enqueue_waiting_request(request)
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
@@ -2486,7 +2497,6 @@ class Scheduler(SchedulerInterface):
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
 
-        self._enqueue_waiting_request(request)
         return False
 
     def _update_request_with_output(
