@@ -7,9 +7,10 @@
 //! parsed from the generated assistant completion and then rendered back to the exact same
 //! assistant completion.
 //!
-//! The tool-call fixture also snapshots the output grammar built by the initialized parser for each
-//! tool-choice variant, with the rendered completion as its generation, as one file per model under
-//! `tests/grammar_replay/`. `grammar_replay.rs` replays these cases through the real XGrammar.
+//! The tool-call fixture also snapshots the output grammars built by the initialized parser, one
+//! entry per distinct grammar with the rendered completion of every variant that builds it as a
+//! generation, as one file per model under `tests/grammar_replay/`. `grammar_replay.rs` replays
+//! these generations through the real XGrammar.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -30,6 +31,7 @@ use vllm_chat::{
     GenerationPromptMode, LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection,
     RendererSelection, ToolStrictLevel, load_model_backends,
 };
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_parser::output_grammar::BuiltOutputGrammar;
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
@@ -57,6 +59,13 @@ struct RoundtripCase {
     json_fmt: JsonFmt,
     /// Whether the template renders tool-call argument object keys in sorted order.
     sort_json_keys: bool,
+    /// Which tool-call fixture variants with a JSON schema this case runs;
+    /// every case runs the variants without one. The variants answered with
+    /// content need a template that renders a final turn without tool calls
+    /// back to its completion (some templates drop its reasoning or its stop
+    /// suffix); the variant answered with calls needs a tool grammar, which
+    /// holds the calls next to the schema.
+    with_schema: &'static [ToolCallMixVariant],
 }
 
 #[derive(Clone, Copy)]
@@ -125,10 +134,11 @@ impl ThinkingBehavior {
     }
 }
 
-/// Tool-choice variant of the tool-call fixture.
+/// Variant of the tool-call fixture: the request's tool choice and optional
+/// JSON schema, and the completion that answers it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum ToolChoiceVariant {
+enum ToolCallMixVariant {
     /// `auto`, with content before the tool calls.
     Auto,
     /// `required`, with tool calls only: builder grammars admit no content
@@ -136,18 +146,59 @@ enum ToolChoiceVariant {
     Required,
     /// Named `get_weather`, with a single call to it and no content.
     Named,
+
+    /// `none` with a JSON schema, answered with schema-valid content.
+    NoneSchema,
+    /// `auto` with a JSON schema, answered with schema-valid content.
+    AutoSchemaContent,
+    /// `auto` with a JSON schema, answered with tool calls only: builder
+    /// grammars hold either schema-valid content or the calls.
+    AutoSchemaCalls,
 }
 
-impl ToolChoiceVariant {
-    const ALL: [Self; 3] = [Self::Auto, Self::Required, Self::Named];
+/// The schema-valid content of the schema variants answered with content.
+const SCHEMA_CONTENT: &str = r#"{"answer":"sunny"}"#;
+
+impl ToolCallMixVariant {
+    const WITHOUT_SCHEMA: &[Self] = &[Self::Auto, Self::Required, Self::Named];
+    const WITH_SCHEMA: &[Self] = &[
+        Self::NoneSchema,
+        Self::AutoSchemaContent,
+        Self::AutoSchemaCalls,
+    ];
 
     fn tool_choice(self) -> ChatToolChoice {
         match self {
-            Self::Auto => ChatToolChoice::Auto,
+            Self::Auto | Self::AutoSchemaContent | Self::AutoSchemaCalls => ChatToolChoice::Auto,
             Self::Required => ChatToolChoice::Required,
             Self::Named => ChatToolChoice::Function {
                 name: "get_weather".to_string(),
             },
+            Self::NoneSchema => ChatToolChoice::None,
+        }
+    }
+
+    fn structured_outputs(self) -> Option<StructuredOutputsParams> {
+        matches!(
+            self,
+            Self::NoneSchema | Self::AutoSchemaContent | Self::AutoSchemaCalls
+        )
+        .then(|| {
+            StructuredOutputsParams::json(serde_json::json!({
+                "type": "object",
+                "properties": { "answer": { "type": "string" } },
+                "required": ["answer"]
+            }))
+        })
+    }
+
+    /// The expected text content and number of tool calls.
+    fn expected(self) -> (Option<&'static str>, usize) {
+        match self {
+            Self::Auto => (Some("I will call the tools."), 2),
+            Self::Required | Self::AutoSchemaCalls => (None, 2),
+            Self::Named => (None, 1),
+            Self::NoneSchema | Self::AutoSchemaContent => (Some(SCHEMA_CONTENT), 0),
         }
     }
 }
@@ -163,6 +214,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -176,6 +228,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -189,6 +242,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -202,6 +256,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -215,6 +270,12 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            // The MiniMax M3 tool parser builds no tool grammar, so the schema
+            // excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
         }
     }
 
@@ -228,6 +289,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -241,6 +303,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -254,6 +317,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -267,6 +331,12 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            // The GLM-4.5 tool parser builds no tool grammar, so the schema
+            // excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
         }
     }
 
@@ -280,6 +350,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -293,6 +364,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -306,6 +378,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -329,6 +402,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
             sort_json_keys: false,
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -346,6 +420,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -363,6 +438,7 @@ impl RoundtripCase {
             },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -376,6 +452,12 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            // The Seed-OSS tool parser builds no tool grammar, so the schema
+            // excludes the calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
         }
     }
 
@@ -389,6 +471,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -402,6 +485,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 
@@ -415,6 +499,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: false,
+            with_schema: &[ToolCallMixVariant::AutoSchemaCalls],
         }
     }
 
@@ -428,6 +513,7 @@ impl RoundtripCase {
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
             sort_json_keys: true,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
         }
     }
 }
@@ -545,8 +631,10 @@ async fn run_roundtrip_tool_call_mix(
     backends: &vllm_chat::LoadedModelBackends,
 ) -> Result<()> {
     let mut results = Vec::new();
-    for variant in ToolChoiceVariant::ALL {
-        let result = run_roundtrip_tool_call_mix_inner(case, backends, variant).await?;
+    for &variant in ToolCallMixVariant::WITHOUT_SCHEMA.iter().chain(case.with_schema) {
+        let result = run_roundtrip_tool_call_mix_inner(case, backends, variant)
+            .await
+            .with_context(|| format!("variant {}", serde_json::to_value(variant).unwrap()))?;
         results.push((variant, result));
     }
     check_grammar_replay_file(case, backends, results)
@@ -555,9 +643,9 @@ async fn run_roundtrip_tool_call_mix(
 async fn run_roundtrip_tool_call_mix_inner(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
-    variant: ToolChoiceVariant,
+    variant: ToolCallMixVariant,
 ) -> Result<RoundtripResult> {
-    let request = roundtrip_request(
+    let mut request = roundtrip_request(
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
             ChatRole::User,
@@ -568,12 +656,9 @@ async fn run_roundtrip_tool_call_mix_inner(
         Some(true), // always enable thinking in this fixture
         case.thinking_behavior,
     );
+    request.sampling_params.structured_outputs = variant.structured_outputs();
     let expected_reasoning = "Need call the weather and add tools.";
-    let (expected_text, tool_call_count) = match variant {
-        ToolChoiceVariant::Auto => (Some("I will call the tools."), 2),
-        ToolChoiceVariant::Required => (None, 2),
-        ToolChoiceVariant::Named => (None, 1),
-    };
+    let (expected_text, tool_call_count) = variant.expected();
 
     let mut content = vec![AssistantContentBlock::Reasoning {
         text: expected_reasoning.to_string(),
@@ -617,11 +702,13 @@ async fn run_roundtrip_tool_call_mix_inner(
         "parsed message: {:#?}",
         result.parsed_message
     );
-    assert_eq!(tool_calls[0].name, "get_weather");
-    assert_eq!(
-        tool_calls[0].arguments,
-        expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
-    );
+    if let Some(weather) = tool_calls.first() {
+        assert_eq!(weather.name, "get_weather");
+        assert_eq!(
+            weather.arguments,
+            expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
+        );
+    }
     if let Some(add) = tool_calls.get(1) {
         assert_eq!(add.name, "add");
         assert_eq!(
@@ -1117,16 +1204,23 @@ struct GrammarReplayFile {
     /// Request stop set, passed to the matcher as `override_stop_tokens`.
     #[serde(serialize_with = "serialize_one_line")]
     all_stop_token_ids: BTreeSet<u32>,
-    /// Cases keyed by tool-choice variant.
-    cases: BTreeMap<ToolChoiceVariant, GrammarReplayCase>,
+    /// Distinct output grammars, in the order of the first variant building each.
+    grammars: Vec<GrammarReplayCase>,
 }
 
-/// One parser-built output grammar with the generation it must accept.
+/// One parser-built output grammar with the generations it must accept.
 #[derive(Serialize)]
 struct GrammarReplayCase {
     /// Parser-built grammar; only token-zero grammars are replayed from the
     /// first generated token.
     grammar: BuiltOutputGrammar,
+    /// Generations keyed by the fixture variants whose requests build this grammar.
+    generations: BTreeMap<ToolCallMixVariant, GrammarReplayGeneration>,
+}
+
+/// One rendered completion replayed against its output grammar.
+#[derive(Serialize)]
+struct GrammarReplayGeneration {
     /// Generated completion text, without the stop token.
     completion: String,
     /// Generated token IDs presented to the matcher, ending with a stop token.
@@ -1150,13 +1244,13 @@ fn grammar_replay_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/grammar_replay")
 }
 
-/// Snapshot the output grammars of one model's roundtrips, keyed by variant,
-/// as its grammar replay file, or check that no stale file remains when the
+/// Snapshot the output grammars of one model's roundtrips, grouping the
+/// variants that build the same grammar, as its grammar replay file, or check that no stale file remains when the
 /// parser builds none.
 fn check_grammar_replay_file(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
-    results: Vec<(ToolChoiceVariant, RoundtripResult)>,
+    results: Vec<(ToolCallMixVariant, RoundtripResult)>,
 ) -> Result<()> {
     let model_name = case.model_id.rsplit_once('/').map_or(case.model_id, |(_, name)| name);
     let path = grammar_replay_dir().join(format!("{model_name}.json"));
@@ -1197,7 +1291,7 @@ fn check_grammar_replay_file(
         case.assistant_stop_suffix
     );
 
-    let mut cases = BTreeMap::new();
+    let mut grammars = Vec::<GrammarReplayCase>::new();
     for (variant, grammar, closed_completion) in results {
         let (completion, mut generation_token_ids) = match completion_body(
             tokenizer.as_ref(),
@@ -1208,27 +1302,41 @@ fn check_grammar_replay_file(
             CompletionBody::TokenIds(body) => (tokenizer.decode(body, false)?, body.to_vec()),
         };
         generation_token_ids.push(stop_token_id);
-        cases.insert(
-            variant,
-            GrammarReplayCase {
+        let generation = GrammarReplayGeneration {
+            completion,
+            generation_token_ids,
+        };
+        match grammars.iter_mut().find(|case| case.grammar == grammar) {
+            Some(case) => {
+                case.generations.insert(variant, generation);
+            }
+            None => grammars.push(GrammarReplayCase {
                 grammar,
-                completion,
-                generation_token_ids,
-            },
-        );
+                generations: BTreeMap::from([(variant, generation)]),
+            }),
+        }
     }
 
     // A readable outline of the same grammars, for review only.
     let mut outline = String::new();
-    for (variant, case) in &cases {
+    for case in &grammars {
         if !outline.is_empty() {
             outline.push('\n');
         }
-        let variant = serde_json::to_value(variant)?;
+        let variants = case
+            .generations
+            .keys()
+            .map(|variant| {
+                serde_json::to_value(variant)?
+                    .as_str()
+                    .map(str::to_owned)
+                    .context("variant name")
+            })
+            .collect::<Result<Vec<_>>>()?;
         let coverage = serde_json::to_value(case.grammar.coverage)?;
         outline.push_str(&format!(
             "# {} ({})\n",
-            variant.as_str().context("variant name")?,
+            variants.join(", "),
             coverage.as_str().context("coverage name")?,
         ));
         outline.push_str(&vllm_parser::output_grammar::test_utils::outline(
@@ -1241,7 +1349,7 @@ fn check_grammar_replay_file(
         model_id: case.model_id,
         vocab_size: backends.text_backend.model_vocab_size(),
         all_stop_token_ids,
-        cases,
+        grammars,
     };
     let mut json = serde_json::to_string_pretty(&file)?;
     json.push('\n');

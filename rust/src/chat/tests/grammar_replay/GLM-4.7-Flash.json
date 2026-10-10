@@ -2,8 +2,8 @@
   "model_id": "zai-org/GLM-4.7-Flash",
   "vocab_size": 154880,
   "all_stop_token_ids": [154820, 154827, 154829],
-  "cases": {
-    "auto": {
+  "grammars": [
+    {
       "grammar": {
         "format": {
           "type": "sequence",
@@ -99,10 +99,14 @@
         },
         "coverage": "from_token_zero"
       },
-      "completion": "Need call the weather and add tools.</think>I will call the tools.<tool_call>get_weather<arg_key>location</arg_key><arg_value>Shanghai</arg_value></tool_call><tool_call>add<arg_key>y</arg_key><arg_value>1.0</arg_value><arg_key>x</arg_key><arg_value>2</arg_value><arg_key>items</arg_key><arg_value>[\"left\", \"right\"]</arg_value></tool_call>",
-      "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 40, 686, 1618, 279, 7375, 13, 154843, 455, 68852, 154847, 2527, 154848, 154849, 2016, 29953, 154850, 154844, 154843, 718, 154847, 88, 154848, 154849, 16, 13, 15, 154850, 154847, 87, 154848, 154849, 17, 154850, 154847, 3615, 154848, 154849, 1183, 2359, 497, 330, 1291, 1341, 154850, 154844, 154820]
+      "generations": {
+        "auto": {
+          "completion": "Need call the weather and add tools.</think>I will call the tools.<tool_call>get_weather<arg_key>location</arg_key><arg_value>Shanghai</arg_value></tool_call><tool_call>add<arg_key>y</arg_key><arg_value>1.0</arg_value><arg_key>x</arg_key><arg_value>2</arg_value><arg_key>items</arg_key><arg_value>[\"left\", \"right\"]</arg_value></tool_call>",
+          "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 40, 686, 1618, 279, 7375, 13, 154843, 455, 68852, 154847, 2527, 154848, 154849, 2016, 29953, 154850, 154844, 154843, 718, 154847, 88, 154848, 154849, 16, 13, 15, 154850, 154847, 87, 154848, 154849, 17, 154850, 154847, 3615, 154848, 154849, 1183, 2359, 497, 330, 1291, 1341, 154850, 154844, 154820]
+        }
+      }
     },
-    "required": {
+    {
       "grammar": {
         "format": {
           "type": "sequence",
@@ -198,10 +202,14 @@
         },
         "coverage": "from_token_zero"
       },
-      "completion": "Need call the weather and add tools.</think><tool_call>get_weather<arg_key>location</arg_key><arg_value>Shanghai</arg_value></tool_call><tool_call>add<arg_key>y</arg_key><arg_value>1.0</arg_value><arg_key>x</arg_key><arg_value>2</arg_value><arg_key>items</arg_key><arg_value>[\"left\", \"right\"]</arg_value></tool_call>",
-      "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 154843, 455, 68852, 154847, 2527, 154848, 154849, 2016, 29953, 154850, 154844, 154843, 718, 154847, 88, 154848, 154849, 16, 13, 15, 154850, 154847, 87, 154848, 154849, 17, 154850, 154847, 3615, 154848, 154849, 1183, 2359, 497, 330, 1291, 1341, 154850, 154844, 154820]
+      "generations": {
+        "required": {
+          "completion": "Need call the weather and add tools.</think><tool_call>get_weather<arg_key>location</arg_key><arg_value>Shanghai</arg_value></tool_call><tool_call>add<arg_key>y</arg_key><arg_value>1.0</arg_value><arg_key>x</arg_key><arg_value>2</arg_value><arg_key>items</arg_key><arg_value>[\"left\", \"right\"]</arg_value></tool_call>",
+          "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 154843, 455, 68852, 154847, 2527, 154848, 154849, 2016, 29953, 154850, 154844, 154843, 718, 154847, 88, 154848, 154849, 16, 13, 15, 154850, 154847, 87, 154848, 154849, 17, 154850, 154847, 3615, 154848, 154849, 1183, 2359, 497, 330, 1291, 1341, 154850, 154844, 154820]
+        }
+      }
     },
-    "named": {
+    {
       "grammar": {
         "format": {
           "type": "sequence",
@@ -244,8 +252,187 @@
         },
         "coverage": "from_token_zero"
       },
-      "completion": "Need call the weather and add tools.</think><tool_call>get_weather<arg_key>location</arg_key><arg_value>Shanghai</arg_value></tool_call>",
-      "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 154843, 455, 68852, 154847, 2527, 154848, 154849, 2016, 29953, 154850, 154844, 154820]
+      "generations": {
+        "named": {
+          "completion": "Need call the weather and add tools.</think><tool_call>get_weather<arg_key>location</arg_key><arg_value>Shanghai</arg_value></tool_call>",
+          "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 154843, 455, 68852, 154847, 2527, 154848, 154849, 2016, 29953, 154850, 154844, 154820]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "json_schema",
+              "json_schema": {
+                "type": "object",
+                "properties": {
+                  "answer": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "answer"
+                ]
+              },
+              "style": "json",
+              "any_order": false,
+              "max_whitespace_cnt": null,
+              "excludes": []
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "none_schema": {
+          "completion": "Need call the weather and add tools.</think>{\"answer\":\"sunny\"}",
+          "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 4913, 9214, 3252, 82, 27208, 9204, 154820]
+        }
+      }
+    },
+    {
+      "grammar": {
+        "format": {
+          "type": "sequence",
+          "elements": [
+            {
+              "type": "tag",
+              "begin": "",
+              "content": {
+                "type": "any_text",
+                "excludes": [],
+                "max_tokens": null,
+                "max_chars": null
+              },
+              "end": "</think>"
+            },
+            {
+              "type": "or",
+              "elements": [
+                {
+                  "type": "triggered_tags",
+                  "triggers": [
+                    "<tool_call>"
+                  ],
+                  "tags": [
+                    {
+                      "type": "tag",
+                      "begin": "<tool_call>get_weather",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                          "type": "object",
+                          "properties": {
+                            "location": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "location"
+                          ]
+                        },
+                        "style": "glm_xml",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "</tool_call>"
+                    },
+                    {
+                      "type": "tag",
+                      "begin": "<tool_call>add",
+                      "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                          "type": "object",
+                          "properties": {
+                            "y": {
+                              "type": "number"
+                            },
+                            "x": {
+                              "type": "number"
+                            },
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "y",
+                            "x",
+                            "items"
+                          ]
+                        },
+                        "style": "glm_xml",
+                        "any_order": false,
+                        "max_whitespace_cnt": null,
+                        "excludes": []
+                      },
+                      "end": "</tool_call>"
+                    }
+                  ],
+                  "at_least_one": true,
+                  "stop_after_first": false,
+                  "excludes": [
+                    "<think>",
+                    "</think>",
+                    "</tool_call>",
+                    "<arg_key>",
+                    "</arg_key>",
+                    "<arg_value>",
+                    "</arg_value>"
+                  ]
+                },
+                {
+                  "type": "json_schema",
+                  "json_schema": {
+                    "type": "object",
+                    "properties": {
+                      "answer": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "answer"
+                    ]
+                  },
+                  "style": "json",
+                  "any_order": false,
+                  "max_whitespace_cnt": null,
+                  "excludes": []
+                }
+              ]
+            }
+          ]
+        },
+        "coverage": "from_token_zero"
+      },
+      "generations": {
+        "auto_schema_content": {
+          "completion": "Need call the weather and add tools.</think>{\"answer\":\"sunny\"}",
+          "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 4913, 9214, 3252, 82, 27208, 9204, 154820]
+        },
+        "auto_schema_calls": {
+          "completion": "Need call the weather and add tools.</think><tool_call>get_weather<arg_key>location</arg_key><arg_value>Shanghai</arg_value></tool_call><tool_call>add<arg_key>y</arg_key><arg_value>1.0</arg_value><arg_key>x</arg_key><arg_value>2</arg_value><arg_key>items</arg_key><arg_value>[\"left\", \"right\"]</arg_value></tool_call>",
+          "generation_token_ids": [23591, 1618, 279, 9101, 323, 912, 7375, 13, 154842, 154843, 455, 68852, 154847, 2527, 154848, 154849, 2016, 29953, 154850, 154844, 154843, 718, 154847, 88, 154848, 154849, 16, 13, 15, 154850, 154847, 87, 154848, 154849, 17, 154850, 154847, 3615, 154848, 154849, 1183, 2359, 497, 330, 1291, 1341, 154850, 154844, 154820]
+        }
+      }
     }
-  }
+  ]
 }

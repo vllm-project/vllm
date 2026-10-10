@@ -87,10 +87,19 @@ impl UnifiedParser for CombinedParser {
         &self,
         ctx: &OutputGrammarContext<'_>,
     ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
-        let Some(tool) = self.tool.as_ref() else {
+        // Without an active reasoning or tool parser, the request's own
+        // constraint applies unchanged.
+        if self.reasoning.is_none() && self.tool.is_none() {
             return Ok(None);
+        }
+
+        // The tool parser composes the answer constraint into its calls where
+        // it can; without a tool grammar, the answer is the visible language.
+        let calls = match self.tool.as_ref() {
+            Some(tool) => tool.build_visible_format(ctx)?,
+            None => None,
         };
-        let Some(visible) = tool.build_visible_format(ctx)? else {
+        let Some(visible) = calls.or_else(|| ctx.answer.cloned()) else {
             return Ok(None);
         };
         // The reasoning parser may wrap that language with the reasoning phase
@@ -165,7 +174,8 @@ mod tests {
 
     use super::CombinedParser;
     use crate::output_grammar::{
-        GrammarCoverage, OutputGrammarContext, full_format_from_builder_for_test,
+        BuiltOutputGrammar, GrammarCoverage, OutputGrammarContext,
+        full_format_from_builder_for_test,
     };
     use crate::reasoning::{
         DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, Glm45ReasoningParser,
@@ -235,6 +245,7 @@ mod tests {
                     tool_choice: &tool_choice,
                     tool_strict_level: Default::default(),
                     parallel_tool_calls: true,
+                    answer: None,
                 };
                 let tool = T::create(&tools).unwrap();
                 let expected = full_format_from_builder_for_test(
@@ -524,6 +535,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
         let tool = Qwen3XmlToolParser::create(&tools).unwrap();
@@ -553,6 +565,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let visible = Format::const_string("answer");
 
@@ -586,6 +599,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let visible = Format::const_string("visible");
 
@@ -622,6 +636,7 @@ mod tests {
             tool_choice: &tool_choice,
             tool_strict_level: Default::default(),
             parallel_tool_calls: true,
+            answer: None,
         };
         let tokenizer = Arc::new(tokenizer());
         let reasoning = Qwen3ReasoningParser::create(tokenizer.clone()).unwrap();
@@ -649,5 +664,98 @@ mod tests {
                 "{prompt:?}"
             );
         }
+    }
+
+    fn grammar_ctx<'a>(
+        tools: &'a [Tool],
+        tool_choice: &'a ToolChoice,
+        answer: Option<&'a Format>,
+    ) -> OutputGrammarContext<'a> {
+        OutputGrammarContext {
+            tools,
+            tool_choice,
+            tool_strict_level: Default::default(),
+            parallel_tool_calls: true,
+            answer,
+        }
+    }
+
+    fn qwen3_parser(tools: &[Tool], with_tool: bool) -> CombinedParser {
+        let reasoning = Qwen3ReasoningParser::create(Arc::new(tokenizer())).unwrap();
+        let tool = with_tool.then(|| Qwen3XmlToolParser::create(tools).unwrap());
+        let mut parser = CombinedParser::new(Some(reasoning), tool);
+        parser.initialize(&[]).unwrap();
+        parser
+    }
+
+    #[test]
+    fn answer_constraint_composes_with_the_tool_choice() {
+        let tools = test_tools();
+        let answer = Format::json_schema(serde_json::json!({ "type": "object" }));
+        let reasoning = |visible| {
+            Format::sequence(vec![
+                Format::optional(Format::sequence(vec![
+                    Format::tag("<think>", Format::any_text(), "</think>"),
+                    Format::const_string("\n\n"),
+                ])),
+                visible,
+            ])
+        };
+        let required = ToolChoice::required();
+        let required_calls = Qwen3XmlToolParser::create(&tools)
+            .unwrap()
+            .build_visible_format(&grammar_ctx(&tools, &required, None))
+            .unwrap()
+            .unwrap();
+
+        // No callable tool: the answer alone, after the reasoning phase.
+        for (tool_choice, with_tool) in [(ToolChoice::none(), true), (ToolChoice::auto(), false)] {
+            let parser = qwen3_parser(&tools, with_tool);
+            let ctx = grammar_ctx(&tools, &tool_choice, Some(&answer));
+            let actual = parser.build_output_grammar(&ctx).unwrap().unwrap();
+            assert_eq!(actual.coverage, GrammarCoverage::FromTokenZero);
+            assert_eq!(actual.format, reasoning(answer.clone()), "{tool_choice:?}");
+        }
+
+        // `auto`, strict or not, keeps tool calls next to the answer.
+        let parser = qwen3_parser(&tools, true);
+        let auto = ToolChoice::auto();
+        let actual = parser.build_output_grammar(&grammar_ctx(&tools, &auto, Some(&answer)));
+        let expected = Format::or(vec![required_calls, answer.clone()]);
+        assert_eq!(actual.unwrap().unwrap().format, reasoning(expected));
+
+        // A required call ignores the answer constraint.
+        for tool_choice in [ToolChoice::required(), ToolChoice::function("get_weather")] {
+            let with_answer = grammar_ctx(&tools, &tool_choice, Some(&answer));
+            let without = grammar_ctx(&tools, &tool_choice, None);
+            assert_eq!(
+                parser.build_output_grammar(&with_answer).unwrap(),
+                parser.build_output_grammar(&without).unwrap(),
+                "{tool_choice:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn answer_without_a_reasoning_phase_covers_the_final_output() {
+        let tools = test_tools();
+        let answer = Format::regex("[a-z]+");
+        let none = ToolChoice::none();
+        let auto = ToolChoice::auto();
+
+        // Without an active parser, the request keeps its own constraint.
+        let parser = CombinedParser::new(None, None);
+        let ctx = grammar_ctx(&tools, &auto, Some(&answer));
+        assert!(parser.build_output_grammar(&ctx).unwrap().is_none());
+
+        let parser = CombinedParser::new(None, Some(Qwen3XmlToolParser::create(&tools).unwrap()));
+        let ctx = grammar_ctx(&tools, &none, Some(&answer));
+        let alone = parser.build_output_grammar(&ctx).unwrap().unwrap();
+        assert_eq!(alone, BuiltOutputGrammar::final_output_only(answer.clone()));
+
+        let ctx = grammar_ctx(&tools, &auto, Some(&answer));
+        let composed = parser.build_output_grammar(&ctx).unwrap().unwrap();
+        assert_eq!(composed.coverage, GrammarCoverage::FinalOutputOnly);
+        assert!(matches!(composed.format, Format::Or(_)));
     }
 }
