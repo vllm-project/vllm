@@ -2130,6 +2130,27 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g
         )
 
 
+def mxfp4_w4a8_gemv(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    # a: [M, K] fp16/bf16 with 1 <= M <= 8; b_q: [N, K/2] uint8 E2M1;
+    # b_scale: [N, K/32] uint8 E8M0. Returns [M, N] in a.dtype.
+    return torch.ops._rocm_C.mxfp4_w4a8_gemv(a, b_q, b_scale)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_w4a8_gemv"):
+
+    @register_fake("_rocm_C::mxfp4_w4a8_gemv")
+    def _mxfp4_w4a8_gemv_fake(
+        a: torch.Tensor,
+        b_q: torch.Tensor,
+        b_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty((a.size(0), b_q.size(0)), dtype=a.dtype, device=a.device)
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:

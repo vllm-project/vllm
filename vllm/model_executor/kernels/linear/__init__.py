@@ -88,6 +88,9 @@ from vllm.model_executor.kernels.linear.mxfp4.humming import (
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.rdna_w4a8 import (
+    RdnaW4A8MxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
@@ -595,6 +598,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
         EmulationMxfp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        RdnaW4A8MxFp4LinearKernel,
         AiterMxfp4LinearKernel,
         EmulationMxfp4LinearKernel,
     ],
@@ -1310,6 +1314,7 @@ __all__ = [
     "EmulationMxfp4LinearKernel",
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
+    "RdnaW4A8MxFp4LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
     "FlashInferTrtllmMxfp8LinearKernel",
