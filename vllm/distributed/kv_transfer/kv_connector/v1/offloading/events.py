@@ -16,7 +16,7 @@ KV cache events are enabled. See the PR description for the full design.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.distributed.kv_events import (
@@ -29,6 +29,7 @@ from vllm.distributed.kv_events import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    generate_block_hash_extra_keys,
     maybe_convert_block_hash,
     resolve_block_hashes,
     to_event_extra_keys,
@@ -43,8 +44,10 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
+    ReqContext,
     get_offload_block_hash,
     get_offload_group_idx,
+    make_offload_key,
 )
 from vllm.v1.request import Request
 
@@ -96,6 +99,17 @@ class _OffloadEventMetadata:
     active_residencies: set[tuple[Medium, str | None]]
 
 
+@dataclass(slots=True)
+class _RequestEventContext:
+    """Lazy event locators owned by one request."""
+
+    request: Request
+    group_configs: dict[int, "GroupOffloadConfig"]
+    supports_partial_tail: bool
+    indexed_hash_count: int = 0
+    locators: dict[OffloadKey, int] = field(default_factory=dict)
+
+
 class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
@@ -114,6 +128,144 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+
+    def on_new_request(
+        self,
+        req_context: ReqContext,
+        request: Request,
+        group_configs: tuple["GroupOffloadConfig", ...],
+        supports_partial_tail: bool = False,
+    ) -> None:
+        """Attach lazy event locators to one request."""
+        if not self.self_describing_enabled:
+            return
+        req_context.set_state(
+            _RequestEventContext(
+                request=request,
+                group_configs={config.group_idx: config for config in group_configs},
+                supports_partial_tail=supports_partial_tail,
+            )
+        )
+
+    @staticmethod
+    def _request_event_context(
+        req_context: ReqContext | None,
+    ) -> _RequestEventContext | None:
+        if req_context is None:
+            return None
+        return req_context.get_state(_RequestEventContext)
+
+    @staticmethod
+    def _extend_locators(state: _RequestEventContext) -> None:
+        request = state.request
+        if len(request.block_hashes) < state.indexed_hash_count:
+            state.indexed_hash_count = 0
+            state.locators.clear()
+        for hash_idx in range(state.indexed_hash_count, len(request.block_hashes)):
+            block_hash = request.block_hashes[hash_idx]
+            if block_hash is None:
+                continue
+            for group_config in state.group_configs.values():
+                if group_config.sliding_window_size_in_chunks is not None:
+                    continue
+                hash_boundary = hash_idx + 1
+                if (
+                    hash_boundary % group_config.hashes_per_chunk != 0
+                    and not state.supports_partial_tail
+                ):
+                    continue
+                tokens_per_hash = (
+                    group_config.tokens_per_chunk // group_config.hashes_per_chunk
+                )
+                key = make_offload_key(block_hash, group_config.group_idx)
+                state.locators.setdefault(key, hash_boundary * tokens_per_hash)
+        state.indexed_hash_count = len(request.block_hashes)
+
+    def _locator_for(
+        self,
+        state: _RequestEventContext,
+        offload_key: OffloadKey,
+    ) -> tuple["GroupOffloadConfig", int] | None:
+        self._extend_locators(state)
+        boundary_tokens = state.locators.get(offload_key)
+        group_config = state.group_configs.get(get_offload_group_idx(offload_key))
+        if boundary_tokens is None or group_config is None:
+            return None
+        return group_config, boundary_tokens
+
+    @staticmethod
+    def _request_is_event_safe(request: Request) -> bool:
+        if getattr(request, "resumable", False) is True:
+            return False
+        params = getattr(request, "kv_transfer_params", None)
+        return not (isinstance(params, dict) and params.get("_p_side_truncated"))
+
+    def _metadata_for(
+        self,
+        state: _RequestEventContext,
+        offload_key: OffloadKey,
+    ) -> _OffloadEventMetadata | None:
+        if not self._request_is_event_safe(state.request):
+            return None
+        locator = self._locator_for(state, offload_key)
+        if locator is None:
+            return None
+        group_config, boundary_tokens = locator
+        if boundary_tokens % group_config.tokens_per_chunk == 0:
+            chunk_idx = boundary_tokens // group_config.tokens_per_chunk - 1
+            return self._build_event_metadata(state.request, group_config, chunk_idx)
+        self._record_partial_tail(
+            state.request,
+            group_config,
+            boundary_tokens,
+            offload_key,
+        )
+        return self._pending_event_metadata.get(offload_key)
+
+    def _record_lazy_metadata(
+        self,
+        req_context: ReqContext | None,
+        offload_key: OffloadKey,
+    ) -> _OffloadEventMetadata | None:
+        state = self._request_event_context(req_context)
+        if state is None:
+            return None
+        metadata = self._metadata_for(state, offload_key)
+        if metadata is None:
+            return None
+        if existing := self._pending_event_metadata.get(offload_key):
+            metadata.active_residencies.update(existing.active_residencies)
+        self._pending_event_metadata[offload_key] = metadata
+        return metadata
+
+    def record_hit(self, req_context: ReqContext, offload_key: OffloadKey) -> None:
+        """Backfill metadata for a ready primary-tier lookup hit."""
+        if not self.self_describing_enabled:
+            return
+        if offload_key not in self._pending_event_metadata:
+            self._record_lazy_metadata(req_context, offload_key)
+
+    @staticmethod
+    def _build_extra_keys(
+        req: Request,
+        start_token_idx: int,
+        end_token_idx: int,
+        block_size: int,
+    ) -> tuple[tuple[Any, ...] | None, ...]:
+        """Match GPU event extra-key generation at event block granularity."""
+        assert start_token_idx % block_size == 0
+        assert end_token_idx % block_size == 0
+        curr_mm_idx = 0
+        extra_keys: list[tuple[Any, ...] | None] = []
+        for block_start in range(start_token_idx, end_token_idx, block_size):
+            block_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                req,
+                block_start,
+                block_start + block_size,
+                curr_mm_idx,
+            )
+            extra_keys.append(block_extra_keys)
+        return tuple(extra_keys)
 
     def record_store(
         self,
@@ -220,6 +372,12 @@ class OffloadingEventsTracker:
 
         lora_id = req.lora_request.adapter_id if req.lora_request is not None else None
         lora_name = req.lora_request.name if req.lora_request is not None else None
+        extra_keys = self._build_extra_keys(
+            req,
+            chunk_start,
+            boundary_tokens,
+            tokens_per_hash,
+        )
         meta = _OffloadEventMetadata(
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
@@ -227,7 +385,7 @@ class OffloadingEventsTracker:
             block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=extra_keys,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
@@ -248,6 +406,17 @@ class OffloadingEventsTracker:
             the underlying :class:`OffloadingEvent` stream.
 
         """
+        events = list(events)
+        if self.self_describing_enabled:
+            # A primary removal can precede its queued secondary store in the
+            # same manager batch. Resolve request-owned store metadata first so
+            # the earlier removal can still expand to all constituent hashes.
+            for event in events:
+                if not event.removed and event.req_context is not None:
+                    for key in event.keys:
+                        if key not in self._pending_event_metadata:
+                            self._record_lazy_metadata(event.req_context, key)
+
         removed_keys: set[OffloadKey] = set()
         for event in events:
             if event.removed:
@@ -321,6 +490,12 @@ class OffloadingEventsTracker:
             lora_id = req.lora_request.adapter_id
             lora_name = req.lora_request.name
 
+        extra_keys = self._build_extra_keys(
+            req,
+            tok_start,
+            tok_end,
+            group_config.tokens_per_block,
+        )
         return _OffloadEventMetadata(
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
@@ -328,7 +503,7 @@ class OffloadingEventsTracker:
             block_size=group_config.tokens_per_block,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=extra_keys,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies={(Medium.CPU, None)},
@@ -363,6 +538,8 @@ class OffloadingEventsTracker:
         locality = event.locality.value if event.locality is not None else None
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
+            if meta is None and self.self_describing_enabled:
+                meta = self._record_lazy_metadata(event.req_context, key)
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.

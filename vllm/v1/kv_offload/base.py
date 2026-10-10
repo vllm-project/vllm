@@ -116,6 +116,9 @@ class ReqContext:
     def get_offload_key_position(self, key: OffloadKey) -> int | None:
         return self._offload_key_positions.get(key)
 
+    def pop_state(self, cls: type[_T]) -> _T | None:
+        return self._state.pop(cls, None)
+
 
 class LookupResult(Enum):
     """Result of OffloadingManager.lookup()."""
@@ -172,6 +175,9 @@ class OffloadingEvent:
     # Secondary tier identifier that generated the event, or None for primary.
     ownership: str | None = None
     removal_expected: bool = False
+    # The request that produced a stored event, when known locally. Removal
+    # events are storage-owned and do not carry request context.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """
