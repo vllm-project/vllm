@@ -396,6 +396,8 @@ class SpeculativeConfig:
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
+    hf_config_dict: dict[str, Any] | None = None
+    """In-memory HF config for the draft model instead of loading a config file."""
     method: SpeculativeMethod | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
@@ -1281,6 +1283,7 @@ class SpeculativeConfig:
                     )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
+                    hf_config_dict=self.hf_config_dict,
                     runner="draft",
                     tokenizer=(
                         self.model

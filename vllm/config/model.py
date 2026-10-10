@@ -32,6 +32,7 @@ from vllm.transformers_utils.config import (
     ConfigFormat,
     checkpoint_has_lm_head,
     get_config,
+    get_config_from_dict,
     get_hf_image_processor_config,
     get_hf_text_config,
     get_pooling_config,
@@ -169,6 +170,8 @@ class ModelConfig:
     tokenizer: str = None  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
+    hf_config_dict: dict[str, Any] | None = None
+    """In-memory HF config, including model_type, instead of loading a config file."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:
 
@@ -468,6 +471,7 @@ class ModelConfig:
             "tokenizer_mode",
             "seed",
             "hf_config_path",
+            "hf_config_dict",
             "allowed_local_media_path",
             "allowed_media_domains",
             "tokenizer_revision",
@@ -624,17 +628,22 @@ class ModelConfig:
         # If loading model/tokenizer from HF Hub, resolve the revision once
         # to prevent resolving it multiple times downstream. A resolved revision
         # only pins the repo it was resolved for, so each repo needs its own call.
-        self.revision = resolve_revision(
-            self.model,
-            self.revision,
-            self.hf_token,
-        )
+        if self.hf_config_dict is None:
+            self.revision = resolve_revision(
+                self.model,
+                self.revision,
+                self.hf_token,
+            )
 
         # The config can live in another repo, which `self.revision` does not pin.
         # It stays `None` if the config comes from `self.model`, so that call sites
         # fall back to `self.revision` the same way they fall back to `self.model`.
         self._hf_config_revision = None
-        if self.hf_config_path and self.hf_config_path != self.model:
+        if (
+            self.hf_config_dict is None
+            and self.hf_config_path
+            and self.hf_config_path != self.model
+        ):
             self._hf_config_revision = resolve_revision(
                 self.hf_config_path,
                 self.revision,
@@ -646,7 +655,7 @@ class ModelConfig:
             and self.tokenizer_revision == requested_revision
         ):
             self.tokenizer_revision = self.revision
-        else:
+        elif self.hf_config_dict is None:
             self.tokenizer_revision = resolve_revision(
                 self.tokenizer,
                 self.tokenizer_revision,
@@ -667,16 +676,23 @@ class ModelConfig:
         ):
             raise ValueError("cumem allocator is not supported on current platform.")
 
-        hf_config = get_config(
-            self.hf_config_path or self.model,
-            self.trust_remote_code,
-            self._hf_config_revision or self.revision,
-            self.code_revision,
-            self.config_format,
-            hf_overrides_kw=hf_overrides_kw,
-            hf_overrides_fn=hf_overrides_fn,
-            token=self.hf_token,
-        )
+        if self.hf_config_dict is None:
+            hf_config = get_config(
+                self.hf_config_path or self.model,
+                self.trust_remote_code,
+                self._hf_config_revision or self.revision,
+                self.code_revision,
+                self.config_format,
+                hf_overrides_kw=hf_overrides_kw,
+                hf_overrides_fn=hf_overrides_fn,
+                token=self.hf_token,
+            )
+        else:
+            hf_config = get_config_from_dict(
+                self.hf_config_dict,
+                hf_overrides_kw=hf_overrides_kw,
+                hf_overrides_fn=hf_overrides_fn,
+            )
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)

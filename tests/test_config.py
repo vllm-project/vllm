@@ -58,6 +58,42 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.parametrize("callable_overrides", [False, True])
+def test_model_config_from_dict(monkeypatch, callable_overrides):
+    from transformers import LlamaConfig
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("In-memory config must not load a file or resolve revisions")
+
+    monkeypatch.setattr("vllm.config.model.get_config", unexpected_load)
+    monkeypatch.setattr("vllm.config.model.resolve_revision", unexpected_load)
+    config_dict = LlamaConfig(architectures=["LlamaForCausalLM"]).to_dict()
+    overrides = {"num_key_value_heads": 4}
+
+    def override(config):
+        config.update(overrides)
+        return config
+
+    model_config = ModelConfig(
+        model="in-memory-model",
+        hf_config_dict=config_dict,
+        tokenizer_mode="skip",
+        hf_overrides=override if callable_overrides else overrides,
+    )
+    assert model_config.hf_text_config.num_key_value_heads == 4
+    speculative_config = SpeculativeConfig(
+        model="in-memory-draft",
+        hf_config_dict=config_dict,
+        method="dspark",
+        num_speculative_tokens=8,
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+    assert speculative_config.draft_model_config.hf_config.num_attention_heads == 32
+    assert config_dict["model_type"] == "llama"
+    assert config_dict["num_key_value_heads"] == 32
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 

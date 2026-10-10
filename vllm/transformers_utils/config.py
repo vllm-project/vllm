@@ -944,6 +944,19 @@ def get_config(
     return config
 
 
+def get_config_from_dict(
+    config_dict: dict[str, Any],
+    hf_overrides_kw: dict[str, Any] | None = None,
+    hf_overrides_fn: Callable[[PreTrainedConfig], PreTrainedConfig] | None = None,
+) -> PreTrainedConfig:
+    """Build an HF config from an in-memory dict with optional overrides."""
+    config_dict = config_dict | (hf_overrides_kw or {})
+    config = AutoConfig.for_model(config_dict.pop("model_type"), **config_dict)
+    if hf_overrides_fn is not None:
+        config = hf_overrides_fn(config)
+    return config
+
+
 @cache
 def get_pooling_config(
     model: str,
