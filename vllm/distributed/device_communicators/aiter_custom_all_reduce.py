@@ -156,11 +156,14 @@ class AiterCustomAllreduce:
     def mxfp4_fused_ar_rms_stage(self, inp: torch.Tensor) -> bool | None:
         """Kernel choice for AITER's fused AR+RMSNorm+MXFP4 quant with a bf16
         side output: True for the one-stage kernel, False for the two-stage
-        kernel, None when neither launcher accepts the shape.
+        kernel, None when neither launcher accepts the shape or the AITER
+        build lacks the Gemma-capable kernel.
 
         Mirrors ``CudaCommunicator.fused_allreduce_rmsnorm_mxfp4_quant`` in
         aiter/dist/device_communicators/communicator_cuda.py.
         """
+        if not self.build_supports_gemma_mxfp4_quant():
+            return None
         if inp.dim() != 2 or inp.dtype not in (torch.bfloat16, torch.float16):
             return None
         m, k = inp.shape
