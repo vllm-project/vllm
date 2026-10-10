@@ -224,6 +224,8 @@ def triton_scaled_mm(
             tile_shape = (64, 128, 128)
         else:
             tile_shape = (128, 128, 128)
+    else:
+        tile_shape = (block_size_m, block_size_n, block_size_k)
 
     block_size_m, block_size_n, block_size_k = tile_shape
 
