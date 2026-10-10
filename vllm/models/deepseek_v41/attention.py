@@ -26,7 +26,11 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
     fused_indexer_q_rope_quant,
@@ -80,6 +84,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+# From this many tokens, a layer with shard_fused_wqa_wkv set projects one token
+# shard per TP rank and all-gathers the result.
+_SHARD_FUSED_WQA_WKV_MIN_TOKENS = 2048
 
 
 def _replace_layer_index(prefix: str, layer_id: int) -> str:
@@ -404,6 +412,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Set by ``bind_gemm_rs`` when the decoder layer runs sequence
         # parallel and the fused GEMM + reduce-scatter kernel accepts wo_b.
         self.gemm_rs: GemmRsAr | None = None
+        # Set by the NVIDIA decoder layer from _shard_fused_wqa_wkv.
+        self.shard_fused_wqa_wkv = False
 
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
@@ -916,7 +926,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so
         # it cannot go through fused_wqa_wkv directly.
+        num_tokens = hidden_states.shape[0]
         # MergedColumnParallelLinear returns (output, bias); bias is None.
+        if self.shard_fused_wqa_wkv and num_tokens >= _SHARD_FUSED_WQA_WKV_MIN_TOKENS:
+            qr_kv, _ = self.fused_wqa_wkv(sp_shard(hidden_states))
+            return sp_all_gather(qr_kv)[:num_tokens]
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
         return qr_kv
 

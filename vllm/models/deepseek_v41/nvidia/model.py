@@ -17,6 +17,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import (
@@ -256,6 +257,21 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _shard_fused_wqa_wkv(vllm_config: VllmConfig) -> bool:
+    """Whether large batches shard fused_wqa_wkv by token and all-gather the output."""
+    ca_comm = getattr(get_tp_group().device_communicator, "ca_comm", None)
+    return (
+        current_platform.is_device_capability(90)
+        and not _use_sequence_parallel(vllm_config)
+        and vllm_config.lora_config is None
+        and not vllm_config.parallel_config.use_ubatching
+        and not envs.VLLM_BATCH_INVARIANT
+        and ca_comm is not None
+        and not ca_comm.disabled
+        and ca_comm.fully_connected
+    )
+
+
 def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
     """Set up the fused ``wo_b`` GEMM + reduce-scatter when opted in.
 
@@ -330,6 +346,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # Binds only when wo_b's kernel and shape qualify; otherwise
                 # forward keeps the separate reduce-scatter below.
                 self.attn.bind_gemm_rs()
+        self.attn.shard_fused_wqa_wkv = _shard_fused_wqa_wkv(vllm_config)
         self.ffn = DeepseekV4MoE(
             vllm_config,
             prefix=f"{prefix}.ffn",
