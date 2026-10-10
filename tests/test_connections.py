@@ -190,3 +190,37 @@ async def test_get_bytes_allows_body_within_limit(
     finally:
         if connection._async_client is not None:
             await connection._async_client.close()
+
+
+def test_default_connection_disables_trust_env() -> None:
+    connection = HTTPConnection()
+    sync_client = connection.get_sync_client()
+    assert sync_client.trust_env is False
+
+
+@pytest.mark.asyncio
+async def test_default_connection_disables_trust_env_async() -> None:
+    connection = HTTPConnection(reuse_client=False)
+    try:
+        async_client = await connection.get_async_client()
+        assert async_client._trust_env is False
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
+
+
+def test_trust_env_opt_in_sync() -> None:
+    connection = HTTPConnection(trust_env=True)
+    sync_client = connection.get_sync_client()
+    assert sync_client.trust_env is True
+
+
+@pytest.mark.asyncio
+async def test_trust_env_opt_in_async() -> None:
+    connection = HTTPConnection(reuse_client=False, trust_env=True)
+    try:
+        async_client = await connection.get_async_client()
+        assert async_client._trust_env is True
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
