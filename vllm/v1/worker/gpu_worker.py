@@ -507,12 +507,13 @@ class Worker(WorkerBase):
             gc.collect()
             torch.accelerator.empty_cache()
 
-            # take current memory snapshot
-            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             # Weights from external model loader process
             external_weight_memory = get_model_loader(
                 self.load_config
             ).get_external_weight_memory(self.vllm_config)
+
+            # take current memory snapshot after external weights are ready
+            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )
