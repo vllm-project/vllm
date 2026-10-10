@@ -97,7 +97,7 @@
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin
 /tests/distributed/test_multi_node_assignment.py @youkaichao
-/tests/distributed/test_pipeline_parallel.py @youkaichao
+/tests/distributed/pipeline_parallel/ @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
 /tests/evals @mgoin @vadiklyutiy @AndreasKaratzas

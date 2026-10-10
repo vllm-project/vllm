@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""WARNING: This test runs in both single-node (4 GPUs) and multi-node
+"""WARNING: These tests run in both single-node (4 GPUs) and multi-node
 (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
 important to set the distributed backend to "mp" to avoid Ray scheduling
 all workers in a node other than the head node, which can cause the test
@@ -18,8 +18,8 @@ from vllm.config.model import _FLOAT16_NOT_SUPPORTED_MODELS, RunnerOption
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 
-from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, create_new_process_for_each_test
+from ...models.registry import HF_EXAMPLE_MODELS
+from ...utils import compare_two_settings
 
 logger = init_logger("test_pipeline_parallel")
 
@@ -179,25 +179,6 @@ MULTIMODAL_MODELS = {
     "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),
 }
 
-# NOTE: You can update this on your local machine to run specific tests
-TEST_MODELS = [
-    # [LANGUAGE GENERATION]
-    "microsoft/Phi-3.5-MoE-instruct",
-    "meta-llama/Llama-3.2-1B-Instruct",
-    "hmellor/Ilama-3.2-1B",
-    "ibm/PowerLM-3b",
-    "deepseek-ai/DeepSeek-V2-Lite-Chat",
-    # [LANGUAGE EMBEDDING]
-    "intfloat/e5-mistral-7b-instruct",
-    "BAAI/bge-multilingual-gemma2",
-    # [MULTIMODAL GENERATION]
-    "OpenGVLab/InternVL3-1B",
-    "microsoft/Phi-3.5-vision-instruct",
-    "fixie-ai/ultravox-v0_5-llama-3_2-1b",
-    # [LANGUAGE GENERATION - HYBRID ARCH]
-    "ai21labs/Jamba-tiny-dev",
-]
-
 
 def _compare_tp(
     model_id: str,
@@ -336,94 +317,4 @@ def _compare_tp(
         pp_env,
         tp_env,
         method=method,
-    )
-
-
-@pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
-    [
-        params
-        for model_id, settings in TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id)
-        if model_id in TEST_MODELS
-    ],
-)
-@create_new_process_for_each_test()
-def test_tp_language_generation(
-    model_id: str,
-    parallel_setup: ParallelSetup,
-    distributed_backend: str,
-    runner: RunnerOption,
-    test_options: PPTestOptions,
-    num_gpus_available,
-):
-    _compare_tp(
-        model_id,
-        parallel_setup,
-        distributed_backend,
-        runner,
-        test_options,
-        num_gpus_available,
-        method="generate",
-        is_multimodal=False,
-    )
-
-
-@pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
-    [
-        params
-        for model_id, settings in EMBEDDING_MODELS.items()
-        for params in settings.iter_params(model_id)
-        if model_id in TEST_MODELS
-    ],
-)
-@create_new_process_for_each_test()
-def test_tp_language_embedding(
-    model_id: str,
-    parallel_setup: ParallelSetup,
-    distributed_backend: str,
-    runner: RunnerOption,
-    test_options: PPTestOptions,
-    num_gpus_available,
-):
-    _compare_tp(
-        model_id,
-        parallel_setup,
-        distributed_backend,
-        runner,
-        test_options,
-        num_gpus_available,
-        method="encode",
-        is_multimodal=False,
-    )
-
-
-@pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
-    [
-        params
-        for model_id, settings in MULTIMODAL_MODELS.items()
-        for params in settings.iter_params(model_id)
-        if model_id in TEST_MODELS
-    ],
-)
-@create_new_process_for_each_test()
-def test_tp_multimodal_generation(
-    model_id: str,
-    parallel_setup: ParallelSetup,
-    distributed_backend: str,
-    runner: RunnerOption,
-    test_options: PPTestOptions,
-    num_gpus_available,
-):
-    _compare_tp(
-        model_id,
-        parallel_setup,
-        distributed_backend,
-        runner,
-        test_options,
-        num_gpus_available,
-        method="generate",
-        is_multimodal=True,
     )
