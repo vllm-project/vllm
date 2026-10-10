@@ -23,6 +23,7 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -844,8 +845,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         quant_config: ModelOptNvFp4Config,
         moe_config: FusedMoEConfig,
     ) -> None:
+        """Configure the NVFP4 backend and its checkpoint-group shard alignment."""
         super().__init__(moe_config)
         self.quant_config = quant_config
+        self.intermediate_size_per_partition_alignment = quant_config.group_size
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         activation_key = None if self.use_a16 else kNvfp4Dynamic
 
@@ -880,6 +883,26 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        """Align each expert partition to complete checkpoint quantization groups."""
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        alignment = self.intermediate_size_per_partition_alignment
+        intermediate_size_per_partition = (
+            (intermediate_size_per_partition + alignment - 1) // alignment * alignment
+        )
+        return hidden_size, intermediate_size_per_partition
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""

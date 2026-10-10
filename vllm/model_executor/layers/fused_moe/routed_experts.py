@@ -529,6 +529,7 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full: bool = False,
     ):
+        """Load one gate/up TP shard, clearing padding with no checkpoint data."""
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         if self.moe_config.is_act_and_mul:
@@ -537,20 +538,28 @@ class RoutedExperts(PluggableLayer):
             shard_size = expert_data.shape[shard_dim]
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
+        shard_alignment = getattr(
+            self.quant_method, "intermediate_size_per_partition_alignment", 1
+        )
         if not load_full and loaded_weight.ndim > 0:
-            # When the parameter has been padded (e.g. MXFP4 rounding up
-            # intermediate_size_per_partition), shard_size is the padded
-            # size.  Compute the offset into the checkpoint weight using
-            # the *unpadded* per-rank size so that every TP rank lands at
-            # the correct slice.
-            tp_size = self.moe_config.moe_parallel_config.tp_size
-            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+            if shard_alignment > 1:
+                loaded_per_rank = shard_size
+            else:
+                # When the parameter has been padded (e.g. MXFP4 rounding up
+                # intermediate_size_per_partition), shard_size is the padded
+                # size. Compute the offset into the checkpoint weight using
+                # the unpadded per-rank size.
+                tp_size = self.moe_config.moe_parallel_config.tp_size
+                loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
-                # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
+                if shard_id == "w1":
+                    expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+                else:
+                    assert shard_id == "w3"
+                    expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+                expert_data.zero_()
                 return
             narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
@@ -562,6 +571,11 @@ class RoutedExperts(PluggableLayer):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+        if (
+            shard_alignment > 1
+            and expert_data.shape[shard_dim] > loaded_weight.shape[shard_dim]
+        ):
+            expert_data.zero_()
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
             expert_data,
@@ -579,23 +593,32 @@ class RoutedExperts(PluggableLayer):
         tp_rank: int,
         load_full: bool = False,
     ):
+        """Load the down-projection TP shard and clear unused aligned padding."""
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
-        # Padded TP weights have already been sliced by the grouped loader.
+        shard_alignment = getattr(
+            self.quant_method, "intermediate_size_per_partition_alignment", 1
+        )
         if not load_full and loaded_weight.ndim > 0:
-            # Same padding fix as _load_w13: use unpadded per-rank size.
-            tp_size = self.moe_config.moe_parallel_config.tp_size
-            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+            if shard_alignment > 1:
+                loaded_per_rank = expert_data.shape[shard_dim]
+            else:
+                # Same padding fix as _load_w13: use unpadded per-rank size.
+                tp_size = self.moe_config.moe_parallel_config.tp_size
+                loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
-                # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
+                expert_data.zero_()
                 return
             narrow_size = min(loaded_per_rank, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # w2, down_proj: Load into only logical weight of w2.
+        if (
+            shard_alignment > 1
+            and expert_data.shape[shard_dim] > loaded_weight.shape[shard_dim]
+        ):
+            expert_data.zero_()
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
             expert_data,
