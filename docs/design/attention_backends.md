@@ -184,6 +184,8 @@ Priority is **1 = highest** (tried first).
 > encoder attention. Those configurations transparently fall back to FA2. A pinned
 > `--block-size` that is not a multiple of 128 instead makes FlashAttention ineligible
 > for such models, which is an error if the backend was requested explicitly.
+>
+> **`TRITON_ATTN` fp8 KV cache**: native `fp8e4nv` on SM89+; software-emulated on SM75-88 (`fp8e4nv` <-> `bf16` on SM80-88, `fp8e4nv` <-> `fp16` on SM75-88; SM75 has no bf16 hardware type). Software conversion lowers throughput but halves the KV-cache footprint (longer supportable context). Inference assumes finite activations; NaNs indicate an invalid computation and are not meaningful inference values. NaN handling is disabled by default; callers can opt in at compile time to preserve signed NaNs for E4M3 compatibility.
 
 ### b12x
 
