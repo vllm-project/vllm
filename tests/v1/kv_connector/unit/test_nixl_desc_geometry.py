@@ -529,8 +529,11 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
     assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
 
 
-def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
-    """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
+def _make_mla_hybrid_worker(
+    local_block_size, kernel_block_size, num_logical_blocks, mamba=True
+):
+    """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout, or a pure
+    MLA one without ``mamba``."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -563,6 +566,7 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     # The three groups overlay each other, so layer i of every group aliases the same
     # region: mla.i, kda_a.i and kda_b.i all live at i * layer_stride.
     layer_stride = num_logical_blocks * unified_page
+    prefixes = ("mla", "kda_a", "kda_b") if mamba else ("mla",)
     kv_cache_config = KVCacheConfig(
         num_blocks=num_logical_blocks,
         kv_cache_tensors=[
@@ -572,12 +576,14 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
                 layer_stride=layer_stride,
                 block_stride=unified_page,
             )
-            for prefix in ("mla", "kda_a", "kda_b")
+            for prefix in prefixes
         ],
         kv_cache_groups=[
-            KVCacheGroupSpec(["mla.0", "mla.1"], mla_spec),
-            KVCacheGroupSpec(["kda_a.0", "kda_a.1"], kda_spec),
-            KVCacheGroupSpec(["kda_b.0", "kda_b.1"], kda_spec),
+            KVCacheGroupSpec(
+                [f"{prefix}.0", f"{prefix}.1"],
+                mla_spec if prefix == "mla" else kda_spec,
+            )
+            for prefix in prefixes
         ],
     )
 
@@ -623,14 +629,17 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
             )
             for _ in range(2)
         ]
+        # MLA layers see their pages as [B, 1, N, C], like the real views.
         worker.register_kv_caches(
             {
-                "kda_a.0": tensors[0],
-                "mla.0": tensors[0],
-                "kda_b.0": tensors[0],
-                "kda_a.1": tensors[1],
-                "mla.1": tensors[1],
-                "kda_b.1": tensors[1],
+                f"{prefix}.{i}": tensors[i].view(
+                    len(tensors[i]), 1, kernel_block_size, -1
+                )
+                if prefix == "mla"
+                else tensors[i]
+                for i in range(2)
+                for prefix in ("kda_a", "mla", "kda_b")
+                if prefix in prefixes
             }
         )
     # Keep tensors alive alongside the worker; flat views for byte checks.
@@ -848,12 +857,21 @@ def _resolve(
 
 
 def _run_hetero_case(
-    local_block, kernel, remote_block, num_tokens, tp_size=2, remote_kernel=None
+    local_block,
+    kernel,
+    remote_block,
+    num_tokens,
+    tp_size=2,
+    remote_kernel=None,
+    mamba=True,
+    cached=0,
 ):
     """Full pull-path run for one geometry; returns pairing records.
 
     ``remote_kernel`` defaults to the local kernel block size; a smaller
-    value additionally exercises block_size_ratio > 1.
+    value additionally exercises block_size_ratio > 1. Without ``mamba`` the
+    model is pure MLA, whose local prefix hit of ``cached`` blocks is not
+    pulled.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
@@ -862,14 +880,15 @@ def _run_hetero_case(
     remote_kernel = remote_kernel or kernel
     block_size_ratio = kernel // remote_kernel
     remote_ppl = remote_block // remote_kernel
-    matched = num_tokens - 1  # mamba N-1 rule
-    n_local = -(-num_tokens // local_block)
+    matched = num_tokens - 1 if mamba else num_tokens  # mamba N-1 rule
+    n_local = -(-matched // local_block)  # D allocates for the pulled tokens
     n_remote = -(-matched // remote_block)
 
     worker = _make_mla_hybrid_worker(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
+        mamba=mamba,
     )
     # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
     # shards of each.
@@ -885,8 +904,12 @@ def _run_hetero_case(
     # Sparse ids so neighbors exist between the request's blocks.
     local_attn = [2 * i + 1 for i in range(n_local)]
     remote_attn = [2 * i + 2 for i in range(n_remote)]
-    local_ids = (local_attn, [0], [2 * n_local + 2])
-    remote_ids = [remote_attn, [1], [0]]
+    if mamba:
+        local_ids: tuple[list[int], ...] = (local_attn, [0], [2 * n_local + 2])
+        remote_ids = [remote_attn, [1], [0]]
+    else:
+        local_ids = (local_attn[cached:],)
+        remote_ids = [remote_attn]
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -899,6 +922,7 @@ def _run_hetero_case(
             "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": tp_size,
+            "remote_num_tokens": matched,
         },
     )
     meta = metadata.reqs_to_recv["req-b"]
@@ -970,7 +994,9 @@ def _run_hetero_case(
 
     # Invariant 3: full coverage of the matched tokens, at the finest
     # transfer granularity (the remote kernel block).
-    needed = {t for t in range(0, matched - matched % remote_kernel, remote_kernel)}
+    needed = set(
+        range(cached * local_block, matched - matched % remote_kernel, remote_kernel)
+    )
     missing = needed - covered_tokens
     assert not missing, (
         f"tokens never transferred: {sorted(missing)[:8]} "
@@ -997,7 +1023,7 @@ def _run_hetero_case(
     assert "req-b" in done_recving
     n_excluded = -(-matched // local_block)
     stale = []
-    for b in local_attn[:n_excluded]:
+    for b in local_attn[cached:n_excluded]:
         for region, t in enumerate(worker._test_tensors):
             page = t[b * local_unified : (b + 1) * local_unified]
             n_stale = int((page == 0xAA).sum())
@@ -1013,21 +1039,26 @@ def _run_hetero_case(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "local_block,remote_block",
+    "local_block,remote_block,mamba",
     [
-        (12, 8),  # ppl 3 vs 2
-        (36, 8),  # ppl 9 vs 2 (large ppl asymmetry, scaled)
-        (24, 4),  # ppl 6 vs 1
-        (16, 24),  # remote larger than local (D_TP > P_TP direction)
+        (12, 8, True),  # ppl 3 vs 2
+        (36, 8, True),  # ppl 9 vs 2 (large ppl asymmetry, scaled)
+        (24, 4, True),  # ppl 6 vs 1
+        (16, 24, True),  # remote larger than local (D_TP > P_TP direction)
+        (16, 24, False),  # pure MLA
     ],
 )
 @pytest.mark.parametrize("num_tokens", list(range(2, 40)))
-def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens):
+def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens, mamba):
     """Sweep prompt lengths across block-boundary residues for several
     hetero-ppl geometries; assert neighbor-safety, token alignment, and
     coverage of every transferred kernel block."""
     _run_hetero_case(
-        local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
+        local_block,
+        kernel=4,
+        remote_block=remote_block,
+        num_tokens=num_tokens,
+        mamba=mamba,
     )
 
 
@@ -1038,19 +1069,22 @@ def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens)
     # (8), the remote logical block (8) and the local logical block (24).
     [2, 5, 8, 9, 13, 16, 17, 21, 24, 25, 29, 32, 33, 41, 48, 49],
 )
-def test_hetero_ppl_with_block_size_ratio(num_tokens):
+@pytest.mark.parametrize(("mamba", "cached"), [(True, 0), (False, 2)])
+def test_hetero_ppl_with_block_size_ratio(num_tokens, mamba, cached):
     """Both hetero regimes at once: kernel blocks differ (local 8 / remote
     4, block_size_ratio=2) *and* physical_blocks_per_logical differs (3 vs
     2). The transfer is clipped at remote sub-block granularity by the
-    pairing and front-trimmed by _apply_prefix_caching, so the
-    untransferred tail can span both a partial block and whole blocks —
-    the case each of the two former zeroing paths handled only half of."""
+    pairing, so the untransferred tail can span both a partial block and
+    whole blocks — the case each of the two former zeroing paths handled
+    only half of."""
     _run_hetero_case(
         local_block=24,
         kernel=8,
         remote_block=8,
         remote_kernel=4,
-        num_tokens=num_tokens,
+        num_tokens=num_tokens + cached * 24,
+        mamba=mamba,
+        cached=cached,
     )
 
 
@@ -1122,6 +1156,24 @@ def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
     meta_r.block_lens = [x // 2 for x in worker.block_len_per_layer]
     with pytest.raises((AssertionError, RuntimeError)):
         worker.add_remote_agent(meta_r, remote_tp_rank=0, remote_tp_size=2)
+
+
+@pytest.mark.cpu_test
+def test_dcp_rejects_different_logical_block_sizes():
+    worker = _make_mla_hybrid_worker(
+        local_block_size=12, kernel_block_size=4, num_logical_blocks=8, mamba=False
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=8,
+        remote_kernel_block_size=4,
+        remote_num_logical=12,
+        remote_ssm_sizes=(24, 32),
+    )
+    with pytest.raises(NotImplementedError, match="matching P/D logical block sizes"):
+        worker.add_remote_agent(
+            meta_r, remote_tp_rank=0, remote_tp_size=2, remote_dcp_size=2
+        )
 
 
 def _make_csa_linear_ple_worker(
