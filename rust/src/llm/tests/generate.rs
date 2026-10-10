@@ -869,6 +869,7 @@ async fn generate_records_request_metrics_in_prometheus_output() {
                         engine_index: 4,
                         timestamp: 10.0,
                         outputs: vec![EngineCoreOutput {
+                            num_nans_in_logits: 2,
                             prefill_stats: Some(Box::new(PrefillStats {
                                 num_prompt_tokens: 2,
                                 num_computed_tokens: 2,
@@ -952,6 +953,9 @@ async fn generate_records_request_metrics_in_prometheus_output() {
     )));
     assert!(rendered.contains(&format!(
         "vllm:generation_tokens_total{{model_name=\"{model_name}\",engine=\"4\"}} 3"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:corrupted_requests_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
         "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
