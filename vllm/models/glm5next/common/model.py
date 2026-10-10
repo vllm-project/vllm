@@ -498,7 +498,17 @@ class Glm5NextDecoderLayer(nn.Module):
                         self.post_attention_layernorm.variance_epsilon,
                     ),
                 )
-                if not include_pre_gemm_splits:
+                if include_pre_gemm_splits:
+                    from vllm.model_executor.kernels.mhc.warmup import (
+                        HC_PRENORM_GEMM_DEEP_GEMM_KERNEL,
+                    )
+
+                    HC_PRENORM_GEMM_DEEP_GEMM_KERNEL.register_warmup(
+                        n=mix_hc,
+                        k=d_model,
+                        max_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                    )
+                else:
                     _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
                         vllm_config,
                         hidden_size=self.hidden_size,

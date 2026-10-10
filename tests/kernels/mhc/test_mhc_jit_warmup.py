@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Validate JIT dispatch against pre-contract behavior."""
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,48 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     require_fused_post_pre_config,
 )
 from vllm.model_executor.warmup import jit_warmup_tilelang_helper
+
+
+@pytest.mark.parametrize("num_sms", [78, 132, 148])
+@pytest.mark.parametrize("max_tokens", [1, 64, 65, 129, 8192, 16384])
+def test_glm_deep_gemm_warmup_covers_runtime_splits(
+    monkeypatch, num_sms, max_tokens
+) -> None:
+    import torch
+
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+    from vllm.model_executor.kernels.mhc.warmup import HcPrenormGemmDeepGemmKernel
+
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _: SimpleNamespace(multi_processor_count=num_sms),
+    )
+    compute_num_split.cache_clear()
+    try:
+        kernel = HcPrenormGemmDeepGemmKernel()
+        keys = kernel.get_warmup_keys(n=24, k=16384, max_tokens=max_tokens)
+        expected = {
+            kernel.dispatch(n=24, k=16384, num_tokens=m)
+            for m in range(1, max_tokens + 1)
+        }
+        assert len(keys) == len(set(keys))
+        assert set(keys) == expected
+    finally:
+        compute_num_split.cache_clear()
+
+
+def test_glm_deep_gemm_warmup_compiles_without_tensor_inputs(monkeypatch) -> None:
+    from vllm.model_executor.kernels.mhc import warmup
+
+    calls = []
+    monkeypatch.setattr(
+        warmup, "compile_tf32_hc_prenorm_gemm", lambda **kwargs: calls.append(kwargs)
+    )
+    kernel = warmup.HcPrenormGemmDeepGemmKernel()
+    kernel.compile(kernel.CompileKey(n=24, k=16384, num_splits=26))
+
+    assert calls == [dict(n=24, k=16384, num_splits=26)]
 
 
 @pytest.mark.parametrize(

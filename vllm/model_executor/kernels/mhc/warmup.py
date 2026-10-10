@@ -9,9 +9,13 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     compute_num_split,
     mhc_pre_big_fuse_with_norm_tilelang,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupIntRange
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.deep_gemm import (
+    compile_tf32_hc_prenorm_gemm,
+    is_deep_gemm_supported,
+    tf32_hc_prenorm_gemm,
+)
 from vllm.utils.math_utils import cdiv
 
 
@@ -99,3 +103,36 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
 
 
 MHC_PRE_NORM_KERNEL = MHCPreNormKernel()
+
+
+class HcPrenormGemmDeepGemmKernel(
+    VllmJitKernel["HcPrenormGemmDeepGemmKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        n: int
+        k: int
+        num_splits: int
+
+    kernel: Any = staticmethod(tf32_hc_prenorm_gemm)
+
+    def dispatch(  # type: ignore[override]
+        self, *, n: int, k: int, num_tokens: int
+    ) -> CompileKey:
+        return self.CompileKey(
+            n=n, k=k, num_splits=compute_num_split(64, k, cdiv(num_tokens, 64))
+        )
+
+    def get_warmup_keys(self, *, n: int, k: int, max_tokens: int) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            n=n, k=k, num_tokens=WarmupIntRange(1, max_tokens + 1, 64)
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        compile_tf32_hc_prenorm_gemm(**asdict(compile_key))
+
+    def __call__(self, *args):
+        return self.kernel(*args)
+
+
+HC_PRENORM_GEMM_DEEP_GEMM_KERNEL = HcPrenormGemmDeepGemmKernel()
