@@ -52,7 +52,11 @@ from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (
+    EngineDeadError,
+    EngineGenerateError,
+    EngineUnhealthyError,
+)
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -1092,6 +1096,23 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
+
+    async def check_ready(self) -> None:
+        logger.debug("Called check_ready.")
+        if self.errored:
+            raise self.dead_error
+
+        timeout_s = envs.VLLM_READY_CHECK_TIMEOUT_S
+        try:
+            unhealthy_reason = await asyncio.wait_for(
+                self.engine_core.check_ready_async(), timeout=timeout_s
+            )
+        except TimeoutError:
+            raise EngineUnhealthyError(
+                f"Engine did not answer the readiness check within {timeout_s}s."
+            ) from None
+        if unhealthy_reason is not None:
+            raise EngineUnhealthyError(unhealthy_reason)
 
     async def start_profile(
         self,

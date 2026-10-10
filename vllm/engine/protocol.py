@@ -162,6 +162,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def check_ready(self) -> None:
+        """Raise if not ready to serve traffic."""
+        ...
+
+    @abstractmethod
     async def start_profile(
         self,
         profile_prefix: str | None = None,

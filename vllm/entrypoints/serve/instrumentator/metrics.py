@@ -65,6 +65,7 @@ def attach_router(app: FastAPI):
         excluded_handlers=[
             "/metrics",
             "/health",
+            "/health/ready",
             "/load",
             "/ping",
             "/version",

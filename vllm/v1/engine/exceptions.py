@@ -19,3 +19,9 @@ class EngineDeadError(VLLMServerError):
         # Make stack trace clearer when using with LLMEngine by
         # silencing irrelevant ZMQError.
         self.__suppress_context__ = suppress_context
+
+
+class EngineUnhealthyError(Exception):
+    """Raised when the engine is alive but not ready to serve traffic."""
+
+    pass

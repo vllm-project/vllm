@@ -249,7 +249,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
                 periodSeconds: 10
               readinessProbe:
                 httpGet:
-                  path: /health
+                  path: /health/ready
                   port: 8000
                 initialDelaySeconds: 60
                 periodSeconds: 5
@@ -424,6 +424,8 @@ containers:
 
 !!! note
     The gRPC health service checks the engine status on every probe. If the engine is unhealthy or the server is shutting down, the probe returns `NOT_SERVING`.
+
+For HTTP deployments, use `/health` for liveness probes and `/health/ready` for readiness probes. `/health/ready` returns `503` when the engine is dead or when it still has unfinished requests but has stopped making forward progress.
 
 You can also verify the health service manually with `grpcurl`:
 
