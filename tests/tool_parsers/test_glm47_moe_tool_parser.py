@@ -269,11 +269,7 @@ class TestGlm47Streaming:
         assert args["city"] == "Beijing"
 
     def test_stray_arg_key_tag(self, glm47_tool_parser, mock_request):
-        """A duplicated `</arg_key>` in the stream must not reach the key.
-
-        This is the end-to-end path: the engine accumulates the stray tag into
-        `slot.args`, so only a streaming test proves the converter sees it.
-        """
+        """A duplicated `</arg_key>` in the stream must not reach the key."""
         _reset(glm47_tool_parser)
         chunks = [
             "<tool_call>",
@@ -353,10 +349,5 @@ def test_arg_converter_ignores_stray_arg_tags(raw_args: str):
     ],
 )
 def test_partial_arg_converter_ignores_stray_arg_tags(raw_args: str):
-    """The streaming path uses a separate pattern; it needs the same guarantee.
-
-    These inputs have no closing `</arg_value>`, which is what an in-flight
-    stream actually feeds, so they reach `_PARTIAL_ARG_RE` rather than
-    `_ARG_RE`.
-    """
+    """Without `</arg_value>` the input reaches `_PARTIAL_ARG_RE`, not `_ARG_RE`."""
     assert json.loads(_glm47_arg_converter(raw_args, True)) == {"path": "/tmp/x"}
