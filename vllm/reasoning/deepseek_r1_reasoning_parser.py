@@ -8,8 +8,7 @@ from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
 class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
-    """
-    Reasoning parser for DeepSeek R1 model.
+    """Reasoning parser for DeepSeek R1 model.
 
     The DeepSeek R1 model uses <think>...</think> tokens to denote reasoning
     text. This parser extracts the reasoning content from the model output.

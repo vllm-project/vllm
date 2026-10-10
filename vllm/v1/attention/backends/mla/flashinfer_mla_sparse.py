@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer sparse MLA attention backend."""
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -26,18 +27,20 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    align_blocks_to_rows,
     flat_kv_row_view,
+    prepare_sparse_mla_safe_lengths,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
-    from vllm.v1.attention.backend import CommonAttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -68,6 +71,13 @@ class _FlashInferMLASparseBackendBase(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        # The kernels read the rows as pages of their kernel block size.
+        (page,) = cls.get_supported_kernel_block_sizes(spec)
+        assert isinstance(page, MultipleOf)
+        return align_blocks_to_rows(spec, page.base)
+
 
 class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     """FlashInfer sparse MLA backend using the TRTLLM-gen launcher."""
@@ -82,8 +92,8 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [32, 64]
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [MultipleOf(32)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -171,8 +181,8 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         return "FLASHINFER_MLA_SPARSE_SM120"
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64, 256]
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [MultipleOf(64)]
 
     @staticmethod
     def get_impl_cls() -> type[MLAAttentionImpl]:
@@ -272,8 +282,16 @@ class FlashInferMLASparseMetadataBuilder(
 class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
     """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    hisparse_supports_multi_token_decode: ClassVar[bool] = True
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode uses device request boundaries; prefill metadata is not graph-safe.
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -299,12 +317,6 @@ class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilde
                     vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
             )
-
-    def _build_req_id_per_token(
-        self,
-        common_attn_metadata: "CommonAttentionMetadata",
-    ) -> torch.Tensor:
-        return common_attn_metadata.token_to_req_indices(self.req_id_per_token_buffer)
 
 
 # Global workspace buffer (lazily initialized)
@@ -508,10 +520,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             decode_lse: torch.Tensor | None = None
             if num_decode_tokens > 0:
                 physical_topk, valid_counts = (
-                    index_group.convert_decode_logical_to_physical_topk(
+                    index_group.convert_logical_to_physical_topk(
                         self.index_group_index,
                         topk_indices[:num_decode_tokens],
                         attn_metadata,
+                        block_stride_rows=None,
                         return_valid_counts=True,
                     )
                 )
@@ -571,7 +584,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             assert prefill_lse is not None
             return output, torch.cat((decode_lse, prefill_lse))
 
-        _, block_stride_rows = flat_kv_row_view(
+        kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
 
@@ -598,7 +611,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         return self._run_mqa_kernel(
             q,
-            kv_c_and_k_pe_cache,
+            # Block sizes and strides have been aligned to 32 rows.
+            kv_rows.view(
+                -1,
+                math.gcd(block_stride_rows, attn_metadata.block_size, 64),
+                kv_rows.shape[-1],
+            ),
             topk_indices_physical,
             seq_lens,
         )
@@ -697,18 +715,16 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         sparse_topk_capacity = topk_indices.shape[1]
 
         extra_kwargs: dict[str, torch.Tensor] = {}
-        empty_rows: torch.Tensor | None = None
+        needs_empty_query_guard = self.need_to_return_lse_for_decode or isinstance(
+            self.index_group, HiSparseMLAIndexGroup
+        )
         if self.is_nope_mla:
-            # The native no-rope kernel takes the active top-k length per query
-            # token (``seq_lens`` here is already the compacted per-token valid
-            # count, int32) and rejects zero-length rows. Point empty rows at a
-            # single valid dummy slot with length 1 and zero their output after
-            # the launch. ``triton_convert_req_index_to_global_index`` packs the
-            # valid indices into a contiguous prefix, which is what the kernel
-            # requires of the page table.
-            empty_rows = seq_lens == 0
-            topk_indices[:, 0] = topk_indices[:, 0].masked_fill(empty_rows, 0)
-            extra_kwargs["sparse_mla_top_k_lens"] = seq_lens.clamp(min=1)
+            # Resident TP queries have nonempty selections. Preserve empty-query
+            # handling for DCP's local selections and host-backed HiSparse.
+            topk_lens = seq_lens
+            if needs_empty_query_guard:
+                topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
+            extra_kwargs["sparse_mla_top_k_lens"] = topk_lens
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
@@ -737,12 +753,17 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         out = o.view(-1, o.shape[-2], o.shape[-1])
         if lse is not None:
             lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
-        if empty_rows is None and lse is not None:
-            empty_rows = (topk_indices == -1).all(dim=-1)
-        if empty_rows is not None:
-            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+        if self.is_nope_mla and needs_empty_query_guard:
+            empty_queries = seq_lens == 0
             if lse is not None:
-                lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+                # DCP combine already suppresses outputs with zero LSE weight.
+                lse.masked_fill_(empty_queries[:, None], float("-inf"))
+            else:
+                out.masked_fill_(empty_queries[:, None, None], 0.0)
+        elif lse is not None:
+            empty_rows = (topk_indices == -1).all(dim=-1)
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
 
     @staticmethod

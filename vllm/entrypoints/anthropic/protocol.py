@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pydantic models for Anthropic API protocol"""
+"""Pydantic models for Anthropic API protocol."""
 
 import time
 from typing import Annotated, Any, Literal
@@ -11,21 +11,21 @@ import vllm.envs as envs
 
 
 class AnthropicError(BaseModel):
-    """Error structure for Anthropic API"""
+    """Error structure for Anthropic API."""
 
     type: str
     message: str
 
 
 class AnthropicErrorResponse(BaseModel):
-    """Error response structure for Anthropic API"""
+    """Error response structure for Anthropic API."""
 
     type: Literal["error"] = "error"
     error: AnthropicError
 
 
 class AnthropicUsage(BaseModel):
-    """Token usage information"""
+    """Token usage information."""
 
     input_tokens: int
     output_tokens: int
@@ -34,7 +34,7 @@ class AnthropicUsage(BaseModel):
 
 
 class AnthropicContentBlock(BaseModel):
-    """Content block in message"""
+    """Content block in message."""
 
     type: Literal[
         "text",
@@ -44,6 +44,8 @@ class AnthropicContentBlock(BaseModel):
         "tool_reference",
         "thinking",
         "redacted_thinking",
+        "tool_addition",
+        "tool_removal",
     ]
     text: str | None = None
     # For image content
@@ -62,17 +64,45 @@ class AnthropicContentBlock(BaseModel):
     signature: str | None = None
     # For redacted thinking content (safety-filtered by the API)
     data: str | None = None
+    # For tool_addition/tool_removal content
+    tool: "AnthropicToolChange | None" = None
+
+    @model_validator(mode="after")
+    def validate_tool_change(self) -> "AnthropicContentBlock":
+        if self.type not in ("tool_addition", "tool_removal"):
+            return self
+        if self.tool is None:
+            raise ValueError(f"tool is required for {self.type} blocks")
+        if self.type == "tool_removal" and self.tool.type != "tool_reference":
+            raise ValueError("tool_removal only accepts a tool_reference")
+        return self
+
+
+def _reject_tool_changes(content: str | list[AnthropicContentBlock] | None) -> None:
+    if content is None or isinstance(content, str):
+        return
+    for block in content:
+        if block.type in ("tool_addition", "tool_removal"):
+            raise ValueError(
+                f'{block.type} blocks are only allowed in messages with role "system"'
+            )
 
 
 class AnthropicMessage(BaseModel):
-    """Message structure"""
+    """Message structure."""
 
     role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
+    @model_validator(mode="after")
+    def validate_tool_change_role(self) -> "AnthropicMessage":
+        if self.role != "system":
+            _reject_tool_changes(self.content)
+        return self
+
 
 class AnthropicTool(BaseModel):
-    """Tool definition"""
+    """Tool definition."""
 
     name: str
     description: str | None = None
@@ -90,8 +120,28 @@ class AnthropicTool(BaseModel):
         return v
 
 
+class AnthropicToolChangeReference(BaseModel):
+    """A tool named by a tool_addition or tool_removal block."""
+
+    type: Literal["tool_reference"]
+    name: str
+
+
+class AnthropicToolChangeDefinition(BaseModel):
+    """A tool defined by value in a tool_addition block."""
+
+    type: Literal["tool_definition"]
+    definition: AnthropicTool
+
+
+AnthropicToolChange = Annotated[
+    AnthropicToolChangeReference | AnthropicToolChangeDefinition,
+    Field(discriminator="type"),
+]
+
+
 class AnthropicToolChoice(BaseModel):
-    """Tool Choice definition"""
+    """Tool Choice definition."""
 
     type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
@@ -105,27 +155,68 @@ class AnthropicToolChoice(BaseModel):
 
 
 class AnthropicJsonOutputFormat(BaseModel):
-    """JSON output format configuration"""
+    """JSON output format configuration."""
 
     json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
     type: Literal["json_schema"] = "json_schema"
 
 
+AnthropicEffort = Literal["low", "medium", "high", "xhigh", "max"]
+# reasoning_effort sent to the chat template for thinking.type=disabled.
+AnthropicDisabledThinkingEffort = Literal["none", AnthropicEffort]
+AnthropicDisabledThinkingEffortOption = Literal["auto", AnthropicDisabledThinkingEffort]
+AnthropicThinkingDisplay = Literal["summarized", "omitted", "updates"]
+
+
 class AnthropicOutputConfig(BaseModel):
     """Configuration options for the model's output, such as the output format."""
 
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    effort: AnthropicEffort | None = None
     format: AnthropicJsonOutputFormat | None = None
 
 
+class AnthropicThinkingConfigEnabled(BaseModel):
+    """Extended thinking with a fixed token budget.
+
+    ``display`` is accepted but ignored: reasoning is always returned.
+    """
+
+    type: Literal["enabled"]
+    budget_tokens: int = Field(ge=1024)
+    display: AnthropicThinkingDisplay | None = None
+
+
+class AnthropicThinkingConfigDisabled(BaseModel):
+    type: Literal["disabled"]
+
+
+class AnthropicThinkingConfigAdaptive(BaseModel):
+    """Extended thinking whose depth the model chooses.
+
+    ``display`` is accepted but ignored: reasoning is always returned.
+    """
+
+    type: Literal["adaptive"]
+    display: AnthropicThinkingDisplay | None = None
+
+
+AnthropicThinkingConfig = Annotated[
+    AnthropicThinkingConfigEnabled
+    | AnthropicThinkingConfigDisabled
+    | AnthropicThinkingConfigAdaptive,
+    Field(discriminator="type"),
+]
+
+
 class AnthropicMessagesRequest(BaseModel):
-    """Anthropic Messages API request"""
+    """Anthropic Messages API request."""
 
     model: str
     messages: list[AnthropicMessage]
     max_tokens: int
     metadata: dict[str, Any] | None = None
     output_config: AnthropicOutputConfig | None = None
+    thinking: AnthropicThinkingConfig | None = None
     stop_sequences: (
         Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
     ) = None
@@ -138,6 +229,17 @@ class AnthropicMessagesRequest(BaseModel):
     top_p: float | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -149,6 +251,12 @@ class AnthropicMessagesRequest(BaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit)."
+        ),
+    )
+    watermarking: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to apply the engine's configured watermark to this request."
         ),
     )
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -190,9 +298,28 @@ class AnthropicMessagesRequest(BaseModel):
             raise ValueError("max_tokens must be positive")
         return v
 
+    @field_validator("system")
+    @classmethod
+    def validate_system(cls, v):
+        _reject_tool_changes(v)
+        return v
+
+    @model_validator(mode="after")
+    def validate_thinking_budget(self) -> "AnthropicMessagesRequest":
+        # P/D prefill legs are sent with max_tokens=1 and never decode; the
+        # decode leg carries the client's max_tokens and is still checked.
+        if self.kv_transfer_params and self.kv_transfer_params.get("do_remote_decode"):
+            return self
+        if (
+            isinstance(self.thinking, AnthropicThinkingConfigEnabled)
+            and self.thinking.budget_tokens >= self.max_tokens
+        ):
+            raise ValueError("thinking.budget_tokens must be less than max_tokens")
+        return self
+
 
 class AnthropicDelta(BaseModel):
-    """Delta for streaming responses"""
+    """Delta for streaming responses."""
 
     type: (
         Literal["text_delta", "input_json_delta", "thinking_delta", "signature_delta"]
@@ -211,7 +338,7 @@ class AnthropicDelta(BaseModel):
 
 
 class AnthropicStreamEvent(BaseModel):
-    """Streaming event"""
+    """Streaming event."""
 
     type: Literal[
         "message_start",
@@ -232,7 +359,7 @@ class AnthropicStreamEvent(BaseModel):
 
 
 class AnthropicMessagesResponse(BaseModel):
-    """Anthropic Messages API response"""
+    """Anthropic Messages API response."""
 
     id: str
     type: Literal["message"] = "message"
@@ -265,11 +392,13 @@ class AnthropicContextManagement(BaseModel):
 
 
 class AnthropicCountTokensRequest(BaseModel):
-    """Anthropic messages.count_tokens request"""
+    """Anthropic messages.count_tokens request."""
 
     model: str
     messages: list[AnthropicMessage]
+    output_config: AnthropicOutputConfig | None = None
     system: str | list[AnthropicContentBlock] | None = None
+    thinking: AnthropicThinkingConfig | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
 
@@ -289,9 +418,15 @@ class AnthropicCountTokensRequest(BaseModel):
             raise ValueError("Model is required")
         return v
 
+    @field_validator("system")
+    @classmethod
+    def validate_system(cls, v):
+        _reject_tool_changes(v)
+        return v
+
 
 class AnthropicCountTokensResponse(BaseModel):
-    """Anthropic messages.count_tokens response"""
+    """Anthropic messages.count_tokens response."""
 
     input_tokens: int
     context_management: AnthropicContextManagement | None = None

@@ -9,12 +9,15 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldElem,
@@ -29,6 +32,56 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 pytestmark = pytest.mark.cpu_test
 
 HIDDEN = 4
+
+
+@pytest.mark.parametrize(
+    "enabled,enforce_eager,supported,expected",
+    [
+        (True, False, True, True),
+        (False, False, True, False),
+        (True, True, True, False),
+        (True, False, False, False),
+    ],
+)
+def test_encoder_graph_configuration(enabled, enforce_eager, supported, expected):
+    """Encoder graph eligibility is independent of decoder graph mode."""
+    config = MagicMock()
+    config.model_config.enforce_eager = enforce_eager
+    config.model_config.dtype = torch.float32
+    config.model_config.get_inputs_embeds_size.return_value = HIDDEN
+    config.scheduler_config.max_num_batched_tokens = 8
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    config.compilation_config.cudagraph_mm_encoder = enabled
+    model = MagicMock(spec=SupportsEncoderCudaGraph) if supported else torch.nn.Module()
+    state = _model_state(EncoderCache())
+    with patch("vllm.v1.worker.gpu.model_states.interface.EncoderCudaGraphManager"):
+        ModelState.__init__(state, config, model, state.encoder_cache, state.device)
+    assert state.encoder_runner.has_cudagraph() is expected
+
+
+def test_encoder_graph_unsupported_modality_uses_eager_output():
+    """An image graph must not intercept another modality's encoder output."""
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+    runner = _make_runner([], [])
+    output = torch.ones(2, HIDDEN)
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.return_value = [output]
+    manager = MagicMock(spec=EncoderCudaGraphManager)
+    manager.config = SimpleNamespace(modalities=["image"])
+    manager.is_captured.return_value = True
+    manager.supports_modality.side_effect = lambda modality: (
+        EncoderCudaGraphManager.supports_modality(manager, modality)
+    )
+    runner.cudagraph_manager = manager
+    with patch(
+        "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
+        return_value=[("audio", 1, {"audio_values": torch.zeros(2)})],
+    ):
+        result = runner.execute_mm_encoder([("audio", MagicMock())])
+    assert len(result) == 1
+    assert result[0] is output
+    manager.execute.assert_not_called()
 
 
 def _model_state(cache: EncoderCache) -> MagicMock:
@@ -235,6 +288,21 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
 
     assert cache.encoder_outputs == {"hash0": embedding}
     state.encoder_runner.gather_mm_embeddings.assert_not_called()
+
+
+def test_execute_mm_encoder_sorts_by_modality():
+    """Items are encoded sorted by modality; outputs keep the input order."""
+    mm_kwargs = [("video", 0), ("image", 1), ("video", 2), ("image", 3)]
+    runner = _make_runner([], [])
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.side_effect = lambda x: [torch.full((1, 1), x)]
+    with patch(
+        "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
+        side_effect=lambda items, **_: [(m, 1, {"x": x}) for m, x in items],
+    ) as group:
+        outputs = runner.execute_mm_encoder(mm_kwargs)
+    assert group.call_args.args[0] == [mm_kwargs[i] for i in (1, 3, 0, 2)]
+    assert [int(o) for o in outputs] == [0, 1, 2, 3]
 
 
 def test_execute_mm_encoder_is_a_noop_without_scheduled_items():

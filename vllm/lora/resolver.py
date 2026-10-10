@@ -36,6 +36,7 @@ class LoRAResolver(ABC):
         Returns:
             Optional[LoRARequest]: The resolved LoRA model information, or None
             if the LoRA model cannot be found.
+
         """
         pass
 
@@ -54,9 +55,11 @@ class _LoRAResolverRegistry:
         resolver: LoRAResolver,
     ) -> None:
         """Register a LoRA resolver.
+
         Args:
             resolver_name: Name to register the resolver under.
             resolver: The LoRA resolver instance to register.
+
         """
         if resolver_name in self.resolvers:
             logger.warning(
@@ -70,12 +73,16 @@ class _LoRAResolverRegistry:
 
     def get_resolver(self, resolver_name: str) -> LoRAResolver:
         """Get a registered resolver instance by name.
+
         Args:
             resolver_name: Name of the resolver to get.
+
         Returns:
             The resolver instance.
+
         Raises:
             KeyError: If the resolver is not found in the registry.
+
         """
         if resolver_name not in self.resolvers:
             raise KeyError(

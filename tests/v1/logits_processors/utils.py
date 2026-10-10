@@ -37,7 +37,7 @@ DUMMY_LOGITPROC_FQCN = f"{DUMMY_LOGITPROC_MODULE}:DummyLogitsProcessor"
 
 
 class CustomLogitprocSource(Enum):
-    """How to source a logitproc for testing purposes"""
+    """How to source a logitproc for testing purposes."""
 
     LOGITPROC_SOURCE_NONE = auto()  # No custom logitproc
     LOGITPROC_SOURCE_ENTRYPOINT = auto()  # Via entrypoint
@@ -55,17 +55,22 @@ prompts = [
 
 
 class DummyLogitsProcessor(LogitsProcessor):
-    """Fake logit processor to support unit testing and examples"""
+    """Fake logit processor to support unit testing and examples."""
 
-    @classmethod
-    def validate_params(cls, params: SamplingParams):
-        target_token: int | None = params.extra_args and params.extra_args.get(
-            "target_token"
+    @staticmethod
+    def _get_target_token(params: SamplingParams) -> int | None:
+        target_token = (
+            params.extra_args.get(DUMMY_LOGITPROC_ARG) if params.extra_args else None
         )
         if target_token is not None and not isinstance(target_token, int):
             raise VLLMValidationError(
                 f"target_token value {target_token} {type(target_token)} is not int"
             )
+        return target_token
+
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        cls._get_target_token(params)
 
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
@@ -73,13 +78,12 @@ class DummyLogitsProcessor(LogitsProcessor):
         self.req_info: dict[int, int] = {}
 
     def is_argmax_invariant(self) -> bool:
-        """Never impacts greedy sampling"""
+        """Never impacts greedy sampling."""
         return False
 
     def update_state(self, batch_update: BatchUpdate | None):
         def extract_extra_arg(params: SamplingParams) -> int | None:
-            self.validate_params(params)
-            return params.extra_args and params.extra_args.get("target_token")
+            return self._get_target_token(params)
 
         process_dict_updates(
             self.req_info,
@@ -115,7 +119,7 @@ class DummyLogitsProcessor(LogitsProcessor):
 
 
 class EntryPoint:
-    """Dummy entrypoint class for logitsprocs testing"""
+    """Dummy entrypoint class for logitsprocs testing."""
 
     def __init__(self):
         self.name = DUMMY_LOGITPROC_ENTRYPOINT
@@ -126,7 +130,7 @@ class EntryPoint:
 
 
 class EntryPoints(list):
-    """Dummy EntryPoints class for logitsprocs testing"""
+    """Dummy EntryPoints class for logitsprocs testing."""
 
     def __init__(self, group: str):
         # Emulate list-like functionality
@@ -141,7 +145,7 @@ class DummyPerReqLogitsProcessor:
     token id identified by `target_token`"""
 
     def __init__(self, target_token: int) -> None:
-        """Specify `target_token`"""
+        """Specify `target_token`."""
         self.target_token = target_token
 
     def __call__(
@@ -178,6 +182,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
 
         Returns:
           `Callable` request logits processor, or None
+
         """
         target_token: Any | None = params.extra_args and params.extra_args.get(
             "target_token"

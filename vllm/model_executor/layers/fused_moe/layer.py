@@ -118,10 +118,11 @@ def FusedMoEFactory(
     has_bias: bool = False,
     is_sequence_parallel: bool = False,
     reduce_results: bool = True,
-    ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
+    ckpt_names: tuple[str, str, str | None] = ("gate_proj", "down_proj", "up_proj"),
     is_fused_checkpoint_transposed: bool = False,
     n_shared_experts: int | None = None,
     fuse_shared_experts: bool = False,
+    shared_expert_prefix: str | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -137,6 +138,7 @@ def FusedMoEFactory(
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
+    skip_padding: bool = False,
 ) -> MoERunner:
     """Factory function for creating MoE execution pipeline.
 
@@ -151,6 +153,11 @@ def FusedMoEFactory(
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
     copy that naming convention here and handle any remapping in the
     load_weights function in each model implementation.
+
+    Args:
+        intermediate_pad: Padding added to the intermediate size, if any.
+        swiglu_alpha: Optional alpha parameter for the SwiGLU activation.
+        swiglu_beta: Optional beta parameter for the SwiGLU activation.
 
     Args:
         num_experts: Number of experts in the model (global count)
@@ -191,6 +198,7 @@ def FusedMoEFactory(
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         fuse_shared_experts: Whether to enable shared-expert fusion.
+        shared_expert_prefix: Checkpoint prefix for the fused shared expert.
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -208,9 +216,11 @@ def FusedMoEFactory(
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
         routed_experts_args: Additional arguments for routed_experts constructor
+        skip_padding: Whether grouped routing should invalidate padding rows.
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
+
     """
     vllm_config = get_current_vllm_config()
 
@@ -302,6 +312,7 @@ def FusedMoEFactory(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            skip_padding=(skip_padding and moe_parallel_config.use_deepep_v2_kernels),
             # Fused shared-expert slot weight. With apply_routed_scale_to_output
             # the runner scales the combined output by routed_scaling_factor, so
             # the shared slot weight must be 1/routed_scaling_factor for its net
@@ -351,9 +362,11 @@ def FusedMoEFactory(
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
+        shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
+        has_hash_routing=hash_indices_table is not None,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
@@ -432,7 +445,7 @@ def fused_moe_make_expert_params_mapping(
     model: torch.nn.Module,
     ckpt_gate_proj_name: str,
     ckpt_down_proj_name: str,
-    ckpt_up_proj_name: str,
+    ckpt_up_proj_name: str | None,
     num_experts: int,
     num_redundant_experts: int = 0,
     routed_experts_prefix: str = "routed_experts",

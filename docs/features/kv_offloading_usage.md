@@ -22,6 +22,35 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## Per-request load control
+
+Individual requests can cap how many tokens are loaded from offloaded storage
+by setting `max_load_tokens` in `kv_transfer_params`. The cap applies to tokens
+beyond those already available in the GPU prefix cache. Set it to `0` to
+disable external loading for the request:
+
+```json
+{
+  "kv_transfer_params": {
+    "max_load_tokens": 0
+  }
+}
+```
+
+GPU prefix-cache reuse remains enabled, and tokens beyond the aligned load cap
+are recomputed. Omitting the field leaves loading uncapped. The value must be a
+non-negative integer; invalid values are ignored. Positive caps are rounded
+down to a boundary supported by the configured KV cache groups. Offloading
+remains enabled unless it is controlled separately with `max_offload_tokens`.
+
+!!! warning
+    `max_load_tokens` is experimental and subject to change.
+
+`kv_load_tiers` continues to select secondary tiers. CPU is always included:
+it can satisfy a resident hit directly and is the required staging tier for
+secondary-to-GPU loads. Consequently, an empty tier list allows CPU hits but
+does not query any secondary tier.
+
 ## Terminology: Chunks
 
 The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.

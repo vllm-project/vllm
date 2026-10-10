@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import regex as re
 
 import vllm.envs as envs
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -23,8 +22,10 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 from vllm.tool_parsers.utils import partial_tag_overlap
 
 if TYPE_CHECKING:
@@ -101,23 +102,20 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
         RuntimeError: The tokenizer declares the structural tokens through
             ``model_specific_special_tokens``, which transformers 5 no longer
             round-trips.
+
     """
-
-    import transformers
-
-    if int(transformers.__version__.split(".")[0]) >= 5:
-        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
-        think_begin_as_special = init_kwargs.get(
-            "model_specific_special_tokens", {}
-        ).get("think_begin_token", "")
-        if think_begin_as_special:
-            raise RuntimeError(
-                "This checkpoint declares HYV4 structural tokens (think_begin_token"
-                "/toolcalls_begin_token/argkey_begin_token) in "
-                "tokenizer_config.json, which transformers 5 no longer supports. "
-                "Remove those fields and keep the tokens in the tokenizer's own "
-                "token definitions so the suffix can be read from the vocab."
-            )
+    init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+    think_begin_as_special = init_kwargs.get("model_specific_special_tokens", {}).get(
+        "think_begin_token", ""
+    )
+    if think_begin_as_special:
+        raise RuntimeError(
+            "This checkpoint declares HYV4 structural tokens (think_begin_token"
+            "/toolcalls_begin_token/argkey_begin_token) in "
+            "tokenizer_config.json, which transformers 5 no longer supports. "
+            "Remove those fields and keep the tokens in the tokenizer's own "
+            "token definitions so the suffix can be read from the vocab."
+        )
 
     structural_token_re = re.compile(
         r"<(?:think|tool_calls|tool_call|arg_key|arg_value)(:[^\s>]+)?>"
@@ -611,6 +609,7 @@ class HYV4ToolExtractor:
         Returns:
             A streaming delta carrying content and/or the tool calls drained
             from the buffer, or None when nothing can be emitted yet.
+
         """
         content_delta: str | None = None
         tool_calls: list[StreamToolCall] = []
@@ -993,6 +992,7 @@ class HYV4ToolParser(ToolParser):
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
     ) -> StructuralTag | None:
         """Build a structural tag matching HYV4's tool tokens.
 
@@ -1008,9 +1008,11 @@ class HYV4ToolParser(ToolParser):
         Args:
             request: The request being adjusted.
             reasoning: Whether the grammar also covers the reasoning phase.
+            strict_level: Server-side floor from ``--tool-strict-level``.
 
         Returns:
             The structural tag, or None when structural tagging does not apply.
+
         """
         if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
             return None
@@ -1039,6 +1041,7 @@ class HYV4ToolParser(ToolParser):
                 tool_choice=request.tool_choice,
                 reasoning=reasoning,
                 token_suffix=self._extractor.token_suffix,
+                strict_level=strict_level,
             )
         except Exception:
             logger.warning(
@@ -1070,6 +1073,7 @@ class HYV4ToolParser(ToolParser):
 
         Returns:
             True when the streaming parser must use the string-marker path.
+
         """
         structured_outputs = getattr(request, "structured_outputs", None)
         return (

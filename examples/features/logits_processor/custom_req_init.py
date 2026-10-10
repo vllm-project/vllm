@@ -59,7 +59,7 @@ class DummyPerReqLogitsProcessor:
     token id identified by `target_token`"""
 
     def __init__(self, target_token: int) -> None:
-        """Specify `target_token`"""
+        """Specify `target_token`."""
         self.target_token = target_token
 
     def __call__(
@@ -111,6 +111,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
 
         Returns:
           `Callable` request logits processor, or None
+
         """
         if (
             not self.is_cuda

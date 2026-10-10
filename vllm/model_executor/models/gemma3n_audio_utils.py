@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Lightweight utility functions for Gemma3n audio processing.
+"""Lightweight utility functions for Gemma3n audio processing.
 
 This module is separate from gemma3n_mm.py to avoid heavy CUDA dependencies,
 making it testable without a full vLLM build.
@@ -37,6 +36,7 @@ def adjust_audio_features_to_expected_length(
         Tuple of:
         - adjusted_features: Audio features adjusted to expected_tokens length
         - tokens_truncated: Number of tokens truncated (0 if padding was applied)
+
     """
     audio_batch_size, audio_seq_len, audio_embed_dim = audio_features.shape
     tokens_truncated = 0

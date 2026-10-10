@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
+
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
@@ -50,6 +52,20 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
     return ACTIVATION_TO_FI_ACTIVATION[activation]
 
 
+def quantize_nvfp4_per_token_input(
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize NVFP4 activations with one FP32 decode scale per token."""
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    return nvfp4_quantize(
+        hidden_states,
+        NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
+
+
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     return (
         x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
@@ -59,7 +75,7 @@ def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
 def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm1_weights: torch.Tensor, gemm2_weights: torch.Tensor, is_gated_activation: bool
 ):
-    """Shuffle weights for FI TRT-LLM Format"""
+    """Shuffle weights for FI TRT-LLM Format."""
     from flashinfer import reorder_rows_for_gated_act_gemm, shuffle_matrix_a
 
     epilogue_tile_m = 128
@@ -112,8 +128,9 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert expert weights to FlashInfer's block layout.
 
-    This reorders W13 and W2 into the expected epilogue-tiled block layout and
-    returns the shuffled weight tensors.
+    This reorders W13 and W2 in place into the expected epilogue-tiled block
+    layout and returns views of the shuffled weight tensors. Using one expert
+    as scratch space avoids allocating another full copy of both weights.
     """
     if w13_weight.dtype != torch.bfloat16 or w2_weight.dtype != torch.bfloat16:
         raise ValueError(
@@ -147,51 +164,50 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             out=out,
         )
 
-    w13_rows, w13_cols = w13_weight[0].view(torch.uint8).shape
-    w2_rows, w2_cols = w2_weight[0].view(torch.uint8).shape
-    w13_weights_shuffled_tensor = torch.empty(
-        (num_experts, w13_cols // block_k, w13_rows, block_k),
-        dtype=torch.uint8,
-        device=w13_weight.device,
-    )
-    w2_weights_shuffled_tensor = torch.empty(
-        (num_experts, w2_cols // block_k, w2_rows, block_k),
-        dtype=torch.uint8,
-        device=w2_weight.device,
-    )
-
-    for i in range(num_experts):
-        w13_expert_uint8 = w13_weight[i].view(torch.uint8)
-
-        permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-            cache_permute_indices,
-            w13_expert_uint8,
-            epilogue_tile_m,
-            is_gated_act_gemm=is_gated_act_gemm,
-        )
-        if is_gated_act_gemm:
-            rows = w13_expert_uint8.shape[0]
-            permute_indices = (permute_indices + rows // 2) % rows
-        _copy_permuted_expert_to_block_layout(
-            w13_weights_shuffled_tensor[i],
-            w13_expert_uint8,
-            permute_indices,
+    def _convert_weight_in_place(
+        weight: torch.Tensor,
+        is_w13: bool,
+    ) -> torch.Tensor:
+        rows, cols = weight[0].view(torch.uint8).shape
+        block_layout_shape = (num_experts, cols // block_k, rows, block_k)
+        expert_scratch = torch.empty(
+            block_layout_shape[1:],
+            dtype=torch.uint8,
+            device=weight.device,
         )
 
-        permute_indices = get_w2_permute_indices_with_cache(
-            cache_permute_indices,
-            w2_weight[i].view(torch.uint8),
-            epilogue_tile_m,
-        )
-        _copy_permuted_expert_to_block_layout(
-            w2_weights_shuffled_tensor[i],
-            w2_weight[i].view(torch.uint8),
-            permute_indices,
-        )
+        for i in range(num_experts):
+            expert_uint8 = weight[i].view(torch.uint8)
+            if is_w13:
+                permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+                    cache_permute_indices,
+                    expert_uint8,
+                    epilogue_tile_m,
+                    is_gated_act_gemm=is_gated_act_gemm,
+                )
+                if is_gated_act_gemm:
+                    permute_indices = (
+                        permute_indices + expert_uint8.shape[0] // 2
+                    ) % expert_uint8.shape[0]
+            else:
+                permute_indices = get_w2_permute_indices_with_cache(
+                    cache_permute_indices,
+                    expert_uint8,
+                    epilogue_tile_m,
+                )
+
+            _copy_permuted_expert_to_block_layout(
+                expert_scratch,
+                expert_uint8,
+                permute_indices,
+            )
+            expert_uint8.view(-1).copy_(expert_scratch.view(-1))
+
+        return weight.view(torch.uint8).view(block_layout_shape).view(torch.bfloat16)
 
     return (
-        w13_weights_shuffled_tensor.view(torch.bfloat16),
-        w2_weights_shuffled_tensor.view(torch.bfloat16),
+        _convert_weight_in_place(w13_weight, is_w13=True),
+        _convert_weight_in_place(w2_weight, is_w13=False),
     )
 
 
@@ -210,7 +226,6 @@ def align_fp4_moe_weights_for_fi(
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
     """
-
     # Current local intermediate size (per partition) is the K dimension of
     # the down projection.
     num_experts, hidden_size, intermediate = w2.shape
@@ -265,7 +280,21 @@ def align_fp4_moe_weights_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
 
-def align_trtllm_fp4_moe_hidden_dim_for_fi(
+def trtllm_nvfp4_hidden_alignment(
+    per_token_activation: bool, is_act_and_mul: bool
+) -> int:
+    """Hidden-dim alignment for the TRTLLM-Gen NVFP4 MoE cubins.
+
+    The per-token (dynamic activation scale) non-gated variant has far fewer
+    tile configs for 256-aligned K and its heuristic default tactic fails with
+    "No valid config found" (e.g. Nemotron's 2688 -> 2816), so pad to 512.
+    """
+    if per_token_activation and not is_act_and_mul:
+        return 512
+    return 256
+
+
+def align_fp4_moe_hidden_dim_for_fi(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w2: torch.Tensor,
@@ -280,7 +309,7 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
         return w13, w13_scale, w2, w2_scale, hidden_size
 
     logger.warning_once(
-        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights. "
+        "Padding hidden size from %d to %d for FlashInfer NVFP4 MoE weights. "
         "This requires activation slicing at runtime and may cause "
         "performance degradation.",
         hidden_size,
@@ -316,7 +345,6 @@ def align_moe_weights_for_fi(
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
     """
-
     # Current local intermediate size (per partition) is the K dimension of
     # the down projection.
     num_experts, hidden_size, intermediate = w2.shape
@@ -453,8 +481,7 @@ def prepare_fp8_moe_layer_for_fi(
     w2_input_scale: torch.Tensor | None,
     is_trtllm: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Convert Fp8 MoE weights to flashinfer kernel format
+    """Convert Fp8 MoE weights to flashinfer kernel format.
 
     Note that for trtllm we update the model state dict
     with the scale format needed for these kernels.
@@ -462,7 +489,6 @@ def prepare_fp8_moe_layer_for_fi(
     Note that for per-tensor, we update the layer's
     intermediate size if the weights needed padding.
     """
-
     assert hasattr(layer.moe_config, "is_act_and_mul")
     block_quant = (
         hasattr(layer, "weight_block_size") and layer.weight_block_size is not None

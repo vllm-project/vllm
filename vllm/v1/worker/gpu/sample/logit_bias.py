@@ -1,60 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.sample.logits_processor.interface import (
+    LogitsContext,
+    LogitsProcessor,
+    LogitsProcRequestState,
+)
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 MAX_NUM_ALLOWED_TOKEN_IDS = 1024
 MAX_NUM_LOGIT_BIAS_TOKENS = 1024
 MAX_NUM_STOP_TOKEN_IDS = 128
 
 
-class LogitBiasState:
-    def __init__(self, max_num_reqs: int, device: torch.device):
-        self.max_num_reqs = max_num_reqs
+class LogitBiasState(LogitsProcessor):
+    def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
+        self.prompt_len_np = req_states.prompt_len.np
+        max_num_reqs = req_states.max_num_reqs
+        device = req_states.device
 
         # Allowed token IDs.
-        self.num_allowed_token_ids = UvaBackedTensor(
-            self.max_num_reqs, dtype=torch.int32
-        )
+        self.num_allowed_token_ids = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.allowed_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_ALLOWED_TOKEN_IDS),
-            dtype=torch.int32,
-            device=device,
+            (max_num_reqs, MAX_NUM_ALLOWED_TOKEN_IDS), dtype=torch.int32, device=device
         )
         # Logit bias.
-        self.num_logit_bias = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        self.num_logit_bias = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.logit_bias_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
-            dtype=torch.int32,
-            device=device,
+            (max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS), dtype=torch.int32, device=device
         )
         self.logit_bias = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
+            (max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
             dtype=torch.float32,
             device=device,
         )
         # Min tokens.
-        self.min_lens = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        self.num_stop_token_ids = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        self.restore_when_all_masked = UvaBackedTensor(
-            self.max_num_reqs, dtype=torch.int32
-        )
+        self.min_lens = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.num_stop_token_ids = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.restore_when_all_masked = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.stop_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_STOP_TOKEN_IDS),
-            dtype=torch.int32,
-            device=device,
+            (max_num_reqs, MAX_NUM_STOP_TOKEN_IDS), dtype=torch.int32, device=device
         )
 
         # Using any of the above.
         self.use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
 
-    def add_request(
-        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
-    ) -> None:
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
+        prompt_len = int(self.prompt_len_np[req_idx])
         # Using any logit bias.
         use_logit_bias = False
 
@@ -112,6 +113,7 @@ class LogitBiasState:
             self.restore_when_all_masked.np[req_idx] = 0
 
         self.use_logit_bias[req_idx] = use_logit_bias
+        return use_logit_bias
 
     def apply_staged_writes(self) -> None:
         self.num_allowed_token_ids.copy_to_uva()
@@ -126,25 +128,19 @@ class LogitBiasState:
         self.restore_when_all_masked.copy_to_uva()
         self.stop_token_ids.apply_write()
 
-    def apply_logit_bias(
-        self,
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
-        pos: torch.Tensor,
-    ) -> None:
-        if not np.any(self.use_logit_bias[idx_mapping_np]):
+    def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor:
+        if not np.any(self.use_logit_bias[ctx.idx_mapping_np]):
             # No request uses logit bias. Skip the kernel launch.
-            return
+            return logits
 
         enable_stop_token_restore = bool(
-            np.any(self.restore_when_all_masked.np[idx_mapping_np])
+            np.any(self.restore_when_all_masked.np[ctx.idx_mapping_np])
         )
 
         apply_logit_bias(
             logits,
-            expanded_idx_mapping,
-            pos,
+            ctx.expanded_idx_mapping,
+            ctx.pos,
             self.num_allowed_token_ids.gpu,
             self.allowed_token_ids.gpu,
             self.num_logit_bias.gpu,
@@ -156,6 +152,7 @@ class LogitBiasState:
             self.stop_token_ids.gpu,
             enable_stop_token_restore,
         )
+        return logits
 
 
 @triton.jit

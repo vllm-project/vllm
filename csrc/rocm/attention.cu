@@ -342,22 +342,6 @@ typedef union u64_cvt {
   int64_t i64;
 } _T8x8;
 
-__device__ __forceinline__ _B8x8 convert_b16x8(const _B16x8& input,
-                                               _T8x8& Mtemp) {
-  _T8x8 Qtmp8x8;
-
-  for (int i = 0; i < 2; i++) {
-    floatx4 q_out = {0, 0, 0, 0};
-    q_out = gcn_mfma16x16x16_instr<_Float16, 0, 0, 0>(Mtemp.b64, input.xy[i],
-                                                      q_out);
-    Qtmp8x8.b16x4[i * 2] =
-        __builtin_amdgcn_cvt_pk_fp8_f32(q_out[0], q_out[1], 0, false);
-    Qtmp8x8.b16x4[i * 2 + 1] =
-        __builtin_amdgcn_cvt_pk_fp8_f32(q_out[2], q_out[3], 0, false);
-  }
-  return Qtmp8x8.b8x8;
-}
-
 __device__ float warpReduceMax(float val) {
   for (int offset = warpSize / 2; offset > 0; offset /= 2) {
     val = max(
@@ -2578,23 +2562,6 @@ __device__ __forceinline__ float to_float(const T& inp) {
     return (float)inp;
   } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
     return __bfloat162float(inp);
-  } else {
-    static_assert(false, "unsupported 16b dtype");
-  }
-}
-
-template <typename T>
-__device__ __forceinline__ float to_float_b16(const bit16_t& inp) {
-  union tmpcvt {
-    bit16_t u;
-    _Float16 f;
-    __hip_bfloat16 b;
-  } t16;
-  t16.u = inp;
-  if constexpr (std::is_same<T, _Float16>::value) {
-    return (float)t16.f;
-  } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
-    return __bfloat162float(t16.b);
   } else {
     static_assert(false, "unsupported 16b dtype");
   }

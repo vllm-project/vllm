@@ -9,11 +9,10 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -27,6 +26,7 @@ from vllm.parser.abstract_parser import Parser, StreamState
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.renderers.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
@@ -43,6 +43,13 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 logger = init_logger(__name__)
+
+
+class ReasoningEnd(NamedTuple):
+    """Where reasoning ends in a token sequence."""
+
+    offset: int  # index of the first end token, or the sequence length
+    implicit: bool  # the end token is also content, e.g. a tool-call start
 
 
 class ToolCallSlot:
@@ -638,14 +645,15 @@ class ParserEngine(Parser):
     def reasoning_end_token_ids(self) -> frozenset[int]:
         return self._reasoning_end_token_ids
 
-    def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
+    def find_reasoning_end(self, token_ids: Sequence[int]) -> ReasoningEnd | None:
+        """First reasoning end in `token_ids`, and if its token is content."""
         end_ids = self._reasoning_end_token_ids
         if not end_ids:
             return None
         for offset, token_id in enumerate(token_ids):
             if token_id in end_ids:
-                return offset
-        return len(token_ids)
+                return ReasoningEnd(offset, token_id != self._reasoning_end_token_id)
+        return ReasoningEnd(len(token_ids), False)
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         config = self.parser_engine_config
@@ -672,11 +680,30 @@ class ParserEngine(Parser):
         return not wait_for_reasoning
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        config = self.parser_engine_config
+        wait_for_reasoning = config.wait_for_reasoning
+        if wait_for_reasoning is None:
+            wait_for_reasoning = config.initial_state is ParserState.REASONING
+        if not wait_for_reasoning:
+            return input_ids
+
         end_id = self._reasoning_end_token_id
         if end_id is not None:
             for i in range(len(input_ids) - 1, -1, -1):
                 if input_ids[i] == end_id:
                     return input_ids[i + 1 :]
+
+        end_ids = self._reasoning_end_token_ids
+        if end_ids:
+            turn_start = 0
+            boundary_ids = self._turn_boundary_token_ids
+            for i in range(len(input_ids) - 1, -1, -1):
+                if input_ids[i] in boundary_ids:
+                    turn_start = i + 1
+                    break
+            for i in range(turn_start, len(input_ids)):
+                if input_ids[i] in end_ids:
+                    return input_ids[i:]
         return input_ids
 
     def get_streaming_fallback_content(

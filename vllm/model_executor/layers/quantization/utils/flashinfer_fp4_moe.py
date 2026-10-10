@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Utility helpers for NVFP4 + FlashInfer fused-MoE path"""
+"""Utility helpers for NVFP4 + FlashInfer fused-MoE path."""
 
 from typing import TYPE_CHECKING
 
@@ -9,8 +9,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    align_fp4_moe_hidden_dim_for_fi,
     align_fp4_moe_weights_for_fi,
-    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
@@ -128,9 +128,9 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
 ]:
     """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
 
-    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
-    and interleaves w13 gate/linear rows for gated activations. Non-gated
-    activations use a single w13 projection and keep its row order unchanged.
+    Pads the runtime expert tensors to the kernel's GEMM alignment, converts
+    weight scale factors to the MMA layout expected by CuteDslMoEWrapper, and
+    interleaves w13 gate/linear rows for gated activations.
     """
     # Global scaling factors (same as other FlashInfer backends).
     num_experts = w13.shape[0]
@@ -140,12 +140,38 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     )
     a2_scale = amax_for_moe_activation_quant(a2_scale, enable_eplb).repeat(num_experts)
 
-    if layer.activation.is_gated:
+    gated = layer.activation.is_gated
+    if gated:
         w13, w13_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
             layer.activation, w13, w13_scale
         )
 
-        # Interleave up/gate rows for w13 weights and scales.
+    # GEMM1's output dimension must be a multiple of 128: 2I for gated
+    # activations (also required by interleaving), but only I for non-gated.
+    # Keep the checkpoint tensors unchanged and pad only the kernel's runtime
+    # representation. Zero rows also make the padded GEMM2 contraction a no-op.
+    w13, w13_scale, w2, w2_scale, padded_intermediate = align_fp4_moe_weights_for_fi(
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        is_act_and_mul=gated,
+        min_alignment=64 if gated else 128,
+    )
+    layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
+    # GEMM1 gathers full 256-element K tiles of activations and their scales
+    # without a K-tail predicate. Pad runtime weights to match; the MoE runner
+    # pads activations and trims the output using the original hidden size.
+    w13, w13_scale, w2, w2_scale, padded_hidden = align_fp4_moe_hidden_dim_for_fi(
+        w13, w13_scale, w2, w2_scale
+    )
+    if layer.moe_config.hidden_dim_unpadded is None:
+        layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim
+    layer.moe_config.hidden_dim = padded_hidden
+
+    if gated:
+        # Interleave up/gate rows for the fused gated activation.
         w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
         w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 
@@ -318,6 +344,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     w2_scale_2: torch.Tensor,
     a2_scale: torch.Tensor,
     is_act_and_mul: bool,
+    trtllm_hidden_alignment: int = 256,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -371,8 +398,12 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        w13, w13_scale, w2, w2_scale, padded_hidden = (
-            align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+        w13, w13_scale, w2, w2_scale, padded_hidden = align_fp4_moe_hidden_dim_for_fi(
+            w13,
+            w13_scale,
+            w2,
+            w2_scale,
+            min_alignment=trtllm_hidden_alignment,
         )
         if layer.moe_config.hidden_dim_unpadded is None:
             layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim

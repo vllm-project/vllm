@@ -5,9 +5,9 @@ import jinja2
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
+from vllm.renderers.chat_utils import load_chat_template
 from vllm.renderers.hf import (
     _consolidate_system_messages,
     _convert_developer_to_system,
@@ -123,7 +123,7 @@ def test_no_load_chat_template_literallike():
 )
 @pytest.mark.parametrize("use_tools", [True, False])
 def test_resolve_chat_template(sample_json_schema, model, use_tools):
-    """checks that chat_template is a dict type for HF models."""
+    """Checks that chat_template is a dict type for HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
@@ -196,7 +196,7 @@ def test_resolve_chat_template(sample_json_schema, model, use_tools):
     ],
 )
 def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs):
-    """checks that chat_template is a dict type for HF models."""
+    """Checks that chat_template is a dict type for HF models."""
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 

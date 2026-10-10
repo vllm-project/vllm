@@ -82,7 +82,7 @@ class BlipVisionEmbeddings(nn.Module):
 
 
 class BlipAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -140,8 +140,7 @@ class BlipAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        """Input shape: Batch x Time x Channel"""
-
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -220,12 +219,12 @@ class BlipEncoderLayer(nn.Module):
 
 
 class BlipEncoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers` self
+    """Transformer encoder consisting of `config.num_hidden_layers` self
     attention layers. Each layer is a [`BlipEncoderLayer`].
 
     Args:
         config: BlipConfig
+
     """
 
     def __init__(

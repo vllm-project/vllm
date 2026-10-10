@@ -45,11 +45,7 @@ from transformers import BatchFeature
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.config.multimodal import (
-    BaseDummyOptions,
-    ImageDummyOptions,
-    VideoDummyOptions,
-)
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import (
     divide,
     get_pp_group,
@@ -234,7 +230,7 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         processor = self.info.get_hf_processor()
         video_processor = processor.video_processor
@@ -245,16 +241,12 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
             * int(video_processor.downsample_factor)
             * video_grid
         )
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
         return {
             "image": self._get_dummy_images(
                 width=image_width,
                 height=image_height,
                 num_images=mm_counts.get("image", 0),
-                overrides=image_overrides,
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=video_size,
@@ -263,7 +255,7 @@ class MuseGlimmerDummyInputsBuilder(BaseDummyInputsBuilder[MuseGlimmerProcessing
                     seq_len, mm_counts
                 ),
                 num_videos=mm_counts.get("video", 0),
-                overrides=video_overrides,
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -274,16 +266,18 @@ class MuseGlimmerMultiModalProcessor(
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**hf_kwargs)
         tokenizer = processor.tokenizer
         config = self.info.get_hf_config()
         images = mm_data.get("images", ())
@@ -370,8 +364,9 @@ class MuseGlimmerMultiModalProcessor(
                 video_feature_sizes=torch.tensor(video_sizes),
             )
         processed_data = BatchFeature(data=data, tensor_type=None)
-        processed_data.update(passthrough_data)
-        return processed_data
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -1663,9 +1658,7 @@ class MuseGlimmerForCausalLM(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="model",
             connector=["vision_adapter.", "vision_projection."],

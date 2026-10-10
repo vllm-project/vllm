@@ -9,7 +9,7 @@ import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
@@ -73,12 +73,11 @@ def _get_num_image_tokens(image_size: int) -> int:
 
 
 class OpenVLAImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (6)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (6)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -300,18 +299,16 @@ class OpenVLADummyInputsBuilder(BaseDummyInputsBuilder[OpenVLAProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        image_overrides = mm_options.get("image")
         image_size = self.info.get_image_size_with_most_features()
 
         return {
             "image": self._get_dummy_images(
                 width=image_size.width,
                 height=image_size.height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -350,6 +347,7 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,

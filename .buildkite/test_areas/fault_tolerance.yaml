@@ -24,3 +24,33 @@ steps:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s v1/fault_tolerance/test_fault_tolerance_e2e.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MoRI EP Healthy Baseline"
+      dind: false
+      device: mi355_2
+      num_devices: 2
+      timeout_in_minutes: 10
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/rocm/
+      - tests/kernels/moe/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/utils/import_utils.py
+      - vllm/utils/math_utils.py
+      - vllm/utils/torch_utils.py
+      - vllm/platforms/
+      - vllm/_aiter_ops.py
+      # TODO: Add fault injection, detection and recovery once MoRI supports them.
+      # This mirror currently checks healthy EP execution only.
+      commands:
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs kernels/moe/test_moe_layer.py::test_moe_layer_mori_graph
+      - VLLM_TEST_ENABLE_MORI_MOE_LAYER=1 VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs 'kernels/moe/test_moe_layer.py::test_moe_layer[False-mori_high_throughput-2-1-True]' --subtests='[32-512-512-8-2-bfloat16-None-False-False-False-False-mori_high_throughput-2-2-1]'

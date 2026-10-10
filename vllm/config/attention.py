@@ -61,6 +61,11 @@ class AttentionConfig:
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
 
+    tokenspeed_mla_min_split_kv: int = Field(default=1, ge=1, le=256)
+    """Minimum KV splits for TokenSpeed MLA decode. The default of 1 preserves
+    automatic scheduling. Larger values request a split floor and may increase
+    workspace memory. Only applies to the TokenSpeed MLA backend."""
+
     tq_max_kv_splits_for_cuda_graph: int = 32
     """TurboQuant max NUM_KV_SPLITS for cuda graph decode.
     Fixes the split count so grid dimensions are constant across captures,
@@ -93,7 +98,10 @@ class AttentionConfig:
     an SM100-class GPU, DeepGEMM >= 2.8 and the DeepSelect top-k extension
     (the top-k runs on the kernels' bf16 logits). The sparse path costs
     O(candidate blocks) per query regardless of context length, so it pays off
-    for long contexts (roughly 32K tokens and beyond) and is slower below."""
+    for long contexts (roughly 32K tokens and beyond) and is slower below.
+    On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
+    candidate pool instead, with fp32 logits, and keeps the masked dense walk
+    for steps whose contexts are too short for the pool to pay."""
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
@@ -150,8 +158,7 @@ class AttentionConfig:
         return self.indexer_kv_dtype
 
     def compute_hash(self) -> str:
-        """
-        Provide a hash that uniquely identifies all the configs
+        """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after

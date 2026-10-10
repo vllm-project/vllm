@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
+from collections import deque
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from vllm.v1.executor.multiproc_executor import WorkerProc
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
+from vllm.v1.outputs import DraftTokenIds
 
 
 class _ExitWorkerLoop(RuntimeError):
@@ -65,3 +67,37 @@ def test_execute_worker_rpc_returns_worker_exception():
     assert len(outputs) == 1
     assert isinstance(outputs[0], RuntimeError)
     assert str(outputs[0]) == "test error"
+
+
+@pytest.mark.parametrize("stalled", [False, True])
+@pytest.mark.parametrize(
+    "method,result",
+    [
+        ("take_draft_token_ids", DraftTokenIds(["req"], [[1, 2, 3]])),
+        ("execute_dummy_batch", None),
+    ],
+)
+def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stalled):
+    """A wedged model RPC must not block EngineCore forever. For
+    execute_dummy_batch this is an idle DP rank stuck in a collective with a
+    hung peer."""
+    monkeypatch.setenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "7")
+
+    def dequeue(*, timeout=None):
+        assert timeout is not None and 0 < timeout <= 7
+        if stalled:
+            raise TimeoutError
+        return WorkerProc.ResponseStatus.SUCCESS, result
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.is_failed = False
+    executor.output_rank = 1
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)
+    executor.response_mqs = [None, SimpleNamespace(dequeue=dequeue)]
+
+    if stalled:
+        with pytest.raises(TimeoutError, match=f"{method} timed out"):
+            getattr(executor, method)()
+    else:
+        assert getattr(executor, method)() is result
