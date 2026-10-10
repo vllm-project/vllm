@@ -170,23 +170,23 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
     if enable_jit_warmup:
-        logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
         try:
             registry = (
                 worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
             )
-            registry.warmup()
+            warmed = registry.warmup()
         except Exception:
             logger.exception(
                 "JIT kernel warmup failed after %.2fs.",
                 time.perf_counter() - jit_warmup_start,
             )
             raise
-        logger.info(
-            "JIT kernel warmup finished in %.2fs.",
-            time.perf_counter() - jit_warmup_start,
-        )
+        if warmed:
+            logger.info(
+                "JIT kernel warmup finished in %.2fs.",
+                time.perf_counter() - jit_warmup_start,
+            )
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
