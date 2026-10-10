@@ -5,6 +5,8 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
+from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.lora.layers.column_parallel_linear import ColumnParallelLinearWithLoRA
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -100,6 +102,40 @@ def deep_gemm_fp8_o_proj(
             grouped_weight.transpose(1, 2),
             out=z.transpose(0, 1),
         )
+    if isinstance(wo_a, ColumnParallelLinearWithLoRA):
+        # The grouped base GEMM bypasses the linear wrapper's forward.
+        lora_input = o_proj_input
+        if use_fp8:
+            lora_input, _ = fused_inv_rope_fp8_quant(
+                o,
+                positions,
+                cos_sin_cache,
+                n_groups=n_groups,
+                heads_per_group=heads_per_group,
+                nope_dim=nope_dim,
+                rope_dim=rope_dim,
+                quant_group_size=einsum_recipe[2],
+                quantize=False,
+            )
+        lora_a = wo_a.lora_a_stacked
+        if wo_a.lora_config.fully_sharded_loras and wo_a.tp_size > 1:
+            # Each TP rank consumes different groups of attention heads.
+            lora_a = (tensor_model_parallel_all_gather(lora_a[0], dim=2),)
+        for group in range(n_groups):
+            start = group * o_lora_rank
+            lora_b = wo_a.lora_b_stacked[0][
+                :, :, start : start + o_lora_rank, :
+            ].contiguous()
+            group_output = z[:, group, :].contiguous()
+            wo_a.punica_wrapper.add_lora_linear(
+                group_output,
+                lora_input[:, group, :].contiguous(),
+                lora_a,
+                (lora_b,),
+                1.0,
+                (o_lora_rank,),
+            )
+            z[:, group, :] = group_output
     return wo_b(z.flatten(1))
 
 
