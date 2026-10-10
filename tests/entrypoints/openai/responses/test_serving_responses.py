@@ -1363,13 +1363,6 @@ class TestHarmonyPreambleStreaming:
         type_names = [e.type for e in events]
         assert "response.output_text.done" not in type_names
 
-    @pytest.mark.xfail(
-        reason=(
-            "TODO: Ensure added/in-progress events are emitted for zero-delta items."
-            "So we can safely emit done events for zero-delta items."
-        ),
-        strict=True,
-    )
     def test_zero_delta_items_should_preserve_streaming_lifecycle(
         self,
     ) -> None:
@@ -2078,9 +2071,12 @@ class TestAutoToolStreaming:
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.asyncio
-async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+async def test_stream_completed_response_reuses_streamed_items(
+    monkeypatch, finish_reason
+):
     """response.completed must carry the streamed items (same ids,
-    call_id, logprobs) rather than a reparse of the full output."""
+    call_id, logprobs, status) rather than a reparse of the full output."""
     monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
     serving = _make_serving_instance_with_reasoning()
     call = DeltaToolCall(
@@ -2102,6 +2098,9 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     async def result_generator():
         for token_id, text in [(10, "think"), (20, "Hi"), (30, "call")]:
             output = _make_request_output(text, [token_id])
+            if token_id == 30:
+                output.outputs[0].finish_reason = finish_reason
+                output.finished = True
             output.outputs[0].logprobs = [
                 {token_id: SampleLogprob(logprob=-0.5, decoded_token=text)}
             ]
@@ -2131,6 +2130,9 @@ async def test_stream_completed_response_reuses_streamed_items(monkeypatch):
     _, message, function_call = streamed
     assert [lp.token for lp in message.content[0].logprobs] == ["Hi"]
     assert function_call.call_id == "chatcmpl-tool-parser-id"
+    assert message.status == "completed"
+    expected_status = "incomplete" if finish_reason == "length" else "completed"
+    assert function_call.status == events[-1].response.status == expected_status
 
 
 def _harmony_msg(channel: str, text: str, recipient: str | None = None):
@@ -2197,21 +2199,23 @@ async def test_harmony_stream_completed_response_reuses_streamed_ids():
 
 
 @pytest.mark.asyncio
-async def test_harmony_stream_unstreamed_item_keeps_own_id():
-    """An item with no done event (zero-delta) must not take the streamed id
-    of a later item of the same type."""
-    unstreamed = _harmony_msg("analysis", "skipped")
+async def test_harmony_stream_zero_delta_item_keeps_own_id():
+    """A zero-delta item gets its own lifecycle and retains its ID in the response."""
+    zero_delta = _harmony_msg("analysis", "skipped")
     reasoning = _harmony_msg("analysis", "think")
 
     events = await _harmony_stream_events(
-        [_harmony_segments(unstreamed, streamed=False), _harmony_segments(reasoning)]
+        [_harmony_segments(zero_delta, streamed=False), _harmony_segments(reasoning)]
     )
 
-    (streamed,) = [e.item for e in events if e.type == "response.output_item.done"]
+    added = [e.item for e in events if e.type == "response.output_item.added"]
+    streamed = [e.item for e in events if e.type == "response.output_item.done"]
     first, second = events[-1].response.output
     assert first.content[0].text == "skipped"
-    assert first.id != streamed.id
-    assert second.id == streamed.id
+    assert second.content[0].text == "think"
+    assert first.id != second.id
+    assert [first.id, second.id] == [item.id for item in added]
+    assert [first.id, second.id] == [item.id for item in streamed]
 
 
 @pytest.mark.asyncio
