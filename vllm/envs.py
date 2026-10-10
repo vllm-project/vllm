@@ -307,6 +307,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_SPEC_DRAFT_VOCAB: str = ""
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
@@ -2136,6 +2137,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Path to a file of target-vocabulary token ids (one per line) that
+    # restricts a DraftModelSpeculator's own get_top_tokens() to a
+    # frequency-ranked subset (FR-Spec, Zhao et al. ACL 2025), generalized
+    # to any speculator whose draft model has no get_top_tokens() of its
+    # own. Empty (default) leaves every draft model unaffected. Only takes
+    # effect when use_local_argmax_reduction is also enabled -- see
+    # v1/worker/gpu/spec_decode/speculator.py:_attach_reduced_draft_vocab.
+    "VLLM_SPEC_DRAFT_VOCAB": lambda: os.environ.get("VLLM_SPEC_DRAFT_VOCAB", ""),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
