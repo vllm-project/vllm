@@ -15,6 +15,7 @@ ARG NIC_BACKEND=all
 # Users can specify a custom version compatible with their host drivers.
 # The default version has been tested with ionic-dkms=26.03.3.001
 # (libionic1=54.0-187-1), required for MoRI-EP/NIXL on Pollara/AINIC.
+# TODO (jmathias) : Check if we can revert this Pinned AINIC version
 ARG AINIC_VERSION=1.117.5-a-77
 ARG UBUNTU_CODENAME=jammy
 
@@ -115,8 +116,8 @@ WORKDIR ${COMMON_WORKDIR}
 FROM base AS fetch_vllm_0
 ONBUILD COPY ./ vllm/
 FROM base AS fetch_vllm_1
-ARG VLLM_REPO="https://github.com/ROCm/vllm.git"
-ARG VLLM_BRANCH="455_wip"
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG VLLM_BRANCH="main"
 ENV VLLM_REPO=${VLLM_REPO}
 ENV VLLM_BRANCH=${VLLM_BRANCH}
 ONBUILD RUN git clone ${VLLM_REPO} \
@@ -726,13 +727,14 @@ RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt \
 
 # Download bench scripts for gfx1250
 RUN curl -k -O https://raw.githubusercontent.com/ROCm/vllm/refs/heads/gfx1250_bench/vllm_smoketest.sh
+RUN curl -k -O https://raw.githubusercontent.com/ROCm/vllm/refs/heads/gfx1250_bench/vllm_benchserve.sh
 
 
 ### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
 RUN pip3 uninstall -y triton && \
     git clone https://github.com/triton-lang/triton.git && \
     cd triton && \
-    git checkout c517f38c && \
+    git checkout aedd1f6 && \
     TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
 
 CMD ["/bin/bash"]

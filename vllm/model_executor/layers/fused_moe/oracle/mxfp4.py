@@ -40,6 +40,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _swizzle_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    is_rocm_gfx1250 as _is_rocm_gfx1250,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mx_scale_kwargs as _mx_scale_kwargs,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -304,10 +307,15 @@ def backend_to_kernel_cls(
         return [AiterW4A8ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a4_moe import (
+            AiterW4A4ExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
+        if _is_rocm_gfx1250():
+            return [AiterW4A4ExpertsMonolithic, AiterExperts]
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
@@ -428,6 +436,12 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
+        if _is_rocm_gfx1250():
+            return [
+                Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+                Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                Mxfp4MoeBackend.EMULATION,
+            ]
         return [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
@@ -788,10 +802,17 @@ def select_deepseek_v4_mxfp4_moe_backend(
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
-        priority_backends = [
-            Mxfp4MoeBackend.AITER_MXFP4_BF16,
-            Mxfp4MoeBackend.TRITON_UNFUSED,
-        ]
+        if _is_rocm_gfx1250():
+            priority_backends = [
+                Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+                Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                Mxfp4MoeBackend.TRITON_UNFUSED,
+            ]
+        else:
+            priority_backends = [
+                Mxfp4MoeBackend.AITER_MXFP4_BF16,
+                Mxfp4MoeBackend.TRITON_UNFUSED,
+            ]
     else:
         priority_backends = _get_priority_backends()
 
@@ -896,6 +917,18 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     return hidden_size, intermediate_size
 
 
+def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
+    """Repack [E, 2n, X] from [all gates | all ups] to [g0, u0, g1, u1, ...]."""
+    num_experts, two_n, inner = t.shape
+    assert two_n % 2 == 0, f"expected an even gate/up row count, got {two_n}"
+    return (
+        t.view(num_experts, 2, two_n // 2, inner)
+        .transpose(1, 2)
+        .contiguous()
+        .view(num_experts, two_n, inner)
+    )
+
+
 def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
@@ -939,6 +972,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     hidden_size = w13_weight.shape[2] * 2
 
     sf_block_size = 32  # mxfp4 block size
+
+    is_gfx1250 = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        is_gfx1250 = on_gfx1250()
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
@@ -1193,15 +1232,59 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-        from vllm._aiter_ops import rocm_aiter_ops
-
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
+        if is_gfx1250:
+            # Triton moe_gemm_a4w4: uint8 column-major weights.
+            w13_data = w13_weight.data.view(torch.uint8)
+            w2_data = w2_weight.data.view(torch.uint8)
+            w13_scale_data = w13_weight_scale.data.view(torch.uint8)
+
+            # SILU applies the activation outside the GEMM and keeps the
+            # checkpoint's packed halves; the SWIGLUOAI epilogue needs them
+            # interleaved.
+            if getattr(layer, "activation", None) in (
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            ):
+                w13_data = _interleave_gate_up_rows(w13_data)
+                w13_scale_data = _interleave_gate_up_rows(w13_scale_data)
+
+            # Transpose to [E, K, N] — the view has stride(-2)==1 (column-major),
+            # which is what moe_gemm_a4w4 asserts.
+            w13_data = w13_data.transpose(1, 2)
+            w2_data = w2_data.transpose(1, 2)
+
+            # Scales are [E, N, K_scale]; both kernels index them as
+            # [E, K_scale, N] with K innermost, so transpose(1, 2)
+            # Keep them uint8: Triton moe_gemm_a4w4 takes e8m0 scales
+            w13_scale = w13_scale_data.transpose(1, 2)
+            w2_scale = w2_weight_scale.data.view(torch.uint8).transpose(1, 2)
+
+            from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
+
+            w13_scale = shuffle_scale_moe(
+                w13_scale,
+                arch="gfx1250",
+                preshuffle_factor=32,
+                scale_kwidth=4,
+            )
+            w2_scale = shuffle_scale_moe(
+                w2_scale,
+                arch="gfx1250",
+                preshuffle_factor=32,
+                scale_kwidth=4,
+            )
+
+            return (w13_data, w2_data, w13_scale, w2_scale, w13_bias, w2_bias)
+
         # e8m0_shuffle on weight scales (GFX950 swizzle layout)
         from aiter.utility.fp4_utils import e8m0_shuffle
+
+        from vllm._aiter_ops import rocm_aiter_ops
 
         s0, s1, _ = w13_weight_scale.shape
         w13_weight_scale.data = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(

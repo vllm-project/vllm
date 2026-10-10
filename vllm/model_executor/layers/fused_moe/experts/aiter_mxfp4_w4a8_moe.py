@@ -61,12 +61,6 @@ def aiter_triton_kernel_w4a8_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
-    # gfx1250: aiter's in-kernel gather is numerically broken
-    if on_gfx1250():
-        gather_src = gather_idx.to(torch.long) // topk
-        hidden_states = hidden_states[gather_src]
-        gather_idx = None
-
     return triton_kernel_fused_mxfp4_w4a8_experts(
         None,
         hidden_states,
@@ -131,10 +125,16 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
+        should_use_gfx1250_mx_scale_swizzle,
         weight_mx_scale,
     )
 
-    _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    if should_use_gfx1250_mx_scale_swizzle():
+        _swizzle_mx_scale = "GFX1250_SCALE"
+    elif should_use_cdna4_mx_scale_swizzle():
+        _swizzle_mx_scale = "CDNA4_SCALE"
+    else:
+        _swizzle_mx_scale = None
 
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"

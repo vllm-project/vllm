@@ -53,9 +53,17 @@ def _aiter_w4a16_silu_via_a8w4(
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
+        should_use_gfx1250_mx_scale_swizzle,
     )
 
-    swz = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    # gfx1250: _swizzle_mxfp4 GFX1250-swizzles the weight scales at load time,
+    # so the a8w4 kernel must be told to unswizzle them.
+    if should_use_gfx1250_mx_scale_swizzle():
+        swz = "GFX1250_SCALE"
+    elif should_use_cdna4_mx_scale_swizzle():
+        swz = "CDNA4_SCALE"
+    else:
+        swz = None
     quant_dtype = torch.float8_e4m3fn
 
     g1_gammas = gammas if apply_router_weight_on_input else None
@@ -160,7 +168,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
             gating_output,
             topk,
             score_mode=score_mode,
-            bias=e_score_correction_bias,
+            bias=(
+                e_score_correction_bias.float()
+                if e_score_correction_bias is not None
+                else None
+            ),
             renorm=renormalize,
             routed_scaling_factor=(
                 routed_scaling_factor if routed_scaling_factor is not None else 1.0

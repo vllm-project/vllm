@@ -1644,8 +1644,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # If no native backend available, use emulation.
         if self.mxfp4_backend is Mxfp4MoeBackend.NONE:
             self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
+            self.experts_cls = None
 
-        self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+        if self.experts_cls is None:
+            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
 
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"

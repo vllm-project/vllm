@@ -940,6 +940,39 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_fake(
     return Y
 
 
+def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale_preshuffle
+
+    n, k = B.shape
+    return gemm_a8w8_blockscale_preshuffle(
+        A,
+        B.reshape(n // 16, k * 16),
+        As,
+        Bs,
+        output_dtype,
+        None,  # y
+        None,  # config
+        False,  # skip_reduce
+        False,  # is_x_scale_transposed (misspelled in aiter)
+    )
+
+
+def _rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    return torch.empty(A.shape[0], B.shape[0], dtype=output_dtype, device=A.device)
+
+
 def _rocm_aiter_gemm_a8w8_blockscale_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -2877,6 +2910,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle",
+                op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_impl,
+                fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_gemm_a8w8_blockscale_fake,
@@ -3187,6 +3226,19 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
+            A, B, As, Bs, output_dtype
+        )
+
+    @staticmethod
+    def triton_gemm_a8w8_blockscale_preshuffle(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        block_size: list[int],
+        output_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale_preshuffle(
             A, B, As, Bs, output_dtype
         )
 
@@ -3929,6 +3981,17 @@ class rocm_aiter_ops:
             return _triton_gemm_config_is_tuned("GEMM-A8W8_BLOCKSCALE", n, k)
         except (AssertionError, ImportError):
             return False
+
+    @staticmethod
+    @if_aiter_supported
+    def is_triton_blockscale_bpreshuffle_gemm_tuned(n: int, k: int) -> bool:
+        from aiter.ops.triton.utils.gemm_config_utils import (
+            get_gemm_config,
+        )
+
+        # Fake M value for now
+        _, is_tuned = get_gemm_config("GEMM-A8W8_BLOCKSCALE_PRESHUFFLED", 1, n, k)
+        return is_tuned
 
     @staticmethod
     @functools.cache
