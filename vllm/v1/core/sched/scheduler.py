@@ -650,6 +650,9 @@ class Scheduler(SchedulerInterface):
             if input_budget <= draft_slots:
                 break
 
+            if self._finish_if_encoder_input_is_oversized(request):
+                continue
+
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
@@ -914,6 +917,9 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if self._finish_if_encoder_input_is_oversized(request):
+                    continue
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
@@ -2460,6 +2466,43 @@ class Scheduler(SchedulerInterface):
             self.kv_holding_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
+
+    def _finish_if_encoder_input_is_oversized(self, request: Request) -> bool:
+        """Fail requests whose uncached encoder input can never be admitted.
+
+        Encoder inputs use bidirectional attention and therefore must be
+        admitted as a whole. If one input exceeds the per-step encoder budget,
+        repeatedly deferring it would leave the request in the waiting queue
+        forever.
+        """
+        if not request.has_encoder_inputs or request.mm_features is None:
+            return False
+
+        for input_id in range(len(request.mm_features)):
+            if (
+                self.encoder_cache_manager.get_cached_num_encoder_embeds(
+                    request, input_id
+                )
+                is not None
+            ):
+                continue
+
+            num_embeds = request.get_num_encoder_embeds(input_id)
+            if num_embeds <= self.max_num_encoder_input_tokens:
+                continue
+
+            logger.warning(
+                "Rejecting request %s: encoder input %d requires %d embeddings, "
+                "but the per-step encoder capacity is %d",
+                request.request_id,
+                input_id,
+                num_embeds,
+                self.max_num_encoder_input_tokens,
+            )
+            self.finish_requests(request.request_id, RequestStatus.FINISHED_ERROR)
+            return True
+
+        return False
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""

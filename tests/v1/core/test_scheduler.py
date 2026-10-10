@@ -504,6 +504,30 @@ def test_encoder_only_prompt_longer_than_budget_is_chunked():
     assert third.num_scheduled_tokens[request.request_id] == 452
 
 
+def test_oversized_encoder_input_fails_instead_of_waiting_forever():
+    """Reject an encoder item that cannot fit in one admission step."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=32,
+    )
+    scheduler.max_num_encoder_input_tokens = 8
+    scheduler.encoder_cache_manager.cache_size = 16
+    scheduler.encoder_cache_manager.num_free_slots = 16
+
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=16,
+        mm_positions=[[PlaceholderRange(offset=0, length=16)]],
+        req_ids=["oversized-encoder"],
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.request_id in output.finished_req_ids
+
+
 @pytest.mark.parametrize("has_running", [True, False])
 def test_schedule_prefills_gating(has_running: bool):
     """DP prefill-balancing gate: when `throttle_prefills` is True, a new
