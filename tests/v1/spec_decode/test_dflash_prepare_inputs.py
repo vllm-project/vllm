@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import pytest
 import torch
 
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
@@ -35,6 +37,7 @@ def _run_prepare(
     input_buffers = SimpleNamespace(
         input_ids=torch.full((max_num_tokens,), -1, dtype=torch.int32, device=device),
         positions=torch.full((max_num_tokens,), -1, dtype=torch.int64, device=device),
+        is_padding=torch.zeros(max_num_tokens, dtype=torch.bool, device=device),
         query_start_loc=torch.full(
             (max_num_reqs + 1,), -1, dtype=torch.int32, device=device
         ),
@@ -177,6 +180,10 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix(cp_rank, cp_size
     assert out.sample_idx_mapping[:3].tolist() == [2, 2, 2]
     assert out.temperature[2].item() == 1.0
     assert out.seeds[2].item() == 17
+    assert not out.input_buffers.is_padding[:3].any()
+    assert out.input_buffers.is_padding[3:].all()
+    assert out.input_buffers.input_ids[3:].cpu().tolist() == [0] * 13
+    assert out.input_buffers.positions[3:].cpu().tolist() == [0] * 13
 
 
 def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
@@ -212,3 +219,40 @@ def test_prepare_dflash_inputs_never_writes_the_null_block():
         PAD_SLOT_ID,
         PAD_SLOT_ID,
     ]
+
+
+def test_dflash_forward_context_receives_draft_padding_mask(monkeypatch):
+    device = torch.device("cuda")
+    input_buffers = SimpleNamespace(
+        input_ids=torch.tensor([11, 12, 0, 0], dtype=torch.int32, device=device),
+        positions=torch.tensor([7, 8, 0, 0], dtype=torch.int64, device=device),
+        is_padding=torch.tensor([False, False, True, True], device=device),
+    )
+    observed = None
+
+    @contextmanager
+    def fake_set_forward_context(*args, **kwargs):
+        nonlocal observed
+        observed = kwargs["is_padding"].clone()
+        yield
+
+    monkeypatch.setattr(
+        dflash_speculator, "set_forward_context", fake_set_forward_context
+    )
+    speculator = SimpleNamespace(
+        input_buffers=input_buffers,
+        vllm_config=SimpleNamespace(),
+        model=lambda **kwargs: kwargs["input_ids"],
+    )
+
+    result = DFlashSpeculator._run_model(
+        speculator,
+        num_tokens=4,
+        attn_metadata=None,
+        slot_mappings=None,
+        num_tokens_across_dp=None,
+    )
+
+    assert result.tolist() == [11, 12, 0, 0]
+    assert observed is not None
+    assert observed.tolist() == [False, False, True, True]
