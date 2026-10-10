@@ -718,65 +718,6 @@ class TritonPointerInputVariant:
         return TritonWarmupTensor(dtype, aligned=self.is_aligned(name), shape=shape)
 
 
-def _literal_str_refs(node: ast.AST) -> tuple[str | int, ...]:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str | int):
-        return (node.value,)
-    if isinstance(node, ast.List | ast.Tuple):
-        refs: list[str | int] = []
-        for elt in node.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str | int):
-                refs.append(elt.value)
-            else:
-                raise ValueError(
-                    f"Unsupported Triton specialization ref: {ast.dump(elt)}"
-                )
-        return tuple(refs)
-    raise ValueError(f"Unsupported Triton specialization refs: {ast.dump(node)}")
-
-
-def _normalize_arg_refs(
-    refs: tuple[str | int, ...],
-    arg_names: tuple[str, ...],
-) -> frozenset[str]:
-    names: set[str] = set()
-    for ref in refs:
-        if isinstance(ref, int):
-            names.add(arg_names[ref])
-        else:
-            names.add(ref)
-    return frozenset(names)
-
-
-def _decorator_keyword_refs(
-    function_def: ast.FunctionDef,
-    keyword_name: str,
-) -> tuple[str | int, ...]:
-    for decorator in function_def.decorator_list:
-        if not isinstance(decorator, ast.Call):
-            continue
-        decorator_name = get_ast_full_name(decorator.func)
-        if decorator_name not in ("triton.jit", "jit"):
-            continue
-        for keyword in decorator.keywords:
-            if keyword.arg == keyword_name:
-                return _literal_str_refs(keyword.value)
-    return ()
-
-
-def _triton_do_not_specialize_args(
-    kernel: Callable[..., Any],
-    function_def: ast.FunctionDef,
-    arg_names: tuple[str, ...],
-) -> frozenset[str]:
-    refs = getattr(kernel, "do_not_specialize", None)
-    if refs is not None:
-        return _normalize_arg_refs(tuple(refs), arg_names)
-    return _normalize_arg_refs(
-        _decorator_keyword_refs(function_def, "do_not_specialize"),
-        arg_names,
-    )
-
-
 def _triton_constexpr_arg_names(
     kernel: Callable[..., Any],
     function_def: ast.FunctionDef,
@@ -821,25 +762,3 @@ def _pointer_arg_names(
         if name in candidate_names:
             pointer_names.add(name)
     return frozenset(pointer_names)
-
-
-def trace_triton_kernel_specialization_args(
-    kernel: Callable[..., Any],
-) -> tuple[str, ...]:
-    function_def = get_function_source_node(kernel)
-    if not isinstance(function_def, ast.FunctionDef):
-        raise ValueError("Expected Triton kernel to be defined as a function")
-    source_fn = getattr(kernel, "fn", kernel)
-    arg_names = tuple(inspect.signature(source_fn).parameters)
-    constexpr_args = _triton_constexpr_arg_names(kernel, function_def, arg_names)
-    do_not_specialize_args = _triton_do_not_specialize_args(
-        kernel, function_def, arg_names
-    )
-    pointer_args = _pointer_arg_names(function_def, arg_names)
-
-    return tuple(
-        name
-        for name in arg_names
-        if name in constexpr_args
-        or (name not in pointer_args and name not in do_not_specialize_args)
-    )
