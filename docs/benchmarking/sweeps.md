@@ -106,6 +106,8 @@ Both options are also supported by `vllm bench sweep serve_workload`.
     You should set `_benchmark_name` to provide a human-readable name for parameter combinations involving many variables.
     This becomes mandatory if the file name would otherwise exceed the maximum path length allowed by the filesystem.
 
+    Serving, workload, and startup sweeps reject combinations that generate the same result directory before starting work. For example, `experiment/a` and `experiment_a` both become the same directory after filename sanitization. Give combinations names that remain distinct in their result paths.
+
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
 
