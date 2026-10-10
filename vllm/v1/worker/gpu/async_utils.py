@@ -146,6 +146,11 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.num_nans: np.ndarray | None = None
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
+            self.no_valid_token_mask: np.ndarray | None = None
+            if sampler_output.no_valid_token_mask is not None:
+                self.no_valid_token_mask = async_copy_to_np(
+                    sampler_output.no_valid_token_mask
+                )
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
             self.sampling_mask_tensors: SamplingMaskTensors | None = None
             if sampler_output.sampling_mask_tensors is not None:
@@ -194,6 +199,16 @@ class AsyncOutput(AsyncModelRunnerOutput):
             )
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(self.model_runner_output.num_nans_in_logits)
+
+        if self.no_valid_token_mask is not None:
+            mask_list = self.no_valid_token_mask.tolist()
+            self.model_runner_output.no_valid_token_req_ids = {
+                req_id
+                for req_id, is_invalid in zip(
+                    self.model_runner_output.req_ids, mask_list
+                )
+                if is_invalid
+            }
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()

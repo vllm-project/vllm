@@ -99,6 +99,16 @@ class Sampler(nn.Module):
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
         )
+
+        # Detect rows where every logit is -inf after logit processors
+        # (allowed_token_ids + bad_words contradiction, etc.)
+        no_valid_token_mask = torch.isneginf(logits).all(dim=-1)
+        if no_valid_token_mask.any():
+            # Neutralize for kernel safety: downstream ops (argmax, softmax)
+            # must not produce garbage from an all--inf row. The sampled token
+            # will be discarded before becoming request output.
+            logits[no_valid_token_mask] = 0.0
+
         # Sample the next token.
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
@@ -146,6 +156,7 @@ class Sampler(nn.Module):
             # token per request.
             sampled_token_ids=sampled.unsqueeze(-1),
             logprobs_tensors=logprobs_tensors,
+            no_valid_token_mask=no_valid_token_mask,
         )
         return sampler_output
 

@@ -2039,6 +2039,10 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        no_valid_token_req_ids = (
+            model_runner_output.no_valid_token_req_ids
+            or set()
+        )
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -2106,6 +2110,12 @@ class Scheduler(SchedulerInterface):
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
+            no_valid_token = req_id in no_valid_token_req_ids
+            if no_valid_token:
+                # Discard the garbage token from the neutralized all--inf row.
+                # The request will be finished with ERROR below.
+                generated_token_ids = []
+
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
@@ -2161,8 +2171,16 @@ class Scheduler(SchedulerInterface):
             prefill_stats = None
             status_before_stop = request.status
 
-            # Check for stop and update request status.
-            if new_token_ids:
+            if no_valid_token:
+                logger.error(
+                    "No valid token remains after applying sampling "
+                    "constraints for request %s. Terminating request.",
+                    req_id,
+                )
+                request.status = RequestStatus.FINISHED_ERROR
+                request.resumable = False
+                stopped = True
+            elif new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )

@@ -444,3 +444,219 @@ def test_sampler_bad_words(
                 assert logits_for_req[token_id] == -float("inf")
             else:
                 assert logits_for_req[token_id] != -float("inf")
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_no_valid_token_mixed_batch(device: str):
+    """Test that a mixed batch (valid / all--inf / valid) correctly
+    marks only the impossible row and neutralizes it for kernel safety,
+    while valid rows sample normally.
+
+    This tests the core invariant of the #57986 fix:
+        all--inf rows → no_valid_token_mask=True, logits neutralized
+        valid rows    → no_valid_token_mask=False, sampled normally
+    """
+    torch.set_default_device(device)
+    batch_size = 3
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+
+    # Row 0: valid — keep as-is
+    # Row 1: all -inf — simulate the contradiction
+    fake_logits[1, :] = float("-inf")
+    # Row 2: valid — keep as-is
+
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
+    )
+
+    sampler = Sampler()
+    sampler_output = sampler.forward(fake_logits, sampling_metadata)
+
+    no_valid_token_mask = sampler_output.no_valid_token_mask
+    assert no_valid_token_mask is not None
+    mask_cpu = no_valid_token_mask.cpu()
+
+    # Row 0: valid → False
+    assert not mask_cpu[0].item(), "Row 0 should have valid logits"
+    # Row 1: all -inf → True
+    assert mask_cpu[1].item(), "Row 1 should have no valid token"
+    # Row 2: valid → False
+    assert not mask_cpu[2].item(), "Row 2 should have valid logits"
+
+    sampled = sampler_output.sampled_token_ids.cpu()
+    # Rows 0 and 2 sampled normally (argmax of uniform logits → token 0)
+    assert sampled[0, 0].item() == 0
+    assert sampled[2, 0].item() == 0
+    # Row 1 neutralized to [0.0, 0.0, ...]; argmax(0) also returns 0,
+    # but this token is guaranteed discarded before becoming request output.
+    # We assert it did produce *something* so downstream kernels don't break.
+    assert sampled[1, 0].item() == 0
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_no_valid_token_with_allowed_token_ids_and_bad_words(device: str):
+    """Test that allowed_token_ids + bad_words contradiction correctly
+    produces no_valid_token_mask=True at the sampler level.
+
+    allowed_token_ids = [5]
+    bad_words_token_ids = [[5]]  (single-token bad word)
+    → every logit becomes -inf for that row
+    """
+    torch.set_default_device(device)
+    batch_size = 3
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+
+    # Row 0: no constraints → valid
+    # Row 1: allowed only [5], bad words bans [5] → all -inf
+    # Row 2: no constraints → valid
+
+    # Build allowed_token_ids_mask: True = suppress (inverted)
+    mask = torch.zeros(batch_size, VOCAB_SIZE, dtype=torch.bool, device=device)
+    mask[1, :] = True
+    mask[1, 5] = False  # only token 5 is allowed
+
+    # Build bad_words_token_ids: single-token bad word [5]
+    bad_words_token_ids = {1: [[5]]}
+    output_token_ids: list[list[int]] = [
+        np.random.randint(0, VOCAB_SIZE, size=NUM_OUTPUT_TOKENS).tolist()
+        for _ in range(batch_size)
+    ]
+    prompt_token_ids: list[list[int]] = [
+        np.random.randint(
+            0, VOCAB_SIZE, size=np.random.randint(1, MAX_NUM_PROMPT_TOKENS)
+        ).tolist()
+        for _ in range(batch_size)
+    ]
+    prompt_tokens_tensor = _create_prompt_tokens_tensor(
+        prompt_token_ids, VOCAB_SIZE, device
+    )
+
+    sampling_metadata = SamplingMetadata(
+        temperature=torch.full((batch_size,), 0.0),
+        all_greedy=True,
+        all_random=False,
+        top_p=None,
+        top_k=None,
+        generators={},
+        max_num_logprobs=0,
+        prompt_token_ids=prompt_tokens_tensor,
+        output_token_ids=output_token_ids,
+        spec_token_ids=[[] for _ in range(batch_size)],
+        frequency_penalties=_create_penalty_tensor(batch_size, 0.0, device),
+        presence_penalties=_create_penalty_tensor(batch_size, 0.0, device),
+        repetition_penalties=_create_penalty_tensor(batch_size, 1.0, device),
+        no_penalties=True,
+        allowed_token_ids_mask=mask,
+        bad_words_token_ids=bad_words_token_ids,
+        logitsprocs=LogitsProcessors(),
+    )
+
+    sampler = Sampler()
+    sampler_output = sampler.forward(fake_logits, sampling_metadata)
+
+    no_valid_token_mask = sampler_output.no_valid_token_mask
+    assert no_valid_token_mask is not None
+    mask_cpu = no_valid_token_mask.cpu()
+
+    # Row 0: valid → False
+    assert not mask_cpu[0].item(), "Row 0 should be valid"
+    # Row 1: contradiction → True
+    assert mask_cpu[1].item(), "Row 1 should have no valid token"
+    # Row 2: valid → False
+    assert not mask_cpu[2].item(), "Row 2 should be valid"
+
+    sampled = sampler_output.sampled_token_ids.cpu()
+    # Rows 0 and 2 produce a valid token
+    assert sampled[0, 0].item() >= 0
+    assert sampled[2, 0].item() >= 0
+    # Row 1 produces the neutralized token (0) which will be discarded
+    assert sampled[1, 0].item() == 0
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_no_valid_token_nan_not_detected(device: str):
+    """NaN rows must NOT be detected as no-valid-token.
+    torch.isneginf does not match NaNs, so they are treated as
+    non--inf values and left alone.
+    """
+    torch.set_default_device(device)
+    batch_size = 3
+    fake_logits = torch.full((batch_size, VOCAB_SIZE), 1e-2, dtype=torch.float)
+    fake_logits[1, :] = float("nan")
+
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
+    )
+
+    sampler = Sampler()
+    sampler_output = sampler.forward(fake_logits, sampling_metadata)
+
+    mask = sampler_output.no_valid_token_mask
+    assert mask is not None
+    mask_cpu = mask.cpu()
+    assert not mask_cpu[0].item(), "Row 0 should not be invalid"
+    assert not mask_cpu[1].item(), "NaN row should not be detected as invalid"
+    assert not mask_cpu[2].item(), "Row 2 should not be invalid"
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_no_valid_token_posinf_not_detected(device: str):
+    """+inf rows must NOT be detected as no-valid-token."""
+    torch.set_default_device(device)
+    batch_size = 3
+    fake_logits = torch.full((batch_size, VOCAB_SIZE), 1e-2, dtype=torch.float)
+    fake_logits[1, :] = float("inf")
+
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
+    )
+
+    sampler = Sampler()
+    sampler_output = sampler.forward(fake_logits, sampling_metadata)
+
+    mask = sampler_output.no_valid_token_mask
+    assert mask is not None
+    mask_cpu = mask.cpu()
+    assert not mask_cpu[0].item()
+    assert not mask_cpu[1].item(), "+inf row should not be detected as invalid"
+    assert not mask_cpu[2].item()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_no_valid_token_mixed_finite_and_neginf(device: str):
+    """Rows with a mix of -inf and finite values should NOT be detected."""
+    torch.set_default_device(device)
+    batch_size = 1
+    fake_logits = torch.full((batch_size, VOCAB_SIZE), 1e-2, dtype=torch.float)
+    fake_logits[0, :] = float("-inf")
+    fake_logits[0, 5] = 1.0
+
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
+    )
+
+    sampler = Sampler()
+    sampler_output = sampler.forward(fake_logits, sampling_metadata)
+
+    mask = sampler_output.no_valid_token_mask
+    assert mask is not None
+    assert not mask[0].item()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_no_valid_token_all_neginf_detected(device: str):
+    """Only rows where EVERY logit is -inf should be detected."""
+    torch.set_default_device(device)
+    batch_size = 1
+    fake_logits = torch.full((batch_size, VOCAB_SIZE), float("-inf"))
+
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device)
+    )
+
+    sampler = Sampler()
+    sampler_output = sampler.forward(fake_logits, sampling_metadata)
+
+    mask = sampler_output.no_valid_token_mask
+    assert mask is not None
+    assert mask[0].item(), "All -inf row must be detected as invalid"

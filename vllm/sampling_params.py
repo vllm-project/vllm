@@ -860,6 +860,24 @@ class SamplingParams(
                 value=self.bad_words,
             )
 
+        # Static check: allowed_token_ids must not be entirely blocked by
+        # single-token bad words at step 0 (no prefix yet). Multi-token bad
+        # words are handled by the runtime check in the sampler.
+        if self.allowed_token_ids:
+            single_token_banned = {
+                ids[0]
+                for ids in self._bad_words_token_ids
+                if len(ids) == 1
+            }
+            if set(self.allowed_token_ids).issubset(single_token_banned):
+                raise VLLMValidationError(
+                    "Every allowed_token_id is blocked by a single-token "
+                    "bad_words entry at the first generation step. No legal "
+                    "token can be generated.",
+                    parameter="allowed_token_ids",
+                    value=self.allowed_token_ids,
+                )
+
     @cached_property
     def sampling_type(self) -> SamplingType:
         if self.temperature < _SAMPLING_EPS:
