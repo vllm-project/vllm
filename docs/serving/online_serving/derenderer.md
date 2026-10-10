@@ -89,7 +89,7 @@ The derenderer builds its tool and reasoning parsers from its own server flags p
 
 A mismatch doesn't fail. The parser just splits `reasoning`, `content` and `tool_calls` differently from what `vllm serve` would return.
 
-`/v1/completions/derender` only detokenizes. It never runs tool or reasoning parsers, the same as `/v1/completions` on `vllm serve`. It only reads `skip_special_tokens` from `completion_request`.
+`/v1/completions/derender` only detokenizes. It never runs tool or reasoning parsers, the same as `/v1/completions` on `vllm serve`. From `completion_request` it reads `skip_special_tokens`, and `logprobs` and `logprob_token_ids` to cut `top_logprobs` the way `/v1/completions` does.
 
 ## Streaming
 
@@ -105,7 +105,7 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **Send `prompt_token_ids` on the first chunk, even without a parser.** It seeds detokenization so the first token's leading space matches the coupled endpoint (see [Request format](#request-format)). Later chunks already carry that context in `stream_state`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.
 
-`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Streaming derender does the same per chunk on the plain detokenization path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
+`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Generate returns every top-k candidate the engine produced; derender keeps the ones the coupled endpoint would, with the same helpers: the first `top_logprobs` on chat (all of them for `top_logprobs=-1`) and the first `logprobs + 1` on completions. On completions that means `logprobs=-1` returns no candidates, as `/v1/completions` does, although generate still sends the whole vocabulary per position, so prefer an explicit count there. It reads those values from `chat_request` / `completion_request`, so without the original request it returns every candidate. Requests that use `logprob_token_ids` get no output logprobs from generate (their `sampling_params.logprobs` is unset), so derender has none to return for them either. Streaming derender does the same per chunk on the plain detokenization path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
 
 ## Streaming cost
 

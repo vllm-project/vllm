@@ -356,6 +356,32 @@ def decode_token_ids(
     return out
 
 
+def chat_top_logprobs_limit(
+    top_logprobs: int | None, return_all: bool = False
+) -> int | None:
+    """How many of a position's logprob candidates `/v1/chat/completions`
+    returns, in the engine's order (sampled token first): the first
+    ``top_logprobs``, none when it is unset, and all of them (``None``) for
+    ``top_logprobs=-1`` or ``logprob_token_ids`` (``return_all``). Shared with
+    chat derender so the two cannot drift."""
+    if return_all or top_logprobs == -1:
+        return None
+    return top_logprobs or 0
+
+
+def completion_top_logprobs_limit(
+    logprobs: int | None, return_all: bool = False
+) -> int | None:
+    """How many of a position's logprob candidates `/v1/completions` returns:
+    the first ``logprobs + 1`` (the OpenAI completions convention), so none for
+    ``logprobs=-1``, and all of them (``None``) for ``logprob_token_ids``
+    (``return_all``) or when ``logprobs`` is unset. Shared with completions
+    derender so the two cannot drift."""
+    if return_all or logprobs is None:
+        return None
+    return max(logprobs + 1, 0)
+
+
 def clamp_prompt_logprobs(
     prompt_logprobs: PromptLogprobs | None,
 ) -> PromptLogprobs | None:

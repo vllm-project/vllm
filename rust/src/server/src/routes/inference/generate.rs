@@ -5,7 +5,7 @@ mod convert;
 mod types;
 mod validate;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -158,7 +158,7 @@ async fn generate_chunk_stream(
     ResponseOptions {
         include_usage,
         include_continuous_usage,
-        logprobs: output_logprobs,
+        include_logprobs,
         // Ignored: raw generate streaming has no prompt-logprobs wire shape.
         include_prompt_logprobs: _,
         return_token_ids,
@@ -213,15 +213,13 @@ async fn generate_chunk_stream(
                     continue;
                 }
 
-                let logprobs = if let Some(requested) = output_logprobs
-                    && !token_ids.is_empty()
-                {
+                let logprobs = if include_logprobs && !token_ids.is_empty() {
                     let logprobs = output.logprobs.as_ref().ok_or_else(|| {
                         server_error!(
                             "raw generate stream requested logprobs but generation returned none"
                         )
                     })?;
-                    Some(raw_logprobs_to_generate(logprobs, requested)?)
+                    Some(raw_logprobs_to_generate(logprobs)?)
                 } else {
                     None
                 };
@@ -285,19 +283,19 @@ fn collect_generate(
         include_usage: _,
         // Ignored: continuous usage is a streaming-only option.
         include_continuous_usage: _,
-        logprobs: output_logprobs,
+        include_logprobs,
         include_prompt_logprobs,
         return_token_ids,
     }: ResponseOptions,
     mm_placeholders: Option<MultiModalPlaceholders>,
 ) -> Result<GenerateResponse, ApiError> {
-    let logprobs = if let Some(requested) = output_logprobs {
+    let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
             ApiError::server_error(
                 "raw generate response requested logprobs but generation returned none".to_string(),
             )
         })?;
-        Some(raw_logprobs_to_generate(logprobs, requested)?)
+        Some(raw_logprobs_to_generate(logprobs)?)
     } else {
         None
     };
@@ -374,14 +372,11 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
     Some(placeholders)
 }
 
-fn raw_logprobs_to_generate(
-    logprobs: &Logprobs,
-    requested: i32,
-) -> Result<GenerateLogProbs, ApiError> {
+fn raw_logprobs_to_generate(logprobs: &Logprobs) -> Result<GenerateLogProbs, ApiError> {
     let content = logprobs
         .positions
         .iter()
-        .map(|position| position_to_generate_logprobs_content(position, requested))
+        .map(position_to_generate_logprobs_content)
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(GenerateLogProbs {
@@ -402,12 +397,12 @@ fn raw_prompt_logprobs_to_maps(
         .collect()
 }
 
-/// `top_logprobs` matches the Python generate server: the engine's entries (the
-/// sampled token first, then ranks 1..k) with repeated token ids dropped, cut to
-/// `max(requested, 1)` entries, or all of them for `-1`.
+/// `top_logprobs` matches the Python generate server: every candidate the
+/// engine returned (the sampled token first, then ranks 1..k) with the repeated
+/// sampled entry dropped, and no cut. Derender applies each OpenAI endpoint's
+/// cut.
 fn position_to_generate_logprobs_content(
     position: &PositionLogprobs,
-    requested: i32,
 ) -> Result<GenerateLogProbsContent, ApiError> {
     let chosen = position.entries.first().ok_or_else(|| {
         ApiError::server_error(
@@ -415,9 +410,9 @@ fn position_to_generate_logprobs_content(
         )
     })?;
 
-    // One pass: the first entry of each token id wins, as in Python's dict. The
-    // sampled token is the only one the engine can list twice.
-    let mut seen = HashSet::with_capacity(position.entries.len());
+    // The engine row is the sampled token followed by the top k, which are
+    // distinct; only the sampled token can repeat, at its own rank (anywhere in
+    // 1..=k). Skip that repeat, as Python's dict does: linear, no allocation.
     Ok(GenerateLogProbsContent {
         token_id: chosen.token_id,
         logprob: clamp_logprob(chosen.logprob),
@@ -425,9 +420,9 @@ fn position_to_generate_logprobs_content(
         top_logprobs: position
             .entries
             .iter()
-            .filter(|entry| seen.insert(entry.token_id))
-            .take(usize::try_from(requested).map_or(usize::MAX, |n| n.max(1)))
-            .map(|entry| GenerateLogProb {
+            .enumerate()
+            .filter(|(i, entry)| *i == 0 || entry.token_id != chosen.token_id)
+            .map(|(_, entry)| GenerateLogProb {
                 token_id: entry.token_id,
                 logprob: clamp_logprob(entry.logprob),
                 rank: wire_rank(entry.rank),
@@ -556,8 +551,8 @@ mod tests {
         }
     }
 
-    fn top(position: &PositionLogprobs, requested: i32) -> Vec<(u32, Option<u32>)> {
-        position_to_generate_logprobs_content(position, requested)
+    fn top(position: &PositionLogprobs) -> Vec<(u32, Option<u32>)> {
+        position_to_generate_logprobs_content(position)
             .unwrap()
             .top_logprobs
             .iter()
@@ -569,24 +564,31 @@ mod tests {
     fn generate_top_logprobs_drop_the_repeated_sampled_token() {
         // Sampled token 7 is also top-1: the engine row is [7, 7, 8].
         let pos = position(&[(7, -0.1, 1), (7, -0.1, 1), (8, -2.0, 2)]);
-        assert_eq!(top(&pos, 2), vec![(7, Some(1)), (8, Some(2))]);
+        assert_eq!(top(&pos), vec![(7, Some(1)), (8, Some(2))]);
     }
 
     #[test]
-    fn generate_top_logprobs_keep_sampled_first_when_outside_top_k() {
-        // Sampled token 50 has vocab rank 5; it takes a slot and rank 2 drops
-        // out, as on the Python generate server and the OpenAI endpoints.
+    fn generate_top_logprobs_keep_every_candidate_when_sampled_is_outside_top_k() {
+        // Sampled token 50 has vocab rank 5 at logprobs=2: sampled first, then
+        // ranks 1 and 2, all kept (derender cuts per endpoint).
         let pos = position(&[(50, -3.0, 5), (10, -0.2, 1), (20, -1.0, 2)]);
-        assert_eq!(top(&pos, 2), vec![(50, Some(5)), (10, Some(1))]);
+        assert_eq!(top(&pos), vec![(50, Some(5)), (10, Some(1)), (20, Some(2))]);
     }
 
     #[test]
-    fn generate_top_logprobs_respect_zero_and_all() {
-        let pos = position(&[(7, -0.1, 1), (7, -0.1, 1), (8, -2.0, 2), (9, -3.0, 3)]);
-        assert_eq!(top(&pos, 0), vec![(7, Some(1))]);
+    fn generate_top_logprobs_drop_the_sampled_repeat_at_its_own_rank() {
+        // Sampled token 30 is rank 3: the engine row is [30, 10, 20, 30, 40],
+        // so the repeat is at entries[3], not entries[1].
+        let pos = position(&[
+            (30, -1.0, 3),
+            (10, -0.2, 1),
+            (20, -0.5, 2),
+            (30, -1.0, 3),
+            (40, -2.0, 4),
+        ]);
         assert_eq!(
-            top(&pos, -1),
-            vec![(7, Some(1)), (8, Some(2)), (9, Some(3))]
+            top(&pos),
+            vec![(30, Some(3)), (10, Some(1)), (20, Some(2)), (40, Some(4))]
         );
     }
 
@@ -599,7 +601,7 @@ mod tests {
         entries.extend((0..VOCAB).map(|t| (t, -1.0 - t as f32, t + 1)));
         let pos = position(&entries);
         let start = std::time::Instant::now();
-        let got = top(&pos, -1);
+        let got = top(&pos);
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(got.len(), VOCAB as usize);
         assert_eq!(got[0], (5, Some(1)));
@@ -609,10 +611,10 @@ mod tests {
     fn generate_rank_zero_from_a_nan_logprob_is_none() {
         // The engine reports rank 0 for a sampled token whose logprob is NaN.
         let pos = position(&[(7, f32::NAN, 0), (8, -0.2, 1)]);
-        let content = position_to_generate_logprobs_content(&pos, 1).unwrap();
+        let content = position_to_generate_logprobs_content(&pos).unwrap();
         assert_eq!(content.rank, None);
         assert_eq!(content.logprob, -9999.0);
-        assert_eq!(top(&pos, 1), vec![(7, None)]);
+        assert_eq!(top(&pos), vec![(7, None), (8, Some(1))]);
     }
 
     #[tokio::test]

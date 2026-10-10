@@ -108,10 +108,13 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
 - `content` has one entry per generated token, in generation order.
 - `top_logprobs` is a list, not a dict: JSON turns dict keys into strings and
   the ordering would be implicit. It follows the engine's order: the sampled
-  token first, then the remaining candidates in rank order. With non-greedy
-  sampling the sampled token can sit outside the top k (for example ranks
-  `[5, 1, 2]` at `logprobs=2`); it then takes one of the `logprobs` slots and
-  the rank-k candidate is left out, as on the OpenAI endpoints.
+  token first, then the remaining candidates in rank order. It holds every
+  candidate the engine returned and is not cut to `logprobs`: k entries when
+  the sampled token is in the top k, k + 1 when non-greedy sampling picked a
+  token outside it (for example ranks `[5, 1, 2]` at `logprobs=2`). The OpenAI
+  endpoints cut this differently (`/v1/chat/completions` keeps the first k,
+  `/v1/completions` the first k + 1), so [derender](derenderer.md) applies the
+  cut of the endpoint it renders for.
 - `rank` is the token's rank in the vocabulary distribution (1 = most likely)
   on every entry, the sampled one included; a top-k candidate's rank is its
   top-k position. The list is not sorted by it, so sort by `rank` if you need
@@ -132,6 +135,16 @@ choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
     `return_tokens_as_token_ids` on `/v1/chat/completions` and `/v1/completions`
     is unchanged: it is a user-facing OpenAI option and still uses the
     `token_id:N` format.
+    `top_logprobs` is no longer cut to `max(logprobs, 1)` entries, in either
+    `output_mode`: it now holds every candidate the engine returned, which is
+    `logprobs + 1` entries when the sampled token is outside the top
+    `logprobs`. Clients that assume `len(top_logprobs) == logprobs` should
+    take the first `logprobs` entries after sorting by `rank`.
+    Derender applies each endpoint's cut from the original request, so send
+    `chat_request` / `completion_request` to derender whenever logprobs are
+    requested: without it derender returns every candidate, which on chat is
+    `top_logprobs + 1` entries where `/v1/chat/completions` returns
+    `top_logprobs`.
 
 ## Multimodal Render Features
 

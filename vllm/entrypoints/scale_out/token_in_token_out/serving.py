@@ -424,14 +424,12 @@ class ServingTokens(GenerateBaseServing):
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
-                        num_output_top_logprobs=sampling_params.logprobs,
                         tokenizer=tokenizer,
                     )
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
-                        num_output_top_logprobs=sampling_params.logprobs,
                     )
             else:
                 logprobs = None
@@ -597,14 +595,12 @@ class ServingTokens(GenerateBaseServing):
                             logprobs = self._create_text_logprobs(
                                 token_ids=delta_token_ids,
                                 top_logprobs=out_logprobs,
-                                num_output_top_logprobs=sampling_params.logprobs,
                                 tokenizer=tokenizer,
                             )
                         else:
                             logprobs = self._create_tokens_logprobs(
                                 token_ids=delta_token_ids,
                                 top_logprobs=out_logprobs,
-                                num_output_top_logprobs=sampling_params.logprobs,
                             )
                     else:
                         logprobs = None
@@ -724,14 +720,15 @@ class ServingTokens(GenerateBaseServing):
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
-        num_output_top_logprobs: int | None = None,
         tokenizer: TokenizerLike | None = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs for ``output_mode="text"``.
 
         With a ``tokenizer`` the tokens are decoded strings and carry ``bytes``;
         without one (``--return-tokens-as-token-ids``) they are ``token_id:N``
-        placeholders.
+        placeholders. Like tokens mode, ``top_logprobs`` carries every candidate
+        the engine returned (the sampled token first, then the top k), not cut
+        to the requested count.
         """
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
@@ -753,14 +750,7 @@ class ServingTokens(GenerateBaseServing):
                         bytes=token_bytes,
                         top_logprobs=[
                             _top_logprob(top_id, logprob, tokenizer)
-                            for i, (top_id, logprob) in enumerate(
-                                step_top_logprobs.items()
-                            )
-                            if num_output_top_logprobs is not None
-                            and (
-                                num_output_top_logprobs == -1
-                                or i < max(num_output_top_logprobs, 1)
-                            )
+                            for top_id, logprob in step_top_logprobs.items()
                         ],
                     )
                 )
@@ -771,9 +761,15 @@ class ServingTokens(GenerateBaseServing):
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
-        num_output_top_logprobs: int | None = None,
     ) -> GenerateLogProbs:
         """Create generate-shaped logprobs (integer token ids, no tokenizer).
+
+        ``top_logprobs`` carries every candidate the engine returned for the
+        position: the sampled token first, then the top k, so k entries when the
+        sampled token is in the top k and k + 1 when it is not. It is not cut to
+        the requested count: `/v1/chat/completions` and
+        `/v1/completions` cut differently, and derender applies each endpoint's
+        cut the way the coupled server does.
 
         The engine reports rank 0 for a sampled token whose logprob is NaN; that
         is not a rank, so it is sent as ``None`` (the logprob is clamped).
@@ -802,14 +798,7 @@ class ServingTokens(GenerateBaseServing):
                                 logprob=_clamp_logprob(top_logprob.logprob),
                                 rank=top_logprob.rank or None,
                             )
-                            for rank_index, (top_token_id, top_logprob) in enumerate(
-                                step_top_logprobs.items()
-                            )
-                            if num_output_top_logprobs is not None
-                            and (
-                                num_output_top_logprobs == -1
-                                or rank_index < max(num_output_top_logprobs, 1)
-                            )
+                            for top_token_id, top_logprob in step_top_logprobs.items()
                         ],
                     )
                 )
