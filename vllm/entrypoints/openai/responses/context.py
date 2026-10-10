@@ -378,6 +378,7 @@ class ParsableContext(ConversationContext):
                         tool_calls or [], self.request
                     ),
                     tools=self.request.tools,
+                    encrypted_reasoning=self.request.is_include_encrypted_reasoning(),
                 )
             )
         elif completion.text:
