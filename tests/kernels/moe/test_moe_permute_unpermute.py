@@ -510,3 +510,52 @@ def test_moe_permute_scratch_grows_until_workspace_lock(workspace_init) -> None:
         num_experts=16, num_local_experts=16, device=device
     )
     assert rebuilt.max_expanded_rows == 384
+
+
+@pytest.mark.parametrize("n_expert", [16, 128])
+@pytest.mark.parametrize("n_valid,n_pad", [(1, 7), (27, 5)])
+@pytest.mark.parametrize("use_scratch", [False, True])
+def test_moe_permute_invalid_expert_ids_without_expert_map(
+    n_expert: int, n_valid: int, n_pad: int, use_scratch: bool
+) -> None:
+    """Padding routes (topk_ids == -1) must not shift the expert offsets of
+    valid routes when no expert_map is given."""
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    topk, n_hidden = 4, 256
+    n_token = n_valid + n_pad
+    # Column 0 holds the token index (exact in bf16) to identify permuted rows.
+    hidden_states = torch.randn(n_token, n_hidden, device="cuda").to(torch.bfloat16)
+    hidden_states[:, 0] = torch.arange(n_token, device="cuda")
+    valid_ids = torch.stack(
+        [torch.randperm(n_expert, device="cuda")[:topk] for _ in range(n_valid)]
+    ).to(torch.int32)
+    padding = torch.full((n_pad, topk), -1, dtype=torch.int32, device="cuda")
+    topk_ids = torch.cat([valid_ids, padding])
+
+    scratch = None
+    if use_scratch:
+        scratch = MoEPermuteScratch(
+            num_experts=n_expert,
+            num_local_experts=n_expert,
+            device=hidden_states.device,
+        )
+    permuted, _, expert_offsets, _, _ = moe_permute(
+        hidden_states=hidden_states,
+        a1q_scale=None,
+        topk_ids=topk_ids,
+        n_expert=n_expert,
+        scratch=scratch,
+    )
+
+    counts = torch.bincount(valid_ids.flatten(), minlength=n_expert)
+    expected_offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
+    torch.testing.assert_close(expert_offsets, expected_offsets)
+
+    # Each expert segment holds exactly the tokens routed to that expert.
+    for e in torch.nonzero(counts).flatten().tolist():
+        lo, hi = expert_offsets[e].item(), expert_offsets[e + 1].item()
+        actual = permuted[lo:hi, 0].long().sort().values
+        expected = (valid_ids == e).any(dim=1).nonzero().flatten()
+        torch.testing.assert_close(actual, expected)

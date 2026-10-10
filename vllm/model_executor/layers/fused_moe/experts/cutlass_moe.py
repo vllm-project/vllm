@@ -215,10 +215,12 @@ def run_cutlass_moe_fp8(
         )
         expert_offsets = expert_first_token_offset[:-1]
 
-    if not per_act_token and (expert_map is not None or use_batched_format):
+    if not per_act_token:
         # this is necessary to avoid imprecise scale calculation caused by
         # random data in the unused workspace. The workspace is unused when
-        # this rank handles only partial tokens, or when it is batched .
+        # this rank handles only partial tokens, when it is batched, or when
+        # invalid routes (e.g. -1 for padding tokens) are sorted past the valid
+        # rows. The dynamic per-tensor scale of act_out reduces over every row.
         mm1_out.fill_(0)
 
     ops.cutlass_moe_mm(
@@ -1205,6 +1207,12 @@ def run_cutlass_moe_w4a8_fp8(
         expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, True
     )
     expert_offsets = expert_first_token_offset[:-1]
+
+    if not per_act_token:
+        # Rows past the valid routes (non-local experts, or invalid routes such
+        # as -1 for padding tokens) are never written by the grouped GEMM, but
+        # the dynamic per-tensor scale of act_out reduces over every row.
+        mm1_out.fill_(0)
 
     ops.cutlass_w4a8_moe_mm(
         mm1_out,

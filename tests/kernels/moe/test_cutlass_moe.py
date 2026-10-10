@@ -925,3 +925,95 @@ def test_run_cutlass_moe_fp8(
         torch.testing.assert_close(
             output_random_workspace, output_zero_workspace, atol=5e-3, rtol=1e-3
         )
+
+
+@pytest.mark.parametrize("per_out_channel", [True, False])
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()
+    ),
+    reason="Grouped gemm is not supported on this GPU type.",
+)
+def test_run_cutlass_moe_fp8_padded_routes_per_tensor(
+    per_out_channel: bool,
+    workspace_init,
+):
+    """Invalid routes without an expert_map must not skew the dynamic
+    per-tensor activation scale.
+
+    The -1 routes of padding tokens sort past the valid rows, so their mm1_out
+    rows are never written by the grouped GEMM. Stale workspace data there must
+    not leak into the per-tensor scale used to quantize act_out.
+    """
+    set_random_seed(7)
+    per_act_token = False
+    num_valid, num_tokens, topk = 16, 32, 2
+    n, k, e = 256, 512, 8
+    with set_current_vllm_config(vllm_config):
+        mt = MOETensors8Bit.make_moe_tensors_8bit(
+            num_tokens, k, n, e, per_act_token, per_out_channel
+        )
+        # Zero the padding tokens so the input's per-tensor scale is the same
+        # with and without them; only the intermediate scale is under test.
+        hidden_states = mt.a.clone()
+        hidden_states[num_valid:] = 0
+
+        score = torch.randn((num_tokens, e), device="cuda", dtype=torch.half)
+        topk_weights, topk_ids, _ = fused_topk(
+            hidden_states, score, topk, renormalize=False
+        )
+        topk_ids[num_valid:] = -1
+        topk_weights[num_valid:] = 0
+
+        ab_strides1 = torch.full((e,), k, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e,), n, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e,), 2 * n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e,), k, device="cuda", dtype=torch.int64)
+
+        def run(m: int, randomize_workspace: bool) -> torch.Tensor:
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                hidden_states[:m], None, torch.float8_e4m3fn, per_act_token
+            )
+            workspace13 = torch.zeros(
+                m * topk * max(2 * n, k), device="cuda", dtype=mt.a.dtype
+            )
+            workspace2 = torch.zeros(
+                m * topk * max(n, k), device="cuda", dtype=mt.a.dtype
+            )
+            if randomize_workspace:
+                workspace13.random_()
+                workspace2.random_()
+            output = torch.zeros((m, k), device="cuda", dtype=mt.a.dtype)
+            run_cutlass_moe_fp8(
+                output,
+                a1q,
+                mt.w1_q,
+                mt.w2_q,
+                topk_ids[:m],
+                MoEActivation.SILU,
+                e,
+                None,  # no expert_map
+                mt.w1_scale,
+                mt.w2_scale,
+                a1q_scale,
+                None,  # dynamic a2 scale
+                ab_strides1,
+                ab_strides2,
+                c_strides1,
+                c_strides2,
+                workspace13,
+                workspace2,
+                None,
+                mt.a.dtype,
+                per_act_token,
+                per_out_channel,
+                False,
+                topk_weights[:m],
+                None,
+            )
+            return output
+
+        expected = run(num_valid, randomize_workspace=False)
+        assert expected.abs().max() > 0
+        actual = run(num_tokens, randomize_workspace=True)
+        torch.testing.assert_close(actual[:num_valid], expected, atol=5e-3, rtol=1e-3)
