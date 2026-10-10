@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.parser_manager import ParserManager
@@ -316,3 +317,88 @@ def test_whitespace_only_surrounding_content_is_not_preserved(tokenizer):
 def test_tool_parser_registered():
     assert ToolParserManager.get_tool_parser("k2_horizon") is K2HorizonToolParser
     assert K2HorizonToolParser.supports_required_and_named is False
+
+
+def test_regex_timeout_treated_as_no_tool_call(tokenizer):
+    parser = K2HorizonToolParser(tokenizer, _request().tools)
+    output = _group(_xml_call("lookup", [("query", "x")]))
+    mock_regex = MagicMock()
+    mock_regex.finditer.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(parser, "_TOOL_CALL_RE", mock_regex):
+        result = parser.extract_tool_calls(output, _request())
+
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == output
+    mock_regex.finditer.assert_called_once()
+    assert (
+        mock_regex.finditer.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
+
+
+def test_arg_regex_timeout_treated_as_no_tool_call(tokenizer):
+    parser = K2HorizonToolParser(tokenizer, _request().tools)
+    output = _group(_xml_call("lookup", [("query", "x")]))
+    mock_regex = MagicMock()
+    mock_regex.finditer.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(K2HorizonToolParser, "_ARG_RE", mock_regex):
+        result = parser.extract_tool_calls(output, _request())
+
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == output
+    mock_regex.finditer.assert_called_once()
+    assert (
+        mock_regex.finditer.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
+
+
+def test_streaming_regex_timeout_is_not_retried_on_later_delta(tokenizer):
+    request = _request()
+    parser = K2HorizonToolParser(tokenizer, request.tools)
+    output = _group(_xml_call("lookup", [("query", "x")]))
+    mock_regex = MagicMock()
+    mock_regex.finditer.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(parser, "_TOOL_CALL_RE", mock_regex):
+        for char in output[:-1]:
+            parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text="",
+                delta_text=char,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=request,
+            )
+        first = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text="",
+            delta_text=output[-1],
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        second = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text="",
+            delta_text="x",
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+    assert first is not None
+    assert not first.tool_calls
+    assert second is None or not second.tool_calls
+    mock_regex.finditer.assert_called_once()
+    assert (
+        mock_regex.finditer.call_args.kwargs["timeout"]
+        == envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+    )
