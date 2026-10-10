@@ -427,6 +427,43 @@ def test_tensor_broadcast():
     distributed_run(worker_fn_tensor_broadcast, 2)
 
 
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16, np.float32])
+@pytest.mark.parametrize("transport", ["shm", "overflow", "remote"])
+@pytest.mark.parametrize("writable", [True, False])
+def test_numpy_broadcast_retains_values_after_ring_reuse(dtype, transport, writable):
+    """Received arrays must remain valid after the writer reuses a ring slot."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=0 if transport == "remote" else 1,
+        max_chunk_bytes=(2 if transport == "shm" else 1) * 1024 * 1024,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    writer.wait_until_ready()
+    reader.wait_until_ready()
+    array = np.full(1024 * 1024 // np.dtype(dtype).itemsize, 17, dtype=dtype)
+    array.flags.writeable = writable
+    try:
+        writer.enqueue({"array": array, "alias": array})
+        received = reader.dequeue(timeout=5)
+        assert received["array"] is received["alias"]
+        assert received["array"].dtype == array.dtype
+        assert received["array"].flags.writeable == writable
+        np.testing.assert_array_equal(received["array"], array)
+        for value in range(4):
+            writer.enqueue({"replacement": np.full_like(array, value)})
+            replacement = reader.dequeue(timeout=5)
+            np.testing.assert_array_equal(replacement["replacement"], value)
+            np.testing.assert_array_equal(received["array"], array)
+        if writable:
+            received["array"][0] = 42
+            assert array[0] == 17
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+
+
 def _dumps_oob(obj) -> tuple[bytes, list]:
     """Pickle `obj` the same way `MessageQueue.enqueue` does: tensor
     dispatch table + out-of-band buffers >= 1MiB."""
