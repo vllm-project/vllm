@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from vllm.benchmarks.sweep.plot import (
+    PlotBinner,
     PlotEqualTo,
     PlotFilterBase,
     PlotFilters,
@@ -204,6 +205,20 @@ class TestPlotFilters:
         assert filter_obj.var == "request_rate"
         assert filter_obj.target == "inf"
 
+    def test_parse_str_preserves_operator_in_quoted_target(self):
+        """Only the first operator separates a filter's variable and target."""
+        filter_obj = PlotFilterBase.parse_str('model=="foo==bar"')
+
+        assert filter_obj.var == "model"
+        assert filter_obj.target == "foo==bar"
+
+    def test_parse_str_strips_variable_whitespace(self):
+        """Whitespace around a filter expression should not alter its column."""
+        filter_obj = PlotFilterBase.parse_str(" request_rate >= 10.0 ")
+
+        assert filter_obj.var == "request_rate"
+        assert filter_obj.target == "10.0"
+
     def test_parse_multiple_filters(self):
         """Test parsing multiple filters."""
         filters = PlotFilters.parse_str("request_rate>5.0,value<=40")
@@ -215,3 +230,10 @@ class TestPlotFilters:
         """Test parsing empty filter string."""
         filters = PlotFilters.parse_str("")
         assert len(filters) == 0
+
+    def test_parse_binner_strips_whitespace(self):
+        """Whitespace around a bin expression should not break parsing."""
+        binner = PlotBinner.parse_str(" request_rate % 5 ")
+
+        assert binner.var == "request_rate"
+        assert binner.bin_size == 5
