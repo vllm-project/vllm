@@ -137,7 +137,10 @@ def test_aux_output_connector_policy_is_independent_of_role(
             },
         )
     if blocked:
-        with pytest.raises(ValueError, match=f"incompatible with {connector}"):
+        expected_connector = (
+            "NixlPullConnector" if connector == "NixlConnector" else connector
+        )
+        with pytest.raises(ValueError, match=f"incompatible with {expected_connector}"):
             VllmConfig._verify_aux_output_compatibility(config)
     else:
         VllmConfig._verify_aux_output_compatibility(config)

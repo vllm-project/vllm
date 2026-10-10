@@ -303,33 +303,49 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
             )
 
 
-@pytest.mark.parametrize(
-    "kv_transfer_config",
-    [
-        KVTransferConfig(
-            kv_connector="NixlConnector",
-            kv_role="kv_both",
+@pytest.fixture(
+    params=[
+        *(
+            KVTransferConfig(kv_connector=connector, kv_role="kv_both")
+            for connector in ("NixlConnector", "NixlPullConnector")
         ),
-        KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "connectors": [
-                    {
-                        "kv_connector": "NixlConnector",
-                        "kv_role": "kv_both",
-                    },
-                    {
-                        "kv_connector": "OffloadingConnector",
-                        "kv_role": "kv_both",
-                    },
-                ]
-            },
+        *(
+            KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {
+                            "kv_connector": connector,
+                            "kv_role": "kv_both",
+                        },
+                        {
+                            "kv_connector": "OffloadingConnector",
+                            "kv_role": "kv_both",
+                        },
+                    ]
+                },
+            )
+            for connector in ("NixlConnector", "NixlPullConnector")
         ),
     ],
 )
-def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
-    caplog, disable_log_dedup, kv_transfer_config
+def nixl_kv_transfer_config(request):
+    return request.param
+
+
+@pytest.mark.parametrize(
+    "connector_name", ["NixlConnector", "NixlPullConnector", "NixlPushConnector"]
+)
+def test_nixl_connector_aliases(nixl_kv_transfer_config, connector_name):
+    assert nixl_kv_transfer_config.has_connector(connector_name) == (
+        connector_name != "NixlPushConnector"
+    )
+
+
+@pytest.mark.parametrize("explicit_interleave", [None, 1, 8, 3, 32])
+def test_pd_dcp_interleave_size_respects_explicit_settings(
+    caplog, disable_log_dedup, nixl_kv_transfer_config, explicit_interleave
 ):
     config = VllmConfig(
         cache_config=CacheConfig(block_size=16),
@@ -337,20 +353,34 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
         parallel_config=ParallelConfig(
             tensor_parallel_size=2,
             decode_context_parallel_size=2,
-            cp_kv_cache_interleave_size=3,
+            cp_kv_cache_interleave_size=(
+                explicit_interleave if explicit_interleave is not None else 1
+            ),
+            _allow_auto_resolve_cp_interleave_size=explicit_interleave is None,
             distributed_executor_backend="mp",
         ),
-        kv_transfer_config=kv_transfer_config,
+        kv_transfer_config=nixl_kv_transfer_config,
     )
 
+    if explicit_interleave in (3, 32):
+        with pytest.raises(AssertionError, match="divisible by"):
+            config.validate_block_size()
+        return
+
+    config.validate_block_size()
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
     with caplog.at_level(logging.INFO):
         config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
 
-    assert config.parallel_config.cp_kv_cache_interleave_size == 16
-    assert "automatically adjusted from 3 to block_size 16" in caplog.text
+    assert config.parallel_config.cp_kv_cache_interleave_size == (
+        16 if explicit_interleave is None else explicit_interleave
+    )
+    if explicit_interleave is None:
+        assert "automatically adjusted from 1 to block_size 16" in caplog.text
+    else:
+        assert "automatically adjusted" not in caplog.text
 
 
 def test_kv_offloading_does_not_adjust_dcp_interleave_size():
@@ -418,7 +448,8 @@ def test_nixl_dcp_check_skipped_for_submodel_config():
     assert submodel_config.model_config.use_mla is False
 
 
-def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
+@pytest.mark.parametrize("connector", ["NixlConnector", "NixlPullConnector"])
+def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch, connector):
     # Pretend the model has a single KV head so the DCP feasibility checks
     # pass and the MLA-only assert is what actually fires.
     monkeypatch.setattr(ModelConfig, "get_total_num_kv_heads", lambda self: 1)
@@ -432,7 +463,7 @@ def test_nixl_dcp_check_rejects_non_mla_model_with_dcp(monkeypatch):
                 distributed_executor_backend="mp",
             ),
             kv_transfer_config=KVTransferConfig(
-                kv_connector="NixlConnector",
+                kv_connector=connector,
                 kv_role="kv_both",
             ),
         )

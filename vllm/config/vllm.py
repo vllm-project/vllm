@@ -1179,7 +1179,6 @@ class VllmConfig:
         kv_transfer_config = self.kv_transfer_config
         if kv_transfer_config is not None:
             for connector_name in (
-                "NixlConnector",
                 "NixlPullConnector",
                 "NixlPushConnector",
                 "MoRIIOConnector",
@@ -1473,7 +1472,7 @@ class VllmConfig:
         # A NIXL side is either fully replicated or fully DCP-sharded; MLA only.
         if (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
+            and self.kv_transfer_config.has_connector("NixlPullConnector")
         ):
             dcp_size = self.parallel_config.decode_context_parallel_size
             transfer_tp_size = max(
@@ -3252,7 +3251,7 @@ class VllmConfig:
             )
 
         if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
-            "NixlConnector"
+            "NixlPullConnector"
         ):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
@@ -3288,7 +3287,8 @@ class VllmConfig:
         # size is pinned to block_size by each worker.
         nixl_pd_active = (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.has_connector("NixlConnector")
+            and self.kv_transfer_config.has_connector("NixlPullConnector")
+            and self.parallel_config._allow_auto_resolve_cp_interleave_size
         )
         if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
             assert (
