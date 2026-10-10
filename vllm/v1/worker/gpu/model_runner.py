@@ -199,6 +199,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
+        self.dspark_prefill_only = bool(
+            self.speculative_config is not None
+            and self.speculative_config.is_dspark_prefill_only()
+        )
         self._draft_workspace_lane = int(
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
@@ -407,9 +411,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if isinstance(self.speculator, DraftModelSpeculator):
                 with use_workspace_lane(self._draft_workspace_lane):
                     self.speculator.load_model(self.model)
-                    eplb_models_added = self.eplb.maybe_register_speculator(
-                        self.speculator, self.speculative_config, load_dummy_weights
-                    )
+                    if not self.dspark_prefill_only:
+                        eplb_models_added = self.eplb.maybe_register_speculator(
+                            self.speculator,
+                            self.speculative_config,
+                            load_dummy_weights,
+                        )
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
@@ -493,7 +500,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if custom:
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
-            elif self.speculative_config is not None:
+            elif self.speculative_config is not None and not self.dspark_prefill_only:
                 self.rejection_sampler = RejectionSampler(
                     self.sampler,
                     self.speculative_config,
@@ -670,8 +677,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # The speculator clears the flag at load time when the checkpoint has
         # no confidence head, so it holds the effective value.
         self.adaptive_verification = maybe_create_adaptive_verification_manager(
-            enable_adaptive_verification=getattr(
-                self.speculator, "enable_adaptive_verification", False
+            enable_adaptive_verification=(
+                not self.dspark_prefill_only
+                and getattr(self.speculator, "enable_adaptive_verification", False)
             ),
             attn_groups=self.attn_groups,
             req_states=self.req_states,
@@ -758,7 +766,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 self.attn_groups,
             )
-        if self.speculator is not None:
+        if self.speculator is not None and not self.dspark_prefill_only:
             # After set_attn, so the speculator can size its cudagraph mode
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
@@ -914,6 +922,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
         if self.speculator is not None:
             assert self.sampler is not None
+            assert hidden_states is not None
             self.step_timing.drafter_start()
             mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.speculator.supports_mm_inputs:
@@ -1089,7 +1098,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.attn_groups,
                         self.kv_cache_config,
                     )
-                    if self.speculator is not None:
+                    if self.speculator is not None and not self.dspark_prefill_only:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
                     if self.adaptive_verification is not None:
@@ -1671,6 +1680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        broadcast_drafts: torch.Tensor | None = None,
     ) -> None:
         # Update the number of computed tokens.
         output_bin_counts = None
@@ -1688,6 +1698,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
+            broadcast_drafts,
+            self.req_states.draft_tokens if broadcast_drafts is not None else None,
         )
 
         self.model_state.postprocess_state(
@@ -2238,22 +2250,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
                 )
-            if num_spec_tokens < self.num_speculative_steps:
-                draft_tokens[:, num_spec_tokens:] = -1
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            if self.adaptive_verification is not None:
-                self.adaptive_verification.record_confidences(
-                    self.speculator.draft_token_confidence_probs, input_batch
-                )
+            # propose() returns None on a prefill-only PD producer, which
+            # materializes draft context KV instead of drafting.
+            if draft_tokens is not None:
+                if num_spec_tokens < self.num_speculative_steps:
+                    draft_tokens[:, num_spec_tokens:] = -1
+                self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+                if self.pp_handler is not None:
+                    # Earlier stages never run the speculator; ship the
+                    # drafts so their next verification step embeds the real
+                    # draft tokens instead of stale buffer contents.
+                    self.pp_handler.broadcast_drafts(
+                        self.req_states.draft_tokens, input_batch
+                    )
+                if self.adaptive_verification is not None:
+                    self.adaptive_verification.record_confidences(
+                        self.speculator.draft_token_confidence_probs, input_batch
+                    )
 
-        if self.num_speculative_steps > 0:
+        if self.num_speculative_steps > 0 and not self.dspark_prefill_only:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
             )
-            if self.pp_handler is not None:
+            if self.pp_handler is not None and self.speculator is None:
+                # When a speculator ran, the propose() path above already
+                # broadcast the fresh drafts. Broadcasting here as well would
+                # double-post on the pp_broadcast group and misalign the
+                # recv FIFO on earlier stages, hanging the pipeline.
                 self.pp_handler.broadcast_drafts(
                     self.req_states.draft_tokens, input_batch
                 )
