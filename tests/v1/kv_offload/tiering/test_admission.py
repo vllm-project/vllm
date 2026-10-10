@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the tiering admission-policy framework (RFC #53485).
+"""Unit tests for the tiering admission-policy framework.
 
 Covers the TieringAdmissionPolicy interface, the AlwaysAdmitPolicy and
-BackpressureAdmissionPolicy implementations, the AdmissionPolicyFactory
-registry, and the manager wiring that consults the policy.
+BackpressureAdmissionPolicy implementations, and manager wiring.
 """
 
 import time
@@ -24,7 +23,6 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.admission import (
-    AdmissionPolicyFactory,
     AlwaysAdmitPolicy,
     BackpressureAdmissionPolicy,
     TieringAdmissionPolicy,
@@ -260,41 +258,6 @@ class TestBackpressureAdmissionPolicy:
         assert TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA in defs
         assert TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED in defs
         assert TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED in defs
-
-
-class TestAdmissionPolicyFactory:
-    def test_always_resolves(self):
-        assert AdmissionPolicyFactory.get_policy_class("always") is AlwaysAdmitPolicy
-
-    def test_unknown_name_raises_value_error(self):
-        with pytest.raises(ValueError, match="Unknown admission policy"):
-            AdmissionPolicyFactory.get_policy_class("nope")
-
-    def test_register_duplicate_raises(self):
-        with pytest.raises(ValueError, match="already registered"):
-            AdmissionPolicyFactory.register_policy(
-                "always",
-                "vllm.v1.kv_offload.tiering.admission.always",
-                "AlwaysAdmitPolicy",
-            )
-
-    def test_register_and_resolve_custom_policy(self):
-        AdmissionPolicyFactory.register_policy(
-            "test-always-copy",
-            "vllm.v1.kv_offload.tiering.admission.always",
-            "AlwaysAdmitPolicy",
-        )
-        try:
-            cls = AdmissionPolicyFactory.get_policy_class("test-always-copy")
-            assert issubclass(cls, TieringAdmissionPolicy)
-        finally:
-            del AdmissionPolicyFactory._registry["test-always-copy"]
-
-    def test_backpressure_not_registered_by_default(self):
-        # BackpressureAdmissionPolicy needs constructed tier instances, so
-        # it is intentionally absent from the name registry.
-        with pytest.raises(ValueError, match="Unknown admission policy"):
-            AdmissionPolicyFactory.get_policy_class("backpressure")
 
 
 class _WiringTier(SecondaryTierManager):

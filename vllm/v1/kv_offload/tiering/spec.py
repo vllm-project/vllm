@@ -362,10 +362,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # Create TieringOffloadingManager. GPU↔CPU transfers use the inherited
                 # get_worker(). Secondary tier transfers are handled by the
                 # secondary tier managers and need no additional workers here.
-                # The backpressure admission policy adapts each tier's
-                # detector (#50045) behind the TieringAdmissionPolicy
-                # interface; it needs the constructed tier instances, so it
-                # is built here rather than resolved via AdmissionPolicyFactory.
+                # The backpressure policy needs the constructed tier instances.
                 tiering_manager = TieringOffloadingManager(
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
