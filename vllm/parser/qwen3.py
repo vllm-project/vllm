@@ -68,13 +68,15 @@ def _trim_wrapping_newlines(value: str) -> str:
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
     params: dict[str, object] = {}
+    closed = raw_args.endswith(FUNC_END)
+    raw_args = raw_args.removesuffix(FUNC_END)
 
     for match in _PARAM_RE.finditer(raw_args):
         name = match.group(1)
         value = match.group(2)
         params[name] = _trim_wrapping_newlines(value)
 
-    if partial:
+    if partial or closed:
         remaining = _PARAM_RE.sub("", raw_args)
         m = _PARTIAL_PARAM_RE.search(remaining)
         if m:
@@ -171,7 +173,7 @@ def qwen3_config(
             ),
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
-                (EventType.TOOL_CALL_END,),
+                (EventType.ARG_VALUE_CHUNK, EventType.TOOL_CALL_END),
             ),
             (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
                 ParserState.TOOL_ARGS,

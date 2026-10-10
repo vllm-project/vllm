@@ -19,11 +19,24 @@ from tests.parser.engine.streaming_helpers import (
     simulate_tool_streaming,
 )
 from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.mimo import MiMoParser
+from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
+from vllm.parser.seed_oss import SeedOssParser
+from vllm.parser.step3p5 import Step3p5Parser
+
+QWEN3_FAMILY_PARSERS = [
+    Qwen3Parser,
+    MiMoParser,
+    SeedOssParser,
+    Step3p5Parser,
+    NemotronV3Parser,
+]
 
 
 @pytest.fixture
@@ -1182,8 +1195,6 @@ class TestNestedSchemaCoercion:
 def test_mimo_preserves_verbatim_parameter_values(
     mock_tokenizer, mock_request, value, chunk_size
 ):
-    from vllm.parser.mimo import MiMoParser
-
     text = (
         f"<tool_call><function=run><parameter=text>{value}</parameter>"
         "</function></tool_call>"
@@ -1199,3 +1210,43 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+@pytest.mark.parametrize("parser_cls", QWEN3_FAMILY_PARSERS)
+@pytest.mark.parametrize("chunk_size", [1, 1000])
+def test_unclosed_last_parameter_kept_when_function_closed(
+    mock_tokenizer, mock_request, parser_cls, chunk_size
+):
+    """The model may close </function> without closing the last parameter."""
+    text = (
+        "<tool_call><function=get_weather><parameter=city>Tokyo</parameter>"
+        "<parameter=days>5</function></tool_call>"
+    )
+    expected = {"city": "Tokyo", "days": "5"}
+
+    parser = parser_cls(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    result = parser.extract_tool_calls(text, mock_request)
+    assert json.loads(result.tool_calls[0].function.arguments) == expected
+
+    parser = parser_cls(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    results = simulate_tool_streaming(
+        parser,
+        mock_request,
+        [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)],
+    )
+    assert json.loads(collect_tool_arguments(results)) == expected
+
+
+@pytest.mark.parametrize("parser_cls", QWEN3_FAMILY_PARSERS)
+def test_unclosed_last_parameter_dropped_when_output_cut_off(
+    mock_tokenizer, mock_request, parser_cls
+):
+    """Output cut off (e.g. by max_tokens) before </function> must not turn a
+    partial value into a complete one."""
+    text = (
+        "<tool_call><function=run><parameter=dir>/tmp</parameter>"
+        "<parameter=cmd>rm -rf /"
+    )
+    parser = parser_cls(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    result = parser.extract_tool_calls(text, mock_request)
+    assert json.loads(result.tool_calls[0].function.arguments) == {"dir": "/tmp"}
