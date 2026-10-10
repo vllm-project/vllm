@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 import vllm.envs as envs
 from vllm import SamplingParams
+from vllm.entrypoints.generate.beam_search.utils import get_beam_search_score
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -337,6 +338,23 @@ def test_direct_beam_width_rejects_values_over_sequence_cap(
 
     with pytest.raises(VLLMValidationError, match="beam_width must be at most 4"):
         BeamSearchParams(beam_width=5, max_tokens=1)
+
+
+@pytest.mark.parametrize("length_penalty", [-1e4, 1e4])
+def test_beam_score_saturates_on_extreme_length_penalty(length_penalty: float):
+    # 12 ** -1e4 underflows to 0.0 and 12 ** 1e4 overflows. Either used to raise
+    # while sorting the beams, which turned the request into a 500.
+    scores = [
+        get_beam_search_score([1] * 12, logprob, 0, length_penalty)
+        for logprob in (-3.0, 0.0)
+    ]
+    assert scores == sorted(scores)
+
+
+@pytest.mark.parametrize("length_penalty", [float("inf"), float("nan")])
+def test_beam_search_params_rejects_non_finite_length_penalty(length_penalty: float):
+    with pytest.raises(VLLMValidationError, match="length_penalty must be finite"):
+        BeamSearchParams(beam_width=2, max_tokens=1, length_penalty=length_penalty)
 
 
 def test_chat_beam_conversion_rejects_n_before_stream_state_allocation(
