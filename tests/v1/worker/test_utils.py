@@ -1082,6 +1082,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1093,6 +1094,7 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )
@@ -1166,6 +1168,7 @@ def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):
             row_mirrors={},
             all_context_pages_resident=True,
             row_mirrors_from_resident=False,
+            residency_updates={},
         ),
         None,
     )

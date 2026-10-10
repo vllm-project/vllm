@@ -360,14 +360,30 @@ def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
     return group_workspaces
 
 
-def checkpoint_prepare_fi_ar_workspaces(group: ProcessGroup) -> None:
+def checkpoint_prepare_fi_ar_workspaces(
+    group: ProcessGroup, skip_unsupported: bool = False
+) -> None:
     for workspace in _fi_ar_workspaces_for_group(group):
-        workspace.checkpoint_prepare()
+        try:
+            workspace.checkpoint_prepare()
+        except NotImplementedError:
+            if not skip_unsupported:
+                raise
+            logger.info_once(
+                "FlashInfer all-reduce workspace backed by torch symmetric memory "
+                "stays resident during suspend."
+            )
 
 
-def checkpoint_restore_fi_ar_workspaces(group: ProcessGroup) -> None:
+def checkpoint_restore_fi_ar_workspaces(
+    group: ProcessGroup, skip_unsupported: bool = False
+) -> None:
     for workspace in _fi_ar_workspaces_for_group(group):
-        workspace.checkpoint_restore(TorchDistBackend(group=group))
+        try:
+            workspace.checkpoint_restore(TorchDistBackend(group=group))
+        except NotImplementedError:
+            if not skip_unsupported:
+                raise
 
 
 atexit.register(destroy_fi_ar_workspace)

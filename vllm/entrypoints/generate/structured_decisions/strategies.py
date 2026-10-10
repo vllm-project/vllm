@@ -16,10 +16,10 @@ from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.inputs import EngineInput, tokens_input
 from vllm.lora.request import LoRARequest
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
