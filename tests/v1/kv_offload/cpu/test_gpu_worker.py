@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import logging
 import random
 import time
@@ -17,13 +18,17 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    CanonicalPageMapping,
+    CopyRun,
     GPULoadStoreSpec,
     TransferResult,
 )
 from vllm.v1.kv_offload.cpu import gpu_worker
+from vllm.v1.kv_offload.cpu import spec as cpu_spec
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import MIN_N, THRESHOLD_BYTES
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_CHUNKS = [256]
@@ -63,6 +68,165 @@ def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gpu_worker._select_swap_blocks_fn(
         refs, gpu_to_cpu=False, host_memory_is_pinned=False
     ) is (ops.swap_blocks_batch)
+
+
+def _two_fragment_refs(
+    page: int, first_fragment: int
+) -> list[list[CanonicalKVCacheRef]]:
+    runs = (
+        CopyRun(0, 0, first_fragment, 1, first_fragment, first_fragment),
+        CopyRun(first_fragment, page, page - first_fragment, 1, page, page),
+    )
+    mapping = CanonicalPageMapping(2 * page, page, runs, 1, 0, True)
+    return [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page, mapping=mapping)]]
+
+
+@pytest.fixture
+def cuda_like_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    if not gpu_worker.HAS_TRITON:
+        pytest.skip("requires Triton")
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+
+
+def test_canonical_load_path_follows_fragment_size(cuda_like_platform) -> None:
+    """Canonical loads copy per fragment, so a page above the Triton threshold
+    whose fragments fall below it takes the Triton path."""
+    page = 32 * 1024
+    assert page >= THRESHOLD_BYTES > page // 2
+    refs = _two_fragment_refs(page, page // 2)
+
+    direct = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+    canonical = gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, canonical_layout=True
+    )
+
+    assert direct is ops.swap_blocks_batch
+    assert getattr(canonical, "func", None) is gpu_worker.swap_blocks_batch
+
+    # The kernel chunk keeps following the page, not the fragment: a 4 KiB
+    # page split into 2 KiB fragments still gets a 4 KiB chunk.
+    small = gpu_worker._select_swap_blocks_fn(
+        _two_fragment_refs(4096, 2048), gpu_to_cpu=False, canonical_layout=True
+    )
+    assert small.keywords["bytes_per_chunk"] == 4096
+
+
+def test_canonical_load_path_requires_aligned_fragments(cuda_like_platform) -> None:
+    """The Triton kernel copies whole 8-byte words per descriptor, so an aligned
+    page with unaligned fragments must stay on the DMA path."""
+    refs = _two_fragment_refs(page=1024, first_fragment=508)
+
+    canonical = gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, canonical_layout=True
+    )
+
+    assert canonical is ops.swap_blocks_batch
+
+
+def _calibrated_fn(refs: list[list[CanonicalKVCacheRef]]):
+    """The load selector fed by a calibration measured on this worker."""
+    host, device = torch.zeros(1, dtype=torch.int8), torch.device("cpu")
+    min_n = gpu_worker.measure_load_min_n(refs, True, False, host, device)
+    return gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, calibrated_min_n=min_n
+    )
+
+
+def test_calibrated_load_path_uses_measured_min_n(
+    cuda_like_platform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With calibration on, the measured crossover replaces the defaults, also
+    for copy sizes above the default Triton threshold."""
+    page = 32 * 1024
+    assert page >= THRESHOLD_BYTES
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)]]
+    measured = {"ratios": [3.0, 1.5, 0.75, 0.5, 0.3]}
+    monkeypatch.setattr(
+        gpu_worker, "measure_load_paths", lambda *args: measured["ratios"]
+    )
+
+    default = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+    calibrated = _calibrated_fn(refs)
+
+    assert default is ops.swap_blocks_batch
+    assert calibrated.keywords["min_n"] == 64
+
+    # Triton never wins: stay on DMA.
+    measured["ratios"] = [3.0, 1.5, 1.4, 1.3, 1.2]
+    assert _calibrated_fn(refs) is ops.swap_blocks_batch
+
+    # A size the calibration didn't cover keeps its default.
+    assert (
+        gpu_worker._select_swap_blocks_fn(
+            refs, gpu_to_cpu=False, calibrated_min_n={4096: 16}
+        )
+        is ops.swap_blocks_batch
+    )
+
+
+def test_mixed_copy_sizes_reduce_to_one_min_n(
+    cuda_like_platform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One call carries every copy size of the handler: the largest min_n
+    wins, and a size that never takes Triton keeps the whole handler on DMA."""
+    refs = [
+        [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=4096)],
+        [CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=16384)],
+    ]
+    policy: dict[int, int | None] = {4096: 64, 16384: 32}
+    monkeypatch.setattr(gpu_worker, "default_min_n", lambda size: policy[size])
+
+    fn = gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+    assert fn.keywords["min_n"] == 64
+
+    policy[16384] = None
+    assert (
+        gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False)
+        is ops.swap_blocks_batch
+    )
+
+
+def test_calibration_failure_keeps_defaults(
+    cuda_like_platform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=4096)]]
+
+    def boom(*args):
+        raise RuntimeError("no batch memcpy")
+
+    for measure in (boom, lambda *args: None):
+        monkeypatch.setattr(gpu_worker, "measure_load_paths", measure)
+        assert _calibrated_fn(refs).keywords["min_n"] == MIN_N
+
+
+def test_calibration_runs_on_rank0_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rank 0 measures while the others wait, so ranks sharing a PCIe link
+    don't measure at the same time, and every rank gets rank 0's result."""
+    sent: list[object] = []
+
+    class FakeGroup:
+        def __init__(self, rank: int):
+            self.rank_in_group = rank
+
+        def broadcast_object(self, obj=None, src=0):
+            if self.rank_in_group == src:
+                sent.append(obj)
+                return obj
+            return sent[0]
+
+    measured_on: list[int] = []
+
+    def measure(rank: int) -> dict[int, int | None]:
+        measured_on.append(rank)
+        return {65536: 128}
+
+    for rank in (0, 1):
+        group = FakeGroup(rank)
+        monkeypatch.setattr(cpu_spec, "_all_workers_group", lambda g=group: g)
+        assert cpu_spec.run_on_rank0(functools.partial(measure, rank)) == {65536: 128}
+
+    assert measured_on == [0]
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
