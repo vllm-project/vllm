@@ -1715,6 +1715,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        # Drain transfers that still read pages this step may reuse.
+        self.kv_connector.handle_preemptions(scheduler_output)
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()

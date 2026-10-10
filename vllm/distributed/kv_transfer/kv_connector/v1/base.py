@@ -310,7 +310,10 @@ class KVConnectorBase_V1(ABC):
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         """Handle preempted requests or evicted blocks BEFORE they are overwritten.
-        Needed for connectors which use async saves (e.g., OffloadingConnector)
+
+        The model runner calls this before updating request state, including
+        steps with no scheduled tokens. Connectors with asynchronous saves must
+        ensure their reads complete before page reuse.
         """
         return
 
