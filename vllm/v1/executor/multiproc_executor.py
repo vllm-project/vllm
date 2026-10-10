@@ -11,7 +11,7 @@ import traceback
 import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, InvalidStateError
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -187,26 +187,39 @@ class MultiprocExecutor(Executor):
 
             # For CPU backend only, to setup OpenMP threads affinity
             cpu_omp_manager = OMPProcessManager(self.vllm_config)
-            for local_rank in range(self.local_world_size):
+
+            def start_worker(local_rank: int) -> UnreadyWorkerProcHandle:
                 global_rank = global_start_rank + local_rank
-                is_driver_worker = self._is_driver_worker(global_rank)
                 with cpu_omp_manager.configure_omp_envs(
                     rank=global_rank, local_rank=local_rank
                 ):
-                    unready_worker_handle = WorkerProc.make_worker_process(
+                    return WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
                         local_rank=local_rank,
                         rank=global_rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
+                        is_driver_worker=self._is_driver_worker(global_rank),
                         inherited_fds=inherited_fds,
                     )
-                unready_workers.append(unready_worker_handle)
-                if inherited_fds is not None:
-                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+
+            if self._can_start_workers_concurrently(inherited_fds):
+                # With spawn, Process.start() blocks until the child has
+                # unpickled its arguments, which imports vLLM and torch and
+                # takes several seconds per worker. Start the workers from a
+                # thread pool so those imports overlap instead of running one
+                # after another.
+                self._start_workers_concurrently(start_worker, unready_workers)
+            else:
+                for local_rank in range(self.local_world_size):
+                    unready_worker_handle = start_worker(local_rank)
+                    unready_workers.append(unready_worker_handle)
+                    if inherited_fds is not None:
+                        death_writer = unready_worker_handle.death_writer
+                        assert death_writer is not None
+                        inherited_fds.append(death_writer.fileno())
+                        inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -295,6 +308,48 @@ class MultiprocExecutor(Executor):
 
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
+
+    def _can_start_workers_concurrently(self, inherited_fds: list[int] | None) -> bool:
+        """Whether the local workers can be started from parallel threads.
+
+        Only safe with spawn (fork passes inherited fds from one worker to the
+        next) and when nothing changes process-global state around each start:
+        OpenMP env setup on the CPU backend and the NUMA numactl wrapper both
+        patch os.environ / the multiprocessing executable per worker.
+        """
+        return (
+            inherited_fds is None
+            and self.local_world_size > 1
+            and not current_platform.is_cpu()
+            and not self.parallel_config.numa_bind
+        )
+
+    def _start_workers_concurrently(
+        self,
+        start_worker: Callable[[int], "UnreadyWorkerProcHandle"],
+        unready_workers: list["UnreadyWorkerProcHandle"],
+    ) -> None:
+        """Start all local workers from threads, raising the first failure.
+
+        Every worker that did start is appended to `unready_workers` in rank
+        order, even if another one failed or the caller was interrupted, so
+        that cleanup terminates it.
+        """
+        started: list[UnreadyWorkerProcHandle | None] = [None] * self.local_world_size
+
+        def start_and_record(local_rank: int) -> None:
+            started[local_rank] = start_worker(local_rank)
+
+        try:
+            with ThreadPoolExecutor(max_workers=self.local_world_size) as pool:
+                futures = [
+                    pool.submit(start_and_record, local_rank)
+                    for local_rank in range(self.local_world_size)
+                ]
+        finally:
+            unready_workers.extend(h for h in started if h is not None)
+        for future in futures:
+            future.result()
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
