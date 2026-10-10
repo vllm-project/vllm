@@ -1,0 +1,83 @@
+# vLLM
+
+> vLLM is a high-throughput, memory-efficient inference and serving engine for large language models. These docs cover installation, the OpenAI-compatible server, distributed serving, quantization and other features, supported models, configuration, and the CLI.
+
+## Getting started
+
+- [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart/): Install vLLM, run offline batched inference, and start the OpenAI-compatible server
+- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation/): Hardware-specific install guides (GPU, CPU, and other accelerators)
+
+## Serving
+
+- [Online serving](https://docs.vllm.ai/en/latest/serving/online_serving/): Serve models over HTTP with the OpenAI-compatible API
+- [Offline inference](https://docs.vllm.ai/en/latest/serving/offline_inference/): Run inference on batches of prompts with the LLM class
+- [Parallelism and scaling](https://docs.vllm.ai/en/latest/serving/parallelism_scaling/): Tensor, pipeline, data, and expert parallelism across GPUs and nodes
+- [Data-parallel deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/): Run multiple model replicas behind one endpoint
+- [Expert-parallel deployment](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/): Scale mixture-of-experts models across devices
+- [Context-parallel deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/): Split long-context inference across devices
+- [Distributed troubleshooting](https://docs.vllm.ai/en/latest/serving/distributed_troubleshooting/): Debug multi-GPU and multi-node serving issues
+
+## Deployment
+
+- [Docker](https://docs.vllm.ai/en/latest/deployment/docker/): Run vLLM with the official container images
+- [Kubernetes](https://docs.vllm.ai/en/latest/deployment/k8s/): Deploy vLLM on Kubernetes
+- [Nginx](https://docs.vllm.ai/en/latest/deployment/nginx/): Load-balance multiple vLLM servers behind Nginx
+
+## Configuration
+
+- [Configuration overview](https://docs.vllm.ai/en/latest/configuration/): How model, engine, and server options fit together
+- [Engine arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/): Every engine option, with defaults
+- [Server arguments](https://docs.vllm.ai/en/latest/configuration/serve_args/): Options for `vllm serve`
+- [Environment variables](https://docs.vllm.ai/en/latest/configuration/env_vars/): Runtime environment configuration
+- [Model resolution](https://docs.vllm.ai/en/latest/configuration/model_resolution/): How vLLM resolves model names and architectures
+- [Optimization and tuning](https://docs.vllm.ai/en/latest/configuration/optimization/): Throughput and latency tuning
+- [Conserving memory](https://docs.vllm.ai/en/latest/configuration/conserving_memory/): Fit larger models on limited hardware
+
+## Features
+
+- [Quantization](https://docs.vllm.ai/en/latest/features/quantization/): Supported quantization schemes and hardware support
+- [LoRA adapters](https://docs.vllm.ai/en/latest/features/lora/): Serve LoRA adapters, including dynamic loading
+- [Tool calling](https://docs.vllm.ai/en/latest/features/tool_calling/): OpenAI-compatible function and tool calling
+- [Structured outputs](https://docs.vllm.ai/en/latest/features/structured_outputs/): Constrain generation with JSON schemas and grammars
+- [Reasoning outputs](https://docs.vllm.ai/en/latest/features/reasoning_outputs/): Expose reasoning content from reasoning models
+- [Speculative decoding](https://docs.vllm.ai/en/latest/features/speculative_decoding/): Speed up decoding with draft models and n-gram lookahead
+- [Multimodal inputs](https://docs.vllm.ai/en/latest/features/multimodal_inputs/): Pass images, audio, and video to multimodal models
+- [Automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/): Reuse KV cache across prompts with shared prefixes
+- [Context extension](https://docs.vllm.ai/en/latest/features/context_extension/): Extend model context windows
+- [Sleep mode](https://docs.vllm.ai/en/latest/features/sleep_mode/): Free GPU memory between workloads without restarting
+- [Prompt embeddings](https://docs.vllm.ai/en/latest/features/prompt_embeds/): Pass precomputed prompt embeddings
+
+## Models
+
+- [Supported models](https://docs.vllm.ai/en/latest/models/supported_models/): The list of supported model architectures
+- [Generative models](https://docs.vllm.ai/en/latest/models/generative_models/): How vLLM runs text-generation models
+- [Pooling models](https://docs.vllm.ai/en/latest/models/pooling_models/): Embedding, reward, and classification models
+
+## CLI
+
+- [CLI overview](https://docs.vllm.ai/en/latest/cli/): The `vllm` command-line interface
+- [vllm serve](https://docs.vllm.ai/en/latest/cli/serve/): Start the OpenAI-compatible server
+- [vllm chat](https://docs.vllm.ai/en/latest/cli/chat/): Chat with a running vLLM server from the terminal
+- [vllm complete](https://docs.vllm.ai/en/latest/cli/complete/): Text completions against a running server
+- [vllm run-batch](https://docs.vllm.ai/en/latest/cli/run-batch/): Run OpenAI-style batch files offline
+- [vllm bench](https://docs.vllm.ai/en/latest/cli/bench/): Benchmark latency, throughput, and serving performance
+
+## Usage
+
+- [FAQ](https://docs.vllm.ai/en/latest/usage/faq/): Frequently asked questions
+- [Metrics](https://docs.vllm.ai/en/latest/usage/metrics/): Prometheus metrics exposed by the server
+- [Troubleshooting](https://docs.vllm.ai/en/latest/usage/troubleshooting/): Common failures and how to debug them
+- [Security](https://docs.vllm.ai/en/latest/usage/security/): Security model and deployment guidance
+- [V1 engine guide](https://docs.vllm.ai/en/latest/usage/v1_guide/): The V1 engine architecture and differences
+- [Reproducibility](https://docs.vllm.ai/en/latest/usage/reproducibility/): What determinism vLLM does and does not guarantee
+- [Usage stats](https://docs.vllm.ai/en/latest/usage/usage_stats/): What anonymous usage data is collected and how to opt out
+
+## API
+
+- [API reference](https://docs.vllm.ai/en/latest/api/): Python API reference for vLLM internals
+
+## Optional
+
+- [Benchmarking](https://docs.vllm.ai/en/latest/benchmarking/): Benchmark suites and dashboards
+- [Examples](https://docs.vllm.ai/en/latest/examples/): Runnable offline and online examples
+- [Contributing](https://docs.vllm.ai/en/latest/contributing/): How to contribute to vLLM, including design docs
