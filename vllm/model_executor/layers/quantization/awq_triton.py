@@ -1,11 +1,325 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any, ClassVar
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+AWQ_FUSED_FP32_SUPPORTED = current_platform.is_cuda() and (
+    current_platform.has_device_capability(89)
+)
+
+# Measured on RTX PRO 6000 Blackwell (SM120), keyed by exact (N, K) weight
+# shape. Only shapes that beat the legacy path for M <= 256 while staying
+# within ~12% of it at M = 4096 are listed; o_proj/down_proj had no such tile.
+# Unlisted (N, K) use the legacy path (see awq_fused_gemm_is_tuned_for_shape).
+# Hopper (SM90) has no table: fused was slower than legacy there for every
+# measured shape under CUDA graphs.
+_SM120_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = {
+    # (N, K): (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, num_stages)
+    (6144, 2560): (128, 128, 32, 3),  # qkv_proj
+    (19456, 2560): (128, 128, 32, 3),  # gate_up_proj
+}
+
+# Tuned tiles are only valid on the exact architecture they were measured on.
+_TUNED_TILES: dict[tuple[int, int], tuple[int, int, int, int]] = (
+    _SM120_TUNED_TILES
+    if current_platform.is_cuda() and current_platform.is_device_capability(120)
+    else {}
+)
+
+
+def awq_fused_gemm_is_tuned_for_shape(n: int, k: int) -> bool:
+    """True iff the fused kernel is known to beat the legacy dequant+matmul
+    path for this device and (N, K) weight shape.
+
+    SM89 always dispatches: the existing (32,32)/(128,64) heuristic was
+    tuned and proven there for the shapes already shipping. Other
+    architectures only dispatch for the exact (N, K) shapes measured on that
+    exact architecture (``_TUNED_TILES``); anything else uses the legacy path.
+    """
+    if current_platform.is_device_capability(89):
+        return True
+    return (n, k) in _TUNED_TILES
+
+
+@triton.jit(do_not_specialize=["M"])
+def awq_gemm_fused_fp32_kernel(
+    input_ptr,
+    qweight_ptr,
+    scales_ptr,
+    zeros_ptr,
+    output_ptr,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    packed_offsets_n = pid_n * (BLOCK_SIZE_N // 8) + tl.arange(0, BLOCK_SIZE_N // 8)
+    mask_m = offsets_m < M
+    mask_n = offsets_n < N
+    packed_mask_n = packed_offsets_n < N // 8
+
+    reverse_order = ((tl.arange(0, 2) * 4)[None, :] + tl.arange(0, 4)[:, None]).reshape(
+        8
+    )
+    shifts = reverse_order * 4
+    shifts = tl.broadcast_to(shifts[None, :], (BLOCK_SIZE_K * (BLOCK_SIZE_N // 8), 8))
+    shifts = tl.reshape(shifts, (BLOCK_SIZE_K, BLOCK_SIZE_N))
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    offsets_k_base = tl.arange(0, BLOCK_SIZE_K)
+    for k_block in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        offsets_k = k_block * BLOCK_SIZE_K + offsets_k_base
+        mask_k = offsets_k < K
+        inputs = tl.load(
+            input_ptr + offsets_m[:, None] * K + offsets_k[None, :],
+            mask=mask_m[:, None] & mask_k[None, :],
+            other=0.0,
+        )
+        packed = tl.load(
+            qweight_ptr + offsets_k[:, None] * (N // 8) + packed_offsets_n[None, :],
+            mask=mask_k[:, None] & packed_mask_n[None, :],
+            other=0,
+        )
+        packed = tl.interleave(packed, packed)
+        packed = tl.interleave(packed, packed)
+        packed = tl.interleave(packed, packed)
+        weights = (packed >> shifts) & 0xF
+
+        group_offsets = offsets_k // GROUP_SIZE
+        packed_zeros = tl.load(
+            zeros_ptr + group_offsets[:, None] * (N // 8) + packed_offsets_n[None, :],
+            mask=mask_k[:, None] & packed_mask_n[None, :],
+            other=0,
+        )
+        packed_zeros = tl.interleave(packed_zeros, packed_zeros)
+        packed_zeros = tl.interleave(packed_zeros, packed_zeros)
+        packed_zeros = tl.interleave(packed_zeros, packed_zeros)
+        zeros = (packed_zeros >> shifts) & 0xF
+        scales = tl.load(
+            scales_ptr + group_offsets[:, None] * N + offsets_n[None, :],
+            mask=mask_k[:, None] & mask_n[None, :],
+            other=0.0,
+        )
+        weights = ((weights - zeros) * scales).to(inputs.dtype)
+        accumulator = tl.dot(inputs, weights, accumulator)
+
+    output = accumulator.to(output_ptr.type.element_ty)
+    tl.store(
+        output_ptr + offsets_m[:, None] * N + offsets_n[None, :],
+        output,
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+
+class AwqGemmFusedFp32Kernel(VllmTritonJitKernel["AwqGemmFusedFp32Kernel.CompileKey"]):
+    """Warmup-aware wrapper for awq_gemm_fused_fp32_kernel.
+
+    ``M`` (token count) is excluded from the compile key via
+    ``do_not_specialize``. For (N, K) shapes with a tuned tile config
+    (see ``_TUNED_TILES``), the same tile config is used for every M,
+    so a fixed row's launch tile never depends on batch size. Otherwise
+    ``BLOCK_SIZE_M``/``BLOCK_SIZE_N`` fall back to the SM89-tuned heuristic
+    (chosen from which side of the M<=128 threshold a call falls on).
+    """
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        N: int
+        K: int
+        GROUP_SIZE: int
+        BLOCK_SIZE_M: int
+        BLOCK_SIZE_N: int
+        BLOCK_SIZE_K: int = 32
+        NUM_STAGES: int = 2
+
+    kernel: ClassVar[Any] = staticmethod(awq_gemm_fused_fp32_kernel)
+
+    def dispatch(  # type: ignore[override]
+        self, *, m: int, N: int, K: int, GROUP_SIZE: int
+    ) -> CompileKey:
+        # The warmup tracer only supports a single expression-shaped body
+        # (conditional expressions, no if-statements/tuple-unpacking), so
+        # the tuned-vs-fallback choice is expressed with ternaries.
+        tuned_raw = _TUNED_TILES.get((N, K))
+        use_tuned = tuned_raw is not None
+        tuned = tuned_raw if tuned_raw is not None else (0, 0, 0, 0)
+        block_m = tuned[0] if use_tuned else (32 if m <= 128 else 128)
+        block_n = tuned[1] if use_tuned else (32 if m <= 128 else 64)
+        block_k = tuned[2] if use_tuned else 32
+        num_stages = tuned[3] if use_tuned else 2
+        return self.CompileKey(
+            N=N,
+            K=K,
+            GROUP_SIZE=GROUP_SIZE,
+            BLOCK_SIZE_M=block_m,
+            BLOCK_SIZE_N=block_n,
+            BLOCK_SIZE_K=block_k,
+            NUM_STAGES=num_stages,
+        )
+
+    def get_warmup_keys(
+        self, *, N: int, K: int, GROUP_SIZE: int = 128
+    ) -> list[CompileKey]:
+        # One representative M on each side of the 128 threshold covers both
+        # BLOCK_SIZE_M/N configs the SM89 fallback in dispatch(...) can
+        # select; for tuned shapes both traced M values collapse to
+        # the same (M-independent) CompileKey, so this over-covers safely.
+        return self._trace_dispatch(self.dispatch)(
+            m=(1, 129), N=N, K=K, GROUP_SIZE=GROUP_SIZE
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        # M is do_not_specialize'd, but __call__ re-dispatches from the input
+        # shape; one past BLOCK_SIZE_M lands on the same side of the SM89
+        # fallback's M <= 128 threshold as the key being warmed.
+        m = compile_key.BLOCK_SIZE_M + 1
+        num_groups = compile_key.K // compile_key.GROUP_SIZE
+        return dict(
+            input=TritonWarmupTensor(torch.float16, shape=(m, compile_key.K)),
+            qweight=TritonWarmupTensor(
+                torch.int32, shape=(compile_key.K, compile_key.N // 8)
+            ),
+            scales=TritonWarmupTensor(torch.float16, shape=(num_groups, compile_key.N)),
+            zeros=TritonWarmupTensor(
+                torch.int32, shape=(num_groups, compile_key.N // 8)
+            ),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        input: torch.Tensor,
+        qweight: torch.Tensor,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+    ) -> LaunchSpec:
+        m, k = input.shape
+        n = qweight.shape[1] * 8
+        group_size = k // scales.shape[0]
+        compile_key = self.dispatch(m=m, N=n, K=k, GROUP_SIZE=group_size)
+        output = (
+            TritonWarmupTensor(input.dtype, shape=(m, n))
+            if self._warming
+            else torch.empty((m, n), device=input.device, dtype=input.dtype)
+        )
+        grid = (
+            triton.cdiv(m, compile_key.BLOCK_SIZE_M)
+            * triton.cdiv(n, compile_key.BLOCK_SIZE_N),
+        )
+        return (
+            grid,
+            dict(
+                output_ptr=output,
+                M=m,
+                N=compile_key.N,
+                K=compile_key.K,
+                GROUP_SIZE=compile_key.GROUP_SIZE,
+                BLOCK_SIZE_M=compile_key.BLOCK_SIZE_M,
+                BLOCK_SIZE_N=compile_key.BLOCK_SIZE_N,
+                BLOCK_SIZE_K=compile_key.BLOCK_SIZE_K,
+                num_warps=4,
+                num_stages=compile_key.NUM_STAGES,
+            ),
+            output,
+        )
+
+
+_AWQ_GEMM_FUSED_FP32_KERNEL = AwqGemmFusedFp32Kernel()
+
+
+def register_awq_fused_fp32_warmup(*, N: int, K: int, GROUP_SIZE: int = 128) -> None:
+    _AWQ_GEMM_FUSED_FP32_KERNEL.register_warmup(N=N, K=K, GROUP_SIZE=GROUP_SIZE)
+
+
+def _awq_gemm_fused_fp32_impl(
+    inputs: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+) -> torch.Tensor:
+    m, k = inputs.shape
+    n = qweight.shape[1] * 8
+    num_groups = scales.shape[0]
+    if inputs.dtype != torch.float16 or scales.dtype != torch.float16:
+        raise ValueError("fused AWQ GEMM supports FP16 inputs and scales only")
+    if qweight.dtype != torch.int32 or qzeros.dtype != torch.int32:
+        raise ValueError("fused AWQ GEMM requires int32 packed weights and zeros")
+    if not all(tensor.is_contiguous() for tensor in (inputs, qweight, scales, qzeros)):
+        raise ValueError("fused AWQ GEMM requires contiguous tensors")
+    if qweight.shape[0] != k:
+        raise ValueError("fused AWQ GEMM weight K does not match the input")
+    if num_groups == 0 or k % num_groups != 0:
+        raise ValueError(
+            "fused AWQ GEMM requires K to be an exact multiple of the number "
+            "of quantization groups"
+        )
+    group_size = k // num_groups
+    if group_size != 128:
+        raise ValueError("fused AWQ GEMM supports group_size=128 only")
+    if scales.shape != (num_groups, n):
+        raise ValueError("fused AWQ GEMM scales have an invalid shape")
+    if qzeros.shape != (num_groups, n // 8):
+        raise ValueError("fused AWQ GEMM zeros have an invalid shape")
+    if k % 32 != 0 or n % 32 != 0:
+        raise ValueError("fused AWQ GEMM requires K and N aligned to 32")
+
+    return _AWQ_GEMM_FUSED_FP32_KERNEL(inputs, qweight, scales, qzeros)
+
+
+def _awq_gemm_fused_fp32_fake(
+    inputs: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+) -> torch.Tensor:
+    del scales, qzeros
+    return torch.empty(
+        (inputs.size(0), qweight.size(1) * 8),
+        dtype=inputs.dtype,
+        device=inputs.device,
+    )
+
+
+direct_register_custom_op(
+    op_name="awq_gemm_fused_fp32",
+    op_func=_awq_gemm_fused_fp32_impl,
+    mutates_args=[],
+    fake_impl=_awq_gemm_fused_fp32_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def awq_gemm_fused_fp32(
+    inputs: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops.vllm.awq_gemm_fused_fp32(inputs, qweight, scales, qzeros)
 
 
 @triton.jit
