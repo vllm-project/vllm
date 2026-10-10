@@ -50,18 +50,20 @@ class KVChecksumPayload:
     Attributes:
         num_tokens: Tokens whose KV the checksummed blocks hold.
         groups: Per KV cache group id, the group's fingerprint (see
-            ``KVChecksumRecord.fingerprints``), the position of the first
-            block, and one uint64 checksum per block position.
+            ``KVChecksumRecord.fingerprints``), its block size, the position
+            of the first block, and one uint64 checksum per block position.
 
     """
 
     num_tokens: int
-    groups: dict[int, tuple[int, int, np.ndarray]]
+    groups: dict[int, tuple[int, int, int, np.ndarray]]
 
     def to_bytes(self) -> bytes:
         groups = [
-            (group_id, fingerprint, start, values.astype("<u8").tobytes())
-            for group_id, (fingerprint, start, values) in self.groups.items()
+            (group_id, fingerprint, block_size, start, values.astype("<u8").tobytes())
+            for group_id, (fingerprint, block_size, start, values) in (
+                self.groups.items()
+            )
         ]
         return msgspec.msgpack.encode((_PAYLOAD_VERSION, self.num_tokens, groups))
 
@@ -75,7 +77,7 @@ class KVChecksumPayload:
         """
         try:
             version, num_tokens, groups = msgspec.msgpack.decode(
-                data, type=tuple[int, int, list[tuple[int, int, int, bytes]]]
+                data, type=tuple[int, int, list[tuple[int, int, int, int, bytes]]]
             )
         except msgspec.DecodeError as e:
             raise ValueError(f"malformed KV checksums: {e}") from e
@@ -84,8 +86,13 @@ class KVChecksumPayload:
         return cls(
             num_tokens,
             {
-                group_id: (fingerprint, start, np.frombuffer(values, dtype="<u8"))
-                for group_id, fingerprint, start, values in groups
+                group_id: (
+                    fingerprint,
+                    block_size,
+                    start,
+                    np.frombuffer(values, dtype="<u8"),
+                )
+                for group_id, fingerprint, block_size, start, values in groups
             },
         )
 
@@ -378,14 +385,19 @@ class KVChecksumScheduler:
         try:
             pending.check_complete(self._num_workers)
             skipped = pending.skipped_groups()
-            groups: dict[int, tuple[int, int, np.ndarray]] = {}
+            groups: dict[int, tuple[int, int, int, np.ndarray]] = {}
             for group_id, (start, block_ids) in pending.blocks.groups.items():
                 if group_id in skipped:
                     continue
                 values = np.zeros(len(block_ids), dtype=np.uint64)
                 for group in pending.group_checksums(group_id):
                     values += group.values.sum(axis=1, dtype=np.uint64)
-                groups[group_id] = (pending.fingerprint(group_id), start, values)
+                groups[group_id] = (
+                    pending.fingerprint(group_id),
+                    self._groups[group_id].kv_cache_spec.block_size,
+                    start,
+                    values,
+                )
         except _Unverified as e:
             logger.warning_once("KV checksums not sent: %s.", e.reason)
             logger.debug("KV checksums of request %s not sent: %s", req_id, e.detail)
@@ -455,6 +467,9 @@ class KVChecksumScheduler:
     ) -> list[int]:
         """The group's mismatching block positions.
 
+        With different block sizes, sums of the smaller blocks are compared
+        with the larger ones.
+
         Raises:
             _Unverified: If the group cannot be compared.
 
@@ -468,32 +483,61 @@ class KVChecksumScheduler:
                     f"{'producer' if skipped else 'consumer'} only",
                 )
             return []
-        fingerprint, sent_start, sent_values = sent
+        fingerprint, sent_block_size, sent_start, sent_values = sent
         if fingerprint != pending.fingerprint(group_id):
             raise _Unverified(
-                "a group holds other layers, block size or dtype on the producer",
+                "a group holds other layers or dtype on the producer",
                 f"group {group_id}",
             )
         start, block_ids = pending.blocks.groups[group_id]
         block_size = self._groups[group_id].kv_cache_spec.block_size
-        positions = [
-            pos
-            for pos in range(
-                max(start, sent_start),
-                min(start + len(block_ids), sent_start + len(sent_values)),
+        chunk_size = max(block_size, sent_block_size)
+        if chunk_size % min(block_size, sent_block_size):
+            raise _Unverified(
+                "block sizes are not multiples of each other",
+                f"group {group_id}: {sent_block_size} on the producer, "
+                f"{block_size} on the consumer",
             )
-            # Only the last block can hold fewer tokens on one side.
-            if num_valid_tokens(pos, block_size, pending.blocks.num_tokens)
-            == num_valid_tokens(pos, block_size, expected.num_tokens)
+        blocks_per_chunk = chunk_size // block_size
+        if start % blocks_per_chunk:
+            # Its producer block also holds tokens the consumer did not load.
+            raise _Unverified(
+                "the first loaded block starts inside a producer block",
+                f"group {group_id}",
+            )
+        num_tokens = pending.blocks.num_tokens
+        sent_first, sent_sums = _chunk_sums(
+            sent_values, sent_start, sent_block_size, chunk_size, expected.num_tokens
+        )
+        checks = [
+            _chunk_sums(values, start, block_size, chunk_size, num_tokens)
+            for values in _sum_replicas(
+                pending.group_checksums(group_id), len(block_ids)
+            )
         ]
-        if not positions:
+        first, num_chunks = checks[0][0], len(checks[0][1])
+        chunks = [
+            chunk
+            for chunk in range(
+                max(first, sent_first),
+                min(first + num_chunks, sent_first + len(sent_sums)),
+            )
+            # Only the last chunk can hold fewer tokens on one side.
+            if num_valid_tokens(chunk, chunk_size, num_tokens)
+            == num_valid_tokens(chunk, chunk_size, expected.num_tokens)
+        ]
+        if not chunks:
             raise _Unverified("a group has no block in common", f"group {group_id}")
-        index = np.array(positions)
-        sent_values = sent_values[index - sent_start]
-        bad = np.zeros(len(positions), dtype=bool)
-        for values in _sum_replicas(pending.group_checksums(group_id), len(block_ids)):
-            bad |= values[index - start] != sent_values
-        return index[bad].tolist()
+        index = np.array(chunks)
+        bad = np.zeros(len(chunks), dtype=bool)
+        for _, sums in checks:
+            bad |= sums[index - first] != sent_sums[index - sent_first]
+        return [
+            pos
+            for chunk in index[bad].tolist()
+            for pos in range(chunk * blocks_per_chunk, (chunk + 1) * blocks_per_chunk)
+            if start <= pos < start + len(block_ids)
+        ]
 
 
 def _non_null_run(
@@ -510,6 +554,39 @@ def _non_null_run(
     if any(nulls[offset:]):
         return None
     return first + offset, block_ids[offset:]
+
+
+def _chunk_sums(
+    values: np.ndarray,
+    start: int,
+    block_size: int,
+    chunk_size: int,
+    num_tokens: int,
+) -> tuple[int, np.ndarray]:
+    """Sums of the checksums of consecutive blocks over chunks of
+    ``chunk_size`` tokens: the first chunk and one sum per chunk.
+
+    Args:
+        values: Checksums of consecutive blocks.
+        start: Position of the first block.
+        block_size: Tokens per block.
+        chunk_size: A multiple of ``block_size``.
+        num_tokens: Tokens checksummed; blocks past them are zero.
+
+    Returns:
+        The first chunk the blocks cover whole and the sums of the chunks
+        they cover whole.
+
+    """
+    blocks_per_chunk = chunk_size // block_size
+    end = start + len(values)
+    if end >= cdiv(num_tokens, block_size):
+        values = np.pad(values, (0, -end % blocks_per_chunk))
+        end += -end % blocks_per_chunk
+    first = cdiv(start, blocks_per_chunk)
+    last = max(first, end // blocks_per_chunk)
+    whole = values[first * blocks_per_chunk - start : last * blocks_per_chunk - start]
+    return first, whole.reshape(-1, blocks_per_chunk).sum(axis=1, dtype=np.uint64)
 
 
 def _sum_replicas(

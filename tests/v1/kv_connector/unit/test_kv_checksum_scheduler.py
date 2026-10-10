@@ -47,10 +47,13 @@ EXTRA_LAYER = "model.layers.2.self_attn.attn"
 
 
 def _kv_cache_config(
-    heads: int, layers: list[str], extra_group: bool = False
+    heads: int,
+    layers: list[str],
+    extra_group: bool = False,
+    block_size: int = BLOCK_SIZE,
 ) -> KVCacheConfig:
     spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=heads, head_size=8, dtype=torch.bfloat16
+        block_size=block_size, num_kv_heads=heads, head_size=8, dtype=torch.bfloat16
     )
     groups = [KVCacheGroupSpec(layers, spec)]
     if extra_group:
@@ -74,13 +77,14 @@ class _Engine:
         fail_closed: bool = False,
         policy: str = "fail",
         extra_group: str | None = None,
+        block_size: int = BLOCK_SIZE,
     ):
         """``extra_group``: None, or whether the workers can checksum a second
         group ("covered") or skip it for lack of a cache ("skipped")."""
         vllm_config = create_vllm_config(
             kv_connector=connector,
             kv_role=kv_role,
-            block_size=BLOCK_SIZE,
+            block_size=block_size,
             kv_load_failure_policy=policy,
         )
         kv_transfer_config = vllm_config.kv_transfer_config
@@ -92,12 +96,14 @@ class _Engine:
         has_extra = extra_group is not None
         # Like the engine's, the scheduler's config is the first worker's.
         self.scheduler = create_scheduler(
-            vllm_config, kv_cache_config=_kv_cache_config(HEADS, stages[0], has_extra)
+            vllm_config,
+            kv_cache_config=_kv_cache_config(HEADS, stages[0], has_extra, block_size),
         )
+        self.block_size = block_size
         # Per layer, [blocks, heads, tokens, cell] bytes; ranks view their heads.
         self.kv = {
             layer: torch.zeros(
-                NUM_BLOCKS, HEADS, BLOCK_SIZE, CELL_BYTES, dtype=torch.uint8
+                NUM_BLOCKS, HEADS, block_size, CELL_BYTES, dtype=torch.uint8
             )
             for layer in LAYERS
         }
@@ -117,7 +123,7 @@ class _Engine:
                     caches[EXTRA_LAYER] = torch.zeros_like(caches[layers[0]])
                 self.workers.append(
                     KVChecksumWorker(
-                        _kv_cache_config(heads_per_rank, layers, has_extra),
+                        _kv_cache_config(heads_per_rank, layers, has_extra, block_size),
                         caches,
                         tp_rank=tp_rank,
                         tp_size=tp_size,
@@ -201,12 +207,18 @@ def _copy_blocks(
     start: int,
     block_ids: list[int],
 ) -> None:
-    """The connector's transfer: the producer's blocks at the consumer's
-    block positions."""
+    """The connector's transfer: the producer's tokens into the consumer's
+    blocks at the same token positions."""
     remote_block_ids = params["remote_block_ids"][0]
+    p_size, c_size = producer.block_size, consumer.block_size
     for layer, kv in consumer.kv.items():
         for position, block_id in enumerate(block_ids, start):
-            kv[block_id] = producer.kv[layer][remote_block_ids[position]]
+            for token in range(position * c_size, (position + 1) * c_size):
+                if token // p_size < len(remote_block_ids):
+                    remote_block_id = remote_block_ids[token // p_size]
+                    kv[block_id, :, token % c_size] = producer.kv[layer][
+                        remote_block_id, :, token % p_size
+                    ]
 
 
 def _load(
@@ -272,6 +284,29 @@ def test_correct_load_is_verified(connector, producer_tp_pp, consumer_tp_pp):
     assert request.status == RequestStatus.RUNNING
 
 
+@pytest.mark.parametrize("corrupt", [False, True])
+@pytest.mark.parametrize(
+    "producer_block_size,consumer_block_size", [(16, 32), (32, 16)]
+)
+@CONNECTORS
+def test_different_block_sizes_are_compared(
+    connector, producer_block_size, consumer_block_size, corrupt
+):
+    """With different block sizes the smaller blocks' checksums are summed
+    and compared with the larger ones, including the last partial block."""
+    producer = _Engine("kv_producer", connector, block_size=producer_block_size)
+    consumer = _Engine(
+        "kv_consumer", connector, fail_closed=True, block_size=consumer_block_size
+    )
+    params, sent = _prefill(
+        producer, create_request(1, NUM_TOKENS, do_remote_decode=True)
+    )
+
+    request = create_request(1, NUM_TOKENS, do_remote_prefill=True)
+    engine_outputs = _load(producer, consumer, request, params, sent, corrupt)
+    assert _error_ids(engine_outputs) == ({request.request_id} if corrupt else set())
+
+
 def test_prefix_hit_verifies_only_loaded_blocks():
     """With a local prefix hit the consumer loads, and checks, only the
     blocks after it."""
@@ -295,6 +330,35 @@ def test_prefix_hit_verifies_only_loaded_blocks():
     _copy_blocks(producer, consumer, params, start, block_ids)
     engine_outputs = consumer.finish_step(output, {request.request_id})
     assert not _error_ids(engine_outputs)
+
+
+def test_load_starting_inside_a_producer_block_is_unverified():
+    """A consumer with smaller blocks whose local prefix hit ends inside a
+    producer block cannot compare its first loaded block, so the load is
+    unverified rather than verified without it."""
+    producer = _Engine("kv_producer", "NixlPushConnector", block_size=32)
+    consumer = _Engine(
+        "kv_consumer", "NixlPushConnector", fail_closed=True, block_size=16
+    )
+    prefix = 16
+    params, sent = _prefill(
+        producer, create_request(1, NUM_TOKENS, prefix, do_remote_decode=True)
+    )
+
+    local = create_request(2, NUM_TOKENS, prefix, max_tokens=1)
+    consumer.scheduler.add_request(local)
+    consumer.finish_step(consumer.schedule())
+    request = create_request(1, NUM_TOKENS, prefix, do_remote_prefill=True)
+    request.kv_transfer_params = {**params, "do_remote_prefill": True}
+    consumer.scheduler.add_request(request)
+    output = consumer.schedule()
+    start, block_ids = _block_ids(output, request.request_id, send=False)
+    assert start == 1
+    _copy_blocks(producer, consumer, params, start, block_ids)
+    engine_outputs = consumer.finish_step(
+        output, {request.request_id}, {request.request_id: sent}
+    )
+    assert _error_ids(engine_outputs) == {request.request_id}
 
 
 @pytest.mark.parametrize("fault", ["corrupt", "no-checksums"])

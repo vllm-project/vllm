@@ -47,9 +47,9 @@ def _name(layer: int) -> str:
     return f"model.layers.{layer}.self_attn.attn"
 
 
-def _spec(heads: int, **kwargs) -> FullAttentionSpec:
+def _spec(heads: int, block_size: int = BLOCK_SIZE, **kwargs) -> FullAttentionSpec:
     return FullAttentionSpec(
-        block_size=BLOCK_SIZE,
+        block_size=block_size,
         num_kv_heads=heads,
         head_size=HEAD_SIZE,
         dtype=torch.bfloat16,
@@ -116,8 +116,9 @@ def _reference(
     layers: dict[int, torch.Tensor], blocks: KVChecksumBlocks = BLOCKS
 ) -> np.ndarray:
     """Checksums from the definition: each (layer, head) slice of a block is
-    s = sum_j x_j * (2j + 1) over its 8-byte pieces in token order, and the
-    block's checksum is sum m * s with m = 2 * (layer * H + head) + 1.
+    s = sum_j x_j * (2j + 1) over its 8-byte pieces, numbered in token order
+    from the request's first token, and the block's checksum is sum m * s with
+    m = 2 * (layer * H + head) + 1.
 
     ``layers`` maps layer numbers to the KV of all their heads.
     """
@@ -132,9 +133,10 @@ def _reference(
         slice_factor = np.uint64(2) * (
             np.uint64(number * MAX_KV_HEADS_PER_LAYER) + head
         ) + np.uint64(1)
-        position = token * np.uint64(num_pieces) + piece
-        weights = slice_factor * (np.uint64(2) * position + np.uint64(1))
         for row, block_id in enumerate(block_ids):
+            first_token = np.uint64((start + row) * tokens)
+            position = (first_token + token) * np.uint64(num_pieces) + piece
+            weights = slice_factor * (np.uint64(2) * position + np.uint64(1))
             block = pieces[block_id].copy()
             block[:, max(0, blocks.num_tokens - (start + row) * tokens) :, :] = 0
             with np.errstate(over="ignore"):
@@ -325,6 +327,32 @@ def test_kernel_block_split_matches_definition():
     )
     np.testing.assert_array_equal(
         _send(worker)[0].values[:, 0], _reference({0: logical})
+    )
+
+
+def test_checksums_add_up_across_block_sizes():
+    """Blocks of 16 tokens add up to the 32-token blocks holding the same
+    tokens, also where the last one is partial, so producers and consumers
+    with different block sizes can compare."""
+    small = _logical_kv(heads=2)
+    large = (
+        small.view(NUM_BLOCKS // 2, 2, 2, BLOCK_SIZE, CELL_BYTES)
+        .transpose(1, 2)
+        .reshape(NUM_BLOCKS // 2, 2, 2 * BLOCK_SIZE, CELL_BYTES)
+        .repeat(2, 1, 1, 1)  # As many blocks as the config.
+    )
+    small_worker = _worker(_config(_group(_spec(2))), {_name(0): _cache(small)})
+    large_spec = _spec(2, block_size=2 * BLOCK_SIZE)
+    large_worker = _worker(_config(_group(large_spec)), {_name(0): _cache(large)})
+    num_tokens = 4 * BLOCK_SIZE + 8
+    small_values = _send(
+        small_worker, KVChecksumBlocks(num_tokens, {0: (0, [0, 1, 2, 3, 4])})
+    )[0].values[:, 0]
+    large_values = _send(
+        large_worker, KVChecksumBlocks(num_tokens, {0: (0, [0, 1, 2])})
+    )[0].values[:, 0]
+    np.testing.assert_array_equal(
+        np.add.reduceat(small_values, [0, 2, 4]), large_values
     )
 
 

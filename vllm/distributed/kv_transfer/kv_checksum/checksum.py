@@ -7,9 +7,12 @@ unsharded model (all layers of the group, all KV heads):
 
 1. A slice is the KV of one layer and one KV head in the block: the K and V
    of the block's tokens for that head. Laid out token by token and split
-   into little-endian 8-byte pieces ``x_0, x_1, ...``, its checksum is::
+   into little-endian 8-byte pieces, its checksum is::
 
        s = sum_j x_j * (2 * j + 1)  mod 2**64
+
+   where piece ``x_j`` is piece ``p`` of the token at position ``t`` in the
+   request, ``j = t * P + p`` with ``P`` pieces per token.
 
 2. The block's checksum adds up the slices of every layer and head, each
    times its own odd factor::
@@ -22,7 +25,10 @@ unsharded model (all layers of the group, all KV heads):
    globally across TP.
 
 Odd factors make any change to a single piece change ``c``, and distinct
-factors make misplaced data (swapped tokens, heads or layers) change it too.
+factors make misplaced data (swapped tokens, blocks, heads or layers) change
+it too. Numbering pieces from the request's start makes the checksums of
+consecutive blocks add up to that of the tokens they hold, so a producer and
+a consumer with different block sizes compare sums over the same tokens.
 
 A slice always lies whole on one TP rank, and each worker weighs its slices
 by their global layer and head, whatever its shard or memory layout. The
@@ -128,7 +134,7 @@ class KVChecksumRecord:
         skipped_groups: Groups with layers on this worker that it cannot
             checksum.
         fingerprints: Per transfer group, the sum of a hash of each of this
-            worker's layers in it (name and layout). Summed over PP stages it
+            worker's layers in it (name, type and dtype). Summed over PP stages it
             identifies the group's layers.
 
     """
