@@ -7,7 +7,9 @@ reordering without advancing request state. Unit tests directly exercise its
 preparation and adapter scope; model/sampler/graph numerics require GPU tests.
 """
 
+import ast
 import inspect
+import textwrap
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -26,6 +28,35 @@ from vllm.v1.worker.gpu.spec_decode.uno import (
     prepare_uno_inputs_reference,
 )
 from vllm.v1.worker.gpu.spec_decode.uno_lora import draft_lora_mapping
+
+
+def _block_tables_stub(**attrs) -> SimpleNamespace:
+    """A CPU stand-in for BlockTables carrying only attributes it really sets.
+
+    A stub with a name BlockTables no longer has would hide an upstream removal
+    from every test that uses it, so each name is checked against the instance
+    attributes the real class assigns and the methods it defines.
+    """
+    from vllm.v1.worker.gpu.block_table import BlockTables
+
+    source = textwrap.dedent(inspect.getsource(BlockTables))
+    real = set(dir(BlockTables)) | {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, ast.Store)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    missing = sorted(set(attrs) - real)
+    assert not missing, f"BlockTables does not set {missing}"
+    return SimpleNamespace(**attrs)
+
+
+def test_block_tables_stub_rejects_attributes_block_tables_lacks():
+    assert _block_tables_stub(block_sizes=[4]).block_sizes == [4]
+    with pytest.raises(AssertionError, match="kernel_block_sizes"):
+        _block_tables_stub(kernel_block_sizes=[4])
 
 
 @pytest.mark.parametrize("k", [1, 4, 8])
@@ -199,10 +230,10 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
     proposer.input_buffers = InputBuffers(4, 8, torch.device("cpu"))
     proposer.sample_idx_mapping = torch.empty(8, dtype=torch.int64)
     proposer.draft_tokens = torch.empty((4, 2), dtype=torch.int64)
-    proposer.block_tables = SimpleNamespace(
+    proposer.block_tables = _block_tables_stub(
         slot_mappings=torch.empty((1, 8), dtype=torch.int64),
         input_block_tables=[torch.ones((4, 8), dtype=torch.int32)],
-        kernel_block_sizes=[4],
+        block_sizes=[4],
     )
     proposer.kv_cache_config = Mock()
     desc = BatchExecutionDescriptor(
@@ -283,10 +314,10 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
     proposer.input_buffers = InputBuffers(4, 32, torch.device("cpu"))
     proposer.sample_idx_mapping = torch.empty(32, dtype=torch.int64)
     proposer.draft_tokens = torch.empty((4, k), dtype=torch.int64)
-    proposer.block_tables = SimpleNamespace(
+    proposer.block_tables = _block_tables_stub(
         slot_mappings=torch.empty((1, 32), dtype=torch.int64),
         input_block_tables=[torch.ones((4, 8), dtype=torch.int32)],
-        kernel_block_sizes=[4],
+        block_sizes=[4],
     )
     proposer.kv_cache_config = Mock()
     desc = BatchExecutionDescriptor(CUDAGraphMode.NONE, count, n)
@@ -417,10 +448,10 @@ def _cpu_uno_proposer(
     proposer.input_buffers = InputBuffers(max_num_seqs, rows, torch.device("cpu"))
     proposer.sample_idx_mapping = torch.empty(rows, dtype=torch.int64)
     proposer.draft_tokens = torch.empty((max_num_seqs, k), dtype=torch.int64)
-    proposer.block_tables = SimpleNamespace(
+    proposer.block_tables = _block_tables_stub(
         slot_mappings=torch.empty((1, rows), dtype=torch.int64),
         input_block_tables=[torch.ones((max_num_seqs, 8), dtype=torch.int32)],
-        kernel_block_sizes=[4],
+        block_sizes=[4],
     )
     proposer.kv_cache_config = Mock()
     proposer._copy_request_inputs = Mock()  # type: ignore[method-assign]

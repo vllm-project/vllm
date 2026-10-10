@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 import torch
 
-from tests.v1.spec_decode.test_uno_mrv2 import _uno_sample_tokens_runner
+from tests.v1.spec_decode.test_uno_mrv2 import (
+    _block_tables_stub,
+    _uno_sample_tokens_runner,
+)
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -37,7 +40,7 @@ def test_tail_worker_uses_scheduler_zero_draft_batch(monkeypatch):
     runner.update_pp_decode_requests = lambda: None
     for name in ("finish_requests", "free_states", "add_requests", "update_requests"):
         monkeypatch.setattr(runner, name, lambda _output: None)
-    runner.block_tables = SimpleNamespace(apply_staged_writes=lambda: None)
+    runner.block_tables = _block_tables_stub(apply_staged_writes=lambda: None)
     snapshots = []
 
     class BeforeDeviceDispatch(Exception):

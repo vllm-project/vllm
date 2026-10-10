@@ -911,7 +911,7 @@ class UnoSpeculator(DraftModelSpeculator):
             next_prefill_tokens,
             seeds,
             self.block_tables.input_block_tables[0],
-            self.block_tables.kernel_block_sizes[0],
+            self.block_tables.block_sizes[0],
             self.k,
             self.max_model_len,
             self.speculative_config.uno_noise_seed,
