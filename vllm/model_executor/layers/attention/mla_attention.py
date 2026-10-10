@@ -970,7 +970,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mha_tokens = q.size(0) - num_mqa_tokens
         use_mha = True
 
-        if self.impl.is_sparse and num_mha_tokens > 0:
+        if num_mha_tokens > 0 and self._use_batch_invariant_mqa_prefill(attn_metadata):
+            # MHA prefill merges cached-context and new-token partial states,
+            # making rounding depend on scheduler chunking. The decode kernel
+            # reads the already-updated KV cache for each row, independent of it.
+            use_mha = False
+            num_mqa_tokens = q.size(0)
+            num_mha_tokens = 0
+        elif self.impl.is_sparse and num_mha_tokens > 0:
             use_mha = self._use_sparse_mha(attn_metadata)
             if not use_mha:
                 num_mqa_tokens = q.size(0)
@@ -1112,7 +1119,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         mqa_q = self.dcp_manager.query_gather(mqa_q)
 
             # call decode attn
-            if not self.impl.is_sparse:
+            if use_mha and not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
 
@@ -1216,6 +1223,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return (prefill.use_dense_mha or use_masked_mha) and not (
             self._vllm_config.attention_config.sparse_mla_force_mqa
         )
+
+    def _use_batch_invariant_mqa_prefill(
+        self, attn_metadata: "MLACommonMetadata"
+    ) -> bool:
+        impl = cast("MLACommonBaseImpl[Any]", self.impl)
+        if not (
+            envs.VLLM_BATCH_INVARIANT and impl.supports_batch_invariant_mqa_prefill
+        ):
+            return False
+        if not attn_metadata.causal or self.use_pcp or impl.dcp_world_size != 1:
+            logger.warning_once(
+                "MLA prefill is not batch invariant with PCP, DCP or "
+                "non-causal attention; using the existing MHA prefill path."
+            )
+            return False
+        return True
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Let per-backend impls do their own weight packing first (no-op
@@ -2846,6 +2869,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """
 
     _use_flashinfer_concat_mla_k: bool
+    supports_batch_invariant_mqa_prefill: bool = False
 
     def __init__(
         self,

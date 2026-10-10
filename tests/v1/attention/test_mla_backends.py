@@ -10,6 +10,7 @@ Known Issues:
 
 import sys
 from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -820,6 +821,7 @@ class MockMLAAttentionLayer(MLAAttention):
         self._q_scale_float = q_scale
         self._k_scale_float = k_scale
         self._v_scale_float = float("nan")
+        self.use_pcp = False
 
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -864,15 +866,17 @@ class MockMLAAttentionLayer(MLAAttention):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         # Determine decode vs prefill split
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        has_decode = (attn_metadata.num_decodes or 0) > 0
-        has_prefill = (attn_metadata.num_prefills or 0) > 0
+        num_mqa_tokens = attn_metadata.num_decode_tokens or 0
+        num_mha_tokens = q.shape[0] - num_mqa_tokens
+        if num_mha_tokens > 0 and self._use_batch_invariant_mqa_prefill(attn_metadata):
+            num_mqa_tokens = q.shape[0]
+            num_mha_tokens = 0
 
         # Run prefill with forward_mha
-        if has_prefill:
-            prefill_q = q[num_decode_tokens:]
-            prefill_k_pe = k_pe[num_decode_tokens:]
-            prefill_k_c = kv_c[num_decode_tokens:]
+        if num_mha_tokens > 0:
+            prefill_q = q[num_mqa_tokens:]
+            prefill_k_pe = k_pe[num_mqa_tokens:]
+            prefill_k_c = kv_c[num_mqa_tokens:]
             self.impl.forward_mha(
                 prefill_q,
                 prefill_k_c,
@@ -880,12 +884,12 @@ class MockMLAAttentionLayer(MLAAttention):
                 kv_cache,
                 attn_metadata,
                 self._k_scale,
-                output=output[num_decode_tokens:],
+                output=output[num_mqa_tokens:],
             )
 
         # Run decode with forward_mqa
-        if has_decode:
-            decode_q = q[:num_decode_tokens]
+        if num_mqa_tokens > 0:
+            decode_q = q[:num_mqa_tokens]
 
             # Split q into nope and pe parts
             mqa_q_nope, mqa_q_pe = decode_q.split(
@@ -923,8 +927,8 @@ class MockMLAAttentionLayer(MLAAttention):
             decode_output = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(
                 0, 1
             )
-            output[:num_decode_tokens] = decode_output.reshape(
-                num_decode_tokens, self.num_heads * self.v_head_dim
+            output[:num_mqa_tokens] = decode_output.reshape(
+                num_mqa_tokens, self.num_heads * self.v_head_dim
             )
 
         return output
@@ -2135,3 +2139,174 @@ def test_chunked_context_backend_correctness(
         v_head_dim=v_head_dim,
         chunked_prefill_workspace_size=1024,
     )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.TRITON_MLA not in BACKENDS_TO_TEST,
+    reason="TRITON_MLA is not available on this platform.",
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@patch("vllm.envs.VLLM_BATCH_INVARIANT", True)
+def test_triton_mla_batch_invariant_prefill_is_chunk_independent(
+    dist_init,
+    workspace_init,
+    kv_cache_dtype,
+):
+    """The same tail rows are bitwise-equal across prefill chunk boundaries."""
+    device_capability = current_platform.get_device_capability()
+    if device_capability is None:
+        pytest.skip("CUDA device capability is unavailable.")
+    if kv_cache_dtype == "fp8" and not current_platform.has_device_capability(89):
+        pytest.skip("TRITON_MLA needs SM89+ for an FP8 KV cache.")
+    try:
+        invalid_reasons = (
+            MLAPrefillBackendEnum.FLASH_ATTN.get_class().validate_configuration(
+                device_capability,
+                MLAPrefillSelectorConfig(
+                    dtype=torch.bfloat16,
+                    mla_dimensions=MLADimensions(
+                        qk_nope_head_dim=128,
+                        qk_rope_head_dim=64,
+                        v_head_dim=128,
+                    ),
+                ),
+            )
+        )
+    except ImportError as e:
+        pytest.skip(f"FLASH_ATTN MLA prefill is unavailable: {e}")
+    if invalid_reasons:
+        pytest.skip(f"FLASH_ATTN MLA prefill is unavailable: {invalid_reasons}")
+
+    torch.manual_seed(11)
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    seq_len = 48
+    tail_len = 8
+    long_chunk_len = 16
+    block_size = BACKEND_BLOCK_SIZES[AttentionBackendEnum.TRITON_MLA]
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    v_head_dim = 128
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-R1",
+        max_model_len=seq_len,
+        dtype=dtype,
+        num_gpu_blocks=16,
+        block_size=block_size,
+        max_num_seqs=1,
+        max_num_batched_tokens=seq_len,
+        hf_config_override={
+            "num_attention_heads": 8,
+            "num_key_value_heads": 1,
+        },
+    )
+    num_heads = vllm_config.model_config.get_num_attention_heads(
+        vllm_config.parallel_config
+    )
+    head_size = vllm_config.model_config.get_head_size()
+    q_scale = 1.0
+    k_scale = 1.0
+
+    query = torch.randn(
+        seq_len,
+        num_heads,
+        qk_nope_head_dim + qk_rope_head_dim,
+        dtype=dtype,
+        device=device,
+    )
+    kv_c = torch.randn(seq_len, kv_lora_rank, dtype=dtype, device=device)
+    k_pe = torch.randn(seq_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
+
+    W_UK = torch.randn(
+        kv_lora_rank, num_heads, qk_nope_head_dim, dtype=dtype, device=device
+    )
+    W_UV = torch.randn(kv_lora_rank, num_heads, v_head_dim, dtype=dtype, device=device)
+    weight_scale = 1.0 / (kv_lora_rank**0.5)
+    kv_b_proj_weight = torch.cat([W_UK * weight_scale, W_UV * weight_scale], dim=-1)
+
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+
+    mock_kv_b_proj = ColumnParallelLinear(
+        input_size=kv_lora_rank,
+        output_size=num_heads * (qk_nope_head_dim + v_head_dim),
+        bias=False,
+    ).to(device=device, dtype=dtype)
+    mock_kv_b_proj.weight = torch.nn.Parameter(
+        kv_b_proj_weight.view(
+            kv_lora_rank,
+            num_heads * (qk_nope_head_dim + v_head_dim),
+        ).T,
+        requires_grad=False,
+    )
+
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=head_size,
+        dtype=vllm_config.model_config.dtype,
+        sliding_window=vllm_config.model_config.get_sliding_window(),
+        cache_dtype_str=kv_cache_dtype,
+    )
+
+    def run_chunk(query_len: int) -> torch.Tensor:
+        context_len = seq_len - query_len
+        batch_spec = BatchSpec(seq_lens=[seq_len], query_lens=[query_len])
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec,
+            block_size,
+            device,
+        )
+        current_block_num = common_attn_metadata.block_table_tensor.shape[1]
+        padded_block_num = get_block_table_width(current_block_num, block_size)
+        if padding_cols := padded_block_num - current_block_num:
+            padding = torch.zeros(
+                (1, padding_cols),
+                dtype=torch.int32,
+                device=device,
+            )
+            common_attn_metadata.block_table_tensor = torch.cat(
+                [common_attn_metadata.block_table_tensor, padding], dim=1
+            )
+        kv_cache = create_and_prepopulate_kv_cache(
+            kv_c_contexts=[kv_c[:context_len]],
+            k_pe_contexts=[k_pe[:context_len]],
+            block_size=block_size,
+            head_size=head_size,
+            dtype=dtype,
+            device=device,
+            num_blocks=16,
+            common_attn_metadata=common_attn_metadata,
+            randomize_blocks=False,
+            kv_cache_dtype=None if kv_cache_dtype == "auto" else kv_cache_dtype,
+        )
+        return run_attention_backend(
+            AttentionBackendEnum.TRITON_MLA,
+            kv_cache_spec,
+            ["placeholder"],
+            vllm_config,
+            device,
+            common_attn_metadata,
+            query[context_len:],
+            kv_c[context_len:],
+            k_pe[context_len:],
+            kv_cache,
+            kv_lora_rank,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            v_head_dim,
+            mock_kv_b_proj,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            kv_cache_dtype=kv_cache_dtype,
+            prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
+            chunked_prefill_workspace_size=1024,
+        )
+
+    short_chunk_tail = run_chunk(tail_len)
+    long_chunk_tail = run_chunk(long_chunk_len)[-tail_len:]
+
+    assert torch.equal(short_chunk_tail, long_chunk_tail)
