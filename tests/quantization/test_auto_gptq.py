@@ -135,6 +135,35 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
         )
 
 
+def test_auto_gptq_drops_redundant_qzeros_before_kernel_processing():
+    class Kernel:
+        config = SimpleNamespace(zero_points=False)
+        w_zp_name = "qzeros"
+        processed = False
+
+        def process_weights_after_loading(self, layer: torch.nn.Module):
+            assert not hasattr(layer, self.w_zp_name)
+            layer.register_parameter(
+                self.w_zp_name,
+                torch.nn.Parameter(torch.zeros(1), requires_grad=False),
+            )
+            self.processed = True
+
+    method = object.__new__(AutoGPTQLinearMethod)
+    kernel = Kernel()
+    method.kernel = kernel
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "qzeros", torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert kernel.processed
+    assert kernel.w_zp_name == "qzeros"
+    torch.testing.assert_close(layer.qzeros, torch.zeros(1))
+
+
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
     method = object.__new__(AutoGPTQMoEMethod)
     method.quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})

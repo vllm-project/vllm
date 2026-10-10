@@ -247,6 +247,7 @@ def _build_dummy_layer(
     w_ckpt_nk8: torch.Tensor,
     scales_ckpt_nkg: torch.Tensor,
     zeros_ckpt: torch.Tensor | None,
+    layout: str = "ct",
 ):
     from vllm.model_executor.parameter import (
         GroupQuantScaleParameter,
@@ -260,15 +261,17 @@ def _build_dummy_layer(
         pass
 
     layer = DummyLayer()
+    output_dim = 0 if layout == "ct" else 1
+    input_dim = 1 - output_dim
     layer.register_parameter(
         "weight_packed",
         PackedvLLMParameter(
             data=w_ckpt_nk8,
             weight_loader=weight_loader,
-            input_dim=1,
-            output_dim=0,
+            input_dim=input_dim,
+            output_dim=output_dim,
             packed_factor=8,
-            packed_dim=1,
+            packed_dim=input_dim,
         ),
     )
     layer.register_parameter(
@@ -276,8 +279,8 @@ def _build_dummy_layer(
         GroupQuantScaleParameter(
             data=scales_ckpt_nkg,
             weight_loader=weight_loader,
-            input_dim=1,
-            output_dim=0,
+            input_dim=input_dim,
+            output_dim=output_dim,
         ),
     )
     if zeros_ckpt is not None:
@@ -286,17 +289,21 @@ def _build_dummy_layer(
             PackedColumnParameter(
                 data=zeros_ckpt,
                 weight_loader=weight_loader,
-                output_dim=0,
+                output_dim=output_dim,
                 packed_factor=8,
-                packed_dim=0,
+                packed_dim=output_dim,
             ),
         )
     return layer
 
 
 @pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
-def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_init):
-    """uint4b8 (symmetric): w_q -> [N, K//8] int8 ExLlama shuffle, no zp param."""
+@pytest.mark.parametrize("layout", ["ct", "gptq"])
+@pytest.mark.parametrize("strided", [False, True])
+def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(
+    group_size, layout, strided, dist_init
+):
+    """Repack both layouts and strided views without mutating checkpoint data."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -307,7 +314,7 @@ def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_ini
 
     set_random_seed(0)
 
-    K, N = 256, 128
+    K, N = 256, 136  # N exercises the shuffle kernel's partial block.
     G = group_size
     assert K % G == 0
 
@@ -316,7 +323,16 @@ def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_ini
     w_ckpt_nk8 = _pack_int4_along_k_to_ckpt(w_int4_kn)
     scales_ckpt_nkg = 0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16)
 
-    layer = _build_dummy_layer(w_ckpt_nk8, scales_ckpt_nkg, zeros_ckpt=None)
+    if layout == "gptq":
+        w_ckpt_nk8 = w_ckpt_nk8.t().contiguous()
+        scales_ckpt_nkg = scales_ckpt_nkg.t().contiguous()
+    if strided:
+        rows, cols = w_ckpt_nk8.shape
+        storage = torch.empty((rows, cols + 3), device=device, dtype=torch.int32)
+        storage[:, 1 : cols + 1].copy_(w_ckpt_nk8)
+        w_ckpt_nk8 = storage[:, 1 : cols + 1]
+    checkpoint_copy = w_ckpt_nk8.clone()
+    layer = _build_dummy_layer(w_ckpt_nk8, scales_ckpt_nkg, None, layout)
 
     config = MPLinearLayerConfig(
         full_weight_shape=(K, N),
@@ -333,6 +349,7 @@ def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_ini
         w_zp_param_name=None,
     )
     kernel.process_weights_after_loading(layer)
+    torch.testing.assert_close(w_ckpt_nk8, checkpoint_copy, rtol=0, atol=0)
 
     # Skinny weight is stored once as int8 [N, K//2]; the Triton path
     # reinterprets it as int32 [N, K//8] via a view (no separate parameter).
@@ -344,14 +361,18 @@ def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_ini
     expected_packed = pack_int4_exllama_shuffle(w_int4_kn.t().contiguous())
     torch.testing.assert_close(w_q_i32, expected_packed)
 
-    # Scales: [N, K//G] (skinny layout, no transpose since CT already had it).
+    # Scales use [N, K//G] for both checkpoint layouts.
     assert tuple(layer.weight_scale.shape) == (N, K // G)
-    torch.testing.assert_close(layer.weight_scale, scales_ckpt_nkg)
+    expected_scales = scales_ckpt_nkg if layout == "ct" else scales_ckpt_nkg.t()
+    torch.testing.assert_close(layer.weight_scale, expected_scales)
 
 
 @pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
-def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_init):
-    """uint4 (asymmetric): zero points are packed [N//8, K//G] int32."""
+@pytest.mark.parametrize("layout", ["ct", "gptq"])
+def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(
+    group_size, layout, dist_init
+):
+    """Repacking preserves explicit zero points and scales in both layouts."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -375,7 +396,11 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
     zeros_packed_gn8 = _pack_int4_along_n_for_zp(zeros_int4_gn)  # [K//G, N//8]
     zeros_ckpt_n8kg = zeros_packed_gn8.t().contiguous()  # [N//8, K//G]
 
-    layer = _build_dummy_layer(w_ckpt_nk8, scales_ckpt_nkg, zeros_ckpt=zeros_ckpt_n8kg)
+    if layout == "gptq":
+        w_ckpt_nk8 = w_ckpt_nk8.t().contiguous()
+        scales_ckpt_nkg = scales_ckpt_nkg.t().contiguous()
+        zeros_ckpt_n8kg = zeros_ckpt_n8kg.t().contiguous()
+    layer = _build_dummy_layer(w_ckpt_nk8, scales_ckpt_nkg, zeros_ckpt_n8kg, layout)
 
     config = MPLinearLayerConfig(
         full_weight_shape=(K, N),
@@ -405,6 +430,8 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
     assert tuple(w_q_i32.shape) == (N, K // 8)
     expected_packed = pack_int4_exllama_shuffle(w_int4_kn.t().contiguous())
     torch.testing.assert_close(w_q_i32, expected_packed)
+    expected_scales = scales_ckpt_nkg if layout == "ct" else scales_ckpt_nkg.t()
+    torch.testing.assert_close(layer.weight_scale, expected_scales)
 
 
 # ---------------------------------------------------------------------------
@@ -707,8 +734,9 @@ def test_weight_row_padding_does_not_change_results(dtype, has_zp, M):
         (8192, 4096 + 128),  # 4096 B row: on the cliff, padded
     ],
 )
-def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
-    """The stored weight row stride follows the padding rule."""
+@pytest.mark.parametrize("layout", ["ct", "gptq"])
+def test_process_weights_pads_cliff_rows(K, expected_weight_stride, layout, dist_init):
+    """Both checkpoint layouts preserve packed values and apply row padding."""
     from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
         MPLinearLayerConfig,
     )
@@ -718,10 +746,16 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
     N, G = 128, 128
 
     w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    packed = _pack_int4_along_k_to_ckpt(w_int4_kn)
+    scales = 0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16)
+    if layout == "gptq":
+        packed = packed.t().contiguous()
+        scales = scales.t().contiguous()
     layer = _build_dummy_layer(
-        _pack_int4_along_k_to_ckpt(w_int4_kn),
-        0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16),
+        packed,
+        scales,
         zeros_ckpt=None,
+        layout=layout,
     )
     config = MPLinearLayerConfig(
         full_weight_shape=(K, N),
@@ -742,6 +776,12 @@ def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
     assert layer.weight_packed.stride(0) == expected_weight_stride
     # The int32 view the Triton path uses survives the padded stride.
     assert tuple(layer.weight_packed.view(torch.int32).shape) == (N, K // 8)
+    torch.testing.assert_close(
+        layer.weight_packed.view(torch.int32),
+        pack_int4_exllama_shuffle(w_int4_kn.t().contiguous()),
+        rtol=0,
+        atol=0,
+    )
     # Metadata is untouched by this change.
     assert layer.weight_scale.is_contiguous()
 
