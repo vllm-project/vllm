@@ -620,6 +620,11 @@ class Worker(WorkerBase):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
+            # The pinned size does not budget for what this run leaves cached
+            # (e.g. compile and autotune scratch); release it before the KV
+            # cache is allocated, as memory_profiling does on the measured path.
+            gc.collect()
+            torch.accelerator.empty_cache()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
