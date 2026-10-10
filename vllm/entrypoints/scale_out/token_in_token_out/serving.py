@@ -3,11 +3,14 @@
 
 
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 import math
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from collections.abc import Sequence as GenericSequence
-from typing import Any
+from typing import Any, TypeVar
 
 import msgspec
 from fastapi import Request
@@ -40,7 +43,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
-from vllm.logprobs import Logprob
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -53,6 +56,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
+from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
 from .mm_features import (
     mm_kwargs_from_features,
     placeholder_ranges_from_engine_input,
@@ -71,9 +75,41 @@ from .protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
+    RenderedGenerateResponse,
 )
 
 logger = init_logger(__name__)
+
+T = TypeVar("T")
+
+# Logprob entries (positions x slots) from which a response is built in a
+# worker thread rather than on the event loop (about 0.2 us per entry).
+OFFLOAD_MIN_LOGPROB_ENTRIES = 1 << 15
+# Two threads: a build is mostly GIL-bound and a second thread overlaps its
+# GIL-free part; more threads only add memory.
+_RESPONSE_BUILDER = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="generate-response"
+)
+
+
+async def build_response_off_loop(entries: int, build: Callable[[], T]) -> T:
+    """Run ``build`` (CPU only, no shared-state side effects) inline for
+    fewer than ``OFFLOAD_MIN_LOGPROB_ENTRIES`` logprob entries, else in a
+    worker thread, so the event loop keeps serving other requests."""
+    if entries < OFFLOAD_MIN_LOGPROB_ENTRIES:
+        return build()
+    return await asyncio.get_running_loop().run_in_executor(
+        _RESPONSE_BUILDER, functools.partial(contextvars.copy_context().run, build)
+    )
+
+
+def _flat_logprob_entries(final_res: RequestOutput) -> int:
+    """Logprob entries (positions x candidates) kept as FlatLogprobs."""
+    return sum(
+        output.logprobs.num_entries
+        for output in final_res.outputs
+        if isinstance(output.logprobs, FlatLogprobs)
+    )
 
 
 def _clamp_logprob(logprob: float) -> float:
@@ -178,7 +214,12 @@ class ServingTokens(GenerateBaseServing):
         self,
         request: GenerateRequest,
         raw_request: Request | None = None,
-    ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
+    ) -> (
+        GenerateResponse
+        | RenderedGenerateResponse
+        | ErrorResponse
+        | AsyncGenerator[str, None]
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -335,6 +376,18 @@ class ServingTokens(GenerateBaseServing):
         sampling_params.output_kind = (
             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
         )
+        if (
+            not request.stream
+            and request.output_mode == "tokens"
+            and sampling_params.logprobs is not None
+            and sampling_params.logprobs >= 0
+            and sampling_params.prompt_logprobs is None
+        ):
+            # Keep the top-k rows as numpy columns without decoded tokens: the
+            # response is rendered from them without a Python object per
+            # entry. Prompt logprobs stay lists, as the response returns them.
+            sampling_params.flat_logprobs = True
+            sampling_params._detokenize_logprobs = False
 
         self._log_inputs(
             request_id,
@@ -392,12 +445,9 @@ class ServingTokens(GenerateBaseServing):
         request_id: str,
         model_name: str,
         request_metadata: RequestResponseMetadata,
-    ) -> ErrorResponse | GenerateResponse:
+    ) -> ErrorResponse | GenerateResponse | RenderedGenerateResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
-        sampling_params: SamplingParams = request.sampling_params
-        text_mode = request.output_mode == "text"
-        tokenizer = self._logprobs_tokenizer(text_mode)
 
         try:
             async for res in result_generator:
@@ -407,6 +457,61 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
+        response, usage, choice_meta = await build_response_off_loop(
+            _flat_logprob_entries(final_res),
+            functools.partial(
+                self._build_full_response,
+                request,
+                final_res,
+                request_id,
+                model_name,
+                created_time,
+            ),
+        )
+        request_metadata.final_usage_info = usage
+
+        # Log complete response if output logging is enabled
+        if self.enable_log_outputs and self.request_logger:
+            for index, finish_reason in choice_meta:
+                # Get the corresponding output token IDs
+                output_token_ids = None
+                if index < len(final_res.outputs):
+                    output_token_ids = final_res.outputs[index].token_ids
+
+                if output_token_ids:
+                    # Log token_ids only.
+                    self.request_logger.log_outputs(
+                        request_id=request_id,
+                        outputs="",
+                        output_token_ids=output_token_ids,
+                        finish_reason=finish_reason,
+                        is_streaming=False,
+                        delta=False,
+                    )
+
+        return response
+
+    def _build_full_response(
+        self,
+        request: GenerateRequest,
+        final_res: RequestOutput,
+        request_id: str,
+        model_name: str,
+        created_time: int,
+    ) -> tuple[
+        GenerateResponse | RenderedGenerateResponse,
+        UsageInfo,
+        list[tuple[int, str | None]],
+    ]:
+        """The response, its usage and (index, finish_reason) per choice.
+
+        CPU only, no shared-state side effects: may run in a worker thread.
+        """
+        sampling_params: SamplingParams = request.sampling_params
+        text_mode = request.output_mode == "text"
+        tokenizer = self._logprobs_tokenizer(text_mode)
+        # choice position -> pre-rendered JSON of its logprobs
+        fragments: dict[int, list[bytes]] = {}
         tokens_choices: list[GenerateTokensChoice] = []
         text_choices: list[GenerateTextChoice] = []
         num_generated_tokens = 0
@@ -417,10 +522,22 @@ class ServingTokens(GenerateBaseServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
+            logprobs: GenerateLogProbs | ChatCompletionLogProbs | None = None
             if sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
-                logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
-                if text_mode:
+                rendered = None
+                top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
+                if isinstance(out_logprobs, FlatLogprobs) and not text_mode:
+                    rendered = render_tokens_logprobs(
+                        token_ids, out_logprobs, sampling_params.logprobs
+                    )
+                    if rendered is None:
+                        # Irregular rows: the per-entry path. Iterating once
+                        # is cheaper than indexing each position.
+                        top_logprobs = list(out_logprobs)
+                if rendered is not None:
+                    fragments[len(tokens_choices)] = rendered
+                elif text_mode:
                     logprobs = self._create_text_logprobs(
                         token_ids=token_ids,
                         top_logprobs=out_logprobs,
@@ -430,11 +547,9 @@ class ServingTokens(GenerateBaseServing):
                 else:
                     logprobs = self._create_tokens_logprobs(
                         token_ids=token_ids,
-                        top_logprobs=out_logprobs,
+                        top_logprobs=top_logprobs,
                         num_output_top_logprobs=sampling_params.logprobs,
                     )
-            else:
-                logprobs = None
 
             routed_experts_b64 = (
                 numpy2base64(output.routed_experts)
@@ -481,8 +596,6 @@ class ServingTokens(GenerateBaseServing):
                 cached_tokens=final_res.num_cached_tokens
             )
 
-        request_metadata.final_usage_info = usage
-
         per_request_metrics = None
         if request.sampling_params.n == 1:
             spec_stats = build_spec_decoding_metrics(final_res)
@@ -513,26 +626,16 @@ class ServingTokens(GenerateBaseServing):
         else:
             response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
 
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            for choice in response.choices:
-                # Get the corresponding output token IDs
-                output_token_ids = None
-                if choice.index < len(final_res.outputs):
-                    output_token_ids = final_res.outputs[choice.index].token_ids
-
-                if output_token_ids:
-                    # Log token_ids only.
-                    self.request_logger.log_outputs(
-                        request_id=request_id,
-                        outputs="",
-                        output_token_ids=output_token_ids,
-                        finish_reason=choice.finish_reason,
-                        is_streaming=False,
-                        delta=False,
-                    )
-
-        return response
+        choice_meta = [
+            (choice.index, choice.finish_reason) for choice in response.choices
+        ]
+        if fragments:
+            parts = render_json_with_fragments(
+                response.model_dump(), "logprobs", fragments
+            )
+            # Joined here, so a large body is never copied on the event loop.
+            return RenderedGenerateResponse(b"".join(parts)), usage, choice_meta
+        return response, usage, choice_meta
 
     async def serve_tokens_stream_generator(
         self,

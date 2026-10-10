@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 
 from vllm.logprobs import (
     FlatLogprobs,
@@ -215,3 +216,69 @@ def test_flat_logprobs_access() -> None:
         assert len(empty) == 0
         assert empty.start_indices == []
         assert empty.end_indices == []
+
+
+def test_flat_logprobs_reads_like_list_across_storage_changes() -> None:
+    """Random mixes of every append path read back like list[dict], across
+    buffer growth, mixed widths, None positions and ranks, and values that
+    widen the int32 / float32 columns; checked before and after a rank that
+    is not the engine's (0, 1..k) layout."""
+    rng = np.random.default_rng(0)
+    flat = FlatLogprobs()
+    expected: list[LogprobsOnePosition] = []
+
+    def position(width: int, engine_ranks: bool) -> LogprobsOnePosition:
+        ranks = [int(rng.integers(0, 50)), *range(1, width)][:width]
+        if not engine_ranks:
+            ranks = rng.choice([None, *range(width)], width).tolist()
+        return {
+            int(rng.integers(0, 1000)): Logprob(
+                float(np.float32(-rng.random())), rank, rng.choice([None, "t"])
+            )
+            for rank in ranks
+        }
+
+    def check() -> None:
+        assert len(flat) == len(expected)
+        assert list(flat) == expected
+        assert [flat[i] for i in range(-len(flat), 0)] == expected
+        for index in (slice(5, 77), slice(None, None, 3), slice(-40, None)):
+            assert list(flat[index]) == expected[index]
+        assert len(flat.token_ids) == flat.num_entries == sum(map(len, expected))
+
+    for step in range(300):
+        if step == 150:
+            check()
+        engine_ranks = step < 150
+        op = rng.integers(0, 4)
+        if op == 0:
+            width = int(rng.integers(0, 4))
+            entry = position(width, engine_ranks) if rng.random() < 0.9 else None
+            flat.append(entry)
+            expected.append(entry or {})
+        elif op == 1:
+            n, width = int(rng.integers(1, 4)), int(rng.integers(1, 4))
+            ids = rng.integers(0, 1000, (n, width)).astype(np.int32)
+            lps = -rng.random((n, width)).astype(np.float32)
+            first = rng.integers(0, 50, n)
+            flat.append_rows(ids, lps, first)
+            for i in range(n):
+                ranks = [int(first[i]), *range(1, width)]
+                expected.append(
+                    {
+                        t: Logprob(lp, r)
+                        for t, lp, r in zip(ids[i].tolist(), lps[i].tolist(), ranks)
+                    }
+                )
+        elif op == 2:
+            entries = [position(2, engine_ranks) for _ in range(rng.integers(1, 3))]
+            source = FlatLogprobs()
+            source.extend(entries)
+            flat.extend(source if rng.random() < 0.5 else entries)
+            expected.extend(entries)
+        else:
+            entry = {2**40: Logprob(0.1, 3, None)} if rng.random() < 0.1 else {}
+            flat.append(entry)
+            expected.append(entry)
+
+    check()

@@ -28,6 +28,11 @@ logger = init_logger(__name__)
 NONES = itertools.repeat(None)
 
 
+def _row_width(num_logprobs: int, num_slots: int) -> int:
+    """Engine slots kept per position: the sampled token and the top-k."""
+    return num_slots if num_logprobs == -1 else num_logprobs + 1
+
+
 @dataclass
 class LogprobsProcessor:
     # Tokenizer for this request,
@@ -42,6 +47,8 @@ class LogprobsProcessor:
     num_prompt_logprobs: int | None
     # [num_scored_rows, num_token_ids], set once on the final prefill chunk.
     prompt_token_id_logprobs: np.ndarray | None = None
+    # False keeps sample logprobs without decoded token strings.
+    detokenize_sample_logprobs: bool = True
 
     @classmethod
     def from_new_request(
@@ -68,6 +75,7 @@ class LogprobsProcessor:
             ),
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
+            detokenize_sample_logprobs=sampling_params._detokenize_logprobs,
         )
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
@@ -85,21 +93,28 @@ class LogprobsProcessor:
         assert self.cumulative_logprob is not None
 
         token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
+        tokenizer = self.tokenizer if self.detokenize_sample_logprobs else None
+        width = _row_width(self.num_logprobs, token_ids_lst.shape[1])
+        if tokenizer is None and isinstance(self.logprobs, FlatLogprobs):
+            self.logprobs.append_rows(
+                token_ids_lst[:, :width], logprobs_lst[:, :width], ranks_lst
+            )
+            for sampled_token_logprob in logprobs_lst[:, 0].tolist():
+                self.cumulative_logprob += sampled_token_logprob
+            return
 
-        for rank_np, logprobs_np, token_ids_np in zip(
-            ranks_lst, logprobs_lst, token_ids_lst
+        for i, (rank_np, logprobs_np, token_ids_np) in enumerate(
+            zip(ranks_lst, logprobs_lst, token_ids_lst)
         ):
             rank = rank_np.tolist()
             logprobs = logprobs_np.tolist()
             token_ids = token_ids_np.tolist()
             # Detokenize (non-incrementally).
             decoded_tokens: list[str] | Iterable[None]
-            if self.tokenizer is None:
+            if tokenizer is None:
                 decoded_tokens = NONES
             else:
-                decoded_tokens_list = convert_ids_list_to_tokens(
-                    self.tokenizer, token_ids
-                )
+                decoded_tokens_list = convert_ids_list_to_tokens(tokenizer, token_ids)
                 context_token_ids = self._get_sampled_context_ids(self.logprobs)
                 decoded_tokens = self._verify_tokens(
                     decoded_tokens_list=decoded_tokens_list,
@@ -112,14 +127,22 @@ class LogprobsProcessor:
             self.cumulative_logprob += sampled_token_logprob
 
             # Update with the Logprob container for this pos.
-            append_logprobs_for_next_position(
-                self.logprobs,
-                token_ids,
-                logprobs,
-                decoded_tokens,
-                rank,
-                self.num_logprobs,
-            )
+            if isinstance(self.logprobs, FlatLogprobs):
+                self.logprobs.append_rows(
+                    token_ids_lst[i : i + 1, :width],
+                    logprobs_lst[i : i + 1, :width],
+                    ranks_lst[i : i + 1],
+                    list(decoded_tokens)[:width],
+                )
+            else:
+                append_logprobs_for_next_position(
+                    self.logprobs,
+                    token_ids,
+                    logprobs,
+                    decoded_tokens,
+                    rank,
+                    self.num_logprobs,
+                )
 
     def _update_prompt_logprobs(
         self,
@@ -140,6 +163,15 @@ class LogprobsProcessor:
 
         # Recover shapes.
         num_prompt_tokens, num_logprobs = logprobs.shape
+
+        if self.tokenizer is None and isinstance(self.prompt_logprobs, FlatLogprobs):
+            width = _row_width(self.num_prompt_logprobs, num_logprobs)
+            self.prompt_logprobs.append_rows(
+                token_ids[:, :width].numpy(),
+                logprobs[:, :width].numpy(),
+                ranks.numpy(),
+            )
+            return
 
         # Detokenize non-incrementally.
         # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
@@ -242,11 +274,7 @@ class LogprobsProcessor:
 
         # Efficient path for FlatLogprobs: access token_ids directly.
         if isinstance(logprobs_source, FlatLogprobs):
-            return [
-                logprobs_source.token_ids[logprobs_source.start_indices[i]]
-                for i in range(start, n)
-                if logprobs_source.start_indices[i] < logprobs_source.end_indices[i]
-            ]
+            return logprobs_source.first_token_ids(start, n)
 
         # list[dict] path
         result: list[int] = []
