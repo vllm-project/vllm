@@ -554,10 +554,6 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     # matching prior throughput behaviour of omitting output_len when unset.
     d["hf_output_len"] = output_len
     d["sharegpt_output_len"] = output_len
-    # sonnet reads dedicated attrs; fall back to SonnetDataset's own defaults.
-    d["sonnet_input_len"] = input_len if input_len is not None else 550
-    d["sonnet_output_len"] = output_len if output_len is not None else 150
-    d["sonnet_prefix_len"] = prefix_len
     # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
     # multimodal chat backend (preserves today's vllm-chat handling). Callers
     # without a --backend flag (e.g. bench mm-processor) drive every request
@@ -710,14 +706,14 @@ def validate_args(args):
         )
 
     # --prefix-len: only used when dataset_name is 'random', 'random-mm',
-    # 'sonnet', or not set.
+    # or not set.
     if (
-        args.dataset_name not in {"random", "random-mm", "sonnet", None}
+        args.dataset_name not in {"random", "random-mm", None}
         and args.prefix_len is not None
     ):
         warnings.warn(
             "--prefix-len will be ignored since --dataset-name\
-                 is not 'random', 'random-mm', 'sonnet', or not set.",
+                 is not 'random', 'random-mm', or not set.",
             stacklevel=2,
         )
 
@@ -803,7 +799,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         choices=[
             "sharegpt",
             "random",
-            "sonnet",
             "burstgpt",
             "hf",
             "prefix_repetition",

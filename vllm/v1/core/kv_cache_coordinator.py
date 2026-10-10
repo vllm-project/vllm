@@ -4,13 +4,14 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
 
-from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+    eagle_proof_margin,
+    partial_hash_hits_enabled,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -27,8 +28,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -341,6 +340,14 @@ class KVCacheCoordinator(ABC):
         extension = request.num_prompt_tokens // block * block
         return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
 
+    def get_num_cacheable_tokens(
+        self, num_computed_tokens: int, kv_cache_group_id: int
+    ) -> int:
+        """Return the prefix eligible for hashing in this group."""
+        # Only cache tokens with finalized KV. The last num_reprefillable_tokens
+        # tokens can be re-prefilled during multi-module MTP.
+        return max(0, num_computed_tokens - self.num_reprefillable_tokens)
+
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request.
 
@@ -352,17 +359,12 @@ class KVCacheCoordinator(ABC):
 
         """
         boundaries = self.get_replay_boundaries(request)
-        for manager in self.single_type_managers:
+        for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue
-            # Only cache tokens with finalized KV. The last num_reprefillable_tokens
-            # tokens can be re-prefilled during multi-module MTP.
-            num_tokens_to_cache = max(
-                0, num_computed_tokens - self.num_reprefillable_tokens
-            )
             manager.cache_blocks(
                 request,
-                num_tokens_to_cache,
+                self.get_num_cacheable_tokens(num_computed_tokens, group_id),
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )
@@ -659,8 +661,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.hash_block_size = hash_block_size
         self.dcp_world_size = dcp_world_size
         # Only groups that participate in prefix caching must satisfy the
-        # divisibility constraint; groups that opt out (e.g. GLM-5.3-Flash kpool
-        # tail, block_size=kpool) are scratch buffers and excluded.
+        # divisibility constraint; groups that opt out (e.g. circular buffers
+        # such as the GLM-5.3-Flash indexer tail) are scratch and excluded.
         cacheable_block_sizes = [
             manager.block_size
             for manager, group in zip(
@@ -692,37 +694,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # managers in every group. TP needs hashing finer than the Mamba block;
         # DCP accepts equality because it scales the effective full-attention
         # block instead.
-        has_partial_mamba_group = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and (
-                (dcp_world_size == 1 and g.kv_cache_spec.block_size > hash_block_size)
-                or (
-                    dcp_world_size > 1 and g.kv_cache_spec.block_size >= hash_block_size
-                )
-            )
-            for g in kv_cache_config.kv_cache_groups
-        )
         self.enable_partial_hash_hits = (
-            allow_partial_hash_hits and has_partial_mamba_group
+            allow_partial_hash_hits
+            and partial_hash_hits_enabled(
+                kv_cache_config.kv_cache_groups,
+                hash_block_size,
+                dcp_world_size,
+                [type(manager) for manager in self.single_type_managers],
+            )
         )
-        if self.enable_partial_hash_hits:
-            unsupported_partial_hit_managers = {
-                type(manager).__name__
-                for manager, group in zip(
-                    self.single_type_managers, kv_cache_config.kv_cache_groups
-                )
-                if group.kv_cache_spec.prefix_cacheable
-                and not manager.supports_fine_grained_hash_lookup
-                and manager.block_size != hash_block_size
-            }
-            if unsupported_partial_hit_managers:
-                self.enable_partial_hash_hits = False
-                logger.warning_once(
-                    "Disabling fine-grained prefix-cache hits because these KV "
-                    "cache managers require block-aligned lookups: %s.",
-                    ", ".join(sorted(unsupported_partial_hit_managers)),
-                )
         cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
         for manager in self.single_type_managers:
             manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
@@ -744,8 +724,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
-            # kpool tail): their blocks are per-request scratch, never
+            # Skip groups that opt out of prefix caching (e.g. circular
+            # buffers): their blocks are per-request scratch, never
             # shareable, so they must not participate in hit lookup (their
             # manager-level hooks already no-op). Their slot in the per-group
             # hit tuple stays empty.
@@ -809,39 +789,22 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             return num_tokens
         return round_down(num_tokens, self.scheduler_block_size)
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def get_num_cacheable_tokens(
+        self, num_computed_tokens: int, kv_cache_group_id: int
+    ) -> int:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
-        boundaries = self.get_replay_boundaries(request)
-        for manager in self.single_type_managers:
-            if not manager.enable_caching:
-                continue
-            num_tokens_to_cache = cached_num_computed_tokens
-            # EAGLE groups match one block past each aligned boundary and drop
-            # it, so make that lookahead block eligible to be cached.
-            if manager.use_eagle and cached_num_computed_tokens > 0:
-                # Only cache tokens with finalized KV. The last
-                # num_reprefillable_tokens tokens can be re-prefilled during
-                # multi-module MTP.
-                num_finalized_computed_tokens = max(
-                    0, num_computed_tokens - self.num_reprefillable_tokens
-                )
-                cached_num_finalized_computed_tokens = self._align_cacheable(
-                    num_finalized_computed_tokens
-                )
-                num_tokens_to_cache = min(
-                    num_finalized_computed_tokens,
-                    cached_num_finalized_computed_tokens + manager.block_size,
-                )
-            # The manager already knows the fine hit granularity
-            # (``scheduler_block_size``); retention is passed separately so it
-            # can keep both the coarse segment tails and the fine replay
-            # boundary (which needs the fine value).
-            manager.cache_blocks(
-                request,
-                num_tokens_to_cache,
-                retention_interval=self.retention_interval,
-                replay_boundaries=boundaries,
+        manager = self.single_type_managers[kv_cache_group_id]
+        # EAGLE matches one block past the aligned boundary, then drops it.
+        if manager.use_eagle and cached_num_computed_tokens > 0:
+            num_finalized_computed_tokens = max(
+                0, num_computed_tokens - self.num_reprefillable_tokens
             )
+            return min(
+                num_finalized_computed_tokens,
+                self._align_cacheable(num_finalized_computed_tokens)
+                + manager.block_size,
+            )
+        return cached_num_computed_tokens
 
     def find_longest_cache_hit(
         self,
@@ -913,15 +876,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 # mamba: its finder never drops (draft models have no mamba
                 # layers), so the hit would grow past the candidate.
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and group_block_size > self.hash_block_size
-                        else group_block_size
+                    eagle_margin = eagle_proof_margin(
+                        group_block_size,
+                        self.hash_block_size,
+                        self.enable_partial_hash_hits
+                        and manager_cls.supports_fine_grained_hash_lookup,
                     )
                     _max_length = min(
-                        curr_hit_length + eagle_margin, max_cache_hit_length
+                        curr_hit_length + eagle_margin,
+                        len(block_hashes) * self.hash_block_size,
                     )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
@@ -997,9 +960,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
+            lookup_length = max_cache_hit_length
+            if use_eagle and not isinstance(spec, MambaSpec):
+                eagle_margin = eagle_proof_margin(
+                    manager.block_size,
+                    self.hash_block_size,
+                    self.enable_partial_hash_hits
+                    and manager_cls.supports_fine_grained_hash_lookup,
+                )
+                lookup_length = min(
+                    max_cache_hit_length + eagle_margin,
+                    len(block_hashes) * self.hash_block_size,
+                )
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
-                max_length=max_cache_hit_length,
+                max_length=lookup_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
                 kv_cache_spec=spec,

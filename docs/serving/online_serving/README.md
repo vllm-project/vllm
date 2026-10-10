@@ -76,6 +76,9 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Generative Scoring API](generative_scoring.md) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
+- [Structured Decisions API](structured_decisions.md) (`/v1/systemone`)
+    - Applicable to [text generation models](../../models/generative_models.md) with a [chat template](#chat-template).
+    - Answers typed questions about a state with a probability for every allowed answer.
 
 ## Instrumentator APIs
 

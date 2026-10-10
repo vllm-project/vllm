@@ -212,6 +212,10 @@ class RequestOutput:
                             completion.sampling_mask.token_ids.extend(
                                 next_completion.sampling_mask.token_ids
                             )
+                        if next_completion.spec_decode_metrics is not None:
+                            completion.spec_decode_metrics = (
+                                next_completion.spec_decode_metrics
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
