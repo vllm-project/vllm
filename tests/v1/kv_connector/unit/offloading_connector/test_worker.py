@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
+    compute_layout_strides,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -519,6 +520,63 @@ def test_register_kv_caches(backend):
             assert actual.page_size_bytes == expected.page_size_bytes
             # Every layer gets a canonical mapping, certified or opaque
             assert actual.mapping is not None
+
+
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_register_kv_caches_covers_whole_page(layout):
+    """Each block's offloaded regions hold every layer's full page, or the
+    layout is rejected at registration. LHBNC spreads a block's page across
+    the layer (heads a whole layer of blocks apart), which the transfer paths
+    cannot express, so it must fail instead of offloading part of the page."""
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    page = spec.page_size_bytes
+    layers = ["layer0", "layer1"]
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        spec, NUM_BLOCKS, len(layers), layout
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=len(layers) * page * NUM_BLOCKS,
+                layers=layers,
+                layer_stride=layer_stride,
+                block_stride=block_stride,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+    )
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    kv_caches = allocate_kv_cache(
+        kv_cache_config,
+        torch.device(f"{DEVICE_TYPE}:0"),
+        layout,
+        [BLOCK_SIZE],
+    )
+    worker, offloading_spec = _make_worker(kv_cache_config)
+
+    if layout == KVCacheLayout.LHBNC:
+        with pytest.raises(ValueError, match="not contiguous within a block"):
+            worker.register_kv_caches(kv_caches)
+        return
+
+    worker.register_kv_caches(kv_caches)
+    canonical = offloading_spec.get_worker.call_args[0][0]
+
+    block = 3
+    kv_caches[layers[0]].untyped_storage().fill_(0)
+    for layer_name in layers:
+        kv_caches[layer_name][block].view(torch.int8).fill_(1)
+    offloaded = sum(
+        int(t.tensor[block].view(torch.int8).sum()) for t in canonical.tensors
+    )
+    assert offloaded == len(layers) * page
 
 
 def test_register_packed_kv_caches_skips_scratch_group():
