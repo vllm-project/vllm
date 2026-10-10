@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -99,6 +101,56 @@ def test_replace_parameter_preserves_weight_loader(prefer_copy: bool) -> None:
     assert len(calls) == 1
     assert calls[0][0] is layer.weight
     assert calls[0][1] is loaded_weight
+
+
+def test_vision_moe_reload_rebuilds_fused_buffers_and_retains_loader_topology(
+    monkeypatch,
+):
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        finalize_layerwise_processing,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.utils import register_derived_buffer
+    from vllm.models.dots3_note.nvidia import vision
+
+    model = object.__new__(vision.MoESwiGLUFFNFP8)
+    torch.nn.Module.__init__(model)
+    expert = torch.nn.Module()
+    for name in ("fc1", "fc2", "fc3"):
+        linear = torch.nn.Linear(2, 2, bias=False)
+        linear._vllm_defer_weights_reload = True
+        setattr(expert, name, linear)
+    model.experts = torch.nn.ModuleList([expert])
+    for name in model._FUSED_BUFFERS:
+        register_derived_buffer(model, name)
+    monkeypatch.setattr(
+        vision,
+        "_per_block_cast_to_fp8_padded",
+        lambda weight: (
+            weight.detach().clone(),
+            weight.detach().clone().mean().view(1, 1),
+        ),
+    )
+    record_metadata_for_reloading(model)
+    model.process_weights_after_loading()
+    pointers = {name: getattr(model, name).data_ptr() for name in model._FUSED_BUFFERS}
+    for value in (1.0, 3.0, 1.0):
+        initialize_layerwise_reload(model)
+        for linear in (expert.fc1, expert.fc2, expert.fc3):
+            linear.weight.weight_loader(linear.weight, torch.full((2, 2), value))
+        finalize_layerwise_processing(
+            model, model_config=SimpleNamespace(dtype=torch.float32)
+        )
+        for name, pointer in pointers.items():
+            tensor = getattr(model, name)
+            assert tensor.data_ptr() == pointer
+            torch.testing.assert_close(tensor, torch.full_like(tensor, value))
+        assert model.experts[0] is expert
+        assert all(
+            linear.weight.numel() == 0
+            for linear in (expert.fc1, expert.fc2, expert.fc3)
+        )
 
 
 def test_replace_parameter_weight_loader_comes_from_old_parameter() -> None:
