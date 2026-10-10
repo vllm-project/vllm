@@ -342,6 +342,23 @@ class CudaPlatformBase(Platform):
             )
             scheduler_config.disable_chunked_mm_input = True
 
+        compilation_config = vllm_config.compilation_config
+        if (
+            vllm_config.offload_config.uva.cpu_offload_gb > 0
+            and bool(compilation_config.cudagraph_mode)
+            and not cls.is_pin_memory_available()
+        ):
+            from vllm.config.compilation import CUDAGraphMode
+
+            # Unpinned offloaded weights are copied to the GPU in every forward,
+            # and CUDA graphs cannot capture copies from pageable host memory.
+            logger.warning_once(
+                "--cpu-offload-gb without pinned memory cannot run with CUDA "
+                "graphs; disabling CUDA graphs. On WSL2, set "
+                "VLLM_WSL2_ENABLE_PIN_MEMORY=1 to keep them."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         if (
             in_wsl()
             and vllm_config.offload_config.uva.cpu_offload_gb > 0
