@@ -130,6 +130,10 @@ communicators keep their topology, so they are not re-created. It needs NCCL
 2.29.7 or newer; with an older library, a warning is logged and the memory stays
 on the GPU.
 
+The flag also releases the `deepep_high_throughput`/`deepep_low_latency` buffers
+and re-creates them on wake, except with CUDA graphs (they hold the buffer
+addresses) or `VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL=1` (DeepEP leaks those buffers).
+
 ```python
 llm = LLM("Qwen/Qwen3-8B", enable_sleep_mode=True, enable_nccl_comm_suspend=True)
 ```

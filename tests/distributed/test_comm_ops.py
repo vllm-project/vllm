@@ -5,6 +5,7 @@
 Run `pytest tests/distributed/test_comm_ops.py`.
 """
 
+import os
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -14,6 +15,7 @@ import pytest
 import ray
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.distributed import (
     broadcast_tensor_dict,
     get_pp_group,
@@ -21,7 +23,12 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.distributed.device_communicators import flashinfer_all_reduce
+from vllm.distributed.device_communicators import all2all, flashinfer_all_reduce
+from vllm.distributed.device_communicators.all2all import (
+    DeepEPAll2AllManagerBase,
+    DeepEPHTAll2AllManager,
+    DeepEPLLAll2AllManager,
+)
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
@@ -323,6 +330,106 @@ def test_cuda_communicator_checkpoints_flashinfer_workspaces(
     for workspace in unique_workspaces:
         workspace.checkpoint_prepare.assert_called_once_with()
         workspace.checkpoint_restore.assert_called_once_with(group)
+
+
+class _FakeDeepEPBuffer:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.inits = getattr(self, "inits", 0) + 1
+        self.destroys = getattr(self, "destroys", 0)
+
+    def destroy(self):
+        self.destroys += 1
+
+
+def _deepep_communicator(
+    monkeypatch: pytest.MonkeyPatch,
+    manager_cls: type[DeepEPAll2AllManagerBase] = DeepEPHTAll2AllManager,
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    mnnvl: bool = False,
+    comm_suspend: bool = True,
+) -> tuple[CudaCommunicator, list[_FakeDeepEPBuffer]]:
+    monkeypatch.setenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", str(int(mnnvl)))
+    if "NVSHMEM_DISABLE_NCCL" not in os.environ:  # undo the manager's setdefault
+        monkeypatch.delenv("NVSHMEM_DISABLE_NCCL", raising=False)
+    config = Mock(
+        compilation_config=Mock(cudagraph_mode=cudagraph_mode),
+        model_config=Mock(enable_nccl_comm_suspend=comm_suspend),
+    )
+    monkeypatch.setattr(all2all, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(all2all, "has_deep_ep", lambda: True)
+    monkeypatch.setattr(all2all.All2AllManagerBase, "__init__", lambda *a, **k: None)
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.cpu_group = None
+    communicator.pynccl_comm = Mock()
+    communicator.all2all_manager = manager = manager_cls(cpu_group=None)
+    # The cache is weak; these refs stand in for the prepare/finalize objects.
+    buffers = [
+        manager.handle_cache.get_or_create({"num_nvl_bytes": n}, _FakeDeepEPBuffer)
+        for n in (1, 2)
+    ]
+    return communicator, buffers
+
+
+@pytest.mark.parametrize(
+    ("comm_suspend", "preset", "expected"),
+    [(True, None, "1"), (False, None, None), (True, "0", "0")],
+    ids=["suspend", "no-suspend", "user-override"],
+)
+def test_deepep_disables_nvshmem_nccl_with_comm_suspend(
+    monkeypatch: pytest.MonkeyPatch, comm_suspend, preset, expected
+):
+    monkeypatch.delenv("NVSHMEM_DISABLE_NCCL", raising=False)
+    if preset is not None:
+        monkeypatch.setenv("NVSHMEM_DISABLE_NCCL", preset)
+    _deepep_communicator(monkeypatch, comm_suspend=comm_suspend)
+    assert os.environ.get("NVSHMEM_DISABLE_NCCL") == expected
+
+
+@pytest.mark.parametrize(
+    ("manager_cls", "cudagraph_mode", "mnnvl", "released"),
+    [
+        (DeepEPHTAll2AllManager, CUDAGraphMode.NONE, True, True),
+        (DeepEPHTAll2AllManager, CUDAGraphMode.PIECEWISE, False, False),
+        (DeepEPLLAll2AllManager, CUDAGraphMode.NONE, False, True),
+        (DeepEPLLAll2AllManager, CUDAGraphMode.FULL_AND_PIECEWISE, False, False),
+        (DeepEPLLAll2AllManager, CUDAGraphMode.NONE, True, False),
+    ],
+    ids=["ht-eager", "ht-cudagraph", "ll-eager", "ll-cudagraph", "ll-mnnvl"],
+)
+def test_cuda_communicator_suspend_recreates_deepep_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+    manager_cls: type[DeepEPAll2AllManagerBase],
+    cudagraph_mode: CUDAGraphMode,
+    mnnvl: bool,
+    released: bool,
+) -> None:
+    communicator, buffers = _deepep_communicator(
+        monkeypatch, manager_cls, cudagraph_mode, mnnvl
+    )
+    for _ in range(2):
+        communicator.suspend()
+    for _ in range(2):
+        communicator.resume()
+
+    # Destroyed once and re-created in place with the original kwargs.
+    for n, buffer in zip((1, 2), buffers):
+        assert (buffer.destroys, buffer.inits) == ((1, 2) if released else (0, 1))
+        assert buffer.kwargs == {"num_nvl_bytes": n}
+    communicator.pynccl_comm.suspend.assert_called_with()
+    communicator.pynccl_comm.resume.assert_called_with()
+
+
+@pytest.mark.parametrize("suspended", [False, True], ids=["awake", "asleep"])
+def test_deepep_destroy(monkeypatch: pytest.MonkeyPatch, suspended: bool) -> None:
+    communicator, buffers = _deepep_communicator(monkeypatch)
+    if suspended:
+        communicator.suspend()
+    communicator.all2all_manager.destroy()
+
+    # Each buffer is destroyed exactly once, also on shutdown while asleep.
+    assert [b.destroys for b in buffers] == [1, 1]
+    assert not communicator.all2all_manager.handle_cache._cache
 
 
 @pytest.mark.parametrize(
