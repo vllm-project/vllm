@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ToolCall,
@@ -42,6 +41,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,

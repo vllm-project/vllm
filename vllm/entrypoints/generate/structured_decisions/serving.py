@@ -68,6 +68,7 @@ class ServingStructuredDecisions(BaseServing):
         super().__init__(
             models=models, model_config=model_config, request_logger=request_logger
         )
+        self.engine_client = strategy.context.engine_client
         self.strategy = strategy
         self.limits = strategy.limits()
 
@@ -88,6 +89,11 @@ class ServingStructuredDecisions(BaseServing):
             questions = parse_questions(request, self.limits)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine_client.check_admission(len(questions))
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
             reads = await self.strategy.read(
                 questions,
                 request.instructions,
@@ -96,6 +102,8 @@ class ServingStructuredDecisions(BaseServing):
                 chat_template_kwargs=request.chat_template_kwargs,
                 lora_request=lora_request,
                 priority=request.priority,
+                cache_salt=request.cache_salt,
+                trace_headers=trace_headers,
             )
         except StructuredDecisionError as e:
             return self.create_error_response(e)

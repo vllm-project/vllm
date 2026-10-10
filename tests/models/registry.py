@@ -266,6 +266,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
     "ExaoneMoeForCausalLM": _HfExamplesInfo("LGAI-EXAONE/K-EXAONE-236B-A23B"),
+    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+        "LGAI-EXAONE/K-EXAONE-236B-A23B",
+        hf_overrides={"architectures": ["ExaoneMoEForCausalLM"]},
+    ),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
@@ -775,10 +779,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
-        },
+        "nvidia/audio-flamingo-3-hf"
     ),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BailingMoeV3VLForConditionalGeneration": _HfExamplesInfo(
@@ -817,12 +818,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/Cosmos3-Edge",
         max_model_len=4096,
         use_original_num_layers=True,
-        hf_overrides={
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "*-",
-            }
-        },
+        hf_overrides={"text_config": {"layers_block_type": ["full_attention", "mlp"]}},
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
