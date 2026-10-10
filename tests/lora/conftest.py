@@ -3,17 +3,27 @@
 
 import tempfile
 from collections import OrderedDict
+from dataclasses import replace
 from importlib import reload
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.nn as nn
+from transformers import PreTrainedConfig
 
+from vllm.config.lora import LoRAConfig
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     init_distributed_environment,
     initialize_model_parallel,
+)
+from vllm.lora.layers import FusedMoE3DWithLoRA, FusedMoEWithLoRA
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -25,6 +35,61 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
+
+
+@pytest.fixture
+def moe_lora_layer():
+    """Allocate real LoRA storage without constructing a forward kernel."""
+
+    def create(layout="gated", parallel="none", device="cpu"):
+        cls = FusedMoE3DWithLoRA if layout.startswith("3d") else FusedMoEWithLoRA
+        layer = cls.__new__(cls)
+        nn.Module.__init__(layer)
+        pc = FusedMoEParallelConfig.make_no_parallel()
+        if parallel in ("tp", "sharded"):
+            pc = replace(pc, tp_size=2, tp_rank=1)
+        elif parallel == "ep":
+            pc = replace(pc, ep_size=2, ep_rank=1, use_ep=True)
+        layer.moe_config = FusedMoEConfig(
+            num_experts=4,
+            experts_per_token=2,
+            hidden_dim=16,
+            intermediate_size=32,
+            num_local_experts=2 if pc.use_ep else 4,
+            num_logical_experts=4,
+            activation=MoEActivation.SILU_NO_MUL
+            if layout == "non_gated"
+            else MoEActivation.SILU,
+            device=device,
+            routing_method=RoutingMethodType.Default,
+            moe_parallel_config=pc,
+            in_dtype=torch.float32,
+        )
+        layer.tp_size, layer.tp_rank = pc.tp_size, pc.tp_rank
+        layer.device = torch.device(device)
+        layer.enable_moe_shared_loras = False
+        layer._w13_slices = 2 if layout in ("gated", "shared") else 1
+        layer.n_slices = layer.local_num_experts * (layer._w13_slices + 1)
+        layer.create_lora_weights(
+            2,
+            LoRAConfig(
+                max_lora_rank=8,
+                max_loras=2,
+                lora_dtype=torch.float32,
+                fully_sharded_loras=parallel == "sharded",
+                enable_moe_shared_loras=layout == "shared",
+            ),
+            model_config=PreTrainedConfig(
+                architectures=[
+                    "GptOssForCausalLM"
+                    if layout == "3d_interleaved"
+                    else "Qwen3MoeForCausalLM"
+                ]
+            ),
+        )
+        return layer
+
+    return create
 
 
 @pytest.fixture()

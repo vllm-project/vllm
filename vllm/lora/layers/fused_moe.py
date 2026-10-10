@@ -364,9 +364,24 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         self.w2_lora_a_stacked[0][index] = 0
         self.w2_lora_b_stacked[0][index] = 0
-        self.adapter_enabled[index] = 0
+        # A scalar assignment copies a CPU scalar to CUDA and can synchronize.
+        self.adapter_enabled[index : index + 1].zero_()
 
-    #
+    def slot_weights(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        """Rank-local factors: w1/w2/w3, w1/w2 if non-gated, w13/w2 if 3D.
+
+        Factors have a leading local-expert axis, except shared factors,
+        whose expert axis has size one. Rank and output dims follow the
+        allocated TP layout; no stacking or copying is performed.
+        """
+        return (
+            (self.w13_lora_a_stacked[0][index], self.w2_lora_a_stacked[0][index])
+            + tuple(a[index] for a in self.w13_lora_a_stacked[1:]),
+            (self.w13_lora_b_stacked[0][index], self.w2_lora_b_stacked[0][index])
+            + tuple(b[index] for b in self.w13_lora_b_stacked[1:]),
+        )
 
     def set_lora(
         self,
@@ -380,7 +395,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert isinstance(lora_b, list)
 
         self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.adapter_enabled[index : index + 1].fill_(1)
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
@@ -573,7 +588,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         assert len(lora_a) == len(lora_b) == 2
 
         self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.adapter_enabled[index : index + 1].fill_(1)
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b

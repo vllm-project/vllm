@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from typing import TypeVar
 
 import torch
@@ -49,12 +50,27 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
 T = TypeVar("T")
 DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
+
+
+def _as_slices(
+    weights: torch.Tensor | Sequence[torch.Tensor | None],
+) -> tuple[torch.Tensor | None, ...]:
+    """One entry per LoRA slice: a bare tensor is a single-slice module."""
+    return (weights,) if isinstance(weights, torch.Tensor) else tuple(weights)
+
+
+def _unslice(
+    slices: tuple[torch.Tensor | None, ...],
+) -> torch.Tensor | list[torch.Tensor | None]:
+    """The form `set_lora` takes: a tensor for one slice, a list for packed."""
+    return slices[0] if len(slices) == 1 else list(slices)  # type: ignore[return-value]
 
 
 class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
@@ -412,6 +428,237 @@ class LoRAModelManager:
             self.lora_index_to_id[index] = None
         except ValueError:
             pass
+
+    def get_adapter_slot(self, adapter_id: int) -> int | None:
+        """GPU slot index holding `adapter_id`, or None if it is not active."""
+        try:
+            return self.lora_index_to_id.index(adapter_id)
+        except ValueError:
+            return None
+
+    def get_adapter_slot_weights(
+        self, adapter_id: int, module_names: Iterable[str] | None = None
+    ) -> dict[str, tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]]:
+        """Views of the GPU slot buffers of an active adapter, per module.
+
+        Each entry is `(lora_a_slices, lora_b_slices)` as returned by
+        `BaseLayerWithLoRA.slot_weights`: local to this rank, padded to
+        `max_lora_rank`, with the adapter's scaling already folded into B.
+        Writing through a view changes what the next forward computes but not
+        the CPU copy of the adapter, so the change is lost if the adapter is
+        evicted and reloaded; use `update_adapter_weights` to keep both in sync.
+        In a running engine the buffers are inference tensors: modify them
+        inside `torch.inference_mode()`.
+
+        For repeated GPU-resident writes, pin the adapter before retaining
+        these views, and keep all writes ordered with forwards on the worker
+        stream. Removing the adapter or unpinning and evicting it invalidates
+        the association between a retained view and this adapter.
+        """
+        index = self.get_adapter_slot(adapter_id)
+        if index is None:
+            raise ValueError(f"LoRA {adapter_id} is not active in a GPU slot")
+        names = self.modules if module_names is None else module_names
+        return {name: self._lookup_module(name).slot_weights(index) for name in names}
+
+    def update_adapter_weights(
+        self,
+        adapter_id: int,
+        weights: Mapping[
+            str,
+            tuple[
+                torch.Tensor | Sequence[torch.Tensor | None],
+                torch.Tensor | Sequence[torch.Tensor | None],
+            ],
+        ],
+        *,
+        update_cpu_cache: bool = True,
+    ) -> None:
+        """Replace the LoRA weights of registered adapter `adapter_id`.
+
+        `weights` maps module names (keys of `self.modules`, e.g. a packed
+        `qkv_proj`) to `(lora_a, lora_b)` in the form `set_lora` takes: full
+        (unsharded) tensors, scaling folded into `lora_b`, and one entry per
+        slice for packed modules. The GPU slot is rewritten if the adapter is
+        active. Modules held by another pipeline-parallel rank are skipped, so
+        the same mapping can be sent to every worker.
+
+        MoE uses stacked `(experts, rank, in)` A and `(experts, out, rank)` B
+        factors: w1/w2/w3 for gated layers, w1/w2 for non-gated layers, and
+        w13/w2 for 3D layers. EP slices global-expert inputs to this worker;
+        shared factors retain their size-one expert axis. Rank is unchanged.
+
+        With `update_cpu_cache=True` the cached copy is updated as well, so the
+        new weights survive eviction; a slice given as None keeps its cached
+        value. With `update_cpu_cache=False` only the GPU slot is written,
+        which avoids the device-to-host copy for frequent updates; the adapter
+        must then be pinned (`pin_adapter`) so it cannot be evicted and
+        silently reloaded with the old weights, and every slice must be given.
+
+        Input metadata is validated before anything is written; inputs that
+        alias a destination are snapshotted before `set_lora` resets it.
+        Prefix-cache entries computed with previous weights are not invalidated.
+        Call only between forwards: this API does not coordinate concurrent
+        requests. For high-frequency ZO probes, use pinned slot views to write
+        directions directly, avoiding cache copies and reset-then-copy work.
+        """
+        lora_model = self.get_adapter(adapter_id)
+        if lora_model is None:
+            raise ValueError(f"LoRA {adapter_id} is not registered")
+        index = self.get_adapter_slot(adapter_id)
+        if not update_cpu_cache and not (
+            index is not None and adapter_id in self._active_adapters.pinned_items
+        ):
+            raise ValueError(
+                f"update_cpu_cache=False requires LoRA {adapter_id} to be pinned "
+                "in a GPU slot; otherwise eviction would reload its old weights"
+            )
+        # (module, (lora_a, lora_b) for set_lora, [(cached, new)] copies)
+        plan: list[tuple[BaseLayerWithLoRA, tuple, list[tuple]]] = []
+        for module_name, (lora_a, lora_b) in weights.items():
+            if self._on_another_pp_rank(module_name):
+                continue
+            module = self._lookup_module(module_name)
+            new_a, new_b = _as_slices(lora_a), _as_slices(lora_b)
+            cached = self._get_lora_layer_weights(lora_model, module_name)
+            if cached is None:
+                raise ValueError(f"LoRA {adapter_id} has no weights for {module_name}")
+            old_a, old_b = _as_slices(cached.lora_a), _as_slices(cached.lora_b)
+            non_gated = (
+                isinstance(module, FusedMoEWithLoRA)
+                and not isinstance(module, FusedMoE3DWithLoRA)
+                and module._w13_slices == 1
+            )
+            # pack_moe aliases w3 to w1 for non-gated models; only two
+            # physical slices can be updated independently.
+            if non_gated:
+                old_a, old_b = old_a[:2], old_b[:2]
+            n_slices = len(old_a)
+            if len(new_a) != n_slices or len(new_b) != n_slices:
+                raise ValueError(
+                    f"{module_name} has {n_slices} LoRA slices, got "
+                    f"{len(new_a)} A and {len(new_b)} B tensors"
+                )
+            copies = []
+            for new, old, kind in (
+                (new_a, old_a, "A"),
+                (new_b, old_b, "B"),
+            ):
+                for i, (n, o) in enumerate(zip(new, old)):
+                    if n is None:
+                        if not update_cpu_cache:
+                            raise ValueError(
+                                f"{module_name}: update_cpu_cache=False "
+                                "needs every slice"
+                            )
+                        continue
+                    if (
+                        not isinstance(n, torch.Tensor)
+                        or n.layout != torch.strided
+                        or not n.is_floating_point()
+                        or n.device.type == "meta"
+                    ):
+                        raise ValueError(
+                            f"{module_name} slice {i} {kind}: expected a real "
+                            "floating-point strided tensor"
+                        )
+                    if (
+                        isinstance(module, FusedMoEWithLoRA)
+                        and o is not None
+                        and n.ndim == 3
+                        and n.shape[0] == module.global_num_experts
+                        and o.shape[0] == module.local_num_experts
+                        and module.use_ep
+                    ):
+                        n = n.narrow(
+                            0,
+                            module.ep_rank * module.local_num_experts,
+                            module.local_num_experts,
+                        )
+                    if o is None or n.shape != o.shape:
+                        raise ValueError(
+                            f"{module_name} slice {i} {kind}: expected shape "
+                            f"{None if o is None else tuple(o.shape)}, got "
+                            f"{tuple(n.shape)}"
+                        )
+                    copies.append((o, n))
+            plan.append((module, (cached.lora_a, cached.lora_b), copies))
+
+        # set_lora resets its slot before copying. Snapshot only inputs
+        # aliasing a destination (including another module in this call).
+        destinations = {
+            (t.device, t.untyped_storage().data_ptr())
+            for module, _, copies in plan
+            for t in (
+                ([old for old, _ in copies] if update_cpu_cache else [])
+                + (
+                    [t for views in module.slot_weights(index) for t in views]
+                    if index is not None
+                    else []
+                )
+            )
+        }
+        for i, (module, source, copies) in enumerate(plan):
+            safe_copies = [
+                (
+                    old,
+                    new.clone()
+                    if (new.device, new.untyped_storage().data_ptr()) in destinations
+                    else new,
+                )
+                for old, new in copies
+            ]
+            if not update_cpu_cache:
+                n_slices = len(safe_copies) // 2
+                safe_a, safe_b = (
+                    tuple(new for (_, new) in safe_copies[:n_slices]),
+                    tuple(new for (_, new) in safe_copies[n_slices:]),
+                )
+                # Preserve the non-gated w3 placeholder expected by set_lora.
+                if (
+                    isinstance(module, FusedMoEWithLoRA)
+                    and not isinstance(module, FusedMoE3DWithLoRA)
+                    and module._w13_slices == 1
+                ):
+                    safe_a, safe_b = safe_a + (safe_a[0],), safe_b + (safe_b[0],)
+                source = (_unslice(safe_a), _unslice(safe_b))
+            plan[i] = (module, source, safe_copies)
+
+        # Adapters are loaded, and slot buffers written, under inference mode;
+        # their tensors only accept in-place writes inside it.
+        with torch.inference_mode():
+            for module, (source_a, source_b), copies in plan:
+                # Persistence deliberately copies to the cache and may copy
+                # unpinned CPU factors back to the slot (e.g. packed MoE).
+                with gpu_sync_allowed() if update_cpu_cache else nullcontext():
+                    if update_cpu_cache:
+                        for cached_tensor, new_tensor in copies:
+                            cached_tensor.copy_(new_tensor)
+                    if index is not None:
+                        module.set_lora(index, source_a, source_b)
+
+    def _on_another_pp_rank(self, module_name: str) -> bool:
+        """Whether `module_name` is under a layer this pipeline rank lacks.
+
+        Lets one `update_adapter_weights` call carry the whole adapter to every
+        worker while a misspelled name still fails.
+        """
+        module: nn.Module | None = self.model
+        for part in module_name.split("."):
+            module = getattr(module, part, None)
+            if module is None:
+                return False
+            if isinstance(module, PPMissingLayer):
+                return True
+        return False
+
+    def _lookup_module(self, module_name: str) -> BaseLayerWithLoRA:
+        try:
+            return self.modules[module_name]
+        except KeyError:
+            raise KeyError(
+                f"{module_name!r} is not a LoRA module of this model"
+            ) from None
 
     def _add_adapter(self, lora: LoRAModel):
         self._validate_moe_lora_format(lora)
