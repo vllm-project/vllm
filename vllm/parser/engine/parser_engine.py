@@ -90,6 +90,9 @@ class ParserEngine(Parser):
     complete output format for a model (reasoning + tool calls).
     """
 
+    pending_output_token_ids: Sequence[int] = ()
+    """Token IDs for the next ``extract_reasoning`` call, cleared once used."""
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -244,6 +247,56 @@ class ParserEngine(Parser):
     ) -> list[SemanticEvent]:
         delta_text, delta_token_ids = self._preprocess_feed(delta_text, delta_token_ids)
         return self._engine.feed(delta_text, delta_token_ids)
+
+    def _feed_complete(
+        self,
+        model_output: str,
+        token_ids: Sequence[int],
+    ) -> list[SemanticEvent] | None:
+        """Feed a complete output the way a stream would deliver it.
+
+        Every marker that arrived as its special token is fed as its own
+        delta, so a marker the model spelled out with ordinary tokens is
+        content, as in streaming.
+
+        Returns:
+            The events, or None without feeding anything if the token IDs
+            do not reproduce ``model_output``.
+
+        """
+        marker_ids = self._engine.token_id_to_terminal
+        decode = self.model_tokenizer.decode
+        segments: list[tuple[str, Sequence[int]]] = []
+        start = 0
+        for i, token_id in enumerate(token_ids):
+            if token_id not in marker_ids:
+                continue
+            if start < i:
+                segments.append((decode(token_ids[start:i]), token_ids[start:i]))
+            segments.append((decode([token_id]), [token_id]))
+            start = i + 1
+        if start < len(token_ids):
+            segments.append((decode(token_ids[start:]), token_ids[start:]))
+
+        decoded = "".join(text for text, _ in segments)
+        if model_output.startswith(decoded):
+            segments.append((model_output[len(decoded) :], ()))
+        elif not decoded.startswith(model_output):
+            return None
+
+        # The token IDs may run past the text, which excludes the stop token
+        # and anything from a stop string onwards.
+        events: list[SemanticEvent] = []
+        remaining = len(model_output)
+        for text, segment_ids in segments:
+            if not remaining:
+                break
+            if len(text) > remaining:
+                text, segment_ids = text[:remaining], ()
+            remaining -= len(text)
+            if text:
+                events.extend(self._feed(text, segment_ids))
+        return events
 
     # ── Schema-aware type correction ─────────────────────────────────
 
@@ -519,7 +572,13 @@ class ParserEngine(Parser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         self._reset()
-        events = self._feed(model_output, [])
+        events = None
+        if self.pending_output_token_ids:
+            events = self._feed_complete(model_output, self.pending_output_token_ids)
+        if events is None:
+            events = self._feed(model_output, [])
+        else:
+            self.pending_output_token_ids = ()
         events.extend(self._engine.finish())
 
         reasoning_parts: list[str] = []

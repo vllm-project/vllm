@@ -46,6 +46,10 @@ class _Qwen3DelegatingParser(DelegatingParser):
     tool_parser_cls = Qwen3ParserToolAdapter
 
 
+class _Qwen3ReasoningOnlyParser(DelegatingParser):
+    reasoning_parser_cls = Qwen3ParserReasoningAdapter
+
+
 @pytest.fixture
 def mock_tokenizer():
     return make_mock_tokenizer(_QWEN3_VOCAB)
@@ -379,6 +383,75 @@ class TestDelegatingPromptDetection:
         assert delta is not None
         assert delta.reasoning is None
         assert delta.content == "answer"
+
+
+class TestDelegatingTextSpelledThinkEnd:
+    """A ``</think>`` spelled out with ordinary tokens is content, not markup."""
+
+    _THINK_END_ID = 201
+
+    @pytest.fixture
+    def tokenizer(self):
+        # IDs above ASCII, so the mock decodes every character of a
+        # spelled-out marker as its own ordinary token.
+        return make_mock_tokenizer(
+            {
+                "<think>": 200,
+                "</think>": self._THINK_END_ID,
+                "<tool_call>": 202,
+                "</tool_call>": 203,
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "parser_cls", [_Qwen3ReasoningOnlyParser, _Qwen3DelegatingParser]
+    )
+    def test_parse_matches_streaming(self, tokenizer, mock_request, parser_cls):
+        token_ids = [
+            *map(ord, "why"),
+            self._THINK_END_ID,
+            *map(ord, "code `</think>` done"),
+        ]
+
+        # As in serving, the IDs end with a stop token the text leaves out.
+        _, content, _ = parser_cls(tokenizer).parse(
+            tokenizer.decode(token_ids),
+            mock_request,
+            enable_auto_tools=True,
+            model_output_token_ids=[*token_ids, ord("!")],
+        )
+
+        streaming_parser = parser_cls(tokenizer)
+        deltas = [
+            streaming_parser.parse_delta(
+                tokenizer.decode([token_id]),
+                [token_id],
+                mock_request,
+                prompt_token_ids=[],
+                finished=False,
+            )
+            for token_id in token_ids
+        ]
+        streamed = "".join(d.content or "" for d in deltas if d is not None)
+        assert content == streamed == "code `</think>` done"
+
+    def test_special_token_still_absorbed_with_thinking_disabled(
+        self, tokenizer, mock_request
+    ):
+        """The reasoning pass is skipped here, so the tool pass must keep
+        treating a real ``</think>`` token as markup."""
+        parser = _Qwen3DelegatingParser(
+            tokenizer, chat_template_kwargs={"enable_thinking": False}
+        )
+
+        _, content, _ = parser.parse(
+            "a</think>b",
+            mock_request,
+            enable_auto_tools=True,
+            model_output_token_ids=[ord("a"), self._THINK_END_ID, ord("b")],
+        )
+
+        assert content == "ab"
 
 
 class TestStreaming:

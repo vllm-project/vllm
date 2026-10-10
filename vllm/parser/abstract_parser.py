@@ -38,7 +38,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.parser.engine.adapters import ParserEngineToolAdapter
+from vllm.parser.engine.adapters import (
+    ParserEngineReasoningAdapter,
+    ParserEngineToolAdapter,
+)
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
@@ -828,12 +831,40 @@ class DelegatingParser(Parser):
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
-        reasoning, content = self.extract_reasoning(model_output, request)
-        tool_calls, content = self._extract_tool_calls(
-            content=content,
-            request=request,
-            enable_auto_tools=enable_auto_tools,
-        )
+        reasoning_parser = self._reasoning_parser
+        tool_parser = self._tool_parser
+        literal_markup_tool_parser: ParserEngineToolAdapter | None = None
+        if model_output_token_ids and isinstance(
+            reasoning_parser, ParserEngineReasoningAdapter
+        ):
+            reasoning, content, used_token_ids = (
+                reasoning_parser.extract_reasoning_with_token_ids(
+                    model_output, request, model_output_token_ids
+                )
+            )
+            # The reasoning pass consumed every reasoning marker that
+            # arrived as its special token, so any left in the content was
+            # spelled out by the model and stays content, as in streaming.
+            if (
+                used_token_ids
+                and isinstance(tool_parser, ParserEngineToolAdapter)
+                and not tool_parser.skip_reasoning_parsing
+            ):
+                literal_markup_tool_parser = tool_parser
+        else:
+            reasoning, content = self.extract_reasoning(model_output, request)
+
+        if literal_markup_tool_parser is not None:
+            literal_markup_tool_parser.skip_reasoning_parsing = True
+        try:
+            tool_calls, content = self._extract_tool_calls(
+                content=content,
+                request=request,
+                enable_auto_tools=enable_auto_tools,
+            )
+        finally:
+            if literal_markup_tool_parser is not None:
+                literal_markup_tool_parser.skip_reasoning_parsing = False
         return reasoning, content, tool_calls
 
     def parse_delta(
