@@ -12,6 +12,9 @@ from vllm.entrypoints.launchers.cli_args import resolve_default_chat_template_kw
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.middleware.request_failures import (
+    init_request_failure_metrics,
+)
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -28,6 +31,10 @@ async def init_app_state(
     supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
+
+    init_request_failure_metrics(
+        model_name=cast(str, vllm_config.model_config.served_model_name)
+    )
 
     if args.tool_call_parser is not None:
         from vllm.parser.metrics import init_parser_metrics
