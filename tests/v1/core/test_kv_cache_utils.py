@@ -4350,6 +4350,42 @@ def test_trailing_layer_fallback_requires_exact_partition():
     assert not any(g.is_eagle_group for g in trimmed)
 
 
+def test_eagle_sliding_window_group_retains_hit_blocks_below_window():
+    # An EAGLE sliding-window hit scans cdiv(window - 1, block) + 1 = 5 whole
+    # blocks, so the group retains 5 * 16 - 63 = 17 tokens below the window.
+    from vllm.v1.core.kv_cache_utils import _retain_eagle_hit_blocks_below_window
+
+    draft_spec = new_sliding_window_spec(sliding_window=64)
+    retained_draft_spec = replace(draft_spec, extra_retained_tokens=17)
+
+    def specs_by_layer(config, specs):
+        groups = get_kv_cache_groups(config, specs)
+        _retain_eagle_hit_blocks_below_window(config, groups)
+        return {g.layer_names[0]: g.kv_cache_spec for g in groups}
+
+    # No group is flagged for a non-MTP drafter: every group counts as EAGLE.
+    specs = {"target.attn": new_kv_cache_spec(), "draft.attn": draft_spec}
+    config = _spec_decode_grouping_config(method="eagle", model_type="other")
+    assert specs_by_layer(config, specs) == {
+        "target.attn": new_kv_cache_spec(),
+        "draft.attn": retained_draft_spec,
+    }
+
+    # The trailing-layer rule flags the MTP draft group; a target
+    # sliding-window group is untouched.
+    target_spec = new_sliding_window_spec(sliding_window=128)
+    specs = {"target.attn": target_spec, "draft.attn": draft_spec}
+    config = _spec_decode_grouping_config(method="mtp", model_type="other")
+    assert specs_by_layer(config, specs) == {
+        "target.attn": target_spec,
+        "draft.attn": retained_draft_spec,
+    }
+
+    # Without a drafter nothing changes.
+    config.speculative_config = None
+    assert specs_by_layer(config, specs) == specs
+
+
 _GQA_SPEC = FullAttentionSpec(
     block_size=16, num_kv_heads=8, head_size=64, dtype=torch.float32
 )
