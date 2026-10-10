@@ -45,10 +45,25 @@ if docker manifest inspect "$IMAGE_TAG" >/dev/null 2>&1; then
 fi
 echo "Image not found, proceeding with build..."
 
-# --- CUDA 13.0 for nightly builds ---
-# Nightly CI uses CUDA 13.0 while regular CI stays on CUDA 12.9
-NIGHTLY_CUDA_VERSION="13.0.2"
-NIGHTLY_BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
+# --- CUDA 13.2 for nightly builds ---
+# Nightly CI uses CUDA 13.2 while regular CI stays on CUDA 12.9.
+#
+# 13.0 was dropped from PyTorch's binary build matrix on 2026-09-28
+# (pytorch/pytorch#198913), so the cu130 nightly index stopped receiving wheels
+# after 2.15.0.dev20260928 and this lane has been testing a frozen torch since.
+# 13.2 is PyTorch's current CUDA_STABLE.
+#
+# The patch version is load-bearing in two different ways: docker/Dockerfile
+# derives the wheel index from the major.minor only (13.2 -> cu132), but
+# FINAL_BASE_IMAGE below uses the full version, and nvidia/cuda publishes no
+# 13.2.2-base-ubuntu24.04 tag. Hence 13.2.1 rather than PyTorch's 13.2.2.
+#
+# The builder tag is deliberately unpinned. This lane exists to test against a
+# moving upstream, so tracking the current toolchain is in character, and a
+# commit-pinned tag is what let the old cuda13.0 pin outlive the CUDA version
+# it named. release-pipeline.yaml already floats its cuda13.4 builders.
+NIGHTLY_CUDA_VERSION="13.2.1"
+NIGHTLY_BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.2"
 # Must track ARG UBUNTU_VERSION in docker/Dockerfile. The nightly lane exists to
 # run the normal pipeline against nightly torch, so it has to differ from the
 # regular image in torch only -- not in the OS underneath it. This was pinned to
