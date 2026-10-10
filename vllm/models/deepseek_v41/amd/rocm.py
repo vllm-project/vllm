@@ -277,7 +277,7 @@ _TopkRagged = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 @dataclass
-class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
+class DeepseekV41ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     decode_swa_ragged_indices: torch.Tensor | None = None
     decode_swa_ragged_indptr: torch.Tensor | None = None
     # Built only for the aiter prefill, which reads the SWA cache in place.
@@ -285,7 +285,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
     prefill_swa_ragged_indptr: torch.Tensor | None = None
 
 
-class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
+class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBuilder):
     # Keep fused multi-step decode disabled until update_draft_decode_metadata()
     # also refreshes the ROCm-specific ragged SWA indices and indptrs.
     supports_draft_decode_metadata_update = False
@@ -317,7 +317,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
-    ) -> DeepseekV4ROCMAiterSparseSWAMetadata:
+    ) -> DeepseekV41ROCMAiterSparseSWAMetadata:
         base = super().build(
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
@@ -363,7 +363,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataBu
                 base.decode_swa_width,
             )
 
-        return DeepseekV4ROCMAiterSparseSWAMetadata(
+        return DeepseekV41ROCMAiterSparseSWAMetadata(
             **vars(base),
             decode_swa_ragged_indices=ragged_indices,
             decode_swa_ragged_indptr=ragged_indptr,
@@ -498,10 +498,10 @@ class DeepseekV41RocmMxfp4Indexer(DeepseekV4Indexer):
         return q, q_scale, weights
 
 
-class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
+class DeepseekV41ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
-        return "ROCM_FLASHMLA_SPARSE_DSV4"
+        return "ROCM_FLASHMLA_SPARSE_DSV41"
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
@@ -514,14 +514,14 @@ class DeepseekV4ROCMAiterMLASparseBackend(DeepseekV4SparseMLABackend):
 
 class DeepseekV41ROCMAiterSparseSWABackend(DeepseekSparseSWABackend):
     @staticmethod
-    def get_builder_cls() -> type["DeepseekV4ROCMAiterSparseSWAMetadataBuilder"]:
-        return DeepseekV4ROCMAiterSparseSWAMetadataBuilder
+    def get_builder_cls() -> type["DeepseekV41ROCMAiterSparseSWAMetadataBuilder"]:
+        return DeepseekV41ROCMAiterSparseSWAMetadataBuilder
 
 
 class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     """ROCm sparse MLA attention layer for DeepSeek V4.1."""
 
-    backend_cls = DeepseekV4ROCMAiterMLASparseBackend
+    backend_cls = DeepseekV41ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
     _use_aiter_sparse_mla = False
 
@@ -990,7 +990,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             else None,
         )
         swa_metadata = cast(
-            DeepseekV4ROCMAiterSparseSWAMetadata | None,
+            DeepseekV41ROCMAiterSparseSWAMetadata | None,
             attn_metadata.get(self.swa_cache_layer.prefix),
         )
         assert swa_metadata is not None
@@ -1069,7 +1069,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     def _decode_topk_ragged(
         self,
-        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         num_decodes: int,
         num_decode_tokens: int,
@@ -1108,7 +1108,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         q: torch.Tensor,
         positions: torch.Tensor,
         kv_cache: torch.Tensor | None,
-        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor | None,
@@ -1202,7 +1202,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         swa_k_cache: torch.Tensor,
         output: torch.Tensor | None,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
-        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         """Sparse prefill into bf16 ``output``, or into ``mxfp8_out``.
@@ -1368,7 +1368,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     def _prefill_topk_ragged(
         self,
-        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         attn_metadata: DeepseekV4FlashMLAMetadata,
         compressed_k_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1418,7 +1418,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         swa_k_cache: torch.Tensor,
         output: torch.Tensor | None,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
-        swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
+        swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         """Prefill straight off the paged caches, with no bf16 gather.

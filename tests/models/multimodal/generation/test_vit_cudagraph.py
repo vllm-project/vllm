@@ -255,7 +255,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={
             "load_format": "dummy",
             "attention_backend": (
-                "ROCM_FLASHMLA_SPARSE_DSV4"
+                "ROCM_FLASHMLA_SPARSE_DSV41"
                 if current_platform.is_rocm()
                 else "FLASHMLA_SPARSE_DSV41"
             ),
