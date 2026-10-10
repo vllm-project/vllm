@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
+from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+from flashinfer.mla import TrtllmGenMlaDecodeRunner
+from flashinfer.utils import device_support_pdl, get_device_sm_count
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -492,6 +495,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         # for query and kv_cache (mixed bf16+fp8 is not supported).
         self.supports_quant_query_input = True
 
+        # Persistent launch state for the no-LSE decode path; the wrapper
+        # rebuilds runner/tuning/output per call.
+        self._mqa_runner: TrtllmGenMlaDecodeRunner | None = None
+        self._mqa_runner_key: tuple[int, torch.Size, torch.dtype, int] | None = None
+        self._mqa_out: torch.Tensor | None = None
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -575,6 +584,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 prefill_cache,
                 prefill_indices,
                 prefill_lens,
+                # Keep decode/prefill output slices disjoint before concat.
+                out_offset=num_decode_tokens,
             )
             if decode_out is None:
                 return prefill_out, prefill_lse
@@ -638,6 +649,62 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
+    def _get_mqa_out(self, query: torch.Tensor, out_offset: int) -> torch.Tensor:
+        num_rows = query.size(0)
+        if self._mqa_out is None or self._mqa_out.size(0) < out_offset + num_rows:
+            assert self.topk_indices_buffer is not None
+            max_rows = max(out_offset + num_rows, self.topk_indices_buffer.size(0))
+            # Kernel writes bf16 regardless of query dtype.
+            self._mqa_out = torch.empty(
+                (max_rows, 1, self.num_heads, self.kv_lora_rank),
+                dtype=torch.bfloat16,
+                device=query.device,
+            )
+        return self._mqa_out[out_offset : out_offset + num_rows]
+
+    def _get_mqa_runner(
+        self, kv_cache: torch.Tensor, sparse_topk_capacity: int
+    ) -> TrtllmGenMlaDecodeRunner:
+        kv_cache = kv_cache.unsqueeze(1)
+        key = (
+            kv_cache.data_ptr(),
+            kv_cache.shape,
+            kv_cache.dtype,
+            sparse_topk_capacity,
+        )
+        if self._mqa_runner is None or self._mqa_runner_key != key:
+            if 64 < self.num_heads < 128:
+                raise ValueError(
+                    "trtllm-gen MLA decode does not support "
+                    f"64 < num_heads < 128; got num_heads={self.num_heads}."
+                )
+            page_size = kv_cache.size(2)
+            if page_size not in (32, 64):
+                raise ValueError(
+                    f"trtllm-gen requires block_size in (32, 64), got {page_size}."
+                )
+            self._mqa_runner = TrtllmGenMlaDecodeRunner(
+                kv_cache=kv_cache,
+                workspace_buffer=self._workspace_buffer,
+                sm_count=get_device_sm_count(kv_cache.device),
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                max_seq_len=sparse_topk_capacity,
+                sparse_mla_top_k=sparse_topk_capacity,
+                bmm1_scale=self.bmm1_scale,
+                bmm2_scale=self.bmm2_scale,
+                sinks=None,
+                skip_softmax_threshold_scale_factor=None,
+                enable_pdl=device_support_pdl(kv_cache.device),
+                is_var_seq=True,
+                uses_shared_paged_kv_idx=True,
+                return_lse=False,
+                lse=None,
+            )
+            self._mqa_runner_key = key
+        return self._mqa_runner
+
     def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
         """Autotune the largest legal HiSparse decode batch."""
         assert isinstance(self.index_group, HiSparseMLAIndexGroup)
@@ -687,12 +754,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         kv_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         seq_lens: torch.Tensor,
+        *,
+        out_offset: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self._workspace_buffer is not None
         assert self.bmm1_scale is not None
         assert self.bmm2_scale is not None
-
-        from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
         kv_cache = kv_cache.view(q.dtype)
 
@@ -726,29 +793,35 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
             extra_kwargs["sparse_mla_top_k_lens"] = topk_lens
 
-        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
-            query=query,
-            kv_cache=kv_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=block_tables,
-            seq_lens=seq_lens_arg,
-            max_seq_len=sparse_topk_capacity,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
-            sparse_mla_top_k=sparse_topk_capacity,
-            return_lse=self.need_to_return_lse_for_decode,
-            **extra_kwargs,
-        )
         if self.need_to_return_lse_for_decode:
+            # DCP needs a per-call LSE output; stay on the public wrapper.
+            kernel_out = trtllm_batch_decode_with_kv_cache_mla(
+                query=query,
+                kv_cache=kv_cache.unsqueeze(1),
+                workspace_buffer=self._workspace_buffer,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                block_tables=block_tables,
+                seq_lens=seq_lens_arg,
+                max_seq_len=sparse_topk_capacity,
+                bmm1_scale=self.bmm1_scale,
+                bmm2_scale=self.bmm2_scale,
+                sparse_mla_top_k=sparse_topk_capacity,
+                return_lse=self.need_to_return_lse_for_decode,
+                **extra_kwargs,
+            )
             assert isinstance(kernel_out, tuple)
             o, lse = kernel_out
         else:
-            assert isinstance(kernel_out, torch.Tensor)
-            o = kernel_out
-            lse = None
+            # tactic=-1 is the only tactic the runner exposes.
+            runner = self._get_mqa_runner(kv_cache, sparse_topk_capacity)
+            out = self._get_mqa_out(query, out_offset)
+            inputs = [query, block_tables, seq_lens_arg, out]
+            if self.is_nope_mla:
+                inputs.append(topk_lens)
+            runner.forward(inputs=inputs, tactic=-1)
+            o, lse = out, None
 
         out = o.view(-1, o.shape[-2], o.shape[-1])
         if lse is not None:
