@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 
@@ -19,7 +21,11 @@ if HAS_TRITON:
         _topp_split_stats,
         _topp_split_step,
         apply_top_k_top_p_triton,
+        reserve_topk_topp_workspace,
     )
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -32,6 +38,14 @@ def register_top_k_top_p_warmups() -> None:
             _topp_split_stats.register_warmup()
             _topp_split_step.register_warmup()
             _topp_split_mask.register_warmup()
+
+
+def reserve_top_k_top_p_workspace(
+    vllm_config: "VllmConfig", device: torch.device
+) -> None:
+    """Size the Triton sampler scratch before the workspace manager locks."""
+    if HAS_TRITON and not current_platform.is_cpu():
+        reserve_topk_topp_workspace(vllm_config, device)
 
 
 def _skip_aiter_sampler_on_gfx1250() -> bool:
