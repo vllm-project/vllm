@@ -396,11 +396,6 @@ def _kpool_tail_seed_kernel(
     ahead belongs to a different tail block (or is past the batch / padding,
     slot < 0). ``tslot = block * RING + pos % RING``; the destination is
     ``tail[block, {0:K, 1:score}, pos % RING, :]``.
-
-    The tail cache aliases the indexer cache with the indexer's (padded) block
-    stride, so blocks are addressed through ``TAIL_BLOCK_ELEMS`` /
-    ``KPOOL_HEAD`` (``tail.stride(0)`` / ``tail.stride(1)``), never as a dense
-    ``[num_blocks, 2, KPOOL, HEAD_DIM]`` array.
     """
     i = tl.program_id(0)
     t = tl.load(tslot_ptr + i).to(tl.int64)
