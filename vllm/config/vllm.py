@@ -1371,7 +1371,7 @@ class VllmConfig:
                 scope="global",
             )
             return False
-        if config.temperature == 0:
+        if config.temperature == 0 and watermark_config.algorithm != "sbw":
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
                 "(temperature=0) cannot be watermarked. This and subsequent "
