@@ -1497,6 +1497,19 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        # The lone-request exemption may not stack up behind itself: if it
+        # let a chunk run above the configured threshold, the engine holds
+        # off scheduling the next batch so an arriving request re-engages
+        # the cap right behind the in-flight chunk.
+        has_uncapped_lone_prefill = (
+            self.scheduler_config.long_prefill_token_threshold > 0
+            and long_prefill_token_threshold == 0
+            and any(
+                n > self.scheduler_config.long_prefill_token_threshold
+                for n in num_scheduled_tokens.values()
+            )
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1519,6 +1532,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            has_uncapped_lone_prefill=has_uncapped_lone_prefill,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

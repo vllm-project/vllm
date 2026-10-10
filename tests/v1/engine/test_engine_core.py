@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import queue
 import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -25,8 +27,13 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.engine.core import (
+    DPEngineCoreProc,
+    EngineCore,
+    EngineCoreProc,
+    EngineShutdownState,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -63,6 +70,62 @@ def make_request() -> EngineCoreRequest:
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
+    request = make_request()
+    request.request_id = req_id
+    request.sampling_params.max_tokens = max_tokens
+    return request
+
+
+class DummyExecutor(UniProcExecutor):
+    """Executor whose execute_model/sample_tokens run on a thread pool, so
+    tests can drive the concurrent-batch queue without blocking."""
+
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        super().initialize_from_config(kv_cache_configs)
+
+        # Create a thread pool with a single worker
+        self.thread_pool = ThreadPoolExecutor(max_workers=1)
+
+    def execute_model(
+        self,
+        scheduler_output,
+        non_block=False,
+    ) -> Future[ModelRunnerOutput | None]:
+        """Make execute_model non-blocking."""
+        # DummyExecutor used only for testing async case.
+        assert non_block
+
+        def _execute():
+            output = self.collective_rpc("execute_model", args=(scheduler_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
+            return copy.deepcopy(output[0])
+
+        # Use the thread pool instead of creating a new thread
+        return self.thread_pool.submit(_execute)
+
+    def sample_tokens(
+        self, grammar_output, non_block=False
+    ) -> Future[ModelRunnerOutput]:
+        """Make sample_tokens non-blocking."""
+        # DummyExecutor used only for testing async case.
+        assert non_block
+
+        def _execute():
+            output = self.collective_rpc("sample_tokens", args=(grammar_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
+            return copy.deepcopy(output[0])
+
+        # Use the thread pool instead of creating a new thread
+        return self.thread_pool.submit(_execute)
+
+    def shutdown(self):
+        if hasattr(self, "thread_pool"):
+            self.thread_pool.shutdown(wait=False)
 
 
 @create_new_process_for_each_test()
@@ -244,58 +307,6 @@ def test_engine_core_advanced_sampling():
 @create_new_process_for_each_test()
 def test_engine_core_concurrent_batches():
     """Test that the engine can handle multiple concurrent batches."""
-
-    def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
-        request = make_request()
-        request.request_id = req_id
-        request.sampling_params.max_tokens = max_tokens
-        return request
-
-    class DummyExecutor(UniProcExecutor):
-        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-            super().initialize_from_config(kv_cache_configs)
-
-            # Create a thread pool with a single worker
-            self.thread_pool = ThreadPoolExecutor(max_workers=1)
-
-        def execute_model(
-            self,
-            scheduler_output,
-            non_block=False,
-        ) -> Future[ModelRunnerOutput | None]:
-            """Make execute_model non-blocking."""
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("execute_model", args=(scheduler_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def sample_tokens(
-            self, grammar_output, non_block=False
-        ) -> Future[ModelRunnerOutput]:
-            """Make sample_tokens non-blocking."""
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("sample_tokens", args=(grammar_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def shutdown(self):
-            if hasattr(self, "thread_pool"):
-                self.thread_pool.shutdown(wait=False)
-
     engine_args = EngineArgs(
         model=MODEL_NAME,
         # To test concurrent batches.
@@ -394,6 +405,180 @@ def test_engine_core_concurrent_batches():
             )
         expected_num_tokens[req_id] += 1
         req_id = (req_id + 1) % 2
+
+
+@create_new_process_for_each_test()
+def test_engine_core_no_schedule_ahead_of_uncapped_lone_prefill():
+    """An uncapped lone-prefill chunk must complete before the next batch is
+    scheduled behind it, so a request that arrives mid-prefill re-engages
+    long_prefill_token_threshold after the in-flight chunk only."""
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        max_num_seqs=2,
+        enable_prefix_caching=False,
+        max_num_batched_tokens=10,
+        long_prefill_token_threshold=5,
+        enforce_eager=True,
+        async_scheduling=False,
+    )
+    vllm_config = engine_args.create_engine_config()
+    with (
+        set_default_torch_num_threads(1),
+        patch.object(
+            VllmConfig,
+            "max_concurrent_batches",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+    ):
+        engine_core = EngineCore(
+            vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
+        )
+
+    # PROMPT_TOKENS is 12 tokens: the lone request prefills in chunks of 10.
+    engine_core.add_request(
+        *engine_core.preprocess_add_request(make_request_with_max_tokens("0", 5))
+    )
+
+    # Batch 1: (10, req0), uncapped under the lone-request exemption.
+    assert engine_core.step_with_batch_queue()[0] is None
+    assert len(engine_core.batch_queue) == 1
+    scheduler_output = engine_core.batch_queue[0][1]
+    assert scheduler_output.num_scheduled_tokens["0"] == 10
+    assert scheduler_output.has_uncapped_lone_prefill
+
+    # The engine must not queue a second chunk behind the uncapped one:
+    # this call pops batch 1 instead of scheduling batch 2.
+    assert engine_core.step_with_batch_queue()[0] is not None
+    assert len(engine_core.batch_queue) == 0
+
+    # With the arrival visible, the next schedule is capped and co-schedules
+    # the newcomer.
+    engine_core.add_request(
+        *engine_core.preprocess_add_request(make_request_with_max_tokens("1", 5))
+    )
+    assert engine_core.step_with_batch_queue()[0] is None
+    scheduler_output = engine_core.batch_queue[0][1]
+    # req0 got no sampled token: the runner discards samples taken on a
+    # partial prefill chunk, so 12 prompt tokens - 10 computed remain.
+    assert scheduler_output.num_scheduled_tokens["0"] == 2
+    assert scheduler_output.num_scheduled_tokens["1"] == 5
+    assert not scheduler_output.has_uncapped_lone_prefill
+
+    while engine_core.scheduler.has_requests():
+        engine_core.step_with_batch_queue()
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@create_new_process_for_each_test()
+def test_engine_core_input_queue_arrival_during_uncapped_prefill(async_scheduling):
+    """Drain an uncapped prefill before polling a newcomer and recapping it."""
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        max_num_seqs=2,
+        enable_prefix_caching=False,
+        max_num_batched_tokens=10,
+        long_prefill_token_threshold=5,
+        enforce_eager=True,
+        async_scheduling=async_scheduling,
+    )
+    # Exercise the process's queue dispatch without starting ZMQ I/O threads.
+    core = EngineCoreProc.__new__(EngineCoreProc)
+    core.input_queue = queue.Queue()
+    core.output_queue = queue.Queue()
+    core.engines_running = False
+    core.shutdown_state = EngineShutdownState.RUNNING
+    core.process_input_queue_block = False
+    with (
+        set_default_torch_num_threads(1),
+        patch.object(
+            VllmConfig,
+            "max_concurrent_batches",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+    ):
+        EngineCore.__init__(
+            core,
+            vllm_config=engine_args.create_engine_config(),
+            log_stats=False,
+            executor_class=DummyExecutor,
+        )
+
+    release_execution = Event()
+    waiting_for_output = Event()
+    try:
+        long_req = make_request_with_max_tokens("long", 2)
+        long_req.prompt_token_ids = PROMPT_TOKENS * 2
+        assert len(long_req.prompt_token_ids) == 24
+        short_req = make_request_with_max_tokens("short", 2)
+        short_req.prompt_token_ids = PROMPT_TOKENS[:1]
+        newcomer = core.preprocess_add_request(short_req)
+        core.input_queue.put_nowait(
+            (EngineCoreRequestType.ADD, core.preprocess_add_request(long_req))
+        )
+        core._process_input_queue()
+        blocker = core.model_executor.thread_pool.submit(release_execution.wait, 30)
+
+        with patch.object(
+            core.scheduler, "schedule", wraps=core.scheduler.schedule
+        ) as spy:
+            core._process_engine_step()
+            assert core.batch_queue is not None
+            first_future, first_batch, _ = core.batch_queue[0]
+            assert first_batch.num_scheduled_tokens == {"long": 10}
+            assert not first_future.done()
+
+            result = first_future.result
+
+            def wait_for_first_batch(timeout=None):
+                waiting_for_output.set()
+                return result(timeout=30)
+
+            def receive_newcomer():
+                try:
+                    assert waiting_for_output.wait(30)
+                    core.input_queue.put_nowait((EngineCoreRequestType.ADD, newcomer))
+                finally:
+                    release_execution.set()
+
+            # The arrival misses this poll and lands while the step awaits batch 1.
+            core._process_input_queue()
+            with ThreadPoolExecutor(max_workers=1) as receiver:
+                arrival = receiver.submit(receive_newcomer)
+                with patch.object(
+                    first_future, "result", side_effect=wait_for_first_batch
+                ):
+                    core._process_engine_step()
+                arrival.result(timeout=30)
+
+            assert blocker.result(timeout=30)
+            assert spy.call_count == 1, "Scheduled ahead of the uncapped prefill"
+            assert not core.batch_queue
+            assert core.input_queue.qsize() == 1
+            assert "short" not in core.scheduler.requests
+            assert core.scheduler.requests["long"].num_computed_tokens == 10
+            assert core.scheduler.requests["long"].num_tokens == 24
+
+            core._process_input_queue()
+            assert core.input_queue.empty()
+            core._process_engine_step()
+            assert spy.call_count == 2
+            assert core.batch_queue[0][1].num_scheduled_tokens == {
+                "long": 5,
+                "short": 1,
+            }
+
+        for _ in range(20):
+            if not core.has_work():
+                break
+            core._process_input_queue()
+            core._process_engine_step()
+        assert not core.has_work()
+    finally:
+        release_execution.set()
+        core.model_executor.thread_pool.shutdown(wait=True)
+        core.shutdown()
 
 
 @pytest.mark.parametrize("encoder_only", [True, False])

@@ -311,6 +311,12 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # True when the lone-request exemption let a chunk exceed the configured
+    # long_prefill_token_threshold. The engine must not schedule the next
+    # batch behind this one, so a newly arrived request is seen before more
+    # uncapped work is committed.
+    has_uncapped_lone_prefill: bool = False
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

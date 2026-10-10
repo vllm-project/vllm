@@ -710,7 +710,13 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
-        if self.scheduler.has_requests():
+        # Never schedule ahead of an uncapped lone-prefill chunk: the
+        # threshold can only re-engage once the queue drains far enough
+        # for the scheduler to see the new arrival.
+        can_schedule_ahead = not (
+            batch_queue and batch_queue[0][1].has_uncapped_lone_prefill
+        )
+        if can_schedule_ahead and self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
