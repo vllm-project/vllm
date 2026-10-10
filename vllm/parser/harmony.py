@@ -335,20 +335,25 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
+            repaired_header = False
             try:
                 self._harmony_parser.process(token_id)
             except HarmonyError:
-                continue
+                repaired_header = self._repair_malformed_header(token_id)
+                if not repaired_header:
+                    continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
             )
-            delta = self._harmony_parser.last_content_delta or ""
+            delta = (
+                "" if repaired_header else self._harmony_parser.last_content_delta or ""
+            )
             completed_message = self._poll_completed_message()
 
             if completed_message is not None:
                 self._current_message_tokens.clear()
-            else:
+            elif not repaired_header:
                 self._current_message_tokens.append(token_id)
 
             if self._is_reasoning_token(token_id, channel, recipient):
@@ -371,6 +376,155 @@ class HarmonyParser(DelegatingParser):
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    def _repair_malformed_header(self, token_id: int) -> bool:
+        """Repair duplicated metadata sampled into a tool-call content type.
+
+        A well-formed tool header ends with::
+
+            commentary to=python <|constrain|>code
+
+        In a long tool-calling run, the model instead sampled::
+
+            commentary to=python <|constrain|>commentary to=assistant
+            <|constrain|>analysis to=python code
+
+        This corruption occurred with both exact ``oss-harmony`` rendering and
+        the compatibility header ordering, so changing prompt rendering cannot
+        prevent it. Recovery is attempted only after Harmony has already
+        rejected a token; valid input is therefore never re-encoded.
+
+        The current message may start at the latest ``<|start|>`` retained
+        after an earlier rejected header. The first channel after that boundary
+        starts the assistant-specific part of the header. The initial assistant
+        message can omit ``<|start|>`` because Harmony is primed with its role;
+        in that case the first channel starts the header. Everything before the
+        first ``<|constrain|>`` is preserved, and the rest is replaced by the
+        final ``code`` or ``json`` token.
+
+        Dropping sampled tokens is destructive, so the discarded section must
+        contain at least one recognizable duplicate of channel, recipient, or
+        formatting-marker metadata and no possible authored content. Replaying
+        the corrected header through a fresh assistant parser is necessary
+        because Harmony moves the failed parser out of its header state before
+        raising. The new parser resets its token and message history, stream
+        state, current metadata, and content delta. Earlier completed messages
+        have already been emitted, so only the corrected current header is
+        replayed.
+
+        Args:
+            token_id: The token that Harmony rejected.
+
+        Returns:
+            ``True`` if a recognized malformed header was repaired and replayed;
+            otherwise ``False``.
+
+        """
+        encoding = get_encoding()
+        message_token = encoding.encode("<|message|>", allowed_special="all")[0]
+        if token_id != message_token:
+            return False
+
+        current_message_tokens = self._current_message_tokens.copy()
+        start_token = encoding.encode("<|start|>", allowed_special="all")[0]
+        channel_token = encoding.encode("<|channel|>", allowed_special="all")[0]
+        if start_token in current_message_tokens:
+            # Failed messages are not cleared from `_current_message_tokens`.
+            # Harmony accepts the next start token, so its last occurrence is
+            # the boundary of the header that just failed, not an earlier one.
+            start_index = (
+                len(current_message_tokens)
+                - 1
+                - current_message_tokens[::-1].index(start_token)
+            )
+            try:
+                channel_index = current_message_tokens.index(
+                    channel_token, start_index + 1
+                )
+            except ValueError:
+                return False
+        else:
+            # The assistant role primes Harmony in its header state, so the
+            # first completion message starts directly with its channel.
+            try:
+                channel_index = current_message_tokens.index(channel_token)
+            except ValueError:
+                return False
+        channel_section_tokens = current_message_tokens[channel_index:]
+
+        constrain_token = encoding.encode("<|constrain|>", allowed_special="all")[0]
+        try:
+            constrain_index = channel_section_tokens.index(constrain_token)
+        except ValueError:
+            return False
+
+        channel_and_recipient = encoding.decode(
+            channel_section_tokens[:constrain_index]
+        )
+        malformed_section = encoding.decode(
+            channel_section_tokens[constrain_index + 1 :]
+        )
+        channels = ("analysis", "commentary", "final")
+        recipient_marker = " to="
+        recipient = (
+            channel_and_recipient.rsplit(recipient_marker, 1)[1].strip()
+            if recipient_marker in channel_and_recipient
+            else None
+        )
+        metadata_markers = ("<|channel|>", "<|constrain|>")
+        has_duplicate_marker = any(
+            marker in malformed_section for marker in metadata_markers
+        )
+        parts = (
+            malformed_section.replace("<|channel|>", " ")
+            .replace("<|constrain|>", " ")
+            .split()
+        )
+        if not parts:
+            return False
+        # A marker-free lone `code` is already valid. If stripping special
+        # markers leaves only `code`, those bare markers are the duplicated
+        # metadata Harmony rejected and are safe to discard.
+        if len(parts) < 2 and not has_duplicate_marker:
+            return False
+        # In every observed corruption the real type is last; `analysis text`
+        # is rejected because only the observed tool types are safe to restore.
+        content_type = parts[-1]
+        if content_type not in ("code", "json"):
+            return False
+        # Accept only recognizable metadata before the type. For example,
+        # `analysis to=python code` is safe, while `analysis authored code`
+        # might discard model-authored text and must be rejected.
+        if any(
+            part not in channels and part != recipient and not part.startswith("to=")
+            for part in parts[:-1]
+        ):
+            return False
+
+        # Retain the channel/recipient prefix and first constrain marker, then
+        # replay `<|message|>` so the fresh parser enters content state.
+        corrected_tokens = [
+            *channel_section_tokens[: constrain_index + 1],
+            *encoding.encode(content_type),
+        ]
+
+        parser = get_streamable_parser_for_assistant()
+        try:
+            for replay_token in (*corrected_tokens, token_id):
+                parser.process(replay_token)
+        except HarmonyError:
+            return False
+
+        logger.warning(
+            "Harmony rejected a malformed message header; retrying after "
+            "removing metadata from its content type."
+        )
+        # The parser and cursor are one state pair. Every message on the old
+        # parser was already polled; the replacement parser's list is empty.
+        self._parser = parser
+        self._num_processed_messages = 0
+        self._current_message_tokens = [*corrected_tokens, token_id]
+        return True
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if len(token_ids) == self._num_counted_tokens:
