@@ -20,7 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.tool_parsers.streaming import (
-    RequiredToolCallScanState,
+    RequiredToolCallScanner,
     extract_required_tool_call_streaming,
 )
 from vllm.tool_parsers.utils import (
@@ -308,19 +308,15 @@ def _stream_required_tool_calls(
     required-tool streaming helper and rebuild the calls per array index,
     checking that every index gets exactly one id/name chunk first."""
     assert "".join(deltas) == output_json
-    previous_text = ""
-    scan_state = RequiredToolCallScanState()
+    scanner = RequiredToolCallScanner()
     calls: dict[int, dict] = {}
     for delta_text in deltas:
-        current_text = previous_text + delta_text
         delta_message, _ = extract_required_tool_call_streaming(
-            previous_text=previous_text,
-            current_text=current_text,
+            delta_text=delta_text,
             tool_call_idx=tool_call_idx,
             tool_call_id_type=tool_call_id_type,
-            scan_state=scan_state,
+            scanner=scanner,
         )
-        previous_text = current_text
         if delta_message is None:
             continue
         assert delta_message.tool_calls
@@ -348,31 +344,12 @@ def _fixed_len_deltas(text: str, delta_len: int) -> list[str]:
     return [text[i : i + delta_len] for i in range(0, len(text), delta_len)]
 
 
-@pytest.mark.parametrize("output", VALID_TOOLS)
 @pytest.mark.parametrize("delta_len", [1, 13])
-@pytest.mark.parametrize("parameters_first", [False, True])
-def test_incremental_required_stream_matches_stateless(
-    output, delta_len, parameters_first
-):
-    if parameters_first:
-        output = [
-            {"parameters": call["parameters"], "name": call["name"]} for call in output
-        ]
-    text = json.dumps(output) + " trailing text"
-    scan_state = RequiredToolCallScanState()
-    previous = ""
-    for chunk in _fixed_len_deltas(text, delta_len):
-        current = previous + chunk
-        kwargs = dict(
-            previous_text=previous,
-            current_text=current,
-            tool_call_idx=4,
-            tool_call_id_type="kimi_k2",
-        )
-        expected = extract_required_tool_call_streaming(**kwargs)
-        actual = extract_required_tool_call_streaming(**kwargs, scan_state=scan_state)
-        assert actual == expected
-        previous = current
+def test_streaming_parameters_before_name(delta_len):
+    output = [
+        {"parameters": call["parameters"], "name": call["name"]} for call in TWO_CALLS
+    ]
+    _assert_streams_to(output, _fixed_len_deltas(json.dumps(output), delta_len))
 
 
 def _assert_streams_to(output: list[dict], deltas: list[str]) -> None:
