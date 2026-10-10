@@ -249,6 +249,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
       "Tensor input, Tensor input_global_scale) -> ()");
 
+  // Fused GELU(tanh)+Mul+NVFP4 quantization (GeGLU models, e.g. Gemma).
+  ops.def(
+      "gelu_tanh_and_mul_nvfp4_quant(Tensor! result, "
+      "Tensor! result_block_scale, Tensor input, "
+      "Tensor input_global_scale) -> ()");
+
   // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
   // of the given capability
   ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
@@ -771,6 +777,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("silu_and_mul_scaled_fp4_experts_quant",
            TORCH_BOX(&silu_and_mul_scaled_fp4_experts_quant));
   ops.impl("silu_and_mul_nvfp4_quant", TORCH_BOX(&silu_and_mul_nvfp4_quant));
+  ops.impl("gelu_tanh_and_mul_nvfp4_quant",
+           TORCH_BOX(&gelu_tanh_and_mul_nvfp4_quant));
   // mxfp4_experts_quant: registered in mxfp4_experts_quant.cu (SM100 only).
   // W4A8 ops: registered in w4a8_mm_entry.cu / w4a8_grouped_mm_entry.cu.
 
