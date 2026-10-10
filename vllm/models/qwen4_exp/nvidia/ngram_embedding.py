@@ -23,7 +23,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
-from .ops.ple import ple_ngram_ids
+from ..common.ops.ple import ple_ngram_ids
 
 logger = init_logger(__name__)
 
