@@ -138,7 +138,7 @@ Batch invariance has been tested and verified on the following models:
 - **OLMo 2**: `allenai/OLMo-2-0425-1B-Instruct`
 - **ERNIE 4.5**: `baidu/ERNIE-4.5-0.3B-PT`
 - **SmolLM2**: `HuggingFaceTB/SmolLM2-1.7B-Instruct`
-- **PLaMo3**: `pfnet/plamo-3-nict-2b-base`
+- **PLaMo3**: `pfnet/plamo-3-nict-2b-base` (hybrid SWA + full-attention; requires `trust_remote_code=True`; FLASH_ATTN and TRITON_ATTN backends validated; FLEX_ATTENTION excluded due to OOM with sliding-window attention)
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
