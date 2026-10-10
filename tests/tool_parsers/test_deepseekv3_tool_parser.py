@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
@@ -90,3 +93,26 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_pretty_printed_arguments(self, tool_parser, streaming: bool):
+        """Arguments the model indents over several lines are still parsed,
+        and each call keeps its own arguments."""
+        expected = [
+            ("get_weather", {"city": "Tokyo", "unit": "celsius"}),
+            ("search_hotels", {"location": "Tokyo", "check_in": "2025-01-15"}),
+        ]
+        calls = "".join(
+            f"<｜tool▁call▁begin｜>function<｜tool▁sep｜>{name}\n"
+            f"```json\n{json.dumps(args, indent=2)}\n```<｜tool▁call▁end｜>"
+            for name, args in expected
+        )
+        model_output = f"<｜tool▁calls▁begin｜>{calls}<｜tool▁calls▁end｜>"
+
+        _, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=streaming
+        )
+
+        assert len(tool_calls) == len(expected)
+        for tool_call, (name, args) in zip(tool_calls, expected):
+            assert tool_call.function.name == name
+            assert json.loads(tool_call.function.arguments) == args
