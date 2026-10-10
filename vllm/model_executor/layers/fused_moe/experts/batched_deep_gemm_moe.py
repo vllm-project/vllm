@@ -19,9 +19,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    fused_silu_mul_per_token_group_quant_fp8,
-    is_batch_invariant_quant_kernel_enabled,
-    require_batch_invariant_quant_kernel,
+    silu_mul_fp8_quant_masked_triton,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -93,11 +91,14 @@ def _silu_mul_fp8_quant_deep_gemm(
     stride_ys_g,
     # Stride for counts (elements)
     stride_counts_e,
+    # SwiGLU clamp limit (swiglu_limit); only read when HAS_CLAMP
+    clamp_limit,
     # Numeric params ------------------------------------------------------
     eps: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     ceil_ue8m0: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -130,6 +131,10 @@ def _silu_mul_fp8_quant_deep_gemm(
         ).to(tl.float32)
         up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
+        if HAS_CLAMP:
+            gate = tl.minimum(gate, clamp_limit)
+            up = tl.clamp(up.to(tl.float32), -clamp_limit, clamp_limit)
+
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
 
@@ -157,6 +162,15 @@ def persistent_masked_m_silu_mul_quant(
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
+    `clamp_limit` is the model's SwiGLU limit (``swiglu_limit``): when set,
+    the gate is clamped to ``(-inf, clamp_limit]`` and the up projection to
+    ``[-clamp_limit, clamp_limit]`` before the activation, exactly as the
+    dense DeepGemmExperts quantizers do.
+
+    Under ``VLLM_BATCH_INVARIANT`` on CUDA the work is done by a Triton kernel
+    that shares its arithmetic with the dense quantizers, so a token produces
+    the same bytes whether it is quantized on the dense (DeepGemmExperts) or
+    the masked (BatchedDeepGemmExperts) path.
     We launch a fixed grid of threads to accommodate CUDA graphs. Let `P2`
     be a parallelization factor for persistent_masked_m_silu_mul_quant over the
     hidden dimension.
@@ -208,26 +222,6 @@ def persistent_masked_m_silu_mul_quant(
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
-    if envs.VLLM_BATCH_INVARIANT and is_batch_invariant_quant_kernel_enabled():
-        if quant_scale_fmt not in (
-            DeepGemmQuantScaleFMT.FLOAT32,
-            DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
-            DeepGemmQuantScaleFMT.UE8M0,
-        ):
-            raise RuntimeError(
-                "batch-invariant kernel supports FLOAT32 or packed UE8M0 "
-                "scales, "
-                f"got {quant_scale_fmt}"
-            )
-        return fused_silu_mul_per_token_group_quant_fp8(
-            y,
-            use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
-            round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
-            clamp_limit=clamp_limit,
-            masked_m=tokens_per_expert,
-            group_size=group_size,
-        )
-
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
     fp8_dtype = current_platform.fp8_dtype()
@@ -247,10 +241,29 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path below.
-    if current_platform.is_cuda() and current_platform.has_device_capability(80):
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        # Batch invariance: the same token must quantize to identical bytes on
+        # the dense and the masked path, so reuse the dense kernels' Triton
+        # arithmetic instead of the bf16 C++ kernel.
+        silu_mul_fp8_quant_masked_triton(
+            y,
+            tokens_per_expert,
+            y_q,
+            y_s,
+            use_ue8m0=ceil_ue8m0,
+            clamp_limit=clamp_limit,
+            group_size=group_size,
+        )
+    elif current_platform.is_cuda() and current_platform.has_device_capability(80):
+        # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path
+        # below. A negative clamp_limit disables the clamp in the kernel.
         torch.ops._C.persistent_masked_m_silu_mul_quant(
-            y, tokens_per_expert, y_q, y_s, ceil_ue8m0
+            y,
+            tokens_per_expert,
+            y_q,
+            y_s,
+            ceil_ue8m0,
+            -1.0 if clamp_limit is None else float(clamp_limit),
         )
     else:
         # Triton fallback for ROCm and XPU -- the C++ kernel is guarded by
@@ -306,10 +319,12 @@ def persistent_masked_m_silu_mul_quant(
             f32_strides[1],
             f32_strides[2],
             stride_cnt_e,
+            0.0 if clamp_limit is None else float(clamp_limit),
             eps,
             fp8_min,
             fp8_max,
             ceil_ue8m0,
+            HAS_CLAMP=clamp_limit is not None,
             BLOCK=group_size,
             NUM_STAGES=4,
             num_warps=1,
@@ -351,8 +366,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        if envs.VLLM_BATCH_INVARIANT:
-            require_batch_invariant_quant_kernel()
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
@@ -508,7 +521,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             workspace1,
             expert_num_tokens,
             quant_scale_fmt=quant_scale_fmt,
-            clamp_limit=self.gemm1_clamp_limit,
+            clamp_limit=self.activation_config.clamp_limit,
         )
 
         fp8_m_grouped_gemm_nt_masked(

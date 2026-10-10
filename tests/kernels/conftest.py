@@ -17,10 +17,5 @@ def reset_default_torch_device():
 
 @pytest.fixture
 def batch_invariant_kernel() -> None:
-    """Require the batch-invariant kernels in the stable CUDA extension."""
-    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-        require_batch_invariant_quant_kernel,
-    )
-
-    require_batch_invariant_quant_kernel()
+    """Require the batch-invariant sparse-attention kernel."""
     assert hasattr(torch.ops._C, "deterministic_top_k_per_row_prefill")

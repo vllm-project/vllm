@@ -39,90 +39,6 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 logger = init_logger(__name__)
 
 
-def is_batch_invariant_quant_kernel_enabled() -> bool:
-    return hasattr(torch.ops._C, "fused_silu_mul_per_token_group_quant")
-
-
-def require_batch_invariant_quant_kernel() -> None:
-    """Fail if the stable CUDA extension lacks the BI activation kernel."""
-    if not is_batch_invariant_quant_kernel_enabled():
-        raise RuntimeError("batch-invariant quant kernel is not available")
-
-
-def fused_silu_mul_per_token_group_quant_fp8(
-    input: torch.Tensor,
-    *,
-    use_ue8m0: bool,
-    round_scale: bool | None = None,
-    clamp_limit: float | None = None,
-    masked_m: torch.Tensor | None,
-    output_q: torch.Tensor | None = None,
-    group_size: int = 128,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run the batch-invariant fused SiLU*up and per-token FP8 quant kernel."""
-    require_batch_invariant_quant_kernel()
-    if round_scale is None:
-        round_scale = use_ue8m0
-    if use_ue8m0 and not round_scale:
-        raise ValueError("packed UE8M0 scales require round_scale=True")
-    if input.ndim not in (2, 3) or input.shape[-1] % (2 * group_size):
-        raise ValueError(
-            f"invalid batch-invariant activation shape: {tuple(input.shape)}"
-        )
-    if not input.is_contiguous() or input.dtype != torch.bfloat16:
-        raise ValueError("input must be contiguous BF16")
-
-    hidden = input.shape[-1] // 2
-    groups = hidden // group_size
-    if output_q is None:
-        output_q = torch.empty(
-            (*input.shape[:-1], hidden),
-            device=input.device,
-            dtype=torch.float8_e4m3fn,
-        )
-
-    packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
-    if masked_m is None:
-        if input.ndim != 2:
-            raise ValueError("contiguous input must be 2D")
-        tokens = input.shape[0]
-        output_s = torch.empty_strided(
-            (tokens, packed_groups),
-            (1, tokens),
-            device=input.device,
-            dtype=torch.int32 if use_ue8m0 else torch.float32,
-        )
-    else:
-        if input.ndim != 3:
-            raise ValueError("masked input must be 3D")
-        experts, tokens = input.shape[:2]
-        if masked_m.shape != (experts,) or masked_m.dtype != torch.int32:
-            raise ValueError("masked_m must be int32 with one count per expert")
-        output_s = torch.empty_strided(
-            (experts, tokens, packed_groups),
-            (tokens * packed_groups, 1, tokens),
-            device=input.device,
-            dtype=torch.int32 if use_ue8m0 else torch.float32,
-        )
-    output_s.zero_()
-
-    torch.ops._C.fused_silu_mul_per_token_group_quant(
-        input,
-        output_q,
-        output_s,
-        group_size,
-        1e-10,
-        -448.0,
-        448.0,
-        0.0 if clamp_limit is None else float(clamp_limit),
-        round_scale,
-        use_ue8m0,
-        True,
-        masked_m,
-    )
-    return output_q, output_s
-
-
 # Pre-fill value for scale parameters whose shards load independently. The
 # shards are combined with .max(), so an unloaded shard must never win; the
 # smallest representable float32 guarantees that.
@@ -223,6 +139,78 @@ def _per_token_group_quant_fp8(
 
 
 @triton.jit
+def _gated_silu_mul_round_once(
+    gate,
+    up,
+    clamp_limit,
+    alpha,
+    beta,
+    HAS_CLAMP: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
+):
+    """fp32 SiLU-gated product, rounded through bf16.
+
+    Shared by the dense packed-UE8M0 quantizer
+    (``_silu_mul_quant_fp8_packed_kernel``) and its masked-layout twin
+    (``_silu_mul_fp8_quant_masked_packed_kernel``) so a token quantizes to the
+    same bytes on the dense and masked MoE paths in BI mode. The default dense
+    path retains its original pre-clamp rounding behavior.
+    """
+    if HAS_CLAMP:
+        gate = tl.minimum(gate, clamp_limit)
+        up = tl.clamp(up, -clamp_limit, clamp_limit)
+        if BI_NUMERICS:
+            gate = gate.to(tl.bfloat16).to(tl.float32)
+            up = up.to(tl.bfloat16).to(tl.float32)
+
+    # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+    #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+    glu = gate / (1.0 + tl.exp(-gate * alpha))
+    y = (up + beta) * glu
+    # Round through bf16 to match unfused precision path
+    return y.to(tl.bfloat16).to(tl.float32)
+
+
+@triton.jit
+def _gated_silu_mul_narrow(
+    act_in,
+    mul_in,
+    clamp_limit,
+    alpha,
+    beta,
+    HAS_CLAMP: tl.constexpr,
+    NARROW_DTYPE: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
+):
+    """SiLU-gated product with BI or legacy activation rounding.
+
+    ``act_in``/``mul_in`` are in the activation dtype. Clamp in fp32 then store
+    back to the input dtype. BI narrows the final product once; the default
+    dense path narrows each operand before multiplication. Returns fp32.
+
+    Shared by the dense colmajor quantizer
+    (``_silu_mul_per_token_group_quant_fp8_colmajor``) and its masked-layout
+    twin (``_silu_mul_fp8_quant_masked_kernel``) so a token quantizes to the
+    same bytes on the dense and masked MoE paths in BI mode.
+    """
+    if HAS_CLAMP:
+        act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(NARROW_DTYPE)
+        mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
+            NARROW_DTYPE
+        )
+    # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+    #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+    act_in = act_in.to(tl.float32)
+    if BI_NUMERICS:
+        glu = act_in / (1.0 + tl.exp(-act_in * alpha))
+        up = mul_in.to(tl.float32) + beta
+        return (glu * up).to(NARROW_DTYPE).to(tl.float32)
+    glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(NARROW_DTYPE)
+    up = (mul_in.to(tl.float32) + beta).to(NARROW_DTYPE)
+    return (glu * up).to(tl.float32)
+
+
+@triton.jit
 def _silu_mul_quant_fp8_packed_kernel(
     input_ptr,
     output_q_ptr,
@@ -244,6 +232,7 @@ def _silu_mul_quant_fp8_packed_kernel(
     PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
     EXPERT_ALIGNMENT: tl.constexpr,
 ):
     GROUPS_PER_PACK: tl.constexpr = 4
@@ -296,23 +285,27 @@ def _silu_mul_quant_fp8_packed_kernel(
         )
         up = tl.reshape(up_flat, (BLOCK_M, groups_per_cta, GROUP_SIZE)).to(tl.float32)
 
-        if HAS_CLAMP:
-            gate = tl.minimum(gate, clamp_limit)
-            up = tl.clamp(up, -clamp_limit, clamp_limit)
+        y = _gated_silu_mul_round_once(
+            gate, up, clamp_limit, alpha, beta, HAS_CLAMP, BI_NUMERICS
+        )
 
-        # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
-        #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
-        glu = gate / (1.0 + tl.exp(-gate * alpha))
-        y = (up + beta) * glu
-        # Round through bf16 to match unfused precision path
-        y = y.to(tl.bfloat16).to(tl.float32)
-
-        absmax = tl.max(tl.abs(y), axis=2)
-        scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
-        exponent = tl.ceil(tl.log2(scale_raw))
-        scale = tl.math.exp2(exponent)
-
-        y_q = tl.clamp(y / scale[:, :, None], fp8_min, fp8_max)
+        if BI_NUMERICS:
+            absmax = tl.maximum(tl.max(tl.abs(y), axis=2), 1e-10)
+            scale_raw = absmax * (1.0 / fp8_max)
+            scale_bits = scale_raw.to(tl.int32, bitcast=True)
+            exponent = (
+                ((scale_bits >> 23) & 0xFF)
+                - 127
+                + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+            )
+            inv_scale = tl.math.exp2(-exponent.to(tl.float32))
+            y_q = tl.clamp(y * inv_scale[:, :, None], fp8_min, fp8_max)
+        else:
+            absmax = tl.max(tl.abs(y), axis=2)
+            scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
+            exponent = tl.ceil(tl.log2(scale_raw))
+            scale = tl.math.exp2(exponent)
+            y_q = tl.clamp(y / scale[:, :, None], fp8_min, fp8_max)
 
         y_q_flat = tl.reshape(y_q, (BLOCK_M, elems_per_cta))
         tl.store(
@@ -438,6 +431,7 @@ def silu_mul_quant_fp8_packed_triton(
         PACKS_PER_CTA=packs_per_cta,
         BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
+        BI_NUMERICS=envs.VLLM_BATCH_INVARIANT,
         EXPERT_ALIGNMENT=expert_alignment,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -465,6 +459,7 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    BI_NUMERICS: tl.constexpr,
     # Meta-parameters
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -507,31 +502,40 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
             act_in = tl.load(act_in_ptrs)
             mul_in = tl.load(act_in_ptrs + N_2)
 
-        # silu & mul — match C++ silu_and_mul: clamp in fp32 then store back to the
-        # input dtype, run silu in fp32 then narrow, and do the mul at input
-        # precision so HAS_CLAMP True/False share the same multiplication path.
-        if HAS_CLAMP:
-            act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(
-                y_ptr.dtype.element_ty
-            )
-            mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
-                y_ptr.dtype.element_ty
-            )
-        # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
-        #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
-        # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
-        # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
-        act_in = act_in.to(tl.float32)
-        glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(y_ptr.dtype.element_ty)
-        up = (mul_in.to(tl.float32) + beta).to(y_ptr.dtype.element_ty)
-        y = (glu * up).to(tl.float32)
+        # Share the activation rounding with the masked path.
+        y = _gated_silu_mul_narrow(
+            act_in,
+            mul_in,
+            clamp_limit,
+            alpha,
+            beta,
+            HAS_CLAMP,
+            y_ptr.dtype.element_ty,
+            BI_NUMERICS,
+        )
 
-        # quant
         _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
-        scale_raw = _absmax * (1.0 / fp8_max)
-        y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+        if BI_NUMERICS:
+            if use_ue8m0:
+                scale_raw = _absmax * (1.0 / fp8_max)
+                scale_bits = scale_raw.to(tl.int32, bitcast=True)
+                exponent = (
+                    ((scale_bits >> 23) & 0xFF)
+                    - 127
+                    + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+                )
+                y_s = tl.math.exp2(exponent.to(tl.float32))
+            else:
+                y_s = tl.div_rn(_absmax, fp8_max)
+        else:
+            scale_raw = _absmax * (1.0 / fp8_max)
+            y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
         y_s = tl.reshape(y_s, (BLOCK_M, 1))
-        y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+        if BI_NUMERICS:
+            y_q = tl.clamp(tl.div_rn(y, y_s), fp8_min, fp8_max)
+        else:
+            y_q = tl.clamp(y / y_s, fp8_min, fp8_max)
+        y_q = y_q.to(y_q_ptr.dtype.element_ty)
 
         # store y_q
         base_y_q_ptr = y_q_ptr + m_offset * N_2 + n_offset
@@ -641,6 +645,7 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         fp8_max,
         use_ue8m0,
         has_clamp,
+        envs.VLLM_BATCH_INVARIANT,
         GROUP_SIZE,
         BLOCK_M,
         BLOCK_N,
@@ -648,6 +653,333 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     )
 
     return output, output_scales
+
+
+@triton.jit
+def _silu_mul_fp8_quant_masked_kernel(
+    input_ptr,  # (E, T, 2*H) activations
+    y_q_ptr,  # (E, T, H) fp8 [OUT]
+    y_s_ptr,  # (E, T, G) fp32 scales [OUT]
+    counts_ptr,  # (E,) int32 valid tokens per expert
+    T,
+    stride_i_e,
+    stride_i_t,
+    stride_i_h,
+    stride_yq_e,
+    stride_yq_t,
+    stride_yq_h,
+    stride_ys_e,
+    stride_ys_t,
+    stride_ys_g,
+    stride_counts_e,
+    eps,
+    clamp_limit,
+    alpha,
+    beta,
+    H: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    use_ue8m0: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    SPLIT_T: tl.constexpr,
+):
+    """Masked-layout twin of ``_silu_mul_per_token_group_quant_fp8_colmajor``.
+
+    One program owns one (expert, group, token chunk) and walks the chunk
+    BLOCK_T token rows at a time, stopping at ``counts[e]``. The per-element
+    arithmetic is the dense kernel's, so the two produce identical bytes.
+    """
+    G: tl.constexpr = H // GROUP_SIZE
+    pid = tl.program_id(0)
+    e = (pid // (G * SPLIT_T)).to(tl.int64)
+    g = ((pid // SPLIT_T) % G).to(tl.int64)
+    split = pid % SPLIT_T
+
+    n_tokens = tl.load(counts_ptr + e * stride_counts_e).to(tl.int64)
+    chunk = tl.cdiv(T, SPLIT_T)
+    t_lo = split * chunk
+    t_hi = tl.minimum(t_lo + chunk, n_tokens)
+
+    cols = tl.arange(0, GROUP_SIZE).to(tl.int64)
+    rows = tl.arange(0, BLOCK_T).to(tl.int64)
+    base_in = e * stride_i_e + g * GROUP_SIZE * stride_i_h
+
+    for t0 in range(t_lo, t_hi, BLOCK_T):
+        t = t0 + rows
+        live = t < t_hi
+        in_off = base_in + t[:, None] * stride_i_t + cols[None, :] * stride_i_h
+        act_in = tl.load(input_ptr + in_off, live[:, None], other=0)
+        mul_in = tl.load(input_ptr + in_off + H * stride_i_h, live[:, None], other=0)
+
+        y = _gated_silu_mul_narrow(
+            act_in,
+            mul_in,
+            clamp_limit,
+            alpha,
+            beta,
+            HAS_CLAMP,
+            input_ptr.dtype.element_ty,
+            True,
+        )
+
+        _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
+        if use_ue8m0:
+            scale_raw = _absmax * (1.0 / fp8_max)
+            scale_bits = scale_raw.to(tl.int32, bitcast=True)
+            exponent = (
+                ((scale_bits >> 23) & 0xFF)
+                - 127
+                + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+            )
+            y_s = tl.math.exp2(exponent.to(tl.float32))
+        else:
+            y_s = tl.div_rn(_absmax, fp8_max)
+        y_s = tl.reshape(y_s, (BLOCK_T, 1))
+        y_q = tl.clamp(tl.div_rn(y, y_s), fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+
+        yq_off = (
+            e * stride_yq_e
+            + t[:, None] * stride_yq_t
+            + (g * GROUP_SIZE + cols[None, :]) * stride_yq_h
+        )
+        tl.store(y_q_ptr + yq_off, y_q, live[:, None])
+        ys_off = e * stride_ys_e + g * stride_ys_g + t * stride_ys_t
+        tl.store(y_s_ptr + ys_off, tl.reshape(y_s, (BLOCK_T,)), live)
+
+
+@triton.jit
+def _silu_mul_fp8_quant_masked_packed_kernel(
+    input_ptr,  # (E, T, 2*H) activations
+    y_q_ptr,  # (E, T, H) fp8 [OUT]
+    y_s_ptr,  # (E, T, cdiv(G, 4)) int32 packed UE8M0 scales [OUT]
+    counts_ptr,  # (E,) int32 valid tokens per expert
+    T,
+    stride_i_e,
+    stride_i_t,
+    stride_i_h,
+    stride_yq_e,
+    stride_yq_t,
+    stride_yq_h,
+    stride_ys_e,
+    stride_ys_t,
+    stride_ys_p,
+    stride_counts_e,
+    clamp_limit,
+    alpha,
+    beta,
+    H: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    SPLIT_T: tl.constexpr,
+):
+    """Masked-layout twin of ``_silu_mul_quant_fp8_packed_kernel``.
+
+    One program owns one (expert, pack of four groups, token chunk). Its tile
+    is (BLOCK_T tokens x 4 groups, GROUP_SIZE) and the four UE8M0 exponent
+    bytes of a token are packed into one int32 in-kernel, so there is no host
+    side pack loop and the launch is CUDA-graph safe.
+    """
+    GROUPS_PER_PACK: tl.constexpr = 4
+    G: tl.constexpr = H // GROUP_SIZE
+    P: tl.constexpr = (G + GROUPS_PER_PACK - 1) // GROUPS_PER_PACK
+    pid = tl.program_id(0)
+    e = (pid // (P * SPLIT_T)).to(tl.int64)
+    p = ((pid // SPLIT_T) % P).to(tl.int64)
+    split = pid % SPLIT_T
+
+    n_tokens = tl.load(counts_ptr + e * stride_counts_e).to(tl.int64)
+    chunk = tl.cdiv(T, SPLIT_T)
+    t_lo = split * chunk
+    t_hi = tl.minimum(t_lo + chunk, n_tokens)
+
+    r = tl.arange(0, BLOCK_T * GROUPS_PER_PACK).to(tl.int64)
+    tok_l = r // GROUPS_PER_PACK
+    grp = r % GROUPS_PER_PACK
+    c = tl.arange(0, GROUP_SIZE).to(tl.int64)
+    col = (p * GROUPS_PER_PACK + grp)[:, None] * GROUP_SIZE + c[None, :]
+    col_mask = col < H
+    tok_rows = tl.arange(0, BLOCK_T).to(tl.int64)
+
+    for t0 in range(t_lo, t_hi, BLOCK_T):
+        t = t0 + tok_l
+        mask = (t < t_hi)[:, None] & col_mask
+        in_off = e * stride_i_e + t[:, None] * stride_i_t + col * stride_i_h
+        gate = tl.load(input_ptr + in_off, mask, other=0.0).to(tl.float32)
+        up = tl.load(input_ptr + in_off + H * stride_i_h, mask, other=0.0).to(
+            tl.float32
+        )
+
+        y = _gated_silu_mul_round_once(
+            gate, up, clamp_limit, alpha, beta, HAS_CLAMP, True
+        )
+
+        absmax = tl.maximum(tl.max(tl.abs(y), axis=1), 1e-10)
+        scale_raw = absmax * (1.0 / fp8_max)
+        scale_bits = scale_raw.to(tl.int32, bitcast=True)
+        exponent = (
+            ((scale_bits >> 23) & 0xFF)
+            - 127
+            + ((scale_bits & 0x7FFFFF) != 0).to(tl.int32)
+        )
+        inv_scale = tl.math.exp2(-exponent.to(tl.float32))
+        y_q = tl.clamp(y * inv_scale[:, None], fp8_min, fp8_max)
+
+        yq_off = e * stride_yq_e + t[:, None] * stride_yq_t + col * stride_yq_h
+        tl.store(y_q_ptr + yq_off, y_q.to(y_q_ptr.dtype.element_ty), mask)
+
+        scale_byte = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.int32)
+        scale_bytes = tl.reshape(scale_byte, (BLOCK_T, GROUPS_PER_PACK))
+        shifts = tl.arange(0, GROUPS_PER_PACK) * 8
+        packed_scale = tl.sum(scale_bytes << shifts[None, :], axis=1)
+        tt = t0 + tok_rows
+        ys_off = e * stride_ys_e + p * stride_ys_p + tt * stride_ys_t
+        tl.store(y_s_ptr + ys_off, packed_scale, tt < t_hi)
+
+
+@functools.cache
+def _sm_count(device: torch.device) -> int:
+    props = torch.get_device_module(device).get_device_properties(device)
+    return props.multi_processor_count
+
+
+def _masked_quant_token_splits(
+    num_programs: int, T: int, block_t: int, device: torch.device
+) -> int:
+    """Split each (expert, group) over 2^k token chunks until the launch has
+    about two programs per SM. Small expert counts (DeepEP low latency runs a
+    few local experts with many token slots) otherwise leave the GPU idle."""
+    target = 2 * _sm_count(device)
+    split = 1
+    while num_programs * split < target and T // (split * 2) >= block_t:
+        split *= 2
+    return split
+
+
+def _masked_quant_packed_token_splits(
+    num_programs: int, T: int, block_t: int, num_warps: int, device: torch.device
+) -> int:
+    split = _masked_quant_token_splits(num_programs, T, block_t, device)
+    if num_warps < 8:
+        return split
+
+    # Keep wide packed tiles to one token block per program when possible.
+    while T // (split * 2) >= block_t:
+        split *= 2
+    return split
+
+
+def silu_mul_fp8_quant_masked_triton(
+    y: torch.Tensor,  # (E, T, 2*H)
+    tokens_per_expert: torch.Tensor,  # (E,) int32
+    y_q: torch.Tensor,  # (E, T, H) fp8 [OUT]
+    y_s: torch.Tensor,  # fp32 (E, T, G) or int32 packed UE8M0 (E, T, cdiv(G, 4)) [OUT]
+    *,
+    use_ue8m0: bool,
+    clamp_limit: float | None = None,
+    group_size: int = 128,
+    alpha: float = 1.0,
+    beta: float = 0.0,
+    eps: float = 1e-10,
+) -> None:
+    """Masked-layout SiLU*up + per-token-group FP8 quant with the dense
+    kernels' arithmetic.
+
+    This is the batch-invariant twin of the C++ ``persistent_masked_m_silu_mul_quant``
+    kernel: fp32 scales go through ``_silu_mul_per_token_group_quant_fp8_colmajor``'s
+    math and packed UE8M0 scales through ``_silu_mul_quant_fp8_packed_kernel``'s,
+    so a token produces identical bytes whether it is quantized on the dense
+    (``DeepGemmExperts``) or the masked (``BatchedDeepGemmExperts``) path.
+
+    ``y_s`` must already hold the layout ``scales_shape_stride_dtype`` gives and
+    be zeroed by the caller; rows at or beyond ``tokens_per_expert[e]`` are left
+    untouched in both outputs, like the C++ kernel.
+    """
+    assert y.ndim == 3 and y_q.ndim == 3 and y_s.ndim == 3
+    E, T, H2 = y.shape
+    H = H2 // 2
+    assert H % group_size == 0, "H must be a multiple of group_size"
+    assert y_q.shape == (E, T, H)
+    assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
+    assert tokens_per_expert.dtype == torch.int32
+    G = H // group_size
+    is_packed = y_s.dtype == torch.int32
+    has_clamp = clamp_limit is not None
+    clamp = 0.0 if clamp_limit is None else float(clamp_limit)
+    finfo = torch.finfo(y_q.dtype)
+
+    if is_packed:
+        assert use_ue8m0, "packed int32 scales are always UE8M0"
+        packs = triton.cdiv(G, 4)
+        assert y_s.shape == (E, T, packs)
+        BLOCK_T = 8 if T <= 16 else 16 if T <= 32 and E >= 128 else 32
+        num_warps = 4 if BLOCK_T <= 16 else 8
+        num_programs = E * packs
+        if T <= 16 and num_programs < 2 * _sm_count(y.device):
+            BLOCK_T = 2
+            split = triton.cdiv(T, BLOCK_T)
+        else:
+            split = _masked_quant_packed_token_splits(
+                num_programs, T, BLOCK_T, num_warps, y.device
+            )
+        _silu_mul_fp8_quant_masked_packed_kernel[(E * packs * split,)](
+            y,
+            y_q,
+            y_s,
+            tokens_per_expert,
+            T,
+            *y.stride(),
+            *y_q.stride(),
+            *y_s.stride(),
+            tokens_per_expert.stride(0),
+            clamp,
+            alpha,
+            beta,
+            H=H,
+            GROUP_SIZE=group_size,
+            fp8_min=finfo.min,
+            fp8_max=finfo.max,
+            HAS_CLAMP=has_clamp,
+            BLOCK_T=BLOCK_T,
+            SPLIT_T=split,
+            num_warps=num_warps,
+        )
+        return
+
+    assert y_s.dtype == torch.float32 and y_s.shape == (E, T, G)
+    # Same fp8 range the dense colmajor kernel uses (224 for fnuz).
+    fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
+    fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
+    BLOCK_T = 8 if T <= 16 else 32 if T >= 64 else 16
+    split = _masked_quant_token_splits(E * G, T, BLOCK_T, y.device)
+    _silu_mul_fp8_quant_masked_kernel[(E * G * split,)](
+        y,
+        y_q,
+        y_s,
+        tokens_per_expert,
+        T,
+        *y.stride(),
+        *y_q.stride(),
+        *y_s.stride(),
+        tokens_per_expert.stride(0),
+        eps,
+        clamp,
+        alpha,
+        beta,
+        H=H,
+        GROUP_SIZE=group_size,
+        fp8_min=fp8_min,
+        fp8_max=fp8_max,
+        use_ue8m0=use_ue8m0,
+        HAS_CLAMP=has_clamp,
+        BLOCK_T=BLOCK_T,
+        SPLIT_T=split,
+        num_warps=4 if BLOCK_T <= 16 else 8,
+    )
 
 
 @triton.jit

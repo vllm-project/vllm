@@ -17,16 +17,16 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
 )
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    persistent_masked_m_silu_mul_quant,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    fused_silu_mul_per_token_group_quant_fp8,
-    is_batch_invariant_quant_kernel_enabled,
     per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
-    require_batch_invariant_quant_kernel,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -146,8 +146,6 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
-        if envs.VLLM_BATCH_INVARIANT:
-            require_batch_invariant_quant_kernel()
         # MXFP8: FP8 e4m3 values + UE8M0 1x32 block scales (Blackwell). Reuses
         # the same grouped GEMM (aliased to fp8_fp4) with recipe (1, 32).
         self.mxfp8 = quant_config.block_shape == [1, 32]
@@ -278,10 +276,11 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         )
 
         if (
-            is_batch_invariant_quant_kernel_enabled()
+            envs.VLLM_BATCH_INVARIANT
             and activation == MoEActivation.SILU
             and self.gemm1_alpha == 1.0
             and self.gemm1_beta == 0.0
+            and block_k == 128
         ):
             if scale_fmt not in (
                 DeepGemmQuantScaleFMT.FLOAT32,
@@ -292,15 +291,14 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                     "batch-invariant kernel supports FLOAT32 or packed UE8M0 "
                     f"scales, got {scale_fmt}"
                 )
-            return fused_silu_mul_per_token_group_quant_fp8(
-                input,
-                output_q=output,
-                use_ue8m0=scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
-                round_scale=scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
-                clamp_limit=self.gemm1_clamp_limit,
-                masked_m=None,
+            quantized, scales = persistent_masked_m_silu_mul_quant(
+                input.unsqueeze(0),
+                torch.tensor([M_sum], device=input.device, dtype=torch.int32),
                 group_size=block_k,
+                quant_scale_fmt=scale_fmt,
+                clamp_limit=self.gemm1_clamp_limit,
             )
+            return quantized[0], scales[0]
 
         # 1. DeepGemm UE8M0: fused gate+mul+clamp+quant+pack
         if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
