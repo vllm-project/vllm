@@ -1489,6 +1489,16 @@ class SamplingParams(
             watermarking=True,
         )
 
+    @classmethod
+    def for_all_sampler_warmup_configs(cls) -> list["SamplingParams"]:
+        """Returns a list of sampling configurations that cover all the
+        different dispatch paths we need to warm up."""
+        return [
+            cls.for_sampler_warmup(),
+            cls(temperature=0.9, seed=42),
+            cls(temperature=0.0),
+        ]
+
 
 class BeamSearchParams(
     msgspec.Struct,
