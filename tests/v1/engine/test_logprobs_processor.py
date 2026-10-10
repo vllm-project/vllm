@@ -117,7 +117,8 @@ def test_flat_rows_match_list_logprobs(num_logprobs, width):
     same cumulative logprob."""
     expected = _make_processor(num_logprobs)
     actual = _make_processor(num_logprobs, flat_logprobs=True)
-    for step in _engine_steps(0, width, 40):
+    steps = _engine_steps(0, width, 40)
+    for step in steps:
         expected._update_sample_logprobs(step)
         actual._update_sample_logprobs(step)
 
@@ -132,7 +133,6 @@ def test_flat_rows_match_list_logprobs(num_logprobs, width):
     rows = actual.logprobs.rows()
     assert rows is not None
     token_ids, logprobs, ranks = rows
-    steps = _engine_steps(0, width, 40)
     slots = width if num_logprobs == -1 else num_logprobs + 1
     assert token_ids.dtype == np.dtype("<i4") and logprobs.dtype == np.dtype("<f4")
     assert token_ids.flags.c_contiguous and logprobs.flags.c_contiguous

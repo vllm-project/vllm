@@ -63,10 +63,10 @@ class _Column:
     def append(self, values: np.ndarray | Sequence[int] | Sequence[float]) -> None:
         if not isinstance(values, np.ndarray):
             values = self._array(values)
+        if not values.size:
+            return
         start = self._len
         end = start + values.size
-        if end == start:
-            return
         if values.dtype != self.dtype and not _fits(values, self.dtype):
             self.dtype = self.wide
             self._buf = self.view().astype(self.wide)
@@ -213,14 +213,18 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         canonical = width == 0 or (
             ranks[0] is not None and list(ranks[1:]) == list(range(1, width))
         )
+        first_rank = ranks[0] if width and canonical else 0
+        entry_ranks = (
+            None
+            if canonical
+            else np.array([_NO_RANK if r is None else r for r in ranks], np.int64)
+        )
         self._append(
             width,
             token_ids,
             logprobs,
-            np.array([ranks[0] if width and canonical else 0]),
-            None
-            if canonical
-            else np.array([_NO_RANK if r is None else r for r in ranks], np.int64),
+            np.array([first_rank]),
+            entry_ranks,
             decoded_tokens,
         )
 
