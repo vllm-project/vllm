@@ -293,7 +293,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                 )
             quantized, scales = persistent_masked_m_silu_mul_quant(
                 input.unsqueeze(0),
-                torch.tensor([M_sum], device=input.device, dtype=torch.int32),
+                input.new_full((1,), M_sum, dtype=torch.int32),
                 group_size=block_k,
                 quant_scale_fmt=scale_fmt,
                 clamp_limit=self.gemm1_clamp_limit,
