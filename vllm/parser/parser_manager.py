@@ -242,6 +242,19 @@ class ParserManager:
 
             return _CohereCommandParser
 
+        if "minicpmv" in {reasoning_parser_name, tool_parser_name}:
+            from vllm.parser.minicpmv import MiniCPMVUnifiedParser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _MiniCPMVParser(MiniCPMVUnifiedParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+
+            return _MiniCPMVParser
+
         from vllm.parser.abstract_parser import DelegatingParser
 
         r_cls = reasoning_parser_cls
