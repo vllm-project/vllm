@@ -220,7 +220,8 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/kv_event_sources` - KV-event publisher configuration for each data-parallel rank, which may reveal internal transport endpoints (when KV events are configured)
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
-- `/health` - Health check
+- `/health` - Liveness check
+- `/health/ready` - Readiness check
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics

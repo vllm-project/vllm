@@ -7,7 +7,7 @@ from fastapi.responses import Response
 
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineUnhealthyError
 
 logger = init_logger(__name__)
 
@@ -30,4 +30,18 @@ async def health(raw_request: Request) -> Response:
         await client.check_health()
         return Response(status_code=200)
     except EngineDeadError:
+        return Response(status_code=503)
+
+
+@router.get("/health/ready", response_class=Response)
+async def health_ready(raw_request: Request) -> Response:
+    """Readiness check."""
+    client = engine_client(raw_request)
+    if client is None:
+        # Render-only servers have no engine; they are always healthy.
+        return Response(status_code=200)
+    try:
+        await client.check_ready()
+        return Response(status_code=200)
+    except (EngineDeadError, EngineUnhealthyError):
         return Response(status_code=503)
