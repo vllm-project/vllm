@@ -580,3 +580,17 @@ def test_select_explicit_triton_backend(is_lora_enabled):
 
     assert selected_backend == UnquantizedMoeBackend.TRITON
     assert experts_cls is not None
+
+
+@skipif_not_cuda_rocm
+@pytest.mark.parametrize("moe_backend", ["humming", "marlin"])
+def test_quantization_only_backend_falls_back_to_auto(moe_backend):
+    """A quantization-only --moe-backend also reaches the unquantized MoE
+    layers of a quantized model (e.g. a BF16 MTP draft), which must use the
+    auto-selected backend instead of failing."""
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_backend = moe_backend
+
+    assert select_unquantized_moe_backend(
+        moe_config=moe_config
+    ) == select_unquantized_moe_backend(moe_config=make_dummy_moe_config())
