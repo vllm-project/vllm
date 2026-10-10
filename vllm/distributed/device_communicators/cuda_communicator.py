@@ -86,6 +86,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
         self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
+        # Per-rank size up to which all_gather uses custom_all_gather (0: off).
+        self.custom_all_gather_max_bytes = (
+            envs.VLLM_CUSTOM_ALL_GATHER_SMALL_MAX_BYTES
+            if envs.VLLM_CUSTOM_ALL_GATHER_SMALL
+            else 0
+        )
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -456,6 +462,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
 
+        # Small, latency-bound gathers (e.g. the speculative drafter's per-step
+        # gathers) through the custom all-gather instead of an NCCL kernel.
+        if (
+            0 < input_.nbytes <= self.custom_all_gather_max_bytes
+            and (output := self.custom_all_gather(input_)) is not None
+        ):
+            logger.info_once(
+                "Small TP all-gathers (<= %d bytes per rank) use the custom "
+                "all-gather.",
+                self.custom_all_gather_max_bytes,
+            )
+            return self._move_gathered_dim(output, input_.size(), dim)
+
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is None or pynccl_comm.disabled:
             return super().all_gather(input_, dim)
@@ -474,9 +493,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_size, dtype=input_.dtype, device=input_.device
         )
         pynccl_comm.all_gather(output_tensor, input_.contiguous())
-        output_tensor = output_tensor.reshape((self.world_size,) + input_size)
-        output_tensor = output_tensor.movedim(0, dim)
-        return output_tensor.reshape(
+        return self._move_gathered_dim(output_tensor, input_size, dim)
+
+    def _move_gathered_dim(
+        self, output: torch.Tensor, input_size: torch.Size, dim: int
+    ) -> torch.Tensor:
+        """[world_size * input_size[0], ...] dim-0 gather -> concat along dim."""
+        output = output.reshape((self.world_size,) + input_size)
+        output = output.movedim(0, dim)
+        return output.reshape(
             input_size[:dim]
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]

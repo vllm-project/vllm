@@ -273,6 +273,8 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_CUSTOM_ALL_GATHER_SMALL: bool = False
+    VLLM_CUSTOM_ALL_GATHER_SMALL_MAX_BYTES: int = 64 * 1024
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1950,6 +1952,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # integration is being qualified.
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
+    ),
+    # If set, TP all-gathers of at most VLLM_CUSTOM_ALL_GATHER_SMALL_MAX_BYTES
+    # per rank (e.g. the MTP / EAGLE drafter's per-step gathers) use the
+    # custom all-reduce communicator's all-gather (`custom_all_gather`)
+    # instead of NCCL.
+    "VLLM_CUSTOM_ALL_GATHER_SMALL": lambda: bool(
+        int(os.getenv("VLLM_CUSTOM_ALL_GATHER_SMALL", "0"))
+    ),
+    # Per-rank input size limit in bytes for VLLM_CUSTOM_ALL_GATHER_SMALL.
+    "VLLM_CUSTOM_ALL_GATHER_SMALL_MAX_BYTES": lambda: int(
+        os.getenv("VLLM_CUSTOM_ALL_GATHER_SMALL_MAX_BYTES", str(64 * 1024))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
