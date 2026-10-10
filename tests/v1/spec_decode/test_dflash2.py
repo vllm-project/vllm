@@ -459,3 +459,191 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+_LIGHTNING_NVFP4_PAIR = (
+    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+    "bee7596271d1495f6992ae224aefde4410e816b8",
+    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark",
+    "8a0177116d138011e63103110f136ec0ca09ebbf",
+    "dspark",
+)
+
+
+# Keep the checkpoint dimensions and quantization metadata intact: these tests
+# exercise the real model constructors without allocating the full draft weights.
+def _checkpoint_draft_config(target, target_revision, draft, draft_revision, method):
+    from vllm.config import (
+        AttentionConfig,
+        CompilationConfig,
+        ModelConfig,
+        ParallelConfig,
+        SpeculativeConfig,
+        VllmConfig,
+    )
+
+    target_config = ModelConfig(
+        model=target,
+        revision=target_revision,
+        max_model_len=1024,
+        dtype="bfloat16",
+        skip_tokenizer_init=True,
+    )
+    spec_config = SpeculativeConfig(
+        target_model_config=target_config,
+        target_parallel_config=ParallelConfig(),
+        model=draft,
+        revision=draft_revision,
+        method=method,
+        num_speculative_tokens=7,
+    )
+    return VllmConfig(
+        model_config=target_config,
+        speculative_config=spec_config,
+        compilation_config=CompilationConfig(mode=0),
+        attention_config=AttentionConfig(backend="TRITON_ATTN"),
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize(
+    "target,target_revision,draft,draft_revision,method,packed_head",
+    [
+        (
+            "Qwen/Qwen3-8B",
+            "b968826d9c46dd6066d109eabc6255188de91218",
+            "z-lab/Qwen3-8B-DFlash-b16",
+            "9b41424b7109f9c5413454f481b09a82b85333f4",
+            "dflash",
+            False,
+        ),
+        (
+            "Qwen/Qwen3-4B-FP8",
+            "96b30dc13593a244a5e59e84687309f53c375cfa",
+            "deepseek-ai/dspark_qwen3_4b_block7",
+            "3457dff1417cb84927f6098a5fcb7cee85c934b7",
+            "dspark",
+            False,
+        ),
+        (*_LIGHTNING_NVFP4_PAIR, True),
+    ],
+    ids=["dflash-bf16", "dspark-bf16-fp8-target", "dspark-nvfp4"],
+)
+@pytest.mark.parametrize("owned", [False, True])
+def test_draft_checkpoint_lm_head_layout(
+    dist_init,
+    target,
+    target_revision,
+    draft,
+    draft_revision,
+    method,
+    packed_head,
+    owned,
+):
+    from vllm.model_executor.model_loader.utils import initialize_model
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    config = _checkpoint_draft_config(
+        target, target_revision, draft, draft_revision, method
+    )
+    draft_config = config.speculative_config.draft_model_config
+    if owned:
+        # Use the published config with an explicit ownership flag to cover a
+        # malformed checkpoint that declares a head but does not supply it.
+        draft_config.hf_config.has_own_lm_head = True
+    with set_default_torch_dtype(config.model_config.dtype), torch.device("meta"):
+        model = initialize_model(config, model_config=draft_config)
+    packed = owned and packed_head
+    assert model.lm_head.weight.dtype == (torch.uint8 if packed else torch.bfloat16)
+    assert model.lm_head.weight.shape == (
+        model.config.draft_vocab_size,
+        model.config.hidden_size // 2 if packed else model.config.hidden_size,
+    )
+    if owned:
+        with pytest.raises(ValueError, match="has_own_lm_head=true"):
+            model.load_weights([])
+    else:
+        # The unused head is processed before it is replaced with the target's.
+        model.lm_head.quant_method.process_weights_after_loading(model.lm_head)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("quantize_selector", [False, True])
+def test_dflash2_checkpoint_selector_layout(dist_init, quantize_selector):
+    from vllm.model_executor.model_loader.utils import initialize_model
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    config = _checkpoint_draft_config(
+        "Qwen/Qwen3.8-27B",
+        "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "YourHighnessLA/Qwen3.8-27B-DFlash2-NVFP4",
+        "a9334054bb4d2195ea75b812944037bc21b1269b",
+        "dflash",
+    )
+    draft_config = config.speculative_config.draft_model_config
+    if quantize_selector:
+        # The published checkpoint excludes the selector. Remove just those
+        # exclusions to cover a checkpoint with a packed selector projection.
+        draft_config.hf_config.quantization_config["ignore"] = [
+            "re:.*kernel_projection$"
+        ]
+    with set_default_torch_dtype(config.model_config.dtype), torch.device("meta"):
+        model = initialize_model(config, model_config=draft_config)
+        selector = model.model.candidate_selector
+        projection = selector.hidden_projection
+        weight_name = "weight_packed" if quantize_selector else "weight"
+        weight = getattr(projection, weight_name)
+        rank = draft_config.hf_config.dflash_config["selector_rank"]
+        hidden_size = draft_config.hf_config.hidden_size
+        assert weight.dtype == (torch.uint8 if quantize_selector else torch.bfloat16)
+        assert weight.shape == (
+            rank,
+            hidden_size // 2 if quantize_selector else hidden_size,
+        )
+        loaded = AutoWeightsLoader(selector).load_weights(
+            [(f"hidden_projection.{weight_name}", torch.empty_like(weight))]
+        )
+    assert loaded == {f"hidden_projection.{weight_name}"}
+    assert selector.predecessor_codebook.dtype == torch.bfloat16
+    assert selector.successor_codebook.dtype == torch.bfloat16
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+def test_dspark_checkpoint_owned_head_is_not_replaced(dist_init, monkeypatch):
+    from vllm.config import CompilationConfig, replace
+    from vllm.model_executor import model_loader
+    from vllm.model_executor.model_loader.utils import initialize_model
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+
+    config = _checkpoint_draft_config(*_LIGHTNING_NVFP4_PAIR)
+    draft_config = config.speculative_config.draft_model_config
+    draft_config.hf_config.has_own_lm_head = True
+    target_config = replace(
+        config,
+        speculative_config=None,
+        compilation_config=CompilationConfig(mode=0),
+    )
+    with set_default_torch_dtype(config.model_config.dtype), torch.device("meta"):
+        model = initialize_model(config, model_config=draft_config)
+        target = initialize_model(target_config)
+        model.load_weights(
+            (f"lm_head.{name}", torch.empty_like(weight))
+            for name, weight in model.lm_head.named_parameters()
+        )
+    # Materialize only the heads. Identical packed bytes with different scales
+    # are different projections, so explicit ownership must prevent sharing.
+    head = model.lm_head.to_empty(device="cuda")
+    target.lm_head.to_empty(device="cuda")
+    with torch.no_grad():
+        head.weight.fill_(1)
+        target.lm_head.weight.fill_(1)
+        head.weight_scale_2.fill_(1)
+        target.lm_head.weight_scale_2.fill_(2)
+    assert torch.equal(head.weight, target.lm_head.weight)
+    # Isolate checkpoint I/O; model construction and weight ownership detection
+    # above, and the sharing decision below, use the real implementations.
+    monkeypatch.setattr(model_loader, "get_model", lambda **_: model)
+    assert load_dspark_model(target, config) is model
+    assert model.lm_head is head

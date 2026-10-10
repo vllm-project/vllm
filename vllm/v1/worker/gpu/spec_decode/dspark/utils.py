@@ -127,6 +127,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     if (
         target_lm_head is not None
         and draft_output_vocab_size == target_vocab_size
+        and not getattr(draft_model.config, "has_own_lm_head", False)
         and _should_share(draft_model, "has_own_lm_head", draft_lm_head, target_lm_head)
     ):
         if draft_lm_head is not None:
