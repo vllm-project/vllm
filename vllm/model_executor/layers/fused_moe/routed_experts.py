@@ -520,6 +520,36 @@ class RoutedExperts(PluggableLayer):
                     expert_data = expert_data.narrow(dim, 0, loaded_weight.shape[dim])
         return expert_data
 
+    def _check_unquantized_expert_weight(
+        self, expert_data: torch.Tensor, loaded_weight: torch.Tensor
+    ) -> None:
+        """Explain a packed-vs-unquantized expert weight before ``copy_`` fails.
+
+        A checkpoint may store a MoE submodule unquantized while omitting it from
+        the quantization exclude list (ModelOpt ``exclude_modules``, compressed
+        tensors ``ignore``). The layer is then built for packed low-precision
+        weights and the loader is handed a floating point tensor of the logical
+        width, so the copy fails on a shape mismatch that names neither the layer
+        nor the cause. Only raises where the copy would raise anyway.
+        """
+        if (
+            expert_data.is_floating_point()
+            or not loaded_weight.is_floating_point()
+            or expert_data.shape == loaded_weight.shape
+        ):
+            return
+        raise ValueError(
+            f"Expert weight for layer '{self.layer_name}' is "
+            f"{loaded_weight.dtype} {tuple(loaded_weight.shape)} in the "
+            f"checkpoint, but the layer was built for packed "
+            f"{expert_data.dtype} {tuple(expert_data.shape)} weights. The "
+            "checkpoint stores this module unquantized without listing it in "
+            "the quantization exclude list, so add a pattern that matches it. "
+            "The pattern is matched against the vLLM module path, which can "
+            "differ from the checkpoint path (a multi-token-prediction layer is "
+            "built as its own model and so loses any parent prefix)."
+        )
+
     def _load_w13(
         self,
         expert_data: torch.Tensor,
@@ -569,6 +599,7 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
+        self._check_unquantized_expert_weight(expert_data, loaded_weight)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(
@@ -603,6 +634,7 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
+        self._check_unquantized_expert_weight(expert_data, loaded_weight)
         if (
             loaded_weight.device.type == "cpu"
             and expert_data.device.type == "cuda"
