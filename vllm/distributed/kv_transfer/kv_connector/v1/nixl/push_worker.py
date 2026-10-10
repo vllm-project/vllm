@@ -155,16 +155,20 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_stop.set()
         # Unblock the writer if it's waiting in the no-active-state branch.
         self._push_writer_wake.set()
-        if self._push_writer_thread is not None:
-            self._push_writer_thread.join(timeout=2)
+        writer = self._push_writer_thread
+        if writer is not None:
+            writer.join()
             self._push_writer_thread = None
+        super().shutdown()
+
+    def _finish_shutdown(self) -> None:
         with self._sending_transfers_lock:
             for handles in self._sending_transfers.values():
                 for handle in handles:
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
             self._send_failures.clear()
-        super().shutdown()
+        super()._finish_shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
 
@@ -345,6 +349,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
+            if self._push_writer_stop.is_set():
+                return
             try:
                 f.result()
             except Exception as e:
@@ -468,6 +474,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 blocks: BlockIds = local_block_ids,
                 rd: dict[str, Any] = registration_data,
             ) -> None:
+                if self._push_writer_stop.is_set():
+                    return
                 if (e := f.exception()) is not None:
                     # The engine reclaims the blocks via the TTL so we dont free here
                     self._log_failure(

@@ -382,6 +382,10 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._failed_remote_engines = set()
         w._invalid_remote_engines = set()
         w._handshake_lock = threading.RLock()
+        w._shutdown_lock = threading.Lock()
+        w._shutting_down = False
+        w._shutdown_complete = False
+        w._handshake_thread = None
         w._physical_blocks_per_logical_kv_block = 1
         w._uses_region_group_mapping = False
         w.region_group_ids = [0]
@@ -677,6 +681,66 @@ class TestPushWriterStartLoadKv:
 # the *real* ``_do_start_push_kv`` (the stub overrides it for matching tests).
 def _real_do_start_push_kv(w, *args):
     return NixlPushConnectorWorker._do_start_push_kv(w, *args)
+
+
+@pytest.mark.cpu_test
+def test_shutdown_joins_writer_without_timeout_before_base_cleanup():
+    w = _StubWriterWorker.fresh()
+    w.nixl_wrapper = MagicMock()
+    w._sending_transfers["request"] = [13]
+    writer = MagicMock()
+    w._push_writer_thread = writer
+
+    def join(timeout=None):
+        assert w._push_writer_stop.is_set()
+        assert w._push_writer_wake.is_set()
+        w.nixl_wrapper.release_xfer_handle.assert_not_called()
+        assert timeout is None, "timed join can free resources under a live writer"
+
+    writer.join.side_effect = join
+    with (
+        patch.object(NixlBaseConnectorWorker, "shutdown") as base_shutdown,
+        patch.object(NixlBaseConnectorWorker, "_finish_shutdown", create=True),
+    ):
+
+        def finish():
+            writer.join.assert_called_once_with()
+            assert w._push_writer_thread is None
+            if base_shutdown.call_count == 1:
+                w.nixl_wrapper.release_xfer_handle.assert_not_called()
+            w._finish_shutdown()
+
+        base_shutdown.side_effect = finish
+        w.shutdown()
+        w.shutdown()
+    w.nixl_wrapper.release_xfer_handle.assert_called_once_with(13)
+    assert not w._sending_transfers
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("completion", ["success", "cancel"])
+def test_stopped_writer_ignores_handshake_callbacks(completion, caplog):
+    w = _StubWriterWorker.fresh()
+    w._log_failure = MagicMock()
+    future: Future = Future()
+    w._ensure_handshake = lambda *args, **kwargs: future
+    registration = _registration_data("request")
+    w._send_registration_to_p("request", registration)
+    _real_do_start_push_kv(w, "request", ([1],), registration)
+    w._push_writer_stop.set()
+
+    with caplog.at_level(logging.ERROR):
+        if completion == "cancel":
+            assert future.cancel()
+        else:
+            future.set_result(({(0, 0): "agent"}, 0.0))
+
+    assert w._reg_send_inbox.empty()
+    assert w._deferred_push_inbox.empty()
+    assert w._failed_recv_reqs.empty()
+    assert not w._push_writer_wake.is_set()
+    w._log_failure.assert_not_called()
+    assert not caplog.records  # Future logs exceptions raised by done callbacks.
 
 
 def test_do_start_push_kv_defers_then_writes_when_handshake_ready():

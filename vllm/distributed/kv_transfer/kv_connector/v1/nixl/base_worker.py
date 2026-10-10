@@ -824,6 +824,10 @@ class NixlBaseConnectorWorker:
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
+        self._shutdown_lock = threading.Lock()
+        self._shutting_down = False
+        self._shutdown_complete = False
+        self._handshake_thread: threading.Thread | None = None
         # Background thread for initializing new NIXL handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -993,6 +997,7 @@ class NixlBaseConnectorWorker:
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
+        self._handshake_thread = threading.current_thread()
         if self._is_csa_linear:
             self._validate_csa_linear_tp_layout(remote_tp_size)
 
@@ -1283,8 +1288,10 @@ class NixlBaseConnectorWorker:
         returned future.
         Failures to handshake are logged and the request is marked as failed.
         """
-        self._evict_stale_engines()
         with self._handshake_lock:
+            if self._shutting_down:
+                raise RuntimeError("NIXL connector worker is shutting down")
+            self._evict_stale_engines()
             if engine_id in self._remote_agents:
                 return None
             fut = self._handshake_futures.get(engine_id)
@@ -1308,6 +1315,8 @@ class NixlBaseConnectorWorker:
             ):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
+                    if f.cancelled():
+                        return
                     try:
                         remote_agents, clock_offset = f.result()
                         self._remote_agents[eid] = remote_agents
@@ -1347,17 +1356,20 @@ class NixlBaseConnectorWorker:
 
         # Check handshake success before proceeding with request.
         def request_ready(f: Future[Any], entry=(req_id, meta)):
-            try:
-                f.result()
-                self._ready_requests.put(entry)
-            except Exception as e:
-                self._log_failure(
-                    failure_type="handshake_failed",
-                    req_id=req_id,
-                    error=e,
-                    meta=meta,
-                )
-                self._failed_recv_reqs.put(req_id)
+            with self._handshake_lock:
+                if self._shutting_down:
+                    return
+                try:
+                    f.result()
+                    self._ready_requests.put(entry)
+                except Exception as e:
+                    self._log_failure(
+                        failure_type="handshake_failed",
+                        req_id=req_id,
+                        error=e,
+                        meta=meta,
+                    )
+                    self._failed_recv_reqs.put(req_id)
 
         fut.add_done_callback(request_ready)
 
@@ -3727,9 +3739,20 @@ class NixlBaseConnectorWorker:
 
     def __del__(self):
         with contextlib.suppress(Exception):
-            self.shutdown()
+            if getattr(self, "_handshake_thread", None) is threading.current_thread():
+                # The last reference can be released by the executor after its
+                # task and callbacks finish. Do not join that same thread.
+                self._handshake_initiation_executor.shutdown(wait=False)
+                self._finish_shutdown()
+            else:
+                self.shutdown()
 
     def _finish_shutdown(self) -> None:
+        if self._shutdown_complete:
+            return
+        for handles in self._recving_transfers.values():
+            for handle in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
         try:
             for handle in self.src_xfer_handles_by_block_size.values():
@@ -3760,19 +3783,22 @@ class NixlBaseConnectorWorker:
                 self.nixl_wrapper.deregister_memory(desc)
         finally:
             self._registered_descs.clear()
-            # Drop cache references before their owners release registered
-            # host memory; handshake futures may outlive model-runner shutdown.
+            # Deregister before owners release the backing GPU/host memory.
             self.device_kv_caches = {}
             self.host_xfer_buffers = {}
+        self._shutdown_complete = True
 
     def shutdown(self) -> None:
         """Shutdown the connector worker."""
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
             return
-        self._handshake_initiation_executor.shutdown(wait=False)
-        for handles in self._recving_transfers.values():
-            for handle in handles:
-                self.nixl_wrapper.release_xfer_handle(handle)
-        self._recving_transfers.clear()
-        self._finish_shutdown()
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            with self._handshake_lock:
+                self._shutting_down = True
+            # Callbacks need _handshake_lock. Drain them without holding it,
+            # before freeing descriptors or returning to the buffer owners.
+            self._handshake_initiation_executor.shutdown(wait=True, cancel_futures=True)
+            self._finish_shutdown()

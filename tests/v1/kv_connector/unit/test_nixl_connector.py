@@ -10,8 +10,9 @@ import textwrap
 import threading
 import time
 import uuid
+import weakref
 from collections import defaultdict
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
@@ -2130,8 +2131,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     assert memory_types == ["DRAM", "VRAM"]
 
 
-@pytest.fixture
-def recv_worker():
+def _make_recv_worker():
     """Receive lifecycle state without distributed or device initialization."""
     worker = object.__new__(NixlConnectorWorker)
     worker.transfer_topo = MagicMock()
@@ -2145,6 +2145,10 @@ def recv_worker():
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
     worker._handshake_lock = threading.RLock()
+    worker._shutdown_lock = threading.Lock()
+    worker._shutting_down = False
+    worker._shutdown_complete = False
+    worker._handshake_thread = None
     worker._handshake_futures = {}
     worker._remote_agents = {}
     worker._engine_by_address = {}
@@ -2167,6 +2171,11 @@ def recv_worker():
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.get_xfer_telemetry.return_value = get_default_xfer_telemetry()
     return worker
+
+
+@pytest.fixture
+def recv_worker():
+    return _make_recv_worker()
 
 
 def test_mixed_memory_read_notifies_after_both_transfers_finish(recv_worker):
@@ -2661,7 +2670,7 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         worker.shutdown()
         worker.shutdown()
 
-        mock_exec.shutdown.assert_called_with(wait=False)
+        mock_exec.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
 
         # Same sequence on scheduler.shutdown()
         scheduler.shutdown()
@@ -2679,6 +2688,190 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         assert mock_dereg.call_count == 2
         mock_dereg.assert_any_call("desc1")
         mock_dereg.assert_any_call("desc2")
+
+
+def _init_shutdown_worker(worker):
+    worker._engine_ttl = 0
+    for name in (
+        "src_xfer_handles_by_tp_ratio",
+        "_dram_src_handles_by_tp_ratio",
+        "_dram_src_handles_by_block_size",
+        "dst_xfer_side_handles",
+        "kv_caches_base_addr",
+        "dst_num_blocks",
+        "dst_region_num_blocks",
+        "dst_region_group_ids",
+        "dst_uses_region_group_mapping",
+        "dst_region_mem_types",
+        "tp_mappings",
+        "_engine_clock_offset",
+        "_engine_last_active",
+    ):
+        setattr(worker, name, {})
+    worker.src_xfer_handles_by_block_size = {16: 11}
+    worker._recving_transfers = {"request": [12]}
+    worker._registered_descs = ["desc"]
+    worker.device_kv_caches = {"cache": object()}
+    worker.host_xfer_buffers = {"buffer": object()}
+    worker._remote_agents = {"cached": {(0, 0): "cached-agent"}}
+    return worker
+
+
+@pytest.fixture
+def shutdown_worker(recv_worker):
+    worker = _init_shutdown_worker(recv_worker)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        worker._handshake_initiation_executor = executor
+        yield worker
+    worker.shutdown()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("fail_handshake", [False, True])
+def test_shutdown_drains_handshake_and_callbacks_before_cleanup(
+    shutdown_worker, fail_handshake
+):
+    worker = shutdown_worker
+    started, release = threading.Event(), threading.Event()
+    callback_started, callback_release = threading.Event(), threading.Event()
+    queued_done = threading.Event()
+
+    def handshake(*args):
+        started.set()
+        assert release.wait(5), "handshake was not released"
+        if fail_handshake:
+            raise RuntimeError("handshake failed")
+        return {(0, 0): "late-agent"}, 0.0
+
+    def callback(future):
+        with worker._handshake_lock:
+            callback_started.set()
+            assert callback_release.wait(5), "callback was not released"
+
+    def assert_resources_live():
+        worker.nixl_wrapper.release_xfer_handle.assert_not_called()
+        worker.nixl_wrapper.release_dlist_handle.assert_not_called()
+        worker.nixl_wrapper.remove_remote_agent.assert_not_called()
+        worker.nixl_wrapper.deregister_memory.assert_not_called()
+        assert worker.device_kv_caches and worker.host_xfer_buffers
+
+    worker._nixl_handshake = MagicMock(side_effect=handshake)
+    executor = worker._handshake_initiation_executor
+    with (
+        patch.object(executor, "shutdown", wraps=executor.shutdown) as shutdown,
+        ThreadPoolExecutor(max_workers=2) as callers,
+    ):
+        try:
+            active = worker._ensure_handshake("active", "host", 1, 1)
+            assert started.wait(5)
+            active.add_done_callback(callback)
+            queued = worker._ensure_handshake("queued", "host", 2, 1)
+            queued.add_done_callback(lambda _: queued_done.set())
+            stopping = callers.submit(worker.shutdown)
+            assert queued_done.wait(5), "shutdown did not cancel queued handshake"
+            assert queued.cancelled()
+            assert not stopping.done()
+            assert_resources_live()
+            # Cached peers must not bypass admission while shutdown is draining.
+            for peer in ("new", "cached"):
+                with pytest.raises(RuntimeError, match="shutting down"):
+                    worker._ensure_handshake(peer, "host", 3, 1)
+            release.set()
+            assert callback_started.wait(5), "shutdown blocked handshake callback"
+            assert active.done()  # Future completion alone does not drain callbacks.
+            assert not stopping.done()
+            assert_resources_live()
+            overlapping = callers.submit(worker.shutdown)
+            callback_release.set()
+            stopping.result(timeout=5)
+            overlapping.result(timeout=5)
+            worker.shutdown()
+            shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        finally:
+            release.set()
+            callback_release.set()
+
+    worker._nixl_handshake.assert_called_once()
+    assert not worker._handshake_futures
+    assert not worker._remote_agents
+    assert not worker.device_kv_caches and not worker.host_xfer_buffers
+    worker.nixl_wrapper.release_xfer_handle.assert_called_once_with(12)
+    worker.nixl_wrapper.release_dlist_handle.assert_called_once_with(11)
+    worker.nixl_wrapper.deregister_memory.assert_called_once_with("desc")
+    agents = [call("cached-agent")]
+    if not fail_handshake:
+        agents.append(call("late-agent"))
+    assert worker.nixl_wrapper.remove_remote_agent.call_args_list == agents
+    assert worker._log_failure.call_count == int(fail_handshake)
+    with pytest.raises(RuntimeError, match="shutting down"):
+        worker._ensure_handshake("after-shutdown", "host", 4, 1)
+
+
+@pytest.mark.cpu_test
+def test_destructor_on_handshake_thread_does_not_join_itself():
+    worker = _init_shutdown_worker(_make_recv_worker())
+    worker._is_csa_linear = False
+    worker.device_id = 0
+    wrapper = worker.nixl_wrapper
+    release, collected = threading.Event(), threading.Event()
+    worker_ref = weakref.ref(worker, lambda _: collected.set())
+    cleanup_threads = []
+    wrapper.deregister_memory.side_effect = lambda _: cleanup_threads.append(
+        threading.current_thread()
+    )
+
+    def handshake(worker):
+        assert release.wait(5)
+        try:
+            worker._nixl_handshake("host", 1, 1, "peer")
+        except RuntimeError:
+            return threading.current_thread()
+        pytest.fail("device boundary was not reached")
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        patch.object(
+            current_platform, "set_device", side_effect=RuntimeError
+        ) as set_device,
+        patch.object(executor, "shutdown", wraps=executor.shutdown) as shutdown,
+    ):
+        worker._handshake_initiation_executor = executor
+        future = executor.submit(handshake, worker)
+        del worker  # The executor work item now owns the last strong reference.
+        assert worker_ref() is not None
+        wrapper.deregister_memory.assert_not_called()
+        release.set()
+        handshake_thread = future.result(timeout=5)
+        assert collected.wait(5), "executor retained the worker after its task"
+        assert worker_ref() is None
+        assert cleanup_threads == [handshake_thread]
+        set_device.assert_called_once_with(0)
+        shutdown.assert_called_once_with(wait=False)
+    wrapper.deregister_memory.assert_called_once_with("desc")
+    wrapper.remove_remote_agent.assert_called_once_with("cached-agent")
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("cancel", [False, True])
+def test_request_ready_ignores_handshake_completion_during_shutdown(
+    recv_worker, cancel
+):
+    worker = recv_worker
+    worker._ready_requests = queue.Queue()
+    future: Future = Future()
+    meta = SimpleNamespace(
+        remote=SimpleNamespace(host="host", port=1), tp_size=1, dcp_size=1, pp_size=1
+    )
+    with patch.object(worker, "_ensure_handshake", return_value=future):
+        worker._background_nixl_handshake("request", "peer", meta)
+    worker._shutting_down = True
+    if cancel:
+        assert future.cancel()
+    else:
+        future.set_result(({(0, 0): "agent"}, 0.0))
+    assert worker._ready_requests.empty()
+    assert worker._failed_recv_reqs.empty()
+    worker._log_failure.assert_not_called()
 
 
 # ── TTL-based remote engine eviction tests ──────────────────────────
