@@ -20,4 +20,21 @@ void cutlass_scaled_mm_sm100(torch::stable::Tensor& c,
                      vllm::cutlass_scaled_mm_blockwise_sm100_fp8);
 }
 
+void cutlass_scaled_mm_sm100_gemma4_gated(
+    torch::stable::Tensor& c, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  vllm::cutlass_scaled_mm_sm100_fp8_gemma4_gated(c, a, b, a_scales,
+                                                 b_scales);
+}
+
+void cutlass_scaled_mm_sm100_gemma4_gated_amax(
+    torch::stable::Tensor& c, torch::stable::Tensor& row_amax,
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  vllm::cutlass_scaled_mm_sm100_fp8_gemma4_gated_amax(
+      c, row_amax, a, b, a_scales, b_scales);
+}
+
 #endif

@@ -30,4 +30,24 @@ void cutlass_scaled_mm_sm100_fp8(
   }
 }
 
+void cutlass_scaled_mm_sm100_fp8_gemma4_gated(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
+  return cutlass_scaled_mm_sm100_fp8_gemma4_gated_epilogue(
+      out, a, b, a_scales, b_scales);
+}
+
+void cutlass_scaled_mm_sm100_fp8_gemma4_gated_amax(
+    torch::stable::Tensor& out, torch::stable::Tensor& row_amax,
+    torch::stable::Tensor const& a, torch::stable::Tensor const& b,
+    torch::stable::Tensor const& a_scales,
+    torch::stable::Tensor const& b_scales) {
+  STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
+  STD_TORCH_CHECK(row_amax.is_contiguous());
+  return cutlass_scaled_mm_sm100_fp8_gemma4_gated_amax_epilogue(
+      out, row_amax, a, b, a_scales, b_scales);
+}
+
 }  // namespace vllm
