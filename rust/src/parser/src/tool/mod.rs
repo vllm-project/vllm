@@ -11,6 +11,7 @@ mod glm_xml;
 mod hy;
 pub(crate) mod json;
 mod kimi_k2;
+mod minicpm5;
 mod mimo;
 mod minimax_m2;
 mod minimax_m3;
@@ -31,6 +32,7 @@ pub use json::{
     MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
 };
 pub use kimi_k2::KimiK2ToolParser;
+pub use minicpm5::MiniCPM5ToolParser;
 pub use mimo::MiMoToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
