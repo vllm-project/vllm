@@ -410,7 +410,17 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
+            AuxOutputSchedulerConnector(
+                enable_routed_experts=(
+                    vllm_config.aux_output_config.enable_return_routed_experts
+                ),
+                enable_logprobs=vllm_config.aux_output_config.enable_logprobs_replay,
+                enable_prompt_logprobs=(
+                    vllm_config.aux_output_config.enable_prompt_logprobs_replay
+                ),
+                logprobs_mode=vllm_config.model_config.logprobs_mode,
+                hash_block_size=self.hash_block_size,
+            )
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -1654,6 +1664,8 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.release_request(session)
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
         num_computed_tokens = session.num_computed_tokens
@@ -2199,7 +2211,11 @@ class Scheduler(SchedulerInterface):
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
-            if self.aux_output_connector is not None and should_emit_output:
+            if (
+                self.aux_output_connector is not None
+                and self.vllm_config.aux_output_config.enable_return_routed_experts
+                and should_emit_output
+            ):
                 routed_experts = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
                 )
@@ -2256,6 +2272,26 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            if self.aux_output_connector is not None:
+                # For aux-replayed prompt logprobs the auxiliary output plane
+                # is authoritative: drop the runner's prompt_logprobs_dict
+                # fallback so the same rows cannot be delivered twice (the
+                # runner may surface its final-chunk tensor on a different
+                # step than the worker's aux artifact).
+                if self.aux_output_connector.replays_prompt_logprobs(request):
+                    prompt_logprobs_tensors = None
+                if new_token_ids:
+                    replayed = self.aux_output_connector.take_logprobs(
+                        request, model_runner_output.aux_output_connector_output
+                    )
+                    if replayed is not None:
+                        new_logprobs = replayed.slice_request(0, len(new_token_ids))
+                if should_emit_output:
+                    replayed_prompt = self.aux_output_connector.take_prompt_logprobs(
+                        request, model_runner_output.aux_output_connector_output
+                    )
+                    if replayed_prompt is not None:
+                        prompt_logprobs_tensors = replayed_prompt
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
@@ -2288,6 +2324,12 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
+
+            # request_finished() runs before this loop consumes the final
+            # prompt artifact. Release the one-shot scheduler latch only after
+            # that consumption point, including streaming-request teardown.
+            if request.is_finished() and self.aux_output_connector is not None:
+                self.aux_output_connector.release_request(request)
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
@@ -2707,6 +2749,8 @@ class Scheduler(SchedulerInterface):
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            if self.aux_output_connector is not None:
+                self.aux_output_connector.release_request(request)
 
         return valid_requests
 

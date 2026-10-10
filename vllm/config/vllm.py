@@ -1150,24 +1150,50 @@ class VllmConfig:
             )
         if self.model_config.runner_type != "generate":
             raise ValueError("AuxOutput Connector only supports generate runners.")
-        if not self.model_config.is_moe:
-            raise ValueError("AuxOutput Connector only supports MoE models.")
-        if not self.cache_config.enable_prefix_caching:
-            raise ValueError("AuxOutput Connector requires prefix caching.")
         if (
-            self.speculative_config is not None
+            self.aux_output_config.enable_return_routed_experts
+            and not self.model_config.is_moe
+        ):
+            raise ValueError("AuxOutput Connector only supports MoE models.")
+        if (
+            self.aux_output_config.enable_return_routed_experts
+            and not self.cache_config.enable_prefix_caching
+        ):
+            raise ValueError("Routed-experts AuxOutput requires prefix caching.")
+        if (
+            self.aux_output_config.enable_logprobs_replay
+            and not self.cache_config.enable_prefix_caching
+        ):
+            raise ValueError(
+                "Logprobs replay AuxOutput requires prefix caching for "
+                "stable KV block artifact identity."
+            )
+        if (
+            self.aux_output_config.enable_prompt_logprobs_replay
+            and not self.aux_output_config.enable_logprobs_replay
+        ):
+            raise ValueError(
+                "prompt logprobs replay requires generated logprobs replay "
+                "to capture causal block-boundary rows."
+            )
+        if (
+            self.aux_output_config.enable_return_routed_experts
+            and self.speculative_config is not None
             and self.speculative_config.enable_adaptive_verification
         ):
             raise ValueError(
                 "--enable-return-routed-experts is incompatible with "
                 "adaptive speculative verification."
             )
-        if self.parallel_config.pipeline_parallel_size > 1:
+        if (
+            self.aux_output_config.enable_return_routed_experts
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
             raise ValueError(
                 "--enable-return-routed-experts is incompatible with "
                 "pipeline parallelism (PP > 1)."
             )
-        if (
+        if self.aux_output_config.enable_return_routed_experts and (
             self.parallel_config.decode_context_parallel_size > 1
             or self.parallel_config.prefill_context_parallel_size > 1
         ):
@@ -1187,7 +1213,7 @@ class VllmConfig:
             ):
                 if kv_transfer_config.has_connector(connector_name):
                     raise ValueError(
-                        "--enable-return-routed-experts is incompatible with "
+                        "AuxOutput Connector is incompatible with "
                         f"{connector_name}; PD auxiliary output is not supported."
                     )
 

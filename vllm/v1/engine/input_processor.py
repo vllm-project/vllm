@@ -154,6 +154,76 @@ class InputProcessor:
             if not supported_generation_tasks:
                 raise VLLMValidationError("This model does not support generation")
 
+            aux_output_replay = bool(
+                params.extra_args and params.extra_args.get("aux_output_replay", False)
+            )
+            if aux_output_replay:
+                aux_config = self.vllm_config.aux_output_config
+                if (
+                    params.logprobs is not None
+                    and not aux_config.enable_logprobs_replay
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_replay with logprobs requires "
+                        "aux_output_config.enable_logprobs_replay",
+                        parameter="aux_output_replay",
+                    )
+                if (
+                    params.prompt_logprobs is not None
+                    and not aux_config.enable_prompt_logprobs_replay
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_replay with prompt_logprobs requires "
+                        "aux_output_config.enable_prompt_logprobs_replay",
+                        parameter="aux_output_replay",
+                    )
+                if params.logprobs is None and params.prompt_logprobs is None:
+                    raise VLLMValidationError(
+                        "aux_output_replay requires logprobs or prompt_logprobs",
+                        parameter="aux_output_replay",
+                    )
+                if params.logprobs == -1 or params.prompt_logprobs == -1:
+                    raise VLLMValidationError(
+                        "aux_output_replay does not support full-vocabulary logprobs",
+                        parameter="aux_output_replay",
+                    )
+                if self.model_config.logprobs_mode != "raw_logprobs":
+                    raise VLLMValidationError(
+                        "aux_output_replay currently requires "
+                        "logprobs_mode='raw_logprobs'",
+                        parameter="aux_output_replay",
+                    )
+                if (
+                    params.logprob_token_ids is not None
+                    or params.prompt_logprob_token_ids is not None
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_replay does not yet support custom logprob "
+                        "token-id layouts",
+                        parameter="aux_output_replay",
+                    )
+                if (
+                    params.logprobs is not None
+                    and params.prompt_logprobs is not None
+                    and params.logprobs != params.prompt_logprobs
+                ):
+                    raise VLLMValidationError(
+                        "aux_output_replay requires logprobs and prompt_logprobs "
+                        "to use the same top-k width",
+                        parameter="aux_output_replay",
+                    )
+                if params.prompt_logprobs is not None and params.logprobs is None:
+                    raise VLLMValidationError(
+                        "aux_output_replay with prompt_logprobs also requires "
+                        "logprobs with the same top-k width",
+                        parameter="aux_output_replay",
+                    )
+                if self.vllm_config.weight_transfer_config is not None:
+                    raise VLLMValidationError(
+                        "aux_output_replay is incompatible with online weight updates",
+                        parameter="aux_output_replay",
+                    )
+
             params.verify(
                 self.model_config,
                 self.speculative_config,

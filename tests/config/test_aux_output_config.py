@@ -9,8 +9,9 @@ import pytest
 from vllm.config import AuxOutputConfig, VllmConfig
 from vllm.config.kv_transfer import KVRole, KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.sampling_params import SamplingParams
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 
 def _config(
@@ -27,6 +28,7 @@ def _config(
     attention_chunk_size: int | None = None,
     enable_prefix_caching: bool = True,
     adaptive_verification: bool = False,
+    aux_output_config: AuxOutputConfig | None = None,
 ):
     return SimpleNamespace(
         model_config=SimpleNamespace(
@@ -41,7 +43,8 @@ def _config(
             decode_context_parallel_size=dcp,
             prefill_context_parallel_size=pcp,
         ),
-        aux_output_config=AuxOutputConfig(enable_return_routed_experts=True),
+        aux_output_config=aux_output_config
+        or AuxOutputConfig(enable_return_routed_experts=True),
         cache_config=SimpleNamespace(
             enable_prefix_caching=enable_prefix_caching,
         ),
@@ -66,6 +69,8 @@ def test_aux_output_config_defaults():
 
     assert not config.enabled
     assert not config.enable_return_routed_experts
+    assert not config.enable_logprobs_replay
+    assert not config.enable_prompt_logprobs_replay
     assert config.max_bytes is None
 
 
@@ -74,6 +79,57 @@ def test_aux_output_capture_changes_compilation_hash():
     enabled = AuxOutputConfig(enable_return_routed_experts=True)
 
     assert disabled.compute_hash() != enabled.compute_hash()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        AuxOutputConfig(enable_logprobs_replay=True),
+        AuxOutputConfig(enable_prompt_logprobs_replay=True),
+    ],
+)
+def test_logprobs_replay_enables_aux_output(config):
+    assert config.enabled
+
+
+def test_logprobs_only_aux_output_does_not_require_moe():
+    config = _config(
+        is_moe=False,
+        aux_output_config=AuxOutputConfig(enable_logprobs_replay=True),
+    )
+
+    VllmConfig._verify_aux_output_compatibility(config)
+
+
+def test_logprobs_replay_prefix_cache_error_is_feature_specific():
+    config = _config(
+        is_moe=False,
+        enable_prefix_caching=False,
+        aux_output_config=AuxOutputConfig(enable_logprobs_replay=True),
+    )
+
+    with pytest.raises(ValueError, match="Logprobs replay AuxOutput"):
+        VllmConfig._verify_aux_output_compatibility(config)
+
+
+def test_prompt_logprobs_replay_requires_generated_logprobs_replay():
+    config = _config(
+        aux_output_config=AuxOutputConfig(enable_prompt_logprobs_replay=True),
+    )
+
+    with pytest.raises(ValueError, match="causal block-boundary rows"):
+        VllmConfig._verify_aux_output_compatibility(config)
+
+
+def test_aux_output_replay_allows_prompt_prefix_cache_lookup():
+    regular = SamplingParams(prompt_logprobs=2)
+    replay = SamplingParams(
+        prompt_logprobs=2,
+        extra_args={"aux_output_replay": True},
+    )
+
+    assert regular.skip_reading_prefix_cache
+    assert not replay.skip_reading_prefix_cache
 
 
 def test_legacy_routed_experts_flag_updates_aux_output_config():
