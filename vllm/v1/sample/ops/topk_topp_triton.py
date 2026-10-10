@@ -1471,8 +1471,6 @@ def _topp_sb_mask_kernel(
         return
     if fin < 0.0:
         fin = best_fin
-    logZ = tl.log(Z)
-    pivot_logit = tl.log(pivot) + logZ + M
     # numdup/numkeep are exact small integers held in fp32.
     ties = numkeep < numdup
     num_preceding = 0.0
@@ -1498,15 +1496,12 @@ def _topp_sb_mask_kernel(
     for i in range(start, end, BLOCK):
         mask_n = i + offs < end
         x = tl.load(ROW + i + offs, mask=mask_n, other=-float("inf"))
-        keep = x > pivot_logit
+        # Mask in probability space (bitwise the step kernels' predicate);
+        # the logit-space pivot rounds to M for huge |M|.
+        prob = tl.exp(x - M) / Z
+        keep = (prob > pivot) | (x == M)
         if ties:
-            # Match the boundary value in probability space with exact
-            # equality: `dup` is a probability computed by the step kernels
-            # as exp(x - M) / Z, so recomputing it here with the same ops
-            # reproduces it bitwise on any platform. (The log/exp round-trip
-            # to logit space loses ~1e-6 to cancellation, breaking any
-            # absolute tolerance.)
-            dmask = tl.exp(x - M) / Z == dup
+            dmask = prob == dup
             cum = tl.cumsum(dmask.to(tl.int32)).to(tl.float32) + num_preceding
             keep_dup = dmask & (cum <= numkeep)
             keep = keep & (~dmask | keep_dup)
