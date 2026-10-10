@@ -26,6 +26,8 @@ from .utils import (
     BeamSearchOutput,
     BeamSearchSequence,
     create_sort_beams_key_function,
+    merge_beam_scoring_outputs,
+    split_beam_scoring_params,
 )
 
 logger = init_logger(__name__)
@@ -82,6 +84,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        request_allowed_token_ids = params.allowed_token_ids
         self.llm_engine.input_processor.resolve_watermarking(params)
 
         tokenizer = self.renderer.get_tokenizer()
@@ -171,6 +174,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         structured_output_backend=structured_output_backend,
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
+                        request_allowed_token_ids=request_allowed_token_ids,
                     )
                     if should_stop:
                         break
@@ -206,6 +210,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple | None,
         structured_output_bitmask: torch.Tensor | None,
+        request_allowed_token_ids: list[int] | None,
     ) -> bool:
         """Run one token step of beam search across a batch of instances.
 
@@ -235,6 +240,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 structured_output_backend,
                 structured_output_key,
                 structured_output_bitmask,
+                request_allowed_token_ids,
             )
             active_indices = [
                 i for i, entry in enumerate(beam_entries) if entry is not None
@@ -268,26 +274,48 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 base_sampling_params, len(all_beams)
             )
 
+        scoring_beams = []
+        scoring_params = []
+        boundaries = [0]
+        for idx, beam, step_params in zip(active_indices, active_beams, active_params):
+            assert isinstance(step_params, SamplingParams)
+            allowed_ids = request_allowed_token_ids
+            if allowed_ids is not None and structured_output_backend is not None:
+                entry = beam_entries[idx]
+                assert entry is not None
+                allowed_ids = entry[1]
+            chunks = split_beam_scoring_params(step_params, allowed_ids)
+            scoring_params.extend(chunks)
+            scoring_beams.extend([beam] * len(chunks))
+            boundaries.append(len(scoring_params))
+
         # only runs for one step
         # we don't need to use tqdm here
         active_output = self._render_and_run_requests(
-            prompts=(beam.get_prompt() for beam in active_beams),
-            params=active_params,
+            prompts=(beam.get_prompt() for beam in scoring_beams),
+            params=scoring_params,
             output_type=RequestOutput,
-            lora_requests=[beam.lora_request for beam in active_beams],
+            lora_requests=[beam.lora_request for beam in scoring_beams],
             use_tqdm=False,
         )
 
         output: list[RequestOutput | None] = [None] * len(all_beams)
         for idx, active_idx in enumerate(active_indices):
-            output[active_idx] = active_output[idx]
+            output[active_idx] = merge_beam_scoring_outputs(
+                active_output[boundaries[idx] : boundaries[idx + 1]]
+            )
 
         # Logprobs are computed from raw logits before
         # allowed_token_ids masking, so they may contain
         # tokens outside the grammar's allowed set. This filtering is also
         # the only grammar enforcement for beams whose allowed set exceeds
         # the engine-side allowed_token_ids cap.
-        allowed_sets: list[set[int] | None] = [None] * len(all_beams)
+        request_allowed_set = (
+            set(request_allowed_token_ids)
+            if request_allowed_token_ids is not None
+            else None
+        )
+        allowed_sets: list[set[int] | None] = [request_allowed_set] * len(all_beams)
         if structured_output_backend is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
@@ -418,6 +446,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         backend: StructuredOutputBackend,
         structured_output_key: tuple,
         bitmask: torch.Tensor,
+        request_allowed_token_ids: list[int] | None,
     ) -> list[tuple[SamplingParams, list[int]] | None]:
         """Build per-beam SamplingParams and allowed token IDs from grammar.
 
@@ -425,6 +454,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         """
         vocab_size = self.model_config.get_vocab_size()
         request_type, grammar_spec = structured_output_key
+        request_allowed_set = (
+            set(request_allowed_token_ids)
+            if request_allowed_token_ids is not None
+            else None
+        )
         result: list[tuple[SamplingParams, list[int]] | None] = []
 
         for beam in beams:
@@ -445,6 +479,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
             grammar.fill_bitmask(bitmask, 0)
             allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
+            if request_allowed_set is not None:
+                allowed_ids = [
+                    token_id
+                    for token_id in allowed_ids
+                    if token_id in request_allowed_set
+                ]
 
             if not allowed_ids:
                 result.append(None)
