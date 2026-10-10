@@ -1564,6 +1564,8 @@ def test_kv_cache_initialization_propagates_sharing_scales(monkeypatch, runner_v
             model_config=config.model_config,
             shared_kv_cache_layers=shared_layers,
             kv_caches=[],
+            attn_groups=[],
+            speculative_config=None,
         )
         result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
             runner, cache_config, []
