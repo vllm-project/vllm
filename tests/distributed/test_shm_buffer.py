@@ -108,10 +108,10 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         # Clear the buffer
         self.ring_buffer.clear()
 
-        # Check that metadata is empty and IDs reset
+        # Check that metadata is empty and IDs keep increasing
         self.assertEqual(len(self.ring_buffer.metadata), 0)
-        self.assertEqual(self.ring_buffer.monotonic_id_start, 0)
-        self.assertEqual(self.ring_buffer.monotonic_id_end, 0)
+        self.assertEqual(self.ring_buffer.monotonic_id_start, 3)
+        self.assertEqual(self.ring_buffer.monotonic_id_end, 3)
         self.assertEqual(self.ring_buffer.data_buffer_start, 0)
         self.assertEqual(self.ring_buffer.data_buffer_end, 0)
 

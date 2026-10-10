@@ -13,6 +13,7 @@ from mistral_common.protocol.instruct.tool_calls import Tool, ToolChoiceEnum
 from transformers import AutoTokenizer
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -41,7 +42,9 @@ EBNF_GRAMMAR = 'root ::= "id=" [0-9]+'
 
 
 def _validate(
-    grammar: str, backend: str = "xgrammar", tokenizer: object | None = None
+    grammar: str,
+    backend: StructuredOutputsBackend = "xgrammar",
+    tokenizer: object | None = None,
 ) -> StructuredOutputsParams:
     params = SamplingParams(structured_outputs=StructuredOutputsParams(grammar=grammar))
     params._validate_structured_outputs(

@@ -1,0 +1,5 @@
+# Exact B200 compressed-tensors checkpoint; it does not contain MTP weights.
+Qwen3-Next-80B-A3B-NVFP4-EP2-CT-MI355.yaml
+# MTP-capable ModelOpt checkpoint exercises NVFP4 EP2 with MTP1.
+Qwen3-Next-80B-A3B-NVFP4-EP2-MTP-MI355.yaml
+Nemotron-3-Super-120B-A12B-NVFP4-MI355.yaml

@@ -9,6 +9,7 @@ serve-side dataset coverage.
 """
 
 import subprocess
+from argparse import Namespace
 from types import SimpleNamespace
 
 import pytest
@@ -289,7 +290,7 @@ def test_to_serve_args_supports_mm_processor_flags() -> None:
     explicit 0 instead of coercing it to None (which later crashed
     RandomMultiModalDataset.get_prefix on ``None <= 0``).
     """
-    args = SimpleNamespace(
+    args = Namespace(
         random_input_len=32,
         random_output_len=1,
         random_prefix_len=0,
@@ -306,7 +307,7 @@ def test_to_serve_args_supports_mm_processor_flags() -> None:
 
 def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
     """Callers that only set the legacy flags still get them mapped."""
-    args = SimpleNamespace(
+    args = Namespace(
         input_len=256,
         output_len=8,
         prefix_len=16,

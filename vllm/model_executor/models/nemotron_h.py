@@ -23,6 +23,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -87,7 +88,6 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 
 class NemotronHMLP(nn.Module):
@@ -235,7 +235,7 @@ class NemotronHMoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            ckpt_names=("up_proj", "down_proj", ""),
+            ckpt_names=("up_proj", "down_proj", None),
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -707,7 +707,7 @@ class NemotronHModel(nn.Module, EagleModelMixin):
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="",
+                ckpt_up_proj_name=None,
                 num_experts=self._get_max_n_routed_experts(),
                 num_redundant_experts=getattr(self, "num_redundant_experts", 0),
             )
@@ -815,6 +815,7 @@ class NemotronHForCausalLM(
                 tp_world_size=parallel_config.tensor_parallel_size,
                 logical_window=cache_config.replayssm_buffer_len,
                 backend=vllm_config.mamba_config.backend,
+                num_speculative_tokens=vllm_config.num_speculative_tokens,
             )
         return base_shape
 

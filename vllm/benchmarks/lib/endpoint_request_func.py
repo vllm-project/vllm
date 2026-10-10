@@ -122,8 +122,6 @@ def _validate_api_url(
     if isinstance(expected_suffixes, str):
         expected_suffixes = {expected_suffixes}
 
-    expected_suffixes = {*expected_suffixes, "profile"}
-
     if not api_url.endswith(tuple(expected_suffixes)):
         raise ValueError(f"{api_name} URL must end with one of: {expected_suffixes}.")
 
@@ -156,6 +154,34 @@ def _get_headers(content_type: str | None = None) -> dict[str, str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+async def async_request_profile(
+    api_url: str,
+    session: aiohttp.ClientSession,
+    extra_headers: dict | None = None,
+) -> RequestFuncOutput:
+    _validate_api_url(
+        api_url,
+        "Profiling API",
+        {"start_profile", "stop_profile"},
+    )
+
+    headers = _get_headers()
+    if extra_headers:
+        headers |= extra_headers
+
+    output = RequestFuncOutput()
+    try:
+        async with session.post(url=api_url, headers=headers) as response:
+            output.success = response.status == 200
+            if not output.success:
+                output.error = response.reason or ""
+    except Exception:
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
+
+    return output
 
 
 async def async_request_openai_completions(
