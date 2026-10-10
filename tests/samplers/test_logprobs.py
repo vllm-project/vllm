@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+
 import pytest
 
 from vllm import SamplingParams
-from vllm.logprobs import FlatLogprobs
+from vllm.logprobs import FlatLogprobs, clamp_logprob
 
 MODELS = ["distilbert/distilgpt2"]
 MAX_TOKENS = 5
@@ -89,3 +91,30 @@ def test_ranks(
             assert set(range(1, NUM_TOP_LOGPROBS + 1)).issubset(
                 {logprob.rank for logprob in logprobs.values()}
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests for logprob clamping (fix for None / nan / inf logprob values)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_logprob, expected",
+    [
+        (None, -9999.0),  # not computed
+        (float("-inf"), -9999.0),  # zero-probability token
+        (float("inf"), -9999.0),  # abnormal value
+        (float("nan"), -9999.0),  # numerical instability
+        (-1.5, -1.5),  # normal value passes through
+        (-99999.0, -9999.0),  # finite but below floor
+    ],
+)
+def test_clamp_logprob(bad_logprob, expected):
+    """clamp_logprob must handle None / non-finite values without raising.
+
+    Before the fix, the call site used max(logprob, -9999.0), which raises
+    TypeError when logprob is None, and silently passes through nan/inf.
+    """
+    result = clamp_logprob(bad_logprob)
+    assert result == expected
+    assert math.isfinite(result)
