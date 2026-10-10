@@ -1250,6 +1250,21 @@ class CompilationConfig:
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
+        # AgRs uses variable-size all-gather and reduce-scatter collectives for
+        # multi-rank DP. PyNccl implements their variable-size variants with
+        # per-rank pointers that cannot be safely replayed in a CUDA graph.
+        if (
+            all2all_backend == "allgather_reducescatter"
+            and data_parallel_size > 1
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            logger.info(
+                "Disabling CUDA Graphs for allgather_reducescatter with "
+                "data parallelism because its variable-size NCCL collectives "
+                "are not CUDA-graph safe."
+            )
+            self.cudagraph_mode = CUDAGraphMode.NONE
+
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
         if self.splitting_ops is None:
