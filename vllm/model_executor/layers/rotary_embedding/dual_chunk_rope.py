@@ -5,6 +5,7 @@
 import torch
 
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 
 from .common import rotate_gptj, rotate_neox
 
@@ -37,7 +38,7 @@ class DualChunkRotaryEmbedding(CustomOp):
         self.local_size = local_size
         self.dtype = dtype
         device_idx = torch.accelerator.current_device_index()
-        self.device = torch.device(f"cuda:{device_idx}")
+        self.device = torch.device(current_platform.device_type, device_idx)
         (q_cache, qc_cache, k_cache, qc_no_clamp_cache, q_inter_cache) = (
             self._compute_cos_sin_cache()
         )
