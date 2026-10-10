@@ -38,6 +38,7 @@ def _build_responses_serving_render() -> ServingRender:
         OnlineRenderer.validate_chat_template.__get__(serving.online_renderer)
     )
     serving.online_renderer.trust_request_chat_template = True
+    serving.online_renderer.parser = None
     serving._check_model = AsyncMock(return_value=None)
     return serving
 
@@ -133,6 +134,37 @@ async def test_render_responses_rejects_empty_token_ids():
 
     assert isinstance(response, ErrorResponse)
     assert response.error.message == "No token_ids rendered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_carries_reasoning_parser_kwargs():
+    """/v1/responses gives the engine's reasoning parser the effective template
+    kwargs, so the rendered request must carry them to generate."""
+    serving = _build_responses_serving_render()
+    online = serving.online_renderer
+    online.parser = MagicMock(reasoning_parser_cls=object)
+    online.chat_template = None
+    online.chat_template_content_format = "auto"
+    online.default_chat_template_kwargs = {"enable_thinking": True}
+    online.effective_chat_template_kwargs = (
+        OnlineRenderer.effective_chat_template_kwargs.__get__(online)
+    )
+    online.render_responses = AsyncMock(
+        return_value=MagicMock(messages=[], engine_input={"prompt_token_ids": [7]})
+    )
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    response = await serving.render_responses_request(request)
+
+    assert not isinstance(response, ErrorResponse)
+    assert response.reasoning_parser_kwargs is not None
+    kwargs = response.reasoning_parser_kwargs.chat_template_kwargs
+    assert kwargs["enable_thinking"] is False
 
 
 @pytest.fixture(scope="module")

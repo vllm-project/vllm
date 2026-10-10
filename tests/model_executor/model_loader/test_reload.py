@@ -529,6 +529,7 @@ def test_padded_moe_reload_releases_each_layer(
         layer.quant_method = method
         layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
         layer._loaded_expert_biases = set()
+        layer._fused_shared_expert_quantizer = None
         method.create_weights(
             layer,
             experts,
@@ -1052,6 +1053,37 @@ def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm
     assert not hasattr(rnorm, "qnorm_weight")
 
 
+def _device_tensor_ptrs(worker) -> dict[str, int]:
+    """Addresses of every device tensor held by a module; graphs capture them."""
+    ptrs = {}
+    for name, module in worker.get_model().named_modules():
+        tensors = {**vars(module), **module._parameters, **module._buffers}
+        for attr, tensor in tensors.items():
+            if isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
+                ptrs[f"{name}.{attr}"] = tensor.data_ptr()
+    return ptrs
+
+
+def _moved_tensors(llm, ptrs: list[dict[str, int]]) -> list[list[str]]:
+    after = llm.collective_rpc(_device_tensor_ptrs)
+    return [
+        sorted(n for n, p in old.items() if new.get(n) != p)
+        for old, new in zip(ptrs, after)
+    ]
+
+
+@pytest.mark.parametrize(
+    "use_aiter",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="AITER is ROCm-only"
+            ),
+        ),
+    ],
+)
 @pytest.mark.parametrize(
     "tp_size", [pytest.param(1), pytest.param(2, marks=[pytest.mark.slow_test])]
 )
@@ -1095,12 +1127,18 @@ def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm
         ),
     ],
 )
-def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
+def test_reload_weights(
+    base_model, mul_model, add_model, tp_size, use_aiter, vllm_runner, monkeypatch
+):
     if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     if "FP8" in base_model and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    if use_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with vllm_runner(
         model_name=base_model,
@@ -1110,12 +1148,16 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         max_model_len=16,
         max_num_seqs=1,
     ) as llm:
+        # Reloading must update tensors in place: captured graphs keep pointers.
+        ptrs = llm.collective_rpc(_device_tensor_ptrs)
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
+        assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert mul_perp < add_perp
 
         llm.collective_rpc("reload_weights", kwargs={"weights_path": add_model})
+        assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp

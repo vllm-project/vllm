@@ -38,9 +38,7 @@ logger = init_logger(__name__)
 # We prefer to use os.sched_yield as it results in tighter polling loops,
 # measured to be around 3e-7 seconds. However on earlier versions of Python
 # os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = (sys.version_info[:3] >= (3, 11, 1)) or (
-    sys.version_info[:2] == (3, 10) and sys.version_info[2] >= 8
-)
+USE_SCHED_YIELD = sys.version_info[:3] >= (3, 11, 1)
 
 
 def sched_yield():
@@ -52,8 +50,8 @@ def sched_yield():
 
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} is not divisible by {}".format(
-        numerator, denominator
+    assert numerator % denominator == 0, (
+        f"{numerator} is not divisible by {denominator}"
     )
 
 
@@ -146,9 +144,7 @@ def get_pp_indices(
         try:
             partitions = [int(layer) for layer in partition_list_str.split(",")]
         except ValueError as err:
-            raise ValueError(
-                "Invalid partition string: {}".format(partition_list_str)
-            ) from err
+            raise ValueError(f"Invalid partition string: {partition_list_str}") from err
         if len(partitions) != pp_size:
             raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:

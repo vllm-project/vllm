@@ -17,6 +17,7 @@ from typing import (
     Final,
     Generic,
     Literal,
+    Required,
     TypeAlias,
     TypeVar,
     Union,
@@ -48,7 +49,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 # pydantic needs the TypedDict from typing_extensions
-from typing_extensions import Required, TypedDict, override
+from typing_extensions import TypedDict, override
 
 from vllm import envs
 from vllm.config import ModelConfig

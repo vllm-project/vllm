@@ -37,6 +37,14 @@ memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
+Startup logs report two concurrency bounds at `max_model_len`. The generic
+`Maximum concurrency` line charges each request its full admission footprint,
+including the in-flight window of every resident group. The `HiSparse
+steady-state maximum concurrency` line charges running requests that read from
+host only their active tail pages, plus one request being admitted at its full
+footprint. Host-pool metrics are listed in
+[Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
+
 ## Ownership
 
 | Thing | Owner | What “owner” means |

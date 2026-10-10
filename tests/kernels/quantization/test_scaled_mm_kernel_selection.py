@@ -14,6 +14,8 @@ import torch
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear import (
+    _POSSIBLE_KERNELS,
+    _POSSIBLE_NVFP4_KERNELS,
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
     HummingFP8ScaledMMLinearKernel,
@@ -26,6 +28,7 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -197,3 +200,21 @@ def test_register_oot_linear_kernel(platform_mock):
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
     )
+
+
+@pytest.mark.parametrize(
+    "possible_kernels", [_POSSIBLE_KERNELS, _POSSIBLE_NVFP4_KERNELS]
+)
+def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
+    """Preferring Humming must not demote Marlin below unrelated kernels."""
+    kernels = possible_kernels[PlatformEnum.CUDA]
+    original = list(kernels)
+
+    assert prioritize_humming(kernels, compute_capability=80) == original
+
+    names = [k.__name__ for k in prioritize_humming(kernels, compute_capability=90)]
+    humming = next(i for i, name in enumerate(names) if "Humming" in name)
+    assert "Marlin" in names[humming + 1]
+    del names[humming]
+    assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
+    assert kernels == original
