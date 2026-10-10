@@ -60,42 +60,66 @@ class RequestOutputCollector:
     def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.request_id = request_id
-        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.pending: deque[RequestOutput | PoolingRequestOutput | Exception] = deque()
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
 
+    @staticmethod
+    def _can_merge(tail: RequestOutput, output: RequestOutput) -> bool:
+        """Merging must not extend a completion that carries a finish_reason:
+        for streaming-input sessions that marker is the chunk boundary."""
+        if tail.finished:
+            return False
+        finished = {c.index for c in tail.outputs if c.finished()}
+        return all(c.index not in finished for c in output.outputs)
+
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
-        if self.output is None or isinstance(output, Exception):
-            self.output = output
+        if not self.pending or isinstance(output, Exception):
+            # An exception is terminal: drop anything pending.
+            if isinstance(output, Exception):
+                self.pending.clear()
+            self.pending.append(output)
             self.ready.set()
-        elif isinstance(self.output, RequestOutput) and isinstance(
-            output, RequestOutput
+            return
+
+        tail = self.pending[-1]
+        if (
+            isinstance(tail, RequestOutput)
+            and isinstance(output, RequestOutput)
+            and self._can_merge(tail, output)
         ):
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
-            self.output.add(output, aggregate=self.aggregate)
-        elif isinstance(self.output, PoolingRequestOutput) and isinstance(
+            tail.add(output, aggregate=self.aggregate)
+        elif isinstance(tail, PoolingRequestOutput) and isinstance(
             output, PoolingRequestOutput
         ):
-            self.output = output
+            self.pending[-1] = output
+        else:
+            # The tail carries a finish_reason (a streaming chunk boundary):
+            # queue instead of merging, so the marker is never overwritten.
+            self.pending.append(output)
+            self.ready.set()
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
-        while (output := self.output) is None:
+        while not self.pending:
             await self.ready.wait()
-        self.output = None
-        self.ready.clear()
+        output = self.pending.popleft()
+        if not self.pending:
+            self.ready.clear()
         if isinstance(output, Exception):
             raise output
         return output
 
     def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
         """Non-blocking get operation."""
-        output = self.output
-        if output is not None:
-            self.output = None
+        if not self.pending:
+            return None
+        output = self.pending.popleft()
+        if not self.pending:
             self.ready.clear()
         if isinstance(output, Exception):
             raise output
