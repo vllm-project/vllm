@@ -415,3 +415,68 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("failure", [None, "construction", "mapping"])
+def test_ipc_loader_preserves_existing_model_state(
+    monkeypatch, default_vllm_config, failure
+):
+    """Retry failed construction without stale layers or meta RoPE caches."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.layers import rotary_embedding
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+        register_layer_for_moe_forward_op,
+    )
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader
+
+    config = default_vllm_config
+    compilation = config.compilation_config
+    monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", {})
+    target = SimpleNamespace(layer_name="target")
+    register_layer_for_moe_forward_op(config, target)
+    target_rope = rotary_embedding.get_rope(32, 128, dtype=torch.float32)
+    target_buffer = target_rope.cos_sin_cache
+    target_state = target_rope.state_dict()
+    before_ops = compilation.enabled_custom_ops.copy()
+    context = compilation.static_forward_context
+    moe_layers = compilation.static_all_moe_layers
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(loader, "_fetch_entries", lambda _: None)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+
+    def build(device):
+        layer = SimpleNamespace(layer_name="draft")
+        register_layer_for_moe_forward_op(config, layer)
+        with torch.device(device):
+            rope = rotary_embedding.get_rope(64, 128, dtype=torch.float32)
+        compilation.enabled_custom_ops["test_op"] += 1
+        if device == "meta":
+            if failure == "mapping":
+                target_rope.register_buffer(
+                    "cos_sin_cache", torch.zeros_like(target_buffer)
+                )
+            raise RuntimeError("failed construction")
+        assert rope.cos_sin_cache.device.type == "cpu"
+        return layer
+
+    monkeypatch.setattr(
+        loader, "_build_model", lambda *args: build("meta" if failure else "cpu")
+    )
+    monkeypatch.setattr(loader, "_fallback_load", lambda *args: build("cpu"))
+    result = loader.load_model(config, config.model_config)
+
+    assert compilation.static_forward_context is context
+    assert compilation.static_all_moe_layers is moe_layers
+    assert context == {"target": target, "draft": result}
+    assert moe_layers == ["target", "draft"]
+    assert compilation.enabled_custom_ops["test_op"] == 1
+    assert all(compilation.enabled_custom_ops[k] >= v for k, v in before_ops.items())
+    assert rotary_embedding.get_rope(32, 128, dtype=torch.float32) is target_rope
+    assert target_rope.cos_sin_cache is target_buffer
+    assert target_rope.state_dict().keys() == target_state.keys()
