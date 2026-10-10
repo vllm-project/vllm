@@ -3585,12 +3585,12 @@ def test_maybe_evict_cached_block():
     # also use the same hash
     pool._maybe_evict_cached_block(block0)
     assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block3.block_id: block3},
+        block_hash0: block3,
         block_hash2: block2,
     }
     # Evict block2
     pool._maybe_evict_cached_block(block2)
-    assert pool.cached_block_hash_to_block._cache == {block_hash0: {3: block3}}
+    assert pool.cached_block_hash_to_block._cache == {block_hash0: block3}
     # Evict block3
     pool._maybe_evict_cached_block(block3)
     assert pool.cached_block_hash_to_block._cache == {}
@@ -5241,7 +5241,16 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.get_one_block(key0) is block00
     assert cache.pop(key0, 0) is block00
     assert cache.get_one_block(key0) is block01
+    # Evicting duplicates should restore the compact single-block representation.
+    assert cache._cache[key0] is block01
+    cache.insert(key0, block00)
+    assert cache.contain(key0, 0)
+    assert cache.contain(key0, 1)
+    assert cache.pop(key0, 100) is None
     assert cache.pop(key0, 1) is block01
+    assert cache._cache[key0] is block00
+    assert cache.get_one_block(key0) is block00
+    assert cache.pop(key0, 0) is block00
     assert cache.get_one_block(key0) is None
     assert cache.pop(key0, 2) is None
 
