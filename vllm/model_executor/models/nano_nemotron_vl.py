@@ -217,6 +217,7 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             video_token=self.get_video_token(),
             video_pruning_rate=self.get_video_pruning_rate(),
             max_model_len=self.ctx.model_config.max_model_len,
+            dtype=self.ctx.model_config.dtype,
             **kwargs,
         )
 
@@ -988,9 +989,7 @@ class NemotronH_Nano_VL_V2(
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
-        llm_dtype = self.language_model.config.dtype
-        assert isinstance(llm_dtype, torch.dtype)
-        self.llm_dtype = llm_dtype
+        self.llm_dtype = llm_dtype = model_config.dtype
         with self._mark_tower_model(vllm_config, {"image", "video", "audio"}):
             self.vision_model = self.get_vit_model_from_radio_config(config).to(
                 llm_dtype
@@ -1093,8 +1092,9 @@ class NemotronH_Nano_VL_V2(
         self, pixel_values: torch.Tensor, imgs_sizes: list[tuple[int, int]]
     ):
         """Dynamic resolution extract_feature for images."""
+        pixel_values = pixel_values.to(dtype=self.llm_dtype)
         _, vit_embeds = self.vision_model(pixel_values, imgs_sizes=imgs_sizes)
-        vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+        vit_embeds = vit_embeds.to(dtype=self.llm_dtype)
         vit_embeds = self.pixel_shuffle_dynamic_res(vit_embeds, imgs_sizes=imgs_sizes)
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
@@ -1121,12 +1121,12 @@ class NemotronH_Nano_VL_V2(
 
         vit_embeds_list = []
         for i in range(0, N, micro_batch_size):
-            chunk = pixel_values[i : i + micro_batch_size]
+            chunk = pixel_values[i : i + micro_batch_size].to(dtype=self.llm_dtype)
             if num_frames is not None and T > 1:
                 _, vit_embeds = self.vision_model(chunk, num_frames=chunk.shape[0])
             else:
                 _, vit_embeds = self.vision_model(chunk)
-            vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+            vit_embeds = vit_embeds.to(dtype=self.llm_dtype)
             vit_embeds = vit_embeds.reshape(
                 vit_embeds.shape[0], H_patches, W_patches, -1
             )
