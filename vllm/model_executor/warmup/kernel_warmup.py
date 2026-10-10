@@ -20,6 +20,8 @@ from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
+    resolve_flashinfer_autotune_v2_root,
+    use_flashinfer_autotune_v2,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     autotune_hisparse_flashinfer_attention,
@@ -420,7 +422,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     otherwise the world group tunes together. Per-tactic timings are
     averaged over the tuning group so all its ranks select the same tactic.
 
-    Results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
+    Legacy results are persisted per rank: FlashInfer keys MoE entries by tp/ep rank
     (``MoERunner.get_cache_key_extras``), so one rank's file only hits on that
     rank. A rank with a cache hit skips the per-tactic reduce the others block
     in, so ranks keep loaded configs only if every rank in the tuning group
@@ -450,38 +452,45 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
-    cache_path = resolve_flashinfer_autotune_file(runner)
-    # The world group only spans DP ranks when vLLM folds DP into it.
-    dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
-    cache_path = cache_path.with_name(
-        f"{cache_path.stem}_dp{dp_rank}_rank{world.rank_in_group}{cache_path.suffix}"
-    )
-    if is_leader:
-        logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+    use_autotune_v2 = use_flashinfer_autotune_v2(runner)
+    if use_autotune_v2:
+        from flashinfer import autotune_v2, autotune_v2_reload
 
-    # We skip EPLB here since we don't want to record dummy metrics.
-    # Randomize inputs to avoid every token pick the same experts,
-    # which lead to some EP ranks receiving no tokens and skipping their
-    # MoE kernel entirely, and cause hang due to all-reduce collective
-    # during synchronized autotuning.
-    if _all_ranks_have_matching_cache(cache_path, tune_group):
-        loaded = tuner.load_configs(str(cache_path))
-        if tune_group.world_size > 1:
-            loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
-            torch.distributed.all_gather_object(
-                loaded_by_rank, loaded, group=tune_group.cpu_group
+        cache_root = resolve_flashinfer_autotune_v2_root()
+        if is_leader:
+            logger.info_once(
+                "Using FlashInfer managed autotune cache (root=%s)",
+                cache_root if cache_root is not None else "flashinfer default",
             )
-            loaded = all(loaded_by_rank)
-        if not loaded:
-            tuner.clear_cache()
+        autotune_context = autotune_v2(
+            mode="tune", cache_root=cache_root, **autotune_kwargs
+        )
+    else:
+        cache_path = resolve_flashinfer_autotune_file(runner)
+        # The world group only spans DP ranks when vLLM folds DP into it.
+        dp_rank = runner.vllm_config.parallel_config.data_parallel_rank
+        cache_path = cache_path.with_name(
+            f"{cache_path.stem}_dp{dp_rank}_rank{world.rank_in_group}{cache_path.suffix}"
+        )
+        if is_leader:
+            logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
+
+        if _all_ranks_have_matching_cache(cache_path, tune_group):
+            loaded = tuner.load_configs(str(cache_path))
+            if tune_group.world_size > 1:
+                loaded_by_rank: list[bool | None] = [None] * tune_group.world_size
+                torch.distributed.all_gather_object(
+                    loaded_by_rank, loaded, group=tune_group.cpu_group
+                )
+                loaded = all(loaded_by_rank)
+            if not loaded:
+                tuner.clear_cache()
+        autotune_context = fi_utils.autotune(tune_mode=True, **autotune_kwargs)
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
     set_autotune_process_group(group)
     try:
-        with (
-            torch.inference_mode(),
-            fi_utils.autotune(tune_mode=True, **autotune_kwargs),
-        ):
+        with torch.inference_mode(), autotune_context:
             hisparse_enabled = (
                 runner.vllm_config.attention_config.hisparse_config is not None
             )
@@ -497,7 +506,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     if world.world_size > 1:
         world.barrier()
-    # Skip the rewrite when nothing was tuned this start (every entry came from
-    # the file). FlashInfer gates its own autotune(cache=...) save the same way.
-    if tuner._dirty:
+    if use_autotune_v2:
+        if world.world_size > 1:
+            # All ranks serve the shared store's final state after publishing.
+            autotune_v2_reload()
+            world.barrier()
+    elif tuner._dirty:
         tuner.save_configs(str(cache_path))

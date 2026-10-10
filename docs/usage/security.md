@@ -284,6 +284,8 @@ Certain API request parameters can have a large impact on resource consumption a
 
 To mitigate this, vLLM enforces a configurable upper bound on the `n` parameter via the `VLLM_MAX_N_SEQUENCES` environment variable (default: **16384**). Requests exceeding this limit are rejected before reaching the engine.
 
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
+
 ### Recommendations
 
 - **Public-facing deployments:** Consider setting `VLLM_MAX_N_SEQUENCES` to a value appropriate for your workload (e.g., `64` or `128`) to limit the blast radius of a single request.
@@ -378,6 +380,8 @@ An attacker who can reach the gRPC port can:
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
 4. **Stop a managed engine** through `Control.Shutdown`, or cause denial of service by exploiting bugs in the gRPC interface.
 
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
+
 ### Recommendations
 
 - Only enable `--grpc-port` when you have a specific need for gRPC-based inference
@@ -397,12 +401,18 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
-| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base cache directory. Respects `XDG_CACHE_HOME` if set. All paths below inherit from this unless explicitly overridden. |
+| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base directory for vLLM-owned caches. Respects `XDG_CACHE_HOME` if set. |
 | *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
-| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | FlashInfer autotune config cache. |
+| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | FlashInfer's managed-cache default, or the legacy path described below | Overrides FlashInfer autotune cache placement for both cache APIs. |
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
+
+Single-rank deployments with Elastic EP disabled use FlashInfer's managed autotune cache when available. Multi-rank deployments retain legacy cache synchronization until the pinned FlashInfer coordinates cache-hit decisions before profiling. Without a vLLM override, FlashInfer uses `FLASHINFER_AUTOTUNE_CACHE_DIR`, or its default `~/.cache/flashinfer/autotune` (relocated by `FLASHINFER_WORKSPACE_BASE`). `VLLM_CACHE_ROOT` does not relocate this managed store. Use a separate store root for each independently tuning deployment, including separate prefill and decode instances. Directory sharing alone does not synchronize cache-hit decisions. After interrupted tuning, use a fresh store root when diagnosing incomplete caches.
+
+The legacy fallback retains `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/`. Each rank saves its own `autotune_configs_dp<dp>_rank<rank>.json`. With PP>1, each stage's TP group coordinates cache loading and profiling independently.
+
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
 
 ### Recommendations
 
@@ -608,6 +618,8 @@ Scope the salt to the isolation boundary you need:
 - **Per-group sharing**: A shared random salt for users who are allowed to benefit from each other's cached prefixes, such as users within the same organization.
 - **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
 
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
+
 ### Recommendations
 
 - **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
@@ -638,6 +650,8 @@ This applies to the multimodal processor cache, the encoder output cache, and th
 For additional cross-tenant isolation, set `cache_salt` on each request (see [Prefix Cache Timing Side-Channel Mitigation](#prefix-cache-timing-side-channel-mitigation-cache-salting) above). The salt is mixed into the prefix cache block hashes, so requests with different salts cannot share cached prefix blocks even if UUIDs collide.
 
 `cache_salt` is opt-in and not passed by default.
+
+FlashInfer SM120 sparse MLA also maintains a separate calibration cache controlled by `FLASHINFER_AUTOTUNE_DIR`. Managed-cache reload does not synchronize its calibration parameters across ranks. Pre-calibrate on idle, compatible hardware and deploy a consistent calibration artifact when reproducible kernel selection is required.
 
 ### Recommendations
 
