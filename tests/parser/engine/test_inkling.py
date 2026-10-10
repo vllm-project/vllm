@@ -1013,3 +1013,93 @@ class TestToolParserWithoutReasoningParser:
         )
         assert [c.name for c in calls] == ["get_weather"]
         assert not content
+
+
+class TestCountReasoningTokens:
+    """``count_reasoning_tokens`` feeds ``usage.reasoning_tokens``.
+
+    The count must follow the same reasoning span the parser extracts,
+    including when the chat template opens the thinking block in the prompt
+    so the generated ids carry no ``<|content_thinking|>`` marker.
+    """
+
+    @staticmethod
+    def _generated_ids(mock_tokenizer, text: str, *markers: str) -> list[int]:
+        vocab = mock_tokenizer.get_vocab()
+        return [vocab[m] for m in markers] + [ord(c) for c in text]
+
+    def _reasoning_and_count(
+        self, parser, mock_tokenizer, mock_request, prompt_markers, generated_ids
+    ) -> tuple[str, int]:
+        vocab = mock_tokenizer.get_vocab()
+        prompt_token_ids = [vocab[m] for m in prompt_markers]
+        if prompt_token_ids:
+            parser.adjust_initial_state_from_prompt(prompt_token_ids)
+        delta = parser.parse_delta(
+            mock_tokenizer.decode(generated_ids),
+            list(generated_ids),
+            mock_request,
+            prompt_token_ids=prompt_token_ids,
+            finished=True,
+        )
+        reasoning = getattr(delta, "reasoning", None) or ""
+        return reasoning, parser.count_reasoning_tokens(generated_ids)
+
+    def test_generated_thinking_marker(self, parser, mock_tokenizer, mock_request):
+        generated = self._generated_ids(mock_tokenizer, "abc", THINK_START) + [
+            mock_tokenizer.get_vocab()[END_MESSAGE]
+        ]
+        reasoning, count = self._reasoning_and_count(
+            parser, mock_tokenizer, mock_request, (), generated
+        )
+        assert reasoning == "abc"
+        assert count == 3
+
+    def test_prompt_opened_thinking_block(self, parser, mock_tokenizer, mock_request):
+        """A prompt-opened span still counts its generated reasoning tokens."""
+        generated = self._generated_ids(mock_tokenizer, "abc") + [
+            mock_tokenizer.get_vocab()[END_MESSAGE]
+        ]
+        reasoning, count = self._reasoning_and_count(
+            parser, mock_tokenizer, mock_request, (MSG_MODEL, THINK_START), generated
+        )
+        assert reasoning == "abc"
+        assert count == 3
+
+    def test_prompt_opened_text_block(self, parser, mock_tokenizer, mock_request):
+        """A prompt-opened text block has no reasoning tokens to count."""
+        generated = self._generated_ids(mock_tokenizer, "hello") + [
+            mock_tokenizer.get_vocab()[END_MESSAGE]
+        ]
+        reasoning, count = self._reasoning_and_count(
+            parser, mock_tokenizer, mock_request, (MSG_MODEL, TEXT_START), generated
+        )
+        assert reasoning == ""
+        assert count == 0
+
+    def test_reasoning_then_text(self, parser, mock_tokenizer, mock_request):
+        vocab = mock_tokenizer.get_vocab()
+        generated = (
+            self._generated_ids(mock_tokenizer, "abc", THINK_START)
+            + [vocab[END_MESSAGE], vocab[MSG_MODEL], vocab[TEXT_START]]
+            + [ord(c) for c in "hello"]
+            + [vocab[END_MESSAGE]]
+        )
+        reasoning, count = self._reasoning_and_count(
+            parser, mock_tokenizer, mock_request, (), generated
+        )
+        assert reasoning == "abc"
+        assert count == 3
+
+    def test_non_streaming_count_after_replay(self, mock_tokenizer):
+        """The adapter's replay path keeps counting generated markers."""
+        vocab = mock_tokenizer.get_vocab()
+        generated = (
+            [vocab[THINK_START]]
+            + [ord(c) for c in "abc"]
+            + [vocab[END_MESSAGE], vocab[MSG_MODEL], vocab[TEXT_START]]
+            + [ord(c) for c in "hi"]
+            + [vocab[END_MESSAGE]]
+        )
+        adapter = InklingParserReasoningAdapter(mock_tokenizer)
+        assert adapter.count_reasoning_tokens(generated) == 3
