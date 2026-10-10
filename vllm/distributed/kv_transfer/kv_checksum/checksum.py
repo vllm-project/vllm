@@ -39,6 +39,13 @@ of their TP sizes, PP sizes or KV cache layouts.
 Replicated KV (MLA, or GQA with more TP ranks than KV heads) is tracked per
 replica: a partial checksum is keyed by ``(replicas, replica_index)`` of the
 layers it covers, so each consumer replica can be checked on its own.
+
+Mamba state is not per token: a group's block is the request's running
+state, at position 0. A layer whose TP split is known
+(``MambaSpec.state_splits``) has one slice per global row of its states,
+the TP-split dimension, whose pieces are its 2- or 4-byte elements read
+unsigned; other Mamba layers have one slice per TP shard, which only
+producers and consumers of equal TP sizes compare.
 """
 
 import enum

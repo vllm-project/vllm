@@ -21,11 +21,12 @@ from vllm.distributed.kv_transfer.kv_checksum.checksum import (
     kv_checksum_enabled,
     num_valid_tokens,
 )
+from vllm.distributed.kv_transfer.kv_connector.utils import clip_ssm_state_blocks
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import FinishReason
-from vllm.v1.kv_cache_interface import KVCacheConfig, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, SlidingWindowSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -48,6 +49,7 @@ class KVChecksumPayload:
     """A producer's checksums of one request, as sent to its consumer.
 
     Attributes:
+        tp_size: The producer's TP size.
         num_tokens: Tokens whose KV the checksummed blocks hold.
         groups: Per KV cache group id, the group's fingerprint (see
             ``KVChecksumRecord.fingerprints``), its block size, the position
@@ -55,6 +57,7 @@ class KVChecksumPayload:
 
     """
 
+    tp_size: int
     num_tokens: int
     groups: dict[int, tuple[int, int, int, np.ndarray]]
 
@@ -65,7 +68,8 @@ class KVChecksumPayload:
                 self.groups.items()
             )
         ]
-        return msgspec.msgpack.encode((_PAYLOAD_VERSION, self.num_tokens, groups))
+        body = msgspec.msgpack.encode((self.tp_size, self.num_tokens, groups))
+        return msgspec.msgpack.encode((_PAYLOAD_VERSION, body))
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "KVChecksumPayload":
@@ -76,25 +80,27 @@ class KVChecksumPayload:
 
         """
         try:
-            version, num_tokens, groups = msgspec.msgpack.decode(
-                data, type=tuple[int, int, list[tuple[int, int, int, int, bytes]]]
+            version, body = msgspec.msgpack.decode(data, type=tuple[int, bytes])
+            if version != _PAYLOAD_VERSION:
+                raise ValueError(f"unsupported version {version}")
+            tp_size, num_tokens, groups = msgspec.msgpack.decode(
+                body, type=tuple[int, int, list[tuple[int, int, int, int, bytes]]]
             )
-        except msgspec.DecodeError as e:
-            raise ValueError(f"malformed KV checksums: {e}") from e
-        if version != _PAYLOAD_VERSION:
-            raise ValueError(f"unsupported KV checksum version {version}")
-        return cls(
-            num_tokens,
-            {
-                group_id: (
-                    fingerprint,
-                    block_size,
-                    start,
-                    np.frombuffer(values, dtype="<u8"),
-                )
-                for group_id, fingerprint, block_size, start, values in groups
-            },
-        )
+            return cls(
+                tp_size,
+                num_tokens,
+                {
+                    group_id: (
+                        fingerprint,
+                        block_size,
+                        start,
+                        np.frombuffer(values, dtype="<u8"),
+                    )
+                    for group_id, fingerprint, block_size, start, values in groups
+                },
+            )
+        except ValueError as e:  # Includes msgspec's decode errors.
+            raise ValueError(f"invalid KV checksums: {e}") from e
 
 
 class _Unverified(Exception):
@@ -198,10 +204,8 @@ class KVChecksumScheduler:
         parallel_config = vllm_config.parallel_config
         self._connector = connector
         self._fail_closed = kv_transfer_config.kv_checksum_fail_closed
-        self._num_workers = (
-            parallel_config.tensor_parallel_size
-            * parallel_config.pipeline_parallel_size
-        )
+        self._tp_size = parallel_config.tensor_parallel_size
+        self._num_workers = self._tp_size * parallel_config.pipeline_parallel_size
         self._groups = {
             group_id: kv_cache_config.kv_cache_groups[group_id]
             for group_id in kv_cache_config.transfer_group_ids
@@ -361,10 +365,23 @@ class KVChecksumScheduler:
         group with a null block after a non-null one. Sliding-window groups
         keep only their last ``cdiv(window, block_size) + 1`` blocks, the
         blocks the NIXL and Mooncake connectors transfer.
+
+        A Mamba group's state is not per token: its block is the request's
+        running-state slot, the one connectors transfer, at position 0.
         """
         groups: dict[int, tuple[int, list[int]]] = {}
         for group_id, group in self._groups.items():
             spec = group.kv_cache_spec
+            if isinstance(spec, MambaSpec):
+                block_ids = [
+                    b.block_id for b in blocks.blocks[group_id] if not b.is_null
+                ]
+                if block_ids:
+                    state = clip_ssm_state_blocks(
+                        block_ids, spec.num_speculative_blocks
+                    )
+                    groups[group_id] = (0, state)
+                continue
             block_size = spec.block_size
             first = start_token // block_size
             run = _non_null_run(
@@ -402,7 +419,7 @@ class KVChecksumScheduler:
             logger.warning_once("KV checksums not sent: %s.", e.reason)
             logger.debug("KV checksums of request %s not sent: %s", req_id, e.detail)
             return None
-        return KVChecksumPayload(pending.blocks.num_tokens, groups)
+        return KVChecksumPayload(self._tp_size, pending.blocks.num_tokens, groups)
 
     def _verify(self, req_id: str, pending: _Pending) -> bool:
         """Compare a finished load with the producer's checksums and log the
@@ -443,6 +460,7 @@ class KVChecksumScheduler:
         mismatches: dict[int, list[int]] = {}
         unverified: list[_Unverified] = []
         skipped = pending.skipped_groups()
+        num_compared = 0
         for group_id in pending.blocks.groups:
             try:
                 bad = self._compare_group(
@@ -451,10 +469,12 @@ class KVChecksumScheduler:
             except _Unverified as e:
                 unverified.append(e)
                 continue
+            if bad is None:
+                continue
+            num_compared += 1
             if bad:
                 mismatches[group_id] = bad
-        compared = set(pending.blocks.groups) - skipped
-        if not compared and not unverified:
+        if not num_compared and not unverified:
             unverified.append(_Unverified("no loaded group can be checksummed"))
         return mismatches, unverified
 
@@ -464,8 +484,9 @@ class KVChecksumScheduler:
         expected: KVChecksumPayload,
         group_id: int,
         skipped: bool,
-    ) -> list[int]:
-        """The group's mismatching block positions.
+    ) -> list[int] | None:
+        """The group's mismatching block positions, or None if the group is
+        not compared (neither side checksums it).
 
         With different block sizes, sums of the smaller blocks are compared
         with the larger ones.
@@ -474,6 +495,20 @@ class KVChecksumScheduler:
             _Unverified: If the group cannot be compared.
 
         """
+        spec = self._groups[group_id].kv_cache_spec
+        if (
+            isinstance(spec, MambaSpec)
+            and spec.state_splits is None
+            and not spec.tp_replicated
+            and expected.tp_size != self._tp_size
+        ):
+            # Without its TP splits, a rank's share of sharded state depends on
+            # the TP size.
+            logger.warning_once(
+                "KV checksums do not cover Mamba state between producers and "
+                "consumers of different TP sizes."
+            )
+            return None
         sent = expected.groups.get(group_id)
         if skipped or sent is None:
             if skipped != (sent is None):
@@ -482,7 +517,7 @@ class KVChecksumScheduler:
                     f"group {group_id} on the "
                     f"{'producer' if skipped else 'consumer'} only",
                 )
-            return []
+            return None
         fingerprint, sent_block_size, sent_start, sent_values = sent
         if fingerprint != pending.fingerprint(group_id):
             raise _Unverified(
@@ -490,7 +525,11 @@ class KVChecksumScheduler:
                 f"group {group_id}",
             )
         start, block_ids = pending.blocks.groups[group_id]
-        block_size = self._groups[group_id].kv_cache_spec.block_size
+        if isinstance(spec, MambaSpec):
+            # One state per block, not per token.
+            block_size = sent_block_size = 1
+        else:
+            block_size = spec.block_size
         chunk_size = max(block_size, sent_block_size)
         if chunk_size % min(block_size, sent_block_size):
             raise _Unverified(
@@ -523,7 +562,8 @@ class KVChecksumScheduler:
                 min(first + num_chunks, sent_first + len(sent_sums)),
             )
             # Only the last chunk can hold fewer tokens on one side.
-            if num_valid_tokens(chunk, chunk_size, num_tokens)
+            if isinstance(spec, MambaSpec)
+            or num_valid_tokens(chunk, chunk_size, num_tokens)
             == num_valid_tokens(chunk, chunk_size, expected.num_tokens)
         ]
         if not chunks:
