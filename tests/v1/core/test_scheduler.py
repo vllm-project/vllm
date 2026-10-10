@@ -5984,6 +5984,25 @@ def _create_encoder_decoder_scheduler(
     return scheduler
 
 
+def test_encoder_decoder_beams_share_encoder_but_not_cross_attention_blocks():
+    scheduler = _create_encoder_decoder_scheduler()
+    requests = create_requests(
+        num_requests=2,
+        mm_hashes_list=[["audio"], ["audio"]],
+        mm_positions=[[PlaceholderRange(offset=0, length=32)]] * 2,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 2
+    assert sum(map(len, output.scheduled_encoder_inputs.values())) == 1
+    cross_blocks = [req.block_ids[1] for req in output.scheduled_new_reqs]
+    assert all(len(blocks) == 2 for blocks in cross_blocks)
+    assert set(cross_blocks[0]).isdisjoint(cross_blocks[1])
+
+
 def _get_num_cross_attn_blocks(scheduler: Scheduler, request_id: str) -> int:
     """Get the number of cross-attention blocks allocated for a request."""
     from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager

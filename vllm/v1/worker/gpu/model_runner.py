@@ -1762,9 +1762,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         skip_compiled = False
-        if self.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
+        if (
+            self.is_encoder_decoder
+            and batch_req_state is not None
+            and batch_req_state.has_prefill
+        ):
             # Encoder-decoder models such as Whisper should run eager/non-compiled
-            # when encoder inputs are scheduled, because this step updates
+            # on prefill, including encoder cache hits, because this step updates
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 

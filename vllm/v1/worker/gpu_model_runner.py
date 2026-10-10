@@ -3585,13 +3585,16 @@ class GPUModelRunner(
                 num_input_tokens, intermediate_tensors, True
             )
 
-        if is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
-            # Run the encoder, just like we do with other multimodal inputs.
-            # For an encoder-decoder model, our processing here is a bit
-            # simpler, because the outputs are just passed to the decoder.
-            # We are not doing any prompt replacement. We also will only
-            # ever have a single encoder input.
-            encoder_outputs = self._execute_mm_encoder(scheduler_output)
+        if is_encoder_decoder:
+            self._execute_mm_encoder(scheduler_output)
+            # Reuse encoder outputs, but build cross-attention K/V for each
+            # request in the same order as the decoder batch.
+            encoder_outputs = [
+                self.encoder_cache[feature.identifier]
+                for req_id in self.input_batch.req_ids
+                if self.requests[req_id].num_computed_tokens == 0
+                for feature in self.requests[req_id].mm_features
+            ]
             model_kwargs.update({"encoder_outputs": encoder_outputs})
 
         return (
@@ -4212,7 +4215,13 @@ class GPUModelRunner(
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
-                num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                num_encoder_reqs=int(
+                    np.count_nonzero(
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0
+                    )
+                )
+                if self.model_config.is_encoder_decoder
+                else 0,
                 allow_microbatching=self._allow_microbatching(
                     num_reqs, num_scheduled_tokens_np
                 ),
@@ -4346,9 +4355,8 @@ class GPUModelRunner(
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
-        num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
-        has_encoder_input = (
-            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        has_encoder_input = self.model_config.is_encoder_decoder and bool(
+            model_kwargs.get("encoder_outputs")
         )
 
         # Run the model.
