@@ -10,6 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -1472,6 +1474,96 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        num_chunks = self._num_dispatch_chunks(hidden_states.size(0))
+        if num_chunks == 1:
+            return self._apply_chunk(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_ids,
+                topk_weights,
+                activation,
+                global_num_experts,
+                local_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                shared_experts,
+                shared_experts_input,
+            )
+
+        # Batched all2all kernels (e.g. DeepEP low-latency) cap the tokens per
+        # dispatch. Every EP rank must issue the same number of collective
+        # dispatch/combine calls, so ranks that run out of tokens process a
+        # 1-token dummy chunk and discard its output.
+        chunk_size = self.prepare_finalize.max_num_tokens_per_rank()
+        assert chunk_size is not None
+        num_tokens = hidden_states.size(0)
+        assert num_tokens > 0
+        for i in range(num_chunks):
+            start = i * chunk_size
+            is_dummy = start >= num_tokens
+            if is_dummy:
+                start = num_tokens - 1
+            end = min(start + chunk_size, num_tokens)
+            chunk_out = self._apply_chunk(
+                torch.empty_like(output[start:end]) if is_dummy else output[start:end],
+                hidden_states[start:end],
+                w1,
+                w2,
+                topk_ids[start:end],
+                topk_weights[start:end],
+                activation,
+                global_num_experts,
+                local_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                # The shared experts run once, over all tokens.
+                shared_experts if i == 0 else None,
+                shared_experts_input if i == 0 else None,
+            )
+            assert not isinstance(chunk_out, UnfinalizedMoEOutput), (
+                "Deferred MoE finalize is not supported with chunked dispatch."
+            )
+        return output
+
+    def _num_dispatch_chunks(self, num_tokens: int) -> int:
+        """Number of dispatch rounds needed so that no EP rank sends more than
+        `max_num_tokens_per_rank()` tokens per round. Uniform across ranks."""
+        chunk_size = self.prepare_finalize.max_num_tokens_per_rank()
+        if chunk_size is None:
+            return 1
+        max_num_tokens = num_tokens
+        dp_metadata = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_metadata is not None:
+            sizes = (
+                dp_metadata.local_sizes
+                if dp_metadata.local_sizes is not None
+                else dp_metadata.num_tokens_across_dp_cpu.tolist()
+            )
+            max_num_tokens = max([max_num_tokens, *sizes])
+        return max(1, cdiv(max_num_tokens, chunk_size))
+
+    def _apply_chunk(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
             topk_weights,

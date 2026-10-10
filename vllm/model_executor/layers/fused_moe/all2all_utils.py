@@ -248,8 +248,14 @@ def maybe_make_prepare_finalize(
                 physical_to_global,
                 local_expert_global_ids,
             ) = routing_tables
+        max_tokens_per_rank = all2all_manager.max_dispatch_tokens_per_rank(
+            moe.max_num_tokens,
+            moe.hidden_dim,
+            all2all_manager.world_size,
+            moe.num_experts,
+        )
         all_to_all_args = dict(
-            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            max_num_tokens_per_dp_rank=max_tokens_per_rank,
             token_hidden_size=moe.hidden_dim,
             num_ep_ranks=all2all_manager.world_size,
             num_global_experts=moe.num_experts,
@@ -266,7 +272,7 @@ def maybe_make_prepare_finalize(
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
             handle,
-            max_tokens_per_rank=moe.max_num_tokens,
+            max_tokens_per_rank=max_tokens_per_rank,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import os
 import threading
 from collections.abc import Iterator
@@ -11,7 +12,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import SchedulerConfig, get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
@@ -323,6 +324,17 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         deep_ep.Buffer.set_num_sms(num_sms)
 
 
+# DeepEP asserts num_rdma_bytes / sizeof(int4) < INT_MAX.
+DEEPEP_LL_MAX_RDMA_BYTES = 16 * (2**31 - 1)
+
+
+@functools.cache
+def _user_nvshmem_qp_depth() -> str | None:
+    """NVSHMEM_QP_DEPTH as set by the user. Cached because deep_ep.Buffer
+    writes its default (1024) back into the environment on construction."""
+    return os.environ.get("NVSHMEM_QP_DEPTH")
+
+
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     """All2All communication based on DeepEP Low-Latency kernels."""
 
@@ -378,6 +390,53 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             enable_shrink=self.support_fault_tolerance,
         )
         return kwargs
+
+    @staticmethod
+    def max_dispatch_tokens_per_rank(
+        max_num_batched_tokens: int, hidden: int, num_ranks: int, num_experts: int
+    ) -> int:
+        """Per-rank dispatch capacity of the low-latency buffers.
+
+        Decoupled from max_num_batched_tokens: the RDMA buffer and the batched
+        expert workspaces grow linearly with it, and larger forward passes are
+        split into several dispatch rounds instead (see
+        FusedMoEKernelModularImpl.apply). Defaults to the same 256 tokens used
+        as max_num_batched_tokens for batched DP backends. Setting
+        NVSHMEM_QP_DEPTH opts into larger rounds, bounded by DeepEP's
+        NVSHMEM_QP_DEPTH >= 2 * (num_tokens + 1) requirement. Either way the
+        result is reduced until the RDMA buffer fits DeepEP's size limit.
+        """
+        import deep_ep  # type: ignore[import-not-found]
+
+        qp_depth = _user_nvshmem_qp_depth()
+        if qp_depth is None:
+            num_tokens = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
+        else:
+            num_tokens = int(qp_depth) // 2 - 1
+        num_tokens = min(num_tokens, max_num_batched_tokens)
+        if num_tokens < 1:
+            raise ValueError(
+                f"NVSHMEM_QP_DEPTH={qp_depth} is too small for DeepEP "
+                "low-latency kernels, which need NVSHMEM_QP_DEPTH >= "
+                "2 * (max dispatch tokens per rank + 1)."
+            )
+        while (
+            num_tokens > 1
+            and deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                num_tokens, hidden, num_ranks, num_experts
+            )
+            >= DEEPEP_LL_MAX_RDMA_BYTES
+        ):
+            num_tokens //= 2
+        if num_tokens < max_num_batched_tokens:
+            logger.info_once(
+                "DeepEP low-latency: dispatching at most %d tokens per rank at "
+                "a time (max_num_batched_tokens=%d); larger batches are split "
+                "into multiple dispatch rounds.",
+                num_tokens,
+                max_num_batched_tokens,
+            )
+        return num_tokens
 
     def get_handle(self, kwargs):
         """The kwargs for DeepEPLLAll2AllManager is dictated by
