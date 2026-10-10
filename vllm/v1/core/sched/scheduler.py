@@ -1673,9 +1673,9 @@ class Scheduler(SchedulerInterface):
         if num_computed_tokens == 0:
             # Blocks were reclaimed while the session was parked (e.g. by a
             # prefix-cache reset): the history is still valid, only its KV is
-            # gone. Fold the entire prior turn instead of slicing at 0, which
-            # would wipe the trajectory on resume.
-            num_computed_tokens = session.num_tokens
+            # gone. Fold the prior turn as a normal resume would, instead of
+            # slicing at 0, which would wipe the trajectory on resume.
+            num_computed_tokens = session.num_tokens - 1
         kept_output_tokens = session._all_token_ids[
             session.num_prompt_tokens : num_computed_tokens
         ]
