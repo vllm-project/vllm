@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from transformers import Qwen3NextConfig
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
@@ -18,6 +19,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -28,6 +30,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
+from vllm.model_executor.layers.fused_qk_norm_rope_gate_fp8_quant import (
+    fused_qk_norm_rope_gate_fp8_quant,
+    supports_prequantized_scheduler,
+)
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -59,7 +65,7 @@ from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionType, PrequantizedQKV
 
 from .interfaces import (
     EagleModelMixin,
@@ -80,6 +86,8 @@ from .utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
@@ -278,6 +286,7 @@ class Qwen3NextAttention(nn.Module):
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        max_num_seqs: int | None = None,
         reduce_results: bool = True,
         prefix: str = "",
         mrope_positions_factor: int = 4,
@@ -386,6 +395,81 @@ class Qwen3NextAttention(nn.Module):
             and supports_dtype
             and (text_only or supports_mrope)
         )
+        self.use_prequantized_qkv = (
+            self.attn_output_gate
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "dtype", None) == torch.bfloat16
+            and current_platform.is_rocm()
+            and text_only
+            and supports_prequantized_scheduler(max_num_seqs)
+            and self.attn.supports_prequantized_qkv_input
+        )
+        if self.use_prequantized_qkv:
+            logger.info_once(
+                "Using fused AITER Q/K norm, RoPE, gate, and FP8 quantization"
+            )
+        elif envs.VLLM_ROCM_USE_PREQUANTIZED_QKV and current_platform.is_rocm():
+            logger.warning_once(
+                "VLLM_ROCM_USE_PREQUANTIZED_QKV is set but an attention layer "
+                "cannot use it, so it runs BF16 attention. It needs a text-only "
+                "model with gated attention, max_num_seqs <= 256, and the "
+                "ROCM_AITER_FA backend on gfx950 with head size 256, full causal "
+                "attention and a BF16 or FP8 KV cache."
+            )
+
+    def _project_prequantized_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        PrequantizedQKV,
+    ]:
+        """Like ``_project_qkv_gate``, plus FP8 Q/K/V and their descales."""
+        q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
+        pos = positions[0] if positions.ndim == 2 else positions
+        (
+            q,
+            k,
+            gate,
+            q_fp8,
+            k_fp8,
+            v_fp8,
+            q_descale,
+            k_descale,
+            v_descale,
+        ) = fused_qk_norm_rope_gate_fp8_quant(
+            q_gate,
+            k,
+            v,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.rotary_emb.cos_sin_cache,
+            pos,
+            self.attn.layer_name,
+            self.q_norm.variance_epsilon,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_emb.rotary_dim,
+        )
+        return (
+            q,
+            k,
+            v,
+            gate,
+            PrequantizedQKV(
+                query=q_fp8,
+                key=k_fp8,
+                value=v_fp8,
+                query_descale=q_descale,
+                key_descale=k_descale,
+                value_descale=v_descale,
+            ),
+        )
 
     def _project_qkv_gate(
         self,
@@ -455,8 +539,14 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        attn_output = self.attn(q, k, v)
+        if self.use_prequantized_qkv:
+            q, k, v, gate, prequantized_qkv = self._project_prequantized_qkv_gate(
+                qkv, positions
+            )
+            attn_output = self.attn(q, k, v, prequantized_qkv=prequantized_qkv)
+        else:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            attn_output = self.attn(q, k, v)
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output, _ = self.o_proj(attn_output)
@@ -505,6 +595,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
                 reduce_results=not self.use_attn_reduce_scatter_for_moe,
                 prefix=f"{prefix}.self_attn",
             )
