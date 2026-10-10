@@ -7,7 +7,7 @@ use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
-use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::SamplingParams;
 
@@ -71,6 +71,7 @@ pub(super) struct GenerateResponseChoice {
     pub index: u32,
     pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
@@ -82,6 +83,7 @@ pub(super) struct GenerateResponseStreamChoice {
     pub index: u32,
     pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
+    pub stop_reason: Option<StopReason>,
     pub token_ids: Vec<u32>,
     pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
