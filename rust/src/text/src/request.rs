@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
@@ -97,9 +98,9 @@ pub struct SamplingParams {
     ///
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
-    /// Candidate token IDs scored at every scored causal prompt row, where row
-    /// `i` scores them as predictions of prompt token `i + 1`.
-    pub prompt_logprob_token_ids: Option<Vec<u32>>,
+    /// Candidate token IDs per scored causal prompt row, where row `i` scores
+    /// its IDs as predictions of prompt token `prompt_logprob_start + i + 1`.
+    pub prompt_logprob_token_ids: Option<Vec<Vec<i32>>>,
     /// First causal prompt row to score; `None` scores from the first row.
     pub prompt_logprob_start: Option<u32>,
     /// Minimum probability threshold for token sampling. `None` means no
@@ -129,6 +130,8 @@ pub struct SamplingParams {
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Words to avoid during generation (tokenized to IDs during lowering).
     pub bad_words: Option<Vec<String>>,
+    /// Pre-tokenized sequences to prohibit, in addition to `bad_words`.
+    pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
     /// Specific token IDs for which log probabilities should be returned at
     /// each position.
     ///
@@ -145,6 +148,11 @@ pub struct SamplingParams {
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
+    /// Number of newly generated tokens to batch into each streamed output.
+    /// Raises the interval above the frontend-level `--stream-interval`;
+    /// values below it are clamped up to it. The first and final outputs are
+    /// always emitted immediately.
+    pub stream_interval: Option<NonZeroU32>,
 }
 
 #[allow(clippy::derivable_impls)] // more explicit
@@ -173,10 +181,12 @@ impl Default for SamplingParams {
             logit_bias: None,
             allowed_token_ids: None,
             bad_words: None,
+            bad_words_token_ids: None,
             logprob_token_ids: None,
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             vllm_xargs: None,
+            stream_interval: None,
         }
     }
 }

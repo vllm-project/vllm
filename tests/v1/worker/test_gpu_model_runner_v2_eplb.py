@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.config import CompilationConfig, CompilationMode
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
@@ -68,7 +69,9 @@ def _make_runner(**overrides: Any) -> Any:
         enable_batch_sharded_sampling=False,
         eplb_config=SimpleNamespace(log_balancedness=True),
     )
+    runner.compilation_config = CompilationConfig(mode=CompilationMode.NONE)
     runner.vllm_config = SimpleNamespace(
+        compilation_config=runner.compilation_config,
         load_config=runner.load_config,
         model_config=runner.model_config,
     )
@@ -76,6 +79,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.use_aux_hidden_state_outputs = False
     runner.speculative_config = None
     runner.speculator = None
+    runner.pcp_manager = None
     runner.num_speculative_steps = 0
     runner.encoder_cache = None
     runner.is_pooling_model = False
@@ -181,11 +185,12 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         slot_mappings_by_layer=None,
         hidden_states=None,
         aux_hidden_states=None,
-        dp_sync=None,
+        dp_sync_state=None,
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
         cudagraph_stats=None,
+        num_spec_tokens_to_schedule=0,
     )
     runner.req_states = SimpleNamespace()
 

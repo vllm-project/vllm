@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +16,9 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
-use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry};
+use crate::client::state::{
+    OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
+};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
@@ -46,7 +49,12 @@ pub(crate) struct ClientInner {
     /// Per-tensor byte threshold loaded from env variable
     /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
     msgpack_zero_copy_threshold: usize,
-    scheduler_stats_recorder: SchedulerStatsRecorder,
+    /// Whether the connected engines record stats. See
+    /// [`crate::EngineCoreClientConfig::engine_stats_enabled`].
+    engine_stats_enabled: bool,
+    /// Scheduler-stats metric handles, present only when engines record stats
+    /// so that gauges are not exported with values no engine ever reports.
+    scheduler_stats_recorder: Option<SchedulerStatsRecorder>,
     iteration_metrics: BTreeMap<u32, IterationMetricHandles>,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
@@ -61,10 +69,11 @@ impl ClientInner {
         input_send: RouterSendHalf,
         handle: Handle,
         model_name: String,
+        engine_stats_enabled: bool,
         engines: &[ConnectedEngine],
     ) -> Self {
-        let scheduler_stats_recorder =
-            SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines);
+        let scheduler_stats_recorder = engine_stats_enabled
+            .then(|| SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines));
         let iteration_metrics = engines
             .iter()
             .filter_map(|engine| {
@@ -78,6 +87,7 @@ impl ClientInner {
             handle,
             model_name,
             msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
+            engine_stats_enabled,
             scheduler_stats_recorder,
             iteration_metrics,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
@@ -104,12 +114,13 @@ impl ClientInner {
         request_id: String,
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
+        stream_interval: NonZeroU32,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, lora_name, data_parallel_rank)
+        registry.register(request_id, lora_name, data_parallel_rank, stream_interval)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
@@ -152,13 +163,15 @@ impl ClientInner {
         Ok(registry.abortable_request_ids(request_ids))
     }
 
-    /// Obtain stream senders for a whole engine output batch with one registry
-    /// lock acquisition.
-    pub fn take_senders_for_outputs<'a>(
+    /// Send a whole engine output batch to the request streams with one
+    /// registry lock acquisition. Returns the outputs whose requests are no
+    /// longer tracked.
+    pub fn send_outputs(
         &self,
-        outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
-    ) -> Vec<Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>>> {
-        self.request_reg.lock().senders_for_outputs(outputs)
+        outputs: impl IntoIterator<Item = EngineCoreStreamOutput>,
+    ) -> Vec<EngineCoreStreamOutput> {
+        let mut registry = self.request_reg.lock();
+        outputs.into_iter().filter_map(|output| registry.send_output(output)).collect()
     }
 
     /// Remove a batch of requests that have finished or aborted, returning
@@ -166,7 +179,7 @@ impl ClientInner {
     pub fn finish_requests<'a>(
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
-    ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
+    ) -> Vec<OutputSender> {
         self.request_reg.lock().finish_many(request_ids)
     }
 
@@ -207,7 +220,7 @@ impl ClientInner {
 
         // Notify all ongoing requests that the client is closed.
         for sender in request_senders {
-            let _ = sender.send(Err(Error::Shared(persistent_error.clone())));
+            sender.send_error(Error::Shared(persistent_error.clone()));
         }
         for sender in utility_senders {
             let _ = sender.send(Err(Error::Shared(persistent_error.clone())));
@@ -406,13 +419,25 @@ pub(crate) async fn run_abort_loop(
     }
 }
 
+/// Number of tokens one output accounts for in `vllm:iteration_tokens_total`.
+fn output_iteration_tokens(output: &EngineCoreOutput) -> u64 {
+    let mut tokens = output.new_token_ids.len() as u64;
+    if let Some(prefill) = &output.prefill_stats {
+        // The engine emits prefill_stats once, on the first output.
+        tokens += u64::from(prefill.num_computed_tokens);
+    }
+    tokens
+}
+
 /// Background loop that listens for engine-core outputs and dispatches them to
 /// the corresponding request streams based on their `request_id`.
 pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
-    let mut lora_info = LoraInfoExporter::default();
+    // LoRA phases come from request lifecycle events, which engines only emit
+    // when they record stats.
+    let mut lora_info = inner.engine_stats_enabled.then(LoraInfoExporter::default);
 
     let result: Result<()> = async {
         loop {
@@ -426,29 +451,20 @@ pub(crate) async fn run_output_dispatcher_loop(
             match outputs {
                 EngineCoreOutputs::RequestBatch(batch) => {
                     let has_outputs = !batch.outputs.is_empty();
-                    let mut iteration_tokens = 0_u64;
-                    let senders = inner.take_senders_for_outputs(&batch.outputs);
-                    for (output, sender) in batch.outputs.into_iter().zip(senders) {
-                        let request_id = output.request_id.clone();
-                        let Some(sender) = sender else {
-                            debug!(request_id, "dropping output for inactive request");
-                            continue;
-                        };
-
-                        iteration_tokens += output.new_token_ids.len() as u64;
-                        if let Some(prefill) = &output.prefill_stats {
-                            // The engine emits prefill_stats once, on the first output.
-                            iteration_tokens += u64::from(prefill.num_computed_tokens);
-                        }
-
-                        let wrapped_output = EngineCoreStreamOutput {
-                            engine_index: batch.engine_index,
-                            timestamp: batch.timestamp,
-                            output,
-                        };
-                        if sender.send(Ok(wrapped_output)).is_err() {
-                            debug!(request_id, "request output stream receiver dropped");
-                        }
+                    let mut iteration_tokens: u64 =
+                        batch.outputs.iter().map(output_iteration_tokens).sum();
+                    let (engine_index, timestamp) = (batch.engine_index, batch.timestamp);
+                    let outputs = batch.outputs.into_iter().map(|output| EngineCoreStreamOutput {
+                        engine_index,
+                        timestamp,
+                        output,
+                    });
+                    for output in inner.send_outputs(outputs) {
+                        debug!(
+                            request_id = output.request_id,
+                            "dropping output for inactive request"
+                        );
+                        iteration_tokens -= output_iteration_tokens(&output);
                     }
 
                     if has_outputs
@@ -475,14 +491,18 @@ pub(crate) async fn run_output_dispatcher_loop(
                                 "dropping scheduler stats for unknown engine"
                             );
                         }
-                        inner.scheduler_stats_recorder.record(batch.engine_index, scheduler_stats);
+                        if let Some(recorder) = &inner.scheduler_stats_recorder {
+                            recorder.record(batch.engine_index, scheduler_stats);
+                        }
                     }
 
                     // The engine's scheduler stats never carry adapter names;
                     // the gauge is derived from the registry's frontend-side
                     // request tracking instead.
-                    let (running, waiting) = inner.lora_adapter_states();
-                    lora_info.update(&METRICS.scheduler, running, waiting);
+                    if let Some(lora_info) = &mut lora_info {
+                        let (running, waiting) = inner.lora_adapter_states();
+                        lora_info.update(&METRICS.scheduler, running, waiting);
+                    }
                 }
                 EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
@@ -530,6 +550,7 @@ mod tests {
             send,
             Handle::current(),
             "test-model".to_string(),
+            true,
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
                 ready_response: default_ready_response(),

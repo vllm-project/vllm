@@ -71,20 +71,32 @@ if [[ -z "${BK_TOKEN}" ]]; then
 fi
 
 AUDIENCE="pytorch-cross-repo-ci-relay"
+# Pre-flight only; the token minted here is discarded. Checking now means an
+# unusable OIDC setup costs seconds rather than being discovered after hours of
+# polling. The token that is actually sent is minted after the wait, below.
 # OIDC redaction also requires the unavailable Job API socket.
-OIDC_TOKEN="$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)"
-if [[ -z "${OIDC_TOKEN}" ]]; then
+if [[ -z "$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)" ]]; then
     echo "could not mint a Buildkite OIDC token -- skipping report"
     exit 0
 fi
 
 BUILD_JSON="$(mktemp)"
-trap 'rm -f "${BUILD_JSON}"' EXIT
+BUILD_JSON_STAGING="$(mktemp)"
+trap 'rm -f "${BUILD_JSON}" "${BUILD_JSON_STAGING}"' EXIT
 BUILD_URL="https://api.buildkite.com/v2/organizations/${BUILDKITE_ORGANIZATION_SLUG}/pipelines/${BUILDKITE_PIPELINE_SLUG}/builds/${BUILDKITE_BUILD_NUMBER}"
 
+# Staged so a failed request cannot clobber the last good snapshot: curl -o
+# writes the error body too, and the deadline path reports from whatever
+# snapshot it has.
 fetch_build() {
-    curl -sS -w '%{http_code}' -o "${BUILD_JSON}" \
-        -H "Authorization: Bearer ${BK_TOKEN}" "${BUILD_URL}"
+    local code
+    code="$(curl -sS -w '%{http_code}' -o "${BUILD_JSON_STAGING}" \
+        -H "Authorization: Bearer ${BK_TOKEN}" "${BUILD_URL}")"
+    if [[ "${code}" == "200" ]]; then
+        mv -f "${BUILD_JSON_STAGING}" "${BUILD_JSON}"
+        BUILD_JSON_STAGING="$(mktemp)"
+    fi
+    echo "${code}"
 }
 
 # Count jobs that have not reached a terminal state, ignoring this job: the
@@ -113,22 +125,78 @@ PY
 # finished and none of the eventual 152 hard failures visible, and HUD recorded
 # that nightly as green.
 #
-# Polling rather than a full `depends_on` barrier: Buildkite groups carry no
-# key, so a barrier means naming all ~250 step keys, which silently rots when a
-# step is added and fails the pipeline upload when one is removed or excluded
-# from this lane (AMD, retired A100). The pipeline does gate this step on the
-# long pole so it is scheduled near the end of the build -- that keeps the agent
-# from idling for hours, but it is only a hint, and this loop is what actually
-# guarantees the snapshot is complete.
-POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-60}"
-# Under the step's own timeout, so a stuck build still gets a partial report
-# rather than the job being killed with nothing sent.
-WAIT_DEADLINE=$(( $(date +%s) + ${CRCR_MAX_WAIT_S:-46800} ))
+# Polling rather than a `depends_on` barrier: Buildkite groups carry no key, so
+# a barrier means naming all ~250 step keys, which silently rots when a step is
+# added and fails the pipeline upload when one is removed or excluded from this
+# lane (AMD, retired A100). Gating on a single step was tried and is worse: a
+# dependency that fails or is cancelled takes the report with it despite
+# allow_dependency_failure (builds 91191 and 91461 both lost their report that
+# way), so this step depends only on the image it runs in.
+# 15 min: the wait now spans the whole build, so a 60s poll made ~420 requests
+# against an API shared with the rest of CI to learn something that changes on
+# the order of minutes. The cost is up to one interval of extra latency after
+# the last job lands.
+POLL_INTERVAL_S="${CRCR_POLL_INTERVAL_S:-900}"
+
+# The deadline is measured from when the *build* started, not from when this
+# script did, so "report no later than N hours into the build" holds however
+# late this step is scheduled. Anchoring it to script start made the bound
+# meaningless whenever the step was itself delayed.
+#
+# Resolved after the first fetch, from the build's own created_at.
+MAX_BUILD_AGE_S="${CRCR_MAX_BUILD_AGE_S:-14400}"
+WAIT_DEADLINE=""
+# Used until created_at is known. Without it, an API outage on the very first
+# request leaves the deadline unresolved and the loop spins to the step timeout.
+FALLBACK_DEADLINE=$(( $(date +%s) + MAX_BUILD_AGE_S ))
+
+build_deadline() {
+    python3 - "${BUILD_JSON}" "${MAX_BUILD_AGE_S}" <<'PY'
+import datetime, json, sys
+build = json.load(open(sys.argv[1]))
+created = build.get("created_at")
+if not created:
+    raise SystemExit(1)
+started = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
+print(int(started.timestamp()) + int(sys.argv[2]))
+PY
+}
+
 while :; do
     http_code="$(fetch_build)"
     if [[ "${http_code}" != "200" ]]; then
-        echo "buildkite API returned ${http_code} -- skipping report"
-        exit 0
+        # A transient 429/5xx must not cost the whole report: treating one
+        # failure as fatal would drop a nightly for a blip. Keep polling on the
+        # last good snapshot; only give up if the deadline passes having never
+        # fetched one.
+        echo "buildkite API returned ${http_code}"
+        if [[ ! -s "${BUILD_JSON}" ]]; then
+            if (( $(date +%s) >= ${WAIT_DEADLINE:-$FALLBACK_DEADLINE} )); then
+                echo "no build data was ever fetched -- nothing to report"
+                exit 0
+            fi
+            sleep "${POLL_INTERVAL_S}"
+            continue
+        fi
+        if (( $(date +%s) >= ${WAIT_DEADLINE:-$FALLBACK_DEADLINE} )); then
+            echo "deadline reached while the API is unavailable --" \
+                "reporting from the last good snapshot"
+            break
+        fi
+        sleep "${POLL_INTERVAL_S}"
+        continue
+    fi
+    if [[ -z "${WAIT_DEADLINE}" ]]; then
+        WAIT_DEADLINE="$(build_deadline)" || WAIT_DEADLINE=""
+        if [[ -z "${WAIT_DEADLINE}" ]]; then
+            # No created_at to anchor to; fall back to script start so the loop
+            # still has a bound rather than running until the step times out.
+            WAIT_DEADLINE=$(( $(date +%s) + MAX_BUILD_AGE_S ))
+            echo "build created_at unavailable -- deadline measured from now"
+        fi
+        echo "reporting deadline: $(date -u -d "@${WAIT_DEADLINE}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+            || date -u -r "${WAIT_DEADLINE}" '+%Y-%m-%dT%H:%M:%SZ')" \
+            "(build age limit ${MAX_BUILD_AGE_S}s)"
     fi
     remaining="$(outstanding_jobs)" || remaining=""
     if [[ -z "${remaining}" ]]; then
@@ -140,7 +208,7 @@ while :; do
         break
     fi
     if (( $(date +%s) >= WAIT_DEADLINE )); then
-        echo "still ${remaining} job(s) running at the wait deadline --" \
+        echo "still ${remaining} job(s) running at the build-age deadline --" \
             "reporting a partial view"
         break
     fi
@@ -154,6 +222,17 @@ done
 # Resolved from this script's location: the pipeline runs it from
 # /vllm-workspace/tests, so a repo-relative path would not resolve.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Minted here, not before the poll loop: a Buildkite OIDC token defaults to a
+# five-minute lifetime and the loop above can run to the build-age deadline.
+# Build 91827 waited 6h48m and then took a 401 on all 360 callbacks from a
+# token that had expired hours earlier.
+OIDC_TOKEN="$(buildkite-agent oidc request-token --skip-redaction --audience "${AUDIENCE}" 2>/dev/null)"
+if [[ -z "${OIDC_TOKEN}" ]]; then
+    echo "could not mint a Buildkite OIDC token after the wait -- skipping report"
+    exit 0
+fi
+
 python3 "${SCRIPT_DIR}/crcr_report.py" \
     --build-json "${BUILD_JSON}" \
     --callback-url "${CALLBACK_URL}" \

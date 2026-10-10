@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 import itertools
@@ -20,14 +21,7 @@ import jinja2.sandbox
 import torch
 from typing_extensions import override
 
-from vllm.entrypoints.chat_utils import (
-    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
-    ChatTemplateResolutionError,
-    assert_chat_template_rendered_messages,
-    load_chat_template,
-    parse_chat_messages,
-    parse_chat_messages_async,
-)
+from vllm import envs
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
@@ -45,6 +39,14 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
+from vllm.renderers.chat_utils import (
+    PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
+    ChatTemplateResolutionError,
+    assert_chat_template_rendered_messages,
+    load_chat_template,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
 from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -58,17 +60,17 @@ if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.entrypoints.chat_utils import (
-        ChatCompletionMessageParam,
-        ChatTemplateContentFormat,
-        ChatTemplateContentFormatOption,
-        ConversationMessage,
-    )
     from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
         ResolvedPromptUpdate,
+    )
+    from vllm.renderers.chat_utils import (
+        ChatCompletionMessageParam,
+        ChatTemplateContentFormat,
+        ChatTemplateContentFormatOption,
+        ConversationMessage,
     )
 
     from .inputs import DictPrompt
@@ -985,6 +987,44 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 self.tokenizer, config.model_config.renderer_num_workers + 1
             )
 
+    def _replace_executor(self) -> None:
+        """Replace the inner render pool after a stuck worker.
+
+        Called after a render timeout so that the stuck thread (which CPython
+        cannot interrupt) does not permanently block all subsequent renders.
+        The executor *object* is kept so ``make_async`` wrappers bound at
+        init (tokenize, decode, pooling, derender) keep submitting work.
+        The old inner pool is abandoned with wait=False — its thread will
+        eventually finish or be reaped on process exit.
+        """
+        self._executor.replace_inner()
+        logger.warning(
+            "Chat template render timed out — executor pool replaced "
+            "(%d worker(s)). The stuck thread may continue consuming "
+            "CPU until the process exits.",
+            self.model_config.renderer_num_workers,
+        )
+
+    async def _render_with_timeout(self, coro):
+        """Run a template-rendering coroutine with a timeout.
+
+        On timeout, replaces the executor so subsequent renders are not
+        permanently blocked by the stuck thread.
+        """
+        timeout = envs.VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT
+        if timeout <= 0:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except TimeoutError:
+            self._replace_executor()
+            raise TimeoutError(
+                f"Chat template rendering timed out after "
+                f"{timeout}s. This may indicate a malicious or "
+                f"excessively complex template. Adjust "
+                f"VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT to override."
+            ) from None
+
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
@@ -1140,11 +1180,13 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 logger.warning_once(_TOKENIZE_OVERRIDE_WARNING)
             chat_template_kwargs["tokenize"] = True
 
-        prompt_raw = await self._apply_chat_template_async(
-            model_config,
-            tokenizer,
-            conversation,
-            **chat_template_kwargs,
+        prompt_raw = await self._render_with_timeout(
+            self._apply_chat_template_async(
+                model_config,
+                tokenizer,
+                conversation,
+                **chat_template_kwargs,
+            )
         )
 
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5

@@ -3,15 +3,16 @@
 
 
 import asyncio
+import math
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
+from typing import Any
 
 import msgspec
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     RequestResponseMetadata,
@@ -20,6 +21,7 @@ from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
+    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -39,12 +41,15 @@ from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
+from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
@@ -53,14 +58,57 @@ from .mm_features import (
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
+    GenerateLogProb,
+    GenerateLogProbs,
+    GenerateLogProbsContent,
     GenerateRequest,
     GenerateResponse,
-    GenerateResponseChoice,
-    GenerateResponseStreamChoice,
-    GenerateStreamResponse,
+    GenerateTextChoice,
+    GenerateTextResponse,
+    GenerateTextStreamChoice,
+    GenerateTextStreamResponse,
+    GenerateTokensChoice,
+    GenerateTokensResponse,
+    GenerateTokensStreamChoice,
+    GenerateTokensStreamResponse,
 )
 
 logger = init_logger(__name__)
+
+
+def _clamp_logprob(logprob: float) -> float:
+    """The OpenAI shapes' floor for a logprob: ``-inf`` and NaN become ``-9999.0``.
+
+    ``max(nan, -9999.0)`` is NaN in Python, so NaN needs its own check; NaN
+    would otherwise fail ``JSONResponse`` or reach the client as ``null``.
+    """
+    return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
+
+
+def _logprob_token(
+    token_id: int, logprob: Logprob | None, tokenizer: TokenizerLike | None
+) -> tuple[str, list[int] | None]:
+    """Token string and UTF-8 bytes for one logprob entry.
+
+    Without a tokenizer the token is a ``token_id:N`` placeholder with no bytes.
+    """
+    if tokenizer is None:
+        return format_token_id_placeholder(token_id), None
+    token = (
+        tokenizer.decode([token_id])
+        if logprob is None
+        else GenerateBaseServing._get_decoded_token(logprob, token_id, tokenizer)
+    )
+    return token, list(token.encode("utf-8", errors="replace"))
+
+
+def _top_logprob(
+    token_id: int, logprob: Logprob, tokenizer: TokenizerLike | None
+) -> ChatCompletionLogProb:
+    token, token_bytes = _logprob_token(token_id, logprob, tokenizer)
+    return ChatCompletionLogProb(
+        token=token, logprob=_clamp_logprob(logprob.logprob), bytes=token_bytes
+    )
 
 
 class ServingTokens(GenerateBaseServing):
@@ -88,6 +136,9 @@ class ServingTokens(GenerateBaseServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
+        self.has_tokenizer = (
+            not force_no_detokenize and self.renderer.tokenizer is not None
+        )
         if force_no_detokenize:
             logger.info(
                 "Tokens-only mode is enabled, skipping detokenization "
@@ -105,6 +156,23 @@ class ServingTokens(GenerateBaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+    def _validate_mm_cache_handles(
+        self,
+        mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
+        mm_hashes: dict[str, list[str]],
+    ) -> ErrorResponse | None:
+        cache = self.online_renderer.renderer.mm_processor_cache
+        if cache is None:
+            return None
+        try:
+            for modality, items in mm_kwargs.items():
+                for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
+                    if item is not None:
+                        cache.validate_input_item(item, mm_hash)
+        except ValueError as error:
+            return self.create_error_response(error)
+        return None
 
     async def serve_tokens(
         self,
@@ -152,6 +220,15 @@ class ServingTokens(GenerateBaseServing):
                 "stop strings are not supported on a --tokens-only server "
                 "because detokenization is disabled. Check stop strings on "
                 "the coordinator, or use stop_token_ids."
+            )
+        if request.output_mode != "tokens" and not self.has_tokenizer:
+            # The no-op detokenizer returns "", so without this check the
+            # request would succeed with empty text.
+            return self.create_error_response(
+                f"output_mode={request.output_mode!r} requires a tokenizer, but "
+                "this server does not load one (--tokens-only or "
+                "--skip-tokenizer-init). Send the request to a server that "
+                "loads a tokenizer, or use output_mode='tokens'."
             )
         try:
             msgspec.msgpack.encode(
@@ -201,6 +278,8 @@ class ServingTokens(GenerateBaseServing):
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
             mm_kwargs = mm_kwargs_from_features(features)
+            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
+                return error
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
@@ -283,6 +362,12 @@ class ServingTokens(GenerateBaseServing):
             priority=request.priority,
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
+            reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=(
+                request.reasoning_parser_kwargs.model_dump()
+                if request.reasoning_parser_kwargs is not None
+                else None
+            ),
         )
 
         assert result_generator is not None
@@ -311,6 +396,8 @@ class ServingTokens(GenerateBaseServing):
         created_time = int(time.time())
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
+        text_mode = request.output_mode == "text"
+        tokenizer = self._logprobs_tokenizer(text_mode)
 
         try:
             async for res in result_generator:
@@ -320,7 +407,8 @@ class ServingTokens(GenerateBaseServing):
 
         assert final_res is not None
 
-        choices: list[GenerateResponseChoice] = []
+        tokens_choices: list[GenerateTokensChoice] = []
+        text_choices: list[GenerateTextChoice] = []
         num_generated_tokens = 0
         for output in final_res.outputs:
             self._raise_if_error(output.finish_reason, request_id)
@@ -331,11 +419,20 @@ class ServingTokens(GenerateBaseServing):
             # This is top_logprobs in completions API
             if sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
-                logprobs = self._create_tokens_logprobs(
-                    token_ids=token_ids,
-                    top_logprobs=out_logprobs,
-                    num_output_top_logprobs=sampling_params.logprobs,
-                )
+                logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+                if text_mode:
+                    logprobs = self._create_text_logprobs(
+                        token_ids=token_ids,
+                        top_logprobs=out_logprobs,
+                        num_output_top_logprobs=sampling_params.logprobs,
+                        tokenizer=tokenizer,
+                    )
+                else:
+                    logprobs = self._create_tokens_logprobs(
+                        token_ids=token_ids,
+                        top_logprobs=out_logprobs,
+                        num_output_top_logprobs=sampling_params.logprobs,
+                    )
             else:
                 logprobs = None
 
@@ -349,7 +446,7 @@ class ServingTokens(GenerateBaseServing):
             if output.sampling_mask is not None:
                 sampling_mask = output.sampling_mask.token_ids
 
-            choice_data = GenerateResponseChoice(
+            choice_fields: dict[str, Any] = dict(
                 index=output.index,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
@@ -357,8 +454,12 @@ class ServingTokens(GenerateBaseServing):
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
             )
-
-            choices.append(choice_data)
+            if text_mode:
+                text_choices.append(
+                    GenerateTextChoice(text=output.text, **choice_fields)
+                )
+            else:
+                tokens_choices.append(GenerateTokensChoice(**choice_fields))
             num_generated_tokens += len(output.token_ids)
 
         assert final_res.prompt_token_ids is not None
@@ -387,11 +488,10 @@ class ServingTokens(GenerateBaseServing):
             spec_stats = build_spec_decoding_metrics(final_res)
             if spec_stats is not None:
                 per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
-        response = GenerateResponse(
+        response_fields: dict[str, Any] = dict(
             request_id=request_id,
             created=created_time,
             model=model_name,
-            choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             prompt_token_id_logprobs=(
@@ -407,10 +507,15 @@ class ServingTokens(GenerateBaseServing):
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
         )
+        response: GenerateTokensResponse | GenerateTextResponse
+        if text_mode:
+            response = GenerateTextResponse(choices=text_choices, **response_fields)
+        else:
+            response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
-            for choice in choices:
+            for choice in response.choices:
                 # Get the corresponding output token IDs
                 output_token_ids = None
                 if choice.index < len(final_res.outputs):
@@ -438,12 +543,15 @@ class ServingTokens(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_prompt_tokens = 0
-        num_generated_tokens: list[int] = []
         first_iteration = True
         prompt_token_ids: list[int] | None = None
         num_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
+        # With n > 1, the first output may not include every choice yet.
+        num_generated_tokens = [0] * sampling_params.n
         last_res: RequestOutput | None = None
+        text_mode = request.output_mode == "text"
+        tokenizer = self._logprobs_tokenizer(text_mode)
 
         include_usage, include_continuous_usage = should_include_usage(
             request.stream_options, False
@@ -460,7 +568,6 @@ class ServingTokens(GenerateBaseServing):
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
-                    num_generated_tokens = [0] * len(res.outputs)
                     first_iteration = False
 
                 for output in res.outputs:
@@ -471,21 +578,34 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    # Still emit a terminal empty chunk while prompt metadata
-                    # is pending, so zero-token completions deliver it.
-                    if not delta_token_ids and (
-                        finish_reason is None or prompt_token_ids is None
+                    # Terminal outputs are always emitted so the client sees
+                    # the finish reason, e.g. an abort, which has no new
+                    # tokens. Text mode also emits text held back for stop
+                    # string matching, which can arrive without token IDs.
+                    if not (
+                        delta_token_ids
+                        or finish_reason is not None
+                        or (text_mode and output.text)
                     ):
                         continue
 
                     if sampling_params.logprobs is not None:
                         out_logprobs = output.logprobs
                         assert out_logprobs is not None, "Did not output logprobs"
-                        logprobs = self._create_tokens_logprobs(
-                            token_ids=delta_token_ids,
-                            top_logprobs=out_logprobs,
-                            num_output_top_logprobs=sampling_params.logprobs,
-                        )
+                        logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+                        if text_mode:
+                            logprobs = self._create_text_logprobs(
+                                token_ids=delta_token_ids,
+                                top_logprobs=out_logprobs,
+                                num_output_top_logprobs=sampling_params.logprobs,
+                                tokenizer=tokenizer,
+                            )
+                        else:
+                            logprobs = self._create_tokens_logprobs(
+                                token_ids=delta_token_ids,
+                                top_logprobs=out_logprobs,
+                                num_output_top_logprobs=sampling_params.logprobs,
+                            )
                     else:
                         logprobs = None
 
@@ -495,18 +615,33 @@ class ServingTokens(GenerateBaseServing):
                         else None
                     )
 
-                    chunk = GenerateStreamResponse(
-                        request_id=request_id,
-                        choices=[
-                            GenerateResponseStreamChoice(
-                                index=i,
-                                logprobs=logprobs,
-                                finish_reason=finish_reason,
-                                token_ids=as_list(delta_token_ids),
-                                routed_experts=routed_experts_b64,
-                            )
-                        ],
+                    sampling_mask = None
+                    if output.sampling_mask is not None:
+                        sampling_mask = output.sampling_mask.token_ids
+                    choice_fields: dict[str, Any] = dict(
+                        index=i,
+                        logprobs=logprobs,
+                        finish_reason=finish_reason,
+                        token_ids=as_list(delta_token_ids),
+                        routed_experts=routed_experts_b64,
+                        sampling_mask=sampling_mask,
                     )
+                    chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
+                    if text_mode:
+                        chunk = GenerateTextStreamResponse(
+                            request_id=request_id,
+                            choices=[
+                                GenerateTextStreamChoice(
+                                    text=output.text, **choice_fields
+                                )
+                            ],
+                        )
+                    else:
+                        chunk = GenerateTokensStreamResponse(
+                            request_id=request_id,
+                            choices=[GenerateTokensStreamChoice(**choice_fields)],
+                        )
+
                     if prompt_token_ids is not None:
                         chunk.prompt_token_ids = prompt_token_ids
                         chunk.mm_placeholders = request._response_mm_placeholders
@@ -546,12 +681,21 @@ class ServingTokens(GenerateBaseServing):
                         per_request_metrics = PerRequestMetrics(
                             speculative_decoding=spec_stats
                         )
-                final_chunk = GenerateStreamResponse(
-                    request_id=request_id,
-                    choices=[],
-                    usage=final_usage_info,
-                    metrics=per_request_metrics,
-                )
+                final_chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
+                if text_mode:
+                    final_chunk = GenerateTextStreamResponse(
+                        request_id=request_id,
+                        choices=[],
+                        usage=final_usage_info,
+                        metrics=per_request_metrics,
+                    )
+                else:
+                    final_chunk = GenerateTokensStreamResponse(
+                        request_id=request_id,
+                        choices=[],
+                        usage=final_usage_info,
+                        metrics=per_request_metrics,
+                    )
                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
             request_metadata.final_usage_info = final_usage_info
@@ -566,37 +710,50 @@ class ServingTokens(GenerateBaseServing):
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
 
-    def _create_tokens_logprobs(
+    def _logprobs_tokenizer(self, text_mode: bool) -> TokenizerLike | None:
+        """Tokenizer that resolves logprob tokens, or None for placeholders.
+
+        ``--return-tokens-as-token-ids`` keeps placeholders at every level, as
+        it does on ``/v1/completions``.
+        """
+        if not text_mode or self.return_tokens_as_token_ids:
+            return None
+        return self.renderer.tokenizer
+
+    def _create_text_logprobs(
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int | None = None,
+        tokenizer: TokenizerLike | None = None,
     ) -> ChatCompletionLogProbs:
-        """Create OpenAI-style logprobs."""
+        """Create OpenAI-style logprobs for ``output_mode="text"``.
+
+        With a ``tokenizer`` the tokens are decoded strings and carry ``bytes``;
+        without one (``--return-tokens-as-token-ids``) they are ``token_id:N``
+        placeholders.
+        """
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
-            token = f"token_id:{token_id}"
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
+                token, token_bytes = _logprob_token(token_id, None, tokenizer)
                 logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=token,
-                    )
+                    ChatCompletionLogProbsContent(token=token, bytes=token_bytes)
                 )
             else:
                 step_token = step_top_logprobs[token_id]
+                token, token_bytes = _logprob_token(token_id, step_token, tokenizer)
 
                 logprobs_content.append(
                     ChatCompletionLogProbsContent(
                         token=token,
-                        logprob=max(step_token.logprob, -9999.0),
+                        logprob=_clamp_logprob(step_token.logprob),
+                        bytes=token_bytes,
                         top_logprobs=[
-                            ChatCompletionLogProb(
-                                token=f"token_id:{token_id}",
-                                logprob=max(logprob.logprob, -9999.0),
-                            )
-                            for i, (token_id, logprob) in enumerate(
+                            _top_logprob(top_id, logprob, tokenizer)
+                            for i, (top_id, logprob) in enumerate(
                                 step_top_logprobs.items()
                             )
                             if num_output_top_logprobs is not None
@@ -609,3 +766,52 @@ class ServingTokens(GenerateBaseServing):
                 )
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+    def _create_tokens_logprobs(
+        self,
+        token_ids: GenericSequence[int],
+        top_logprobs: GenericSequence[dict[int, Logprob] | None],
+        num_output_top_logprobs: int | None = None,
+    ) -> GenerateLogProbs:
+        """Create generate-shaped logprobs (integer token ids, no tokenizer).
+
+        The engine reports rank 0 for a sampled token whose logprob is NaN; that
+        is not a rank, so it is sent as ``None`` (the logprob is clamped).
+        """
+        logprobs_content: list[GenerateLogProbsContent] = []
+
+        for i, token_id in enumerate(token_ids):
+            step_top_logprobs = top_logprobs[i]
+            if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
+                # Same sentinel the OpenAI shapes use when the sampled token
+                # has no entry in the engine's top-k map.
+                logprobs_content.append(
+                    GenerateLogProbsContent(token_id=token_id, logprob=-9999.0)
+                )
+            else:
+                step_token = step_top_logprobs[token_id]
+
+                logprobs_content.append(
+                    GenerateLogProbsContent(
+                        token_id=token_id,
+                        logprob=_clamp_logprob(step_token.logprob),
+                        rank=step_token.rank or None,
+                        top_logprobs=[
+                            GenerateLogProb(
+                                token_id=top_token_id,
+                                logprob=_clamp_logprob(top_logprob.logprob),
+                                rank=top_logprob.rank or None,
+                            )
+                            for rank_index, (top_token_id, top_logprob) in enumerate(
+                                step_top_logprobs.items()
+                            )
+                            if num_output_top_logprobs is not None
+                            and (
+                                num_output_top_logprobs == -1
+                                or rank_index < max(num_output_top_logprobs, 1)
+                            )
+                        ],
+                    )
+                )
+
+        return GenerateLogProbs(content=logprobs_content)
