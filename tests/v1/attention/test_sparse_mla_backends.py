@@ -81,10 +81,12 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
     FlashInferMLASparseSM120Impl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    MIN_HEADS_FOR_BF16_PREFILL,
     FlashMLASparseBackend,
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
     FlashMLASparseMetadataBuilder,
+    get_prefill_workspace_size,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.mla.index_group import (
@@ -411,7 +413,7 @@ def _quantize_dequantize_nvfp4_ds_mla(
     "kv_cache_dtype",
     ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"],
 )
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
@@ -457,6 +459,11 @@ def test_sparse_backend_decode_correctness(
         )
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
+
+    if tensor_parallel_size == 8 and backend_cls != FlashMLASparseBackend:
+        # 16 heads per rank drives the FlashMLA fp8 mixed-batch path, whose
+        # workspace is reserved separately from the bf16 prefill buffers.
+        pytest.skip("TP=8 only exercises the FlashMLA mixed-batch path")
 
     if (
         backend_cls == FlashMLASparseBackend
@@ -3931,6 +3938,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         index_group_index=0,
         dcp_world_size=1,
         pcp_dcp_kv_gather=False,
+        fp8_use_mixed_batch=use_mixed_batch,
         need_to_return_lse_for_decode=False,
         _fp8_flash_mla_kernel=run_kernel,
         _convert_logical_to_physical_topk=(
@@ -4053,6 +4061,84 @@ def test_fp8_dcp_head_envelope_guard(local_heads, dcp_world_size, should_raise):
         gathered_pad = 64 if gathered_heads <= 64 else 128
         assert builder.fp8_decode_padded_heads == local_pad
         assert local_pad == gathered_pad
+
+
+@pytest.mark.parametrize(
+    ("num_heads", "use_hisparse", "pcp_dcp_kv_gather", "expected"),
+    [
+        (MIN_HEADS_FOR_BF16_PREFILL - 1, False, False, True),
+        (MIN_HEADS_FOR_BF16_PREFILL, False, False, False),
+        (MIN_HEADS_FOR_BF16_PREFILL - 1, True, False, False),
+        (MIN_HEADS_FOR_BF16_PREFILL - 1, False, True, False),
+    ],
+)
+def test_fp8_mixed_batch_requires_few_heads_without_hisparse_or_kv_gather(
+    num_heads, use_hisparse, pcp_dcp_kv_gather, expected
+):
+    assert (
+        FlashMLASparseImpl._use_fp8_mixed_batch(
+            num_heads, use_hisparse, pcp_dcp_kv_gather
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("num_heads", [16, 32])
+@pytest.mark.parametrize("use_hisparse", [False, True])
+@pytest.mark.parametrize(("pcp_size", "dcp_size"), [(1, 1), (2, 2)])
+def test_fp8_mixed_batch_path_reserves_no_prefill_workspace(
+    dist_init, monkeypatch, num_heads, use_hisparse, pcp_size, dcp_size
+):
+    """The bf16 prefill buffers scale with max_model_len and are only read by
+    the separate prefill/decode path; reserving them on the mixed-batch path
+    takes GiBs off the KV cache budget at long context for nothing."""
+    head_size = 576
+    vllm_config = _build_sparse_dcp_vllm_config(num_heads, dcp_size)
+    vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+    if use_hisparse:
+        vllm_config.attention_config.hisparse_config = HiSparseConfig()
+
+    reserved = []
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.flashmla_sparse.current_workspace_manager",
+        lambda: SimpleNamespace(get_simultaneous=lambda *specs: reserved.append(specs)),
+    )
+    with set_current_vllm_config(vllm_config):
+        impl = FlashMLASparseImpl(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=1.0,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8_ds_mla",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            qk_head_dim=192,
+            v_head_dim=128,
+            kv_b_proj=MagicMock(),
+        )
+
+    mixed_batch = num_heads < MIN_HEADS_FOR_BF16_PREFILL and not (
+        use_hisparse or pcp_size > 1
+    )
+    (specs,) = reserved
+    assert list(specs) == impl.workspace_specs
+    max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    q_concat = ((max_tokens, num_heads, head_size), torch.bfloat16)
+    prefill_rows = get_prefill_workspace_size(vllm_config.model_config.max_model_len)
+    if mixed_batch:
+        assert specs == (q_concat,)
+    else:
+        assert specs[0] == q_concat
+        assert ((prefill_rows, head_size), torch.bfloat16) in specs
+        assert len(specs) == (6 if pcp_size > 1 else 5)
+    assert impl.fp8_use_mixed_batch is mixed_batch
 
 
 def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
