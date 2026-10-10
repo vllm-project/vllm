@@ -251,9 +251,10 @@ steps:
   - tests/model_executor/layers/test_activation.py
   - tests/models/test_language_model_cache_is_weak.py
   - tests/models/deepseek_v32/test_sequence_parallel.py
+  - tests/models/deepseek_v4/test_nvidia_o_proj.py
   - tests/models/test_deepseek_v4_fi_moe_ep.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/ model_executor/layers/test_activation.py models/test_language_model_cache_is_weak.py models/deepseek_v32/test_sequence_parallel.py models/deepseek_v4/test_nvidia_o_proj.py models/test_deepseek_v4_fi_moe_ep.py models/test_dspark_mla.py models/transformers/test_layer_registry.py

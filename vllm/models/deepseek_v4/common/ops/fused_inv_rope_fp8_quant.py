@@ -236,6 +236,9 @@ class FusedInvRopeFP8QuantKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        # The output projection bypasses FP8 quantization without DeepGEMM.
+        if not current_platform.support_deep_gemm():
+            return []
         hf_config = vllm_config.model_config.hf_config
         if hf_config is None:
             return []
