@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+import vllm.config as config_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -19,6 +21,8 @@ from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends import fa_utils, flash_attn, flash_attn_diffkv
+from vllm.vllm_flash_attn import flash_attn_interface
 
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
@@ -917,3 +921,224 @@ def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
             get_attn_backend(256, torch.bfloat16, None)
         config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
         assert get_attn_backend(256, torch.bfloat16, None).get_name() == "TRITON_ATTN"
+
+
+@pytest.fixture
+def sm90_config(monkeypatch):
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(flash_attn_version=None),
+        cache_config=SimpleNamespace(cache_dtype="fp8"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        model_config=SimpleNamespace(
+            is_diffusion=False,
+            is_mm_prefix_lm=False,
+            rswa_window=None,
+            hf_config=SimpleNamespace(model_type="gemma4"),
+        ),
+    )
+    monkeypatch.setattr(
+        fa_utils,
+        "current_platform",
+        SimpleNamespace(
+            is_cuda=lambda: True,
+            is_xpu=lambda: False,
+            is_rocm=lambda: False,
+            get_device_capability=lambda: DeviceCapability(9, 0),
+            is_device_capability_family=lambda major: major == 90,
+        ),
+    )
+    for module in (config_module, flash_attn, flash_attn_diffkv):
+        monkeypatch.setattr(module, "get_current_vllm_config_or_none", lambda: config)
+    monkeypatch.setattr(flash_attn_interface, "is_fa_version_supported", lambda v: True)
+    monkeypatch.setattr(
+        flash_attn_diffkv, "is_flash_attn_varlen_func_available", lambda: True
+    )
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    return config
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,head_size,head_size_v,has_sinks,is_diffusion,expected",
+    [
+        ("fp8", 256, 128, False, False, True),
+        ("fp8", 256, 128, True, False, False),
+        ("fp8", 256, 128, False, True, False),
+        ("fp8", 512, 256, False, False, False),
+        ("fp8_e4m3", 256, 128, True, False, False),
+        ("auto", 256, 128, True, False, True),
+        ("bfloat16", 512, 256, True, False, True),
+        ("bfloat16", 256, 128, False, True, True),
+    ],
+)
+def test_diffkv_fp8_selection_paths_agree(
+    sm90_config,
+    monkeypatch,
+    cache_dtype,
+    has_sinks,
+    head_size,
+    head_size_v,
+    is_diffusion,
+    expected,
+):
+    """Reject d256/d128+sinks and d512 Diff-KV FP8, retaining FA3 without sinks."""
+    sm90_config.cache_config.cache_dtype = cache_dtype
+    sm90_config.model_config.is_diffusion = is_diffusion
+    backend = flash_attn_diffkv.FlashAttentionDiffKVBackend
+    monkeypatch.setattr(backend, "head_size_v", head_size_v)
+    reason = backend.supports_combination(
+        head_size=head_size,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=cache_dtype,
+        block_size=64,
+        use_mla=False,
+        has_sink=has_sinks,
+        use_sparse=False,
+        use_mm_prefix=False,
+        device_capability=DeviceCapability(9, 0),
+    )
+    assert (reason is None) == expected
+    assert (
+        backend.is_supported_on_current_device(
+            head_size=head_size, head_size_v=head_size_v, has_sinks=has_sinks
+        )
+        == expected
+    )
+
+
+def test_forced_fa4_rejects_fp8_diffkv_without_sinks(sm90_config, monkeypatch):
+    """Only FA3 can retain the smaller FP8 Diff-KV path."""
+    sm90_config.attention_config.flash_attn_version = 4
+    backend = flash_attn_diffkv.FlashAttentionDiffKVBackend
+    monkeypatch.setattr(backend, "head_size_v", 128)
+    assert (
+        backend.supports_combination(
+            256,
+            torch.bfloat16,
+            "fp8",
+            64,
+            False,
+            False,
+            False,
+            False,
+            DeviceCapability(9, 0),
+        )
+        is not None
+    )
+    assert not backend.is_supported_on_current_device(256, 128, False)
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,head_size,head_size_v,has_sinks,is_diffusion,expected_version",
+    [
+        ("fp8", 256, 128, False, False, 3),
+        ("fp8", 256, 128, True, False, None),
+        ("fp8", 256, 128, False, True, None),
+        ("fp8", 512, 256, False, False, None),
+        ("fp8_e4m3", 256, 128, True, False, None),
+        ("bfloat16", 256, 128, True, False, 4),
+    ],
+)
+def test_explicit_diffkv_backend_checks_actual_value_dimension(
+    sm90_config,
+    monkeypatch,
+    cache_dtype,
+    has_sinks,
+    head_size,
+    head_size_v,
+    is_diffusion,
+    expected_version,
+):
+    """Forcing the backend cannot skip FP8 Diff-KV rejection at construction."""
+    sm90_config.cache_config.cache_dtype = cache_dtype
+    sm90_config.model_config.is_diffusion = is_diffusion
+    monkeypatch.setattr(
+        flash_attn_diffkv.FlashAttentionDiffKVBackend, "head_size_v", head_size_v
+    )
+
+    def init_base(self):
+        self.head_size = head_size
+        self.kv_cache_dtype = cache_dtype
+        self.alibi_slopes = None
+        self.sinks = torch.zeros(8) if has_sinks else None
+
+    # Isolate the subclass check after the base constructor's equal-dim checks.
+    monkeypatch.setattr(flash_attn.FlashAttentionImpl, "__init__", init_base)
+    if expected_version is not None:
+        impl = flash_attn_diffkv.FlashAttentionDiffKVImpl()
+        assert impl.vllm_flash_attn_version == expected_version
+    else:
+        with pytest.raises(
+            NotImplementedError, match="Triton Diff-KV does not support"
+        ):
+            flash_attn_diffkv.FlashAttentionDiffKVImpl()
+
+
+@pytest.mark.parametrize(
+    "head_size,is_diffusion,fa_version,cache_dtype,expected",
+    [
+        (128, False, None, "fp8", True),
+        (256, False, None, "fp8", True),
+        (384, False, None, "fp8", False),
+        (512, False, None, "fp8", True),
+        (256, True, None, "fp8", False),
+        (512, True, None, "fp8", True),
+        (256, False, 4, "fp8", False),
+        (256, True, 4, "bfloat16", True),
+    ],
+)
+def test_equal_dim_sm90_support_matrix(
+    sm90_config, head_size, is_diffusion, fa_version, cache_dtype, expected
+):
+    """Allow d512 dynamic causal, preserving only applicable smaller FP8 FA3 paths."""
+    sm90_config.model_config.is_diffusion = is_diffusion
+    sm90_config.attention_config.flash_attn_version = fa_version
+    sm90_config.cache_config.cache_dtype = cache_dtype
+    reason = flash_attn.FlashAttentionBackend.supports_combination(
+        head_size,
+        torch.bfloat16,
+        cache_dtype,
+        64,
+        False,
+        False,
+        False,
+        False,
+        DeviceCapability(9, 0),
+    )
+    assert (reason is None) == expected
+
+
+@pytest.mark.parametrize("block_size", [None, 32, 64, 96, 256])
+def test_d512_fp8_framework_blocks_can_split_into_kernel_pages(sm90_config, block_size):
+    """Larger framework blocks remain usable with fixed 64-token kernel pages."""
+    reason = flash_attn.FlashAttentionBackend.supports_combination(
+        512,
+        torch.bfloat16,
+        "fp8",
+        block_size,
+        False,
+        False,
+        False,
+        False,
+        DeviceCapability(9, 0),
+    )
+    assert (reason is None) == (block_size is None or block_size % 64 == 0)
+
+
+def test_d512_fp8_sinks_supported_but_block_sparsity_rejected(sm90_config):
+    sm90_config.model_config.is_diffusion = True
+    for use_sparse in (False, True):
+        reason = flash_attn.FlashAttentionBackend.supports_combination(
+            512,
+            torch.bfloat16,
+            "fp8",
+            64,
+            False,
+            True,
+            use_sparse,
+            False,
+            DeviceCapability(9, 0),
+        )
+        assert (reason is None) == (not use_sparse)
+        if use_sparse:
+            assert "block sparsity" in reason
+            assert "Triton" not in reason
