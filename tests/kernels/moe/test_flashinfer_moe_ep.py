@@ -12,7 +12,10 @@ the DeepGEMM kernel (FP8 activations and FP4 weights, power-of-two scales per
 bit.
 """
 
+import importlib
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 import torch
@@ -22,6 +25,7 @@ from tests.distributed.eplb_utils import distributed_run, set_env_vars_and_devic
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import FLASHINFER_MOE_EP_CUTEDSL, FLASHINFER_MOE_EP_DEEP_GEMM
 from vllm.distributed.parallel_state import ensure_model_parallel_initialized
+from vllm.model_executor.layers.fused_moe import flashinfer_moe_ep as fi_ep
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -287,6 +291,38 @@ def _init_warmup_forward(
                 )
         finally:
             adapter.destroy()
+
+
+def test_deep_gemm_alias_reuses_vendored_submodules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """FlashInfer's ``from deep_gemm.utils import ...`` reuses the vendored modules.
+
+    Re-running them under the alias re-initializes DeepGEMM's pybind11 ``_C``
+    ("type ... is already registered"). Needs no GPU.
+    """
+    pkg = tmp_path / "fake_vllm" / "deep_gemm"
+    (pkg / "utils").mkdir(parents=True)
+    (pkg.parent / "__init__.py").touch()
+    (pkg / "__init__.py").write_text("from . import _C, utils\n")
+    (pkg / "_C.py").write_text("def cast():\n    pass\n")
+    (pkg / "utils" / "__init__.py").write_text("from .._C import cast\n")
+    monkeypatch.syspath_prepend(tmp_path)
+    for name in [n for n in sys.modules if n.partition(".")[0] == "deep_gemm"]:
+        monkeypatch.delitem(sys.modules, name)
+    try:
+        vendored = importlib.import_module("fake_vllm.deep_gemm")
+        vendored_utils, vendored_c = vendored.utils, vendored._C
+        monkeypatch.setattr(fi_ep, "_import_deep_gemm", lambda: vendored)
+        fi_ep._expose_deep_gemm_to_flashinfer()
+        utils = importlib.import_module("deep_gemm.utils")
+        c_ext = sys.modules["deep_gemm._C"]
+    finally:
+        for name in list(sys.modules):
+            if name.partition(".")[0] in ("deep_gemm", "fake_vllm"):
+                del sys.modules[name]
+    assert utils is vendored_utils
+    assert c_ext is vendored_c
 
 
 @pytest.mark.skipif(

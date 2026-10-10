@@ -278,7 +278,12 @@ def _expose_deep_gemm_to_flashinfer() -> None:
         raise RuntimeError(
             "FlashInfer MoE-EP DeepGEMM requires a usable DeepGEMM installation"
         )
-    sys.modules.setdefault("deep_gemm", deep_gemm)
+    # Alias the loaded submodules too: importing the vendored ones again as
+    # deep_gemm.* would re-initialize DeepGEMM's pybind11 extension.
+    prefix = deep_gemm.__name__
+    for name, module in list(sys.modules.items()):
+        if name == prefix or name.startswith(f"{prefix}."):
+            sys.modules.setdefault("deep_gemm" + name.removeprefix(prefix), module)
 
 
 class FlashInferMoeEp:
