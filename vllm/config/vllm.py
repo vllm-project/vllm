@@ -2414,8 +2414,12 @@ class VllmConfig:
                 )
                 decode_query_len = self.uniform_decode_query_len
                 max_num_seqs = self.scheduler_config.max_num_seqs
+                # Keep a 512-token floor so short prefills stay in CUDA graphs
+                # at small max_num_seqs; 2 * max_num_seqs alone sends them to
+                # eager mode.
                 max_cudagraph_capture_size = min(
-                    max_num_seqs * decode_query_len * 2, default_max_graph_size
+                    max(max_num_seqs * decode_query_len * 2, 512),
+                    default_max_graph_size,
                 )
                 if decode_query_len > 1:
                     # A uniform decode batch is decode_query_len tokens per
@@ -2549,6 +2553,13 @@ class VllmConfig:
                 # users explicitly configure wider capture sizes.
                 cudagraph_capture_sizes += [
                     size for size in uniform_decode_sizes if size <= max_num_tokens
+                ]
+                # Capture the explicit compile_sizes as well; the dispatcher
+                # rejects a compile size that padding would change.
+                cudagraph_capture_sizes += [
+                    size
+                    for size in self.compilation_config.compile_sizes or []
+                    if isinstance(size, int) and size <= max_cudagraph_capture_size
                 ]
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
