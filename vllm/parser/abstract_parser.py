@@ -817,6 +817,30 @@ class DelegatingParser(Parser):
                     delta_message = DeltaMessage()
                 delta_message.content = (delta_message.content or "") + promoted
 
+        # A legacy reasoning parser may still hold back a trailing delta
+        # that was waiting to see whether it grows into a marker; at end of
+        # stream it never will, so give the parser a chance to flush it.
+        # Engine-based parsers flush separately in _flush_engine_parsers.
+        reasoning_parser = self._reasoning_parser
+        if reasoning_parser is not None and not getattr(
+            reasoning_parser, "engine_based_streaming", False
+        ):
+            finish = getattr(reasoning_parser, "finish_streaming", None)
+            if finish is not None:
+                flush_delta = finish()
+                if flush_delta is not None:
+                    if delta_message is None:
+                        delta_message = flush_delta
+                    else:
+                        if flush_delta.reasoning:
+                            delta_message.reasoning = (
+                                delta_message.reasoning or ""
+                            ) + flush_delta.reasoning
+                        if flush_delta.content:
+                            delta_message.content = (
+                                delta_message.content or ""
+                            ) + flush_delta.content
+
         self._append_unstreamed_tool_args(delta_message)
         return delta_message
 
