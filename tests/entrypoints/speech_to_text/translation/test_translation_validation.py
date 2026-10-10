@@ -11,6 +11,7 @@ import numpy as np
 import openai
 import pytest
 import pytest_asyncio
+import regex as re
 import soundfile as sf
 
 from tests.entrypoints.speech_to_text.conftest import add_attention_backend
@@ -154,6 +155,31 @@ async def test_basic_audio(foscolo, client_and_model):
     )
     out = json.loads(translation)["text"].strip().lower()
     assert "greek sea" in out
+
+
+# NOTE: `foscolo` is not used here: Whisper in translate mode emits no closing
+# timestamp for it, so verbose_json/srt/vtt all yield zero segments (see #58029).
+@pytest.mark.asyncio
+async def test_audio_srt_format(mary_had_lamb, client_and_model):
+    client, model_name = client_and_model
+    request = dict(
+        model=model_name,
+        file=mary_had_lamb,
+        response_format="srt",
+        extra_body=dict(language="en", to_language="en"),
+        temperature=0.0,
+    )
+    if "whisper" not in model_name.lower():
+        # srt/vtt need segment timestamps, which only Whisper-style models emit
+        with pytest.raises(openai.BadRequestError):
+            await client.audio.translations.create(**request)
+        return
+    translation = await client.audio.translations.create(**request)
+    assert translation.startswith("1\n")
+    assert re.search(
+        r"\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}", translation
+    )
+    assert "lamb" in translation.lower()
 
 
 @pytest.mark.asyncio
