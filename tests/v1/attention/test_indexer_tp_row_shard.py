@@ -54,43 +54,27 @@ def test_shard_narrowing_covers_every_row_once(world: int) -> None:
 def test_shard_exchange_reassembles_rows_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The in-place exchange passes the buffer's own full-width prefill rows
-    as gather destination and local slice as source — both contiguous, which
-    is what lets PyNCCL skip the output allocation — and writes land only on
-    real prefill rows: leading decode rows and trailing CUDA-graph padding
-    stay untouched, with the tile-padded width exchanged."""
+    """Gathered indices land only on real prefill rows: leading decode rows
+    and trailing CUDA-graph padding stay untouched, and the full k-pool
+    width (tail columns included) is exchanged."""
     decode, pad, topk, kpool = 5, 3, 8, 4
     width = topk + kpool - 1
-    padded_width = (width + 127) // 128 * 128
     sizes = [17, 9, 21]
-    buffer = torch.full(
-        (decode + sum(sizes) + pad, padded_width), -7, dtype=torch.int32
-    )
-    gathered = torch.arange(sum(sizes) * padded_width, dtype=torch.int32).reshape(
-        -1, padded_width
-    )
+    buffer = torch.full((decode + sum(sizes) + pad, width), -7, dtype=torch.int32)
+    gathered = torch.arange(sum(sizes) * width, dtype=torch.int32).reshape(-1, width)
     calls = []
 
     def fake_group():
-        def all_gatherv(output_tensor, input_tensor, sizes):
-            calls.append((output_tensor, input_tensor, sizes))
-            output_tensor.copy_(gathered)
+        def all_gatherv(local, dim, sizes):
+            calls.append((local, sizes))
+            return gathered
 
-        return SimpleNamespace(
-            device_communicator=SimpleNamespace(
-                pynccl_comm=SimpleNamespace(disabled=False, all_gatherv=all_gatherv)
-            )
-        )
+        return SimpleNamespace(all_gatherv=all_gatherv)
 
     monkeypatch.setattr(sparse_indexer, "get_tp_group", fake_group)
     for rank in range(len(sizes)):
-        PrefillRowShard(decode, sizes, rank).exchange_topk(buffer)
-        dst, src, arg_sizes = calls[-1]
-        start = decode + sum(sizes[:rank])
-        assert arg_sizes == sizes
-        assert dst.shape == (sum(sizes), padded_width) and dst.is_contiguous()
-        assert src.data_ptr() == buffer[start].data_ptr()
-        assert src.shape == (sizes[rank], padded_width) and src.is_contiguous()
+        PrefillRowShard(decode, sizes, rank).exchange_topk(buffer, width)
+    assert calls[0][1] == sizes and calls[0][0].is_contiguous()
     torch.testing.assert_close(buffer[decode : decode + sum(sizes)], gathered)
     assert torch.all(buffer[:decode] == -7), "decode rows stay outside"
     assert torch.all(buffer[decode + sum(sizes) :] == -7), "padding untouched"
