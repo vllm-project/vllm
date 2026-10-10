@@ -26,7 +26,9 @@ class AllocationData:
 
 
 class MemAllocator(Protocol):
-    def use_memory_pool(self, tag: str | None = None) -> AbstractContextManager: ...
+    def use_memory_pool(
+        self, tag: str | None = None, host_pinned: bool = False
+    ) -> AbstractContextManager: ...
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None: ...
 

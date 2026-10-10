@@ -103,6 +103,35 @@ CUresult error_code = no_error;  // store error code
 static PyObject* g_python_malloc_callback = nullptr;
 static PyObject* g_python_free_callback = nullptr;
 
+// Host-NUMA placement for the allocations made while it is set (-1 = device
+// memory). Python turns it on around the KV-cache pool when the KV cache must
+// be host-pinned: on UMA parts such as GB10 only host memory is
+// RDMA-registrable.
+static int g_host_numa_node = -1;
+
+static bool host_numa_active() {
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12020
+  return g_host_numa_node >= 0;
+#else
+  return false;
+#endif
+}
+
+static void fill_alloc_prop(CUmemAllocationProp* prop,
+                            unsigned long long device) {
+  prop->type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop->allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12020
+  if (host_numa_active()) {
+    prop->location.type = CU_MEM_LOCATION_TYPE_HOST_NUMA;
+    prop->location.id = g_host_numa_node;
+    return;
+  }
+#endif
+  prop->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop->location.id = device;
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions:
 
@@ -126,25 +155,22 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   ensure_context(device);
   // Define memory allocation properties
   CUmemAllocationProp prop = {};
-  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  prop.location.id = device;
-  prop.allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
+  fill_alloc_prop(&prop, device);
 
 #ifndef USE_ROCM
   int flag = 0;
   CUresult rdma_result = cuDeviceGetAttribute(
       &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
       device);
-  if (rdma_result == CUDA_SUCCESS &&
-      flag) {  // support GPUDirect RDMA if possible
+  if (rdma_result == CUDA_SUCCESS && flag &&
+      !host_numa_active()) {  // support GPUDirect RDMA if possible
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
   int fab_flag = 0;
   CUresult fab_result = cuDeviceGetAttribute(
       &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
-  if (fab_result == CUDA_SUCCESS &&
-      fab_flag) {  // support fabric handle if possible
+  if (fab_result == CUDA_SUCCESS && fab_flag &&
+      !host_numa_active()) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
 #endif
@@ -207,11 +233,11 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   // Also map for the host, as PyTorch does for its expandable segments: on
   // ROCm >= 7.2, Tensor.item() on a large-BAR device dereferences VRAM
   // directly from the host, which segfaults on a device-only mapping.
-  constexpr int num_desc = 2;
+  int num_desc = 2;
 #else
-  constexpr int num_desc = 1;
+  int num_desc = 1;
 #endif
-  CUmemAccessDesc accessDesc[num_desc] = {};
+  CUmemAccessDesc accessDesc[2] = {};
   accessDesc[0].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   accessDesc[0].location.id = device;
   accessDesc[0].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
@@ -219,6 +245,15 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   accessDesc[1].location.type = hipMemLocationTypeHost;
   accessDesc[1].location.id = 0;  // ignored
   accessDesc[1].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+#endif
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12020
+  if (host_numa_active()) {
+    // Host-pinned backing: the CPU (and the NIC through ibv_reg_mr) see it too.
+    accessDesc[1].location.type = CU_MEM_LOCATION_TYPE_HOST_NUMA;
+    accessDesc[1].location.id = g_host_numa_node;
+    accessDesc[1].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    num_desc = 2;
+  }
 #endif
 
   CUDA_CHECK(cuMemSetAccess(d_mem, size, accessDesc, num_desc));
@@ -342,10 +377,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
   // Define memory allocation properties
   CUmemAllocationProp prop = {};
-  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  prop.location.id = device;
-  prop.allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
+  fill_alloc_prop(&prop, device);
 
   // Check if the allocation is supported
   size_t granularity;
@@ -799,7 +831,41 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   Py_RETURN_NONE;
 }
 
+// set_host_numa_node(device, enable): route the allocations that follow to
+// host-pinned memory on the device's host NUMA node, or back to device memory.
+static PyObject* python_set_host_numa_node(PyObject* self, PyObject* args) {
+  int device, enable;
+  if (!PyArg_ParseTuple(args, "ip", &device, &enable)) {
+    return nullptr;
+  }
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12020
+  if (!enable) {
+    g_host_numa_node = -1;
+    Py_RETURN_NONE;
+  }
+  ensure_context(device);
+  int numa = 0;
+  if (cuDeviceGetAttribute(&numa, CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID, device) !=
+          CUDA_SUCCESS ||
+      numa < 0) {
+    numa = 0;
+  }
+  g_host_numa_node = numa;
+  Py_RETURN_NONE;
+#else
+  if (enable) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "host-pinned cumem allocations need CUDA >= 12.2");
+    return nullptr;
+  }
+  Py_RETURN_NONE;
+#endif
+}
+
 static PyMethodDef module_methods[] = {
+    {"set_host_numa_node", (PyCFunction)python_set_host_numa_node, METH_VARARGS,
+     "Place the following allocations in host-pinned memory (enable=True) or "
+     "device memory (enable=False)."},
     {"init_module", (PyCFunction)py_init_module, METH_VARARGS,
      "Initialize module with python_malloc and python_free callables."},
     {"python_create_and_map", (PyCFunction)python_create_and_map, METH_VARARGS,

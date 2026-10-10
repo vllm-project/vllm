@@ -726,6 +726,13 @@ class NixlBaseConnectorWorker:
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported."
             )
+        if (
+            vllm_config.cache_config.kv_cache_host_pinned
+            and self.kv_buffer_device == "cuda"
+        ):
+            # CUDA tensors backed by host-pinned memory: register them as DRAM
+            # so UCX takes the plain ibv_reg_mr path, no GDR and no staging.
+            nixl_memory_type = "DRAM"
         self.nixl_memory_type = nixl_memory_type
 
         # Note: host xfer buffer ops when use_host_buffer is True

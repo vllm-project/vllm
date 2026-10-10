@@ -481,3 +481,38 @@ def test_cudagraph_pool_sleep(level):
     weight.fill_(2.0)  # Level 2 discards weights; emulate the reload.
     held[0].replay()
     assert torch.equal(held[1], torch.full_like(x, 5.0))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="host-pinned cumem pool is CUDA only"
+)
+@create_new_process_for_each_test("fork")
+def test_host_pinned_pool():
+    """`use_memory_pool(host_pinned=True)` hands out CUDA tensors whose
+    backing is host-pinned memory: the GPU computes on them and the CPU can
+    dereference them directly; the placement flag resets after the context."""
+    import ctypes
+
+    allocator = get_mem_allocator_instance()
+    n = 1 << 20
+    with allocator.use_memory_pool(tag="kv_cache", host_pinned=True):
+        x = torch.arange(n, dtype=torch.int32, device="cuda")
+    assert x.device.type == "cuda"
+    x += 1
+    torch.accelerator.synchronize()
+    assert int(x[0]) == 1 and int(x[-1]) == n
+    # host-pinned backing: readable from the CPU without a copy
+    host_view = (ctypes.c_int32 * 4).from_address(x.data_ptr())
+    assert list(host_view) == [1, 2, 3, 4]
+    assert mapped_usage(allocator) == x.untyped_storage().nbytes()
+
+    # outside the context the pool is back to device memory, and the two
+    # kinds of allocation coexist in the allocator's bookkeeping
+    with allocator.use_memory_pool(tag="kv_cache"):
+        y = torch.ones(n, dtype=torch.int32, device="cuda")
+    assert int(y.sum()) == n
+    assert len(allocator.pointer_to_data) == 2
+    del x, y
+    gc.collect()
+    torch.accelerator.empty_cache()
+    assert mapped_usage(allocator) == 0
