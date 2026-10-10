@@ -1334,6 +1334,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 w1_bias=getattr(layer, "w13_bias", None),
                 w2_bias=getattr(layer, "w2_bias", None),
                 per_act_token_quant=False,
+                per_out_ch_quant=(self.weight_qscheme == "per_channel"),
             )
         return make_int8_moe_quant_config(
             int8_backend=self.int8_backend,
@@ -1344,6 +1345,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
             per_act_token_quant=(self.weight_qscheme == "per_channel"),
+            per_out_ch_quant=(self.weight_qscheme == "per_channel"),
             layer=layer,
         )
 
