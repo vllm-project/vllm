@@ -5,7 +5,6 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, overload
 
-import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
@@ -225,13 +224,6 @@ class LLM(
         """LLM constructor."""
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
-
-        if "worker_cls" in kwargs:
-            worker_cls = kwargs["worker_cls"]
-            # if the worker_cls is not qualified string name,
-            # we serialize it using cloudpickle to avoid pickling issues
-            if isinstance(worker_cls, type):
-                kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
         if "kv_transfer_config" in kwargs and isinstance(
             kwargs["kv_transfer_config"], dict
