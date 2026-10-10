@@ -8,6 +8,37 @@ namespace cpu_attention {
 
 namespace {
 
+#if defined(__AVX2__) && !defined(__AVX512F__)
+// Keep the accumulators in the 16 AVX2 vector registers.
+template <int32_t M, int32_t N, typename scalar_t>
+void gemm_avx2(float* __restrict__ a, scalar_t* __restrict__ b,
+               float* __restrict__ c, const int64_t lda, const int64_t ldb,
+               const int64_t ldc, const int32_t k_size, const bool accum_c) {
+  constexpr int32_t width = std::is_same_v<scalar_t, float> ? 16 : 8;
+  static_assert(M * width <= 64);
+  using fp32_vec_t =
+      std::conditional_t<width == 16, vec_op::FP32Vec16, vec_op::FP32Vec8>;
+  using load_vec_t =
+      std::conditional_t<width == 16, fp32_vec_t, vec_op::vec_t<scalar_t>>;
+  for (int32_t col = 0; col < N; col += width) {
+    fp32_vec_t c_regs[M];
+    if (accum_c) {
+      vec_op::unroll_loop<int32_t, M>(
+          [&](int32_t row) { c_regs[row] = fp32_vec_t(c + row * ldc + col); });
+    }
+    for (int32_t k = 0; k < k_size; ++k) {
+      fp32_vec_t b_reg(load_vec_t(b + k * ldb + col));
+      vec_op::unroll_loop<int32_t, M>([&](int32_t row) {
+        fp32_vec_t a_reg(a[row * lda + k]);
+        c_regs[row] = c_regs[row] + a_reg * b_reg;
+      });
+    }
+    vec_op::unroll_loop<int32_t, M>(
+        [&](int32_t row) { c_regs[row].save(c + row * ldc + col); });
+  }
+}
+#endif
+
 // Load 32 kv_cache_t elements starting at ptr and return them as two FP32Vec16s
 // covering the lower 16 and upper 16 positions.
 // For FP8: both halves come from a single BF16Vec32 dequant of 32 bytes.
@@ -33,7 +64,7 @@ FORCE_INLINE std::pair<vec_op::FP32Vec16, vec_op::FP32Vec16> load_b_pair_vec(
 }
 
 // 8-2-16 pattern, 8 regs for A, 2 regs for B, 16 regs for C, [8, K] @ [k, 32]
-template <typename kv_cache_t>
+template <typename kv_cache_t, bool prefill = false>
 class TileGemm82 {
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -80,6 +111,23 @@ class TileGemm82 {
                          const int32_t block_size, const int32_t dynamic_k_size,
                          const bool accum_c) {
     static_assert(0 < M && M <= 8);
+
+#if defined(__AVX2__) && !defined(__AVX512F__)
+    if constexpr (prefill && M > 2 &&
+                  (std::is_same_v<kv_cache_t, float> ||
+                   std::is_same_v<kv_cache_t, c10::Half> ||
+                   std::is_same_v<kv_cache_t, c10::BFloat16>)) {
+      constexpr int32_t rows = std::is_same_v<kv_cache_t, float> ? 4 : M;
+      gemm_avx2<rows, 32>(a_tile, b_tile, c_tile, lda, ldb, ldc, dynamic_k_size,
+                          accum_c);
+      if constexpr (M > rows) {
+        gemm_avx2<M - rows, 32>(a_tile + rows * lda, b_tile,
+                                c_tile + rows * ldc, lda, ldb, ldc,
+                                dynamic_k_size, accum_c);
+      }
+      return;
+    }
+#endif
 
     float* __restrict__ curr_c_0 = c_tile;
     float* __restrict__ curr_c_1 = c_tile + 16;
@@ -195,6 +243,16 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_scalar_t> {
         scale *= k_scale * 0x1p8f;
       }
     }
+#if defined(__AVX2__) && !defined(__AVX512F__)
+    if constexpr (!fp8_kv) {
+      // A decode tile can contain several GQA heads, but only one token.
+      if (q_token_num > 1) {
+        attention<TileGemm82<kv_cache_t, true>> attention_iteration;
+        attention_iteration(CPU_ATTENTION_PARAMS);
+        return;
+      }
+    }
+#endif
     attention<TileGemm82<kv_cache_t>> attention_iteration;
     attention_iteration(CPU_ATTENTION_PARAMS);
   }
