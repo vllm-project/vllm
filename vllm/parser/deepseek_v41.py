@@ -46,6 +46,7 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
             _dsml_arg_converter,
             param_re=_PARAM_RE,
             partial_param_re=_PARTIAL_PARAM_RE,
+            defer_invalid_partial=True,
         ),
     )
 
