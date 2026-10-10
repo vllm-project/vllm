@@ -75,10 +75,15 @@ class OpenAIServingRealtime(GenerateBaseServing):
 
         # mypy is being stupid
         # TODO(Patrick) - fix this
+        # [EXPERIMENTAL] Unbounded sessions re-anchor instead of stopping at
+        # max_model_len, so the model must not cap its input stream.
+        kwargs = {}
+        if self.engine_client.vllm_config.scheduler_config.enable_realtime_unbounded:
+            kwargs["unbounded"] = True
         stream_input_iter = cast(
             AsyncGenerator[PromptType, None],
             self.model_cls.buffer_realtime_audio(
-                audio_stream, input_stream, model_config
+                audio_stream, input_stream, model_config, **kwargs
             ),
         )
 
