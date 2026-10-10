@@ -224,6 +224,7 @@ class MiMoV2MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.model = MiMoV2MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -257,6 +258,10 @@ class MiMoV2MTP(nn.Module):
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if self.quant_config is not None and (
+            cache_scale_mapper := self.quant_config.get_cache_scale_mapper()
+        ):
+            weights = cache_scale_mapper.apply(weights)
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
 
