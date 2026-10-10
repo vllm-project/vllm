@@ -104,6 +104,35 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     assert config.compute_hash() != fixed_hash
 
 
+def test_kv_cache_dtype_model_dtype_mismatch_raises():
+    vllm_config = object.__new__(VllmConfig)
+    vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    vllm_config.cache_config = SimpleNamespace(cache_dtype="float16")
+    with pytest.raises(ValueError, match="kv_cache_dtype 'float16' is incompatible"):
+        vllm_config._validate_cache_config()
+
+    vllm_config.model_config = SimpleNamespace(dtype=torch.float16)
+    vllm_config.cache_config = SimpleNamespace(cache_dtype="bfloat16")
+    with pytest.raises(ValueError, match="kv_cache_dtype 'bfloat16' is incompatible"):
+        vllm_config._validate_cache_config()
+
+    # Matching dtypes should not raise
+    vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    vllm_config.cache_config = SimpleNamespace(cache_dtype="bfloat16")
+    vllm_config._validate_cache_config()
+
+    vllm_config.model_config = SimpleNamespace(dtype=torch.float16)
+    vllm_config.cache_config = SimpleNamespace(cache_dtype="float16")
+    vllm_config._validate_cache_config()
+
+    # auto and fp8 should not raise
+    vllm_config.cache_config = SimpleNamespace(cache_dtype="auto")
+    vllm_config._validate_cache_config()
+
+    vllm_config.cache_config = SimpleNamespace(cache_dtype="fp8")
+    vllm_config._validate_cache_config()
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")

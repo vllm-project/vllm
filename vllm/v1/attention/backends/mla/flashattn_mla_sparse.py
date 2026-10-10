@@ -95,6 +95,17 @@ class FlashAttnMLASparseBackend(AttentionBackend):
                 "FlashAttention MLA Sparse currently supports only FP16/BF16 KV cache"
             )
 
+        if (
+            kv_cache_dtype in ("float16", "bfloat16")
+            and dtype in (torch.float16, torch.bfloat16)
+        ):
+            expected_kv_dtype = "float16" if dtype == torch.float16 else "bfloat16"
+            if kv_cache_dtype != expected_kv_dtype:
+                return (
+                    "FlashAttention MLA Sparse requires query and key to have the same dtype, "
+                    f"but got model dtype={dtype} and kv_cache_dtype='{kv_cache_dtype}'"
+                )
+
         if not flash_attn_supports_mla():
             return "FlashAttention MLA not supported on this device"
 
