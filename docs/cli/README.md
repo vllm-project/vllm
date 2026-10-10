@@ -232,7 +232,8 @@ See [vllm run-batch](./run-batch.md) for the full reference of all available arg
 Launch weight cache daemons (one per GPU) that hold the post-quantized,
 TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
 over a Unix domain socket. Restarting engines then map the weights via
-zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
+zero-copy IPC instead of reloading from disk, so the weight-loading part of
+an engine restart takes seconds instead of minutes.
 
 ```bash
 # Launch one daemon per GPU
@@ -244,15 +245,21 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
 ```
 
 The daemon accepts the standard engine arguments (model, dtype, quantization,
-tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
-directory holding the per-GPU Unix sockets, and `--weight-cache-master-port` /
-`--weight-cache-draft-master-port` to pin the daemon rendezvous ports for
-multi-node and speculative-decoding setups. Tensor, expert and data
-parallelism are supported; pipeline parallelism is rejected at launch.
+tensor-parallel-size, ...), which must match the engine's, plus:
 
-See [Preload](../features/preload.md) for how it works, cache modes, and
-limitations, and [vllm preload](./preload.md) for the full reference of all
-available arguments.
+- `--weight-cache-socket-dir` to override the directory holding the per-GPU
+  Unix sockets (required when the daemon and the engine run in different
+  containers).
+- `--weight-cache-health-port` / `--weight-cache-health-host` to expose a
+  `/health` readiness endpoint for Docker health checks and Kubernetes probes.
+- `--weight-cache-master-port` / `--weight-cache-draft-master-port` for the
+  daemons' own rendezvous in multi-node setups.
+
+Tensor, pipeline, expert and data parallelism are supported.
+
+See [Preload](../features/preload.md) for how it works, cache modes, Docker
+and Kubernetes deployment, and limitations, and [vllm preload](./preload.md)
+for the full reference of all available arguments.
 
 ## More Help
 
