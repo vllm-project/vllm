@@ -29,7 +29,7 @@ from vllm.models.kimi_k3.amd.mono.layer import compile_mono_moe
 # Calls of up to M_MAX tokens take the launch. Each is compiled, and gets its
 # workspace, for its token count rounded up to a whole m-block (_bucket), so
 # the shared expert loops over no more m-blocks than the call has.
-M_MAX = 4 * BM
+M_MAX = 2 * BM
 G1_BN = 128
 # gemm1 switches to this tile width once routing yields many m-blocks.
 G1_BN_WIDE = 256
