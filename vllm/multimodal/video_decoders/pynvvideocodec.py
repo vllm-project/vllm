@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 import os
 import tempfile
 import threading
@@ -30,12 +31,19 @@ def decode_pynvvideocodec(
     sampling_kwargs: dict,
     *,
     hw_decoders: int = PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+    max_width: int | None = None,
+    max_height: int | None = None,
 ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
+    max_width, max_height = validate_pynvvideocodec_max_dimensions(
+        max_width, max_height
+    )
     PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(hw_decoders)
     return PyNvVideoCodecVideoBackendMixin.decode_frames_pynvvideocodec(
         loader_cls,
         data,
         target,
+        max_width=max_width,
+        max_height=max_height,
         **sampling_kwargs,
     )
 
@@ -51,6 +59,8 @@ class PyNvVideoCodecSourceMetadata(NamedTuple):
 # Per-decoder upper bound reserved for persistent PyNvVideoCodec surfaces.
 PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
 PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
+# Bound native frame surfaces retained by each batch decode call.
+PYNVVIDEOCODEC_DECODE_BATCH_SIZE = 32
 # Per-API-server CUDA context and driver allocation, measured with
 # PyNvVideoCodec 2.0.4 on H100.
 PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES = int(1.8 * 1024 * MiB_bytes)
@@ -64,6 +74,25 @@ def validate_pynvvideocodec_hw_decoders(hw_decoders: object) -> int:
     ):
         raise ValueError("hw_decoders must be a positive integer")
     return hw_decoders
+
+
+def validate_pynvvideocodec_max_dimensions(
+    max_width: object,
+    max_height: object,
+) -> tuple[int | None, int | None]:
+    if max_width is None and max_height is None:
+        return None, None
+    if max_width is None or max_height is None:
+        raise ValueError("max_width and max_height must be set together")
+    if isinstance(max_width, bool) or not isinstance(max_width, int) or max_width < 1:
+        raise ValueError("max_width must be a positive integer")
+    if (
+        isinstance(max_height, bool)
+        or not isinstance(max_height, int)
+        or max_height < 1
+    ):
+        raise ValueError("max_height must be a positive integer")
+    return max_width, max_height
 
 
 def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
@@ -90,22 +119,52 @@ class PyNvVideoCodecDecoderSlot:
     existing decoder at each new source instead of paying a fresh
     ``SimpleDecoder`` construction per request. Construction (CUVID parser +
     decoder + surface-pool allocation) is the dominant per-request cost, so
-    reconfiguring is far cheaper. A single decoder serves both metadata
-    (``len``/``get_stream_metadata``) and frame decode -- no separate
-    metadata decoder.
+    reconfiguring is far cheaper. Decoder dimensions are bounded at construction
+    so resolution changes do not replace its native frame pool. A single decoder
+    serves both metadata (``len``/``get_stream_metadata``) and frame decode -- no
+    separate metadata decoder.
     """
 
     def __init__(self, stream) -> None:
         self.stream = stream
         self.decoder = None
         self.source_path: str | None = None
+        self.max_width = 0
+        self.max_height = 0
 
     def invalidate(self) -> None:
+        decoder = self.decoder
         self.decoder = None
         self.source_path = None
+        self.max_width = 0
+        self.max_height = 0
+        if decoder is not None:
+            with suppress(Exception):
+                decoder.stop()
 
-    def _construct(self, file_path: str, nvc, device_index: int) -> None:
+    def recover(self) -> None:
+        """Release decoder resources and drain work after a failed request."""
         self.invalidate()
+        gc.collect()
+
+        with suppress(Exception):
+            self.stream.synchronize()
+
+        with suppress(Exception):
+            import torch
+
+            with torch.cuda.device(self.stream.device):
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
+    def _construct(
+        self,
+        file_path: str,
+        nvc,
+        device_index: int,
+        max_width: int,
+        max_height: int,
+    ) -> None:
         decoder = nvc.SimpleDecoder(
             file_path,
             output_color_type=nvc.OutputColorType.RGB,
@@ -114,20 +173,36 @@ class PyNvVideoCodecDecoderSlot:
             gpu_id=device_index,
             cuda_stream=self.stream.cuda_stream,
             decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+            max_width=max_width,
+            max_height=max_height,
         )
         self.decoder = decoder
         self.source_path = file_path
+        self.max_width = max_width
+        self.max_height = max_height
 
-    def get_decoder(self, file_path: str, nvc, device_index: int):
+    def get_decoder(
+        self,
+        file_path: str,
+        nvc,
+        device_index: int,
+        max_width: int,
+        max_height: int,
+    ):
         if self.decoder is None:
-            self._construct(file_path, nvc, device_index)
+            self._construct(file_path, nvc, device_index, max_width, max_height)
         elif self.source_path != file_path:
-            try:
-                self.decoder.reconfigure_decoder(file_path)
-                self.source_path = file_path
-            except Exception:
-                # reconfigure unsupported/unsafe for this source -> rebuild.
-                self._construct(file_path, nvc, device_index)
+            if max_width > self.max_width or max_height > self.max_height:
+                self.recover()
+                self._construct(file_path, nvc, device_index, max_width, max_height)
+            else:
+                try:
+                    self.decoder.reconfigure_decoder(file_path)
+                    self.source_path = file_path
+                except Exception:
+                    # reconfigure unsupported/unsafe for this source -> rebuild.
+                    self.recover()
+                    self._construct(file_path, nvc, device_index, max_width, max_height)
         return self.decoder
 
 
@@ -222,9 +297,12 @@ class PyNvVideoCodecVideoBackendMixin:
             borrow_succeeded = True
         finally:
             if not borrow_succeeded:
-                slot.invalidate()
+                slot.recover()
             with pool.cond:
-                pool.slots.append(slot)
+                if borrow_succeeded:
+                    pool.slots.append(slot)
+                else:
+                    pool.active -= 1
                 pool.cond.notify()
 
     @staticmethod
@@ -236,18 +314,79 @@ class PyNvVideoCodecVideoBackendMixin:
         return default
 
     @classmethod
+    def _validate_decoder_caps(
+        cls,
+        file_path: str,
+        nvc,
+        max_width: int | None = None,
+        max_height: int | None = None,
+    ) -> tuple[int, int]:
+        demuxer = nvc.CreateDemuxer(file_path)
+        width = demuxer.Width()
+        height = demuxer.Height()
+        caps = nvc.GetDecoderCaps(
+            cls._DEVICE_INDEX,
+            demuxer.GetNvCodecId(),
+            demuxer.ChromaFormat(),
+            demuxer.BitDepth(),
+        )
+        width_min = int(caps["width_min"])
+        width_max = int(caps["width_max"])
+        height_min = int(caps["height_min"])
+        height_max = int(caps["height_max"])
+        mb_num_max = int(caps["mb_num_max"])
+        macroblock_count = ((width + 15) // 16) * ((height + 15) // 16)
+        if (
+            not caps["supported"]
+            or width < width_min
+            or width > width_max
+            or height < height_min
+            or height > height_max
+            or macroblock_count > mb_num_max
+        ):
+            raise ValueError("Invalid or unsupported video file.")
+
+        if max_width is None or max_height is None:
+            return width_max, height_max
+
+        configured_mb_count = ((max_width + 15) // 16) * ((max_height + 15) // 16)
+        if (
+            max_width < width_min
+            or max_width > width_max
+            or max_height < height_min
+            or max_height > height_max
+            or configured_mb_count > mb_num_max
+        ):
+            raise ValueError(
+                "Configured PyNvVideoCodec max_width and max_height are "
+                "outside the hardware decoder limits"
+            )
+        if width > max_width or height > max_height:
+            raise ValueError("Invalid or unsupported video file.")
+        return max_width, max_height
+
+    @classmethod
     def _read_source_metadata(
         cls,
         file_path: str,
         nvc,
+        max_width: int,
+        max_height: int,
     ) -> PyNvVideoCodecSourceMetadata:
         with cls._borrow_decoder_slot() as decoder_slot:
             with cls._torch_stream_context(decoder_slot.stream):
                 decoder = decoder_slot.get_decoder(
-                    file_path, nvc, device_index=cls._DEVICE_INDEX
+                    file_path,
+                    nvc,
+                    device_index=cls._DEVICE_INDEX,
+                    max_width=max_width,
+                    max_height=max_height,
                 )
-                metadata = decoder.get_stream_metadata()
-                total_frames_num = len(decoder)
+                try:
+                    metadata = decoder.get_stream_metadata()
+                    total_frames_num = len(decoder)
+                finally:
+                    del decoder
             width = int(cls._metadata_value(metadata, "width", default=0))
             height = int(cls._metadata_value(metadata, "height", default=0))
             original_fps = float(
@@ -280,6 +419,8 @@ class PyNvVideoCodecVideoBackendMixin:
         file_path: str,
         frame_idx: list[int],
         nvc,
+        max_width: int,
+        max_height: int,
     ) -> npt.NDArray:
         import torch
 
@@ -289,45 +430,79 @@ class PyNvVideoCodecVideoBackendMixin:
         with cls._borrow_decoder_slot() as decoder_slot:
             stream = decoder_slot.stream
             with cls._torch_stream_context(stream):
-                try:
-                    decoder = decoder_slot.get_decoder(
-                        file_path, nvc, device_index=cls._DEVICE_INDEX
+                decoder = decoder_slot.get_decoder(
+                    file_path,
+                    nvc,
+                    device_index=cls._DEVICE_INDEX,
+                    max_width=max_width,
+                    max_height=max_height,
+                )
+                host_frames = None
+                decoded_count = 0
+                for start in range(0, len(frame_idx), PYNVVIDEOCODEC_DECODE_BATCH_SIZE):
+                    chunk_indices = frame_idx[
+                        start : start + PYNVVIDEOCODEC_DECODE_BATCH_SIZE
+                    ]
+                    invalid_video = False
+                    try:
+                        decoded_frames = decoder.get_batch_frames_by_index(
+                            chunk_indices
+                        )
+                    except Exception as exc:
+                        decoder = None
+                        if not isinstance(
+                            exc,
+                            _pynvvideocodec_exception_types(nvc) + (IndexError,),
+                        ):
+                            raise
+                        invalid_video = True
+                    if invalid_video:
+                        raise ValueError("Invalid or unsupported video file.")
+
+                    torch_frames = [
+                        torch.from_dlpack(frame) for frame in decoded_frames
+                    ]
+                    if not torch_frames:
+                        stream.synchronize()
+                        break
+                    device_frames = _pynvvc_frames_to_nhwc(torch.stack(torch_frames))
+                    if device_frames.ndim != 4:
+                        raise ValueError(
+                            "PyNvVideoCodec returned frames with unexpected shape "
+                            f"{tuple(device_frames.shape)}"
+                        )
+                    if host_frames is None:
+                        host_frames = torch.empty(
+                            (len(frame_idx), *device_frames.shape[1:]),
+                            dtype=device_frames.dtype,
+                            device="cpu",
+                            pin_memory=True,
+                        )
+                    elif tuple(device_frames.shape[1:]) != tuple(host_frames.shape[1:]):
+                        raise ValueError(
+                            "PyNvVideoCodec returned frames with inconsistent shapes"
+                        )
+
+                    next_count = decoded_count + len(device_frames)
+                    host_frames[decoded_count:next_count].copy_(
+                        device_frames, non_blocking=True
                     )
-                    decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
-                except Exception as exc:
-                    if not isinstance(
-                        exc,
-                        _pynvvideocodec_exception_types(nvc) + (IndexError,),
-                    ):
-                        raise
-                    raise ValueError("Invalid or unsupported video file.") from exc
-                if len(decoded_frames) < len(frame_idx):
+                    stream.synchronize()
+                    decoded_count = next_count
+                    del decoded_frames, torch_frames, device_frames
+
+                    if decoded_count < start + len(chunk_indices):
+                        break
+
+                if decoded_count < len(frame_idx):
                     logger.warning(
                         "pynvvideocodec video loading: expected %d frames but got %d.",
                         len(frame_idx),
-                        len(decoded_frames),
+                        decoded_count,
                     )
-                torch_frames = [torch.from_dlpack(frame) for frame in decoded_frames]
-                if not torch_frames:
+                if host_frames is None:
                     return np.empty((0,), dtype=np.uint8)
-                device_frames = torch.stack(torch_frames)
-                if device_frames.ndim != 4:
-                    raise ValueError(
-                        "PyNvVideoCodec returned frames with unexpected shape "
-                        f"{tuple(device_frames.shape)}"
-                    )
-                device_frames = _pynvvc_frames_to_nhwc(device_frames)
-                host_frames = torch.empty(
-                    device_frames.shape,
-                    dtype=device_frames.dtype,
-                    device="cpu",
-                    pin_memory=True,
-                )
-                host_frames.copy_(device_frames, non_blocking=True)
-                stream.synchronize()
-                host_array = host_frames.numpy()
-                del decoded_frames, torch_frames, device_frames
-                return host_array
+                return host_frames[:decoded_count].numpy()
 
     @classmethod
     def decode_frames_pynvvideocodec(
@@ -335,6 +510,8 @@ class PyNvVideoCodecVideoBackendMixin:
         loader_cls,
         data: bytes,
         target: VideoTargetMetadata,
+        max_width: int | None = None,
+        max_height: int | None = None,
         **kwargs,
     ) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
         import PyNvVideoCodec as nvc
@@ -346,12 +523,31 @@ class PyNvVideoCodecVideoBackendMixin:
             with os.fdopen(temp_fd, "wb") as temp_file:
                 temp_file.write(data)
 
+            invalid_video = False
             try:
-                gpu_source = cls._read_source_metadata(temp_path, nvc)
+                decoder_max_width, decoder_max_height = cls._validate_decoder_caps(
+                    temp_path,
+                    nvc,
+                    max_width=max_width,
+                    max_height=max_height,
+                )
             except Exception as exc:
                 if not isinstance(exc, _pynvvideocodec_exception_types(nvc)):
                     raise
-                raise ValueError("Invalid or unsupported video file.") from exc
+                invalid_video = True
+            if invalid_video:
+                raise ValueError("Invalid or unsupported video file.")
+
+            try:
+                gpu_source = cls._read_source_metadata(
+                    temp_path, nvc, decoder_max_width, decoder_max_height
+                )
+            except Exception as exc:
+                if not isinstance(exc, _pynvvideocodec_exception_types(nvc)):
+                    raise
+                invalid_video = True
+            if invalid_video:
+                raise ValueError("Invalid or unsupported video file.")
             check_frame_pixel_limit(gpu_source.width, gpu_source.height)
             source = loader_cls._prepare_source(gpu_source.source)
             frame_idx = loader_cls.compute_frames_index_to_sample(
@@ -360,10 +556,22 @@ class PyNvVideoCodecVideoBackendMixin:
             raw_frame_bytes = len(frame_idx) * gpu_source.height * gpu_source.width * 3
             pool = get_mm_gpu_ipc_pool()
             if pool is None or raw_frame_bytes == 0:
-                frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
+                frames = cls._decode_to_pinned_host(
+                    temp_path,
+                    frame_idx,
+                    nvc,
+                    decoder_max_width,
+                    decoder_max_height,
+                )
             else:
                 with pool.acquire(raw_frame_bytes):
-                    frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
+                    frames = cls._decode_to_pinned_host(
+                        temp_path,
+                        frame_idx,
+                        nvc,
+                        decoder_max_width,
+                        decoder_max_height,
+                    )
         finally:
             with suppress(FileNotFoundError):
                 os.unlink(temp_path)
