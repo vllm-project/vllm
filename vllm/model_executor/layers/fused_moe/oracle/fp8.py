@@ -843,6 +843,17 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
+    # Standard-format experts do not depend on the prepare/finalize, so build
+    # them first: experts that quantize their own inputs (e.g. FlashInfer
+    # CUTLASS with block FP8) are dispatched unquantized activations, and the
+    # dispatch buffers have to be sized for those.
+    experts: mk.FusedMoEExperts | None = None
+    if experts_cls.activation_format() == mk.FusedMoEActivationFormat.Standard:
+        experts = experts_cls(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+        )
+
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -850,6 +861,11 @@ def make_fp8_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        input_dtype=(
+            moe_config.in_dtype
+            if experts is not None and experts.expects_unquantized_inputs
+            else None
+        ),
     )
     assert prepare_finalize is not None
 
@@ -865,7 +881,7 @@ def make_fp8_moe_kernel(
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
-    else:
+    elif experts is None:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
