@@ -638,6 +638,31 @@ def test_aiter_moe_padding_env_var(
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
 
 
+@pytest.mark.parametrize(
+    ("activation", "use_mxfp4_w4a4", "tp_size", "pads", "expected"),
+    [
+        # Qwen3.8 Flash Next W4A4, N=640 stored at 768: TP1 and EP keep the pad.
+        ("SILU", True, 1, (0, 128), (0, 128)),
+        # gpt-oss W4A16 at TP1 keeps the doubled pad.
+        ("SWIGLUOAI", False, 1, (0, 192), (0, 384)),
+        # BF16 SiLU at TP1 keeps the doubled pad.
+        ("SILU", False, 1, (0, 192), (0, 384)),
+        # SITU passes through unrounded.
+        ("SITU", False, 1, (40, 96), (40, 96)),
+    ],
+)
+def test_aiter_moe_pads(activation, use_mxfp4_w4a4, tp_size, pads, expected):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        aiter_moe_pads,
+    )
+
+    assert (
+        aiter_moe_pads(*pads, MoEActivation[activation], use_mxfp4_w4a4, tp_size)
+        == expected
+    )
+
+
 # a4w4 (FP4 activation) opt-in gating test ---------------------------------
 
 
