@@ -158,6 +158,19 @@ class TestPlotFilters:
         assert filter_obj.var == "request_rate"
         assert filter_obj.target == "inf"
 
+    @pytest.mark.parametrize(
+        "filter_str,expected",
+        [
+            ("label==build==one", ["build==one"]),
+            ("label!=build==one", ["==preview", "other"]),
+            ("label====preview", ["==preview"]),
+        ],
+    )
+    def test_string_target_preserves_operator_characters(self, filter_str, expected):
+        df = pd.DataFrame({"label": ["build==one", "==preview", "other"]})
+        filtered = PlotFilters.parse_str(filter_str).apply(df)
+        assert filtered["label"].tolist() == expected
+
     def test_parse_multiple_filters(self):
         """Test parsing multiple filters."""
         filters = PlotFilters.parse_str("request_rate>5.0,value<=40")
