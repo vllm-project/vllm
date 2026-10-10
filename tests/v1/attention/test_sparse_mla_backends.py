@@ -110,6 +110,7 @@ from vllm.v1.hisparse.runtime import (
     hisparse_prefill_staging_remap,
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -3793,6 +3794,38 @@ def test_flashmla_cache_dtype_aliases_use_ds_layout():
             _canonicalize_sparse_mla_kv_cache_dtype(FlashMLASparseBackend, alias)
             == "fp8_ds_mla"
         )
+
+
+def test_flashmla_builder_reads_fp8_layout_from_spec_not_global_config():
+    # The ds_mla canonicalization is layer-local: cache_config keeps the
+    # user-facing alias while the spec carries the resolved format, so the
+    # builder must take the layout from the spec (crash regression: with a
+    # stale global read the fp8 metadata is never built and the first
+    # forward asserts in _forward_fp8_kv_mixed_batch).
+    vllm_config = create_vllm_config(model_name="deepseek-ai/DeepSeek-V2-Lite-Chat")
+    vllm_config.cache_config.cache_dtype = "fp8"
+    kv_cache_spec = MLAAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.uint8,
+        cache_dtype_str="fp8_ds_mla",
+        state_content_bytes=656,
+    )
+    builder = FlashMLASparseBackend.get_builder_cls()(
+        kv_cache_spec, ["placeholder"], vllm_config, torch.device("cpu")
+    )
+    assert builder.use_fp8_kv_cache is True
+
+
+def test_flashmla_builder_without_spec_dtype_falls_back_to_global_config():
+    vllm_config = create_vllm_config(model_name="deepseek-ai/DeepSeek-V2-Lite-Chat")
+    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    builder = FlashMLASparseBackend.get_builder_cls()(
+        kv_cache_spec, ["placeholder"], vllm_config, torch.device("cpu")
+    )
+    assert builder.use_fp8_kv_cache is True
 
 
 def test_flashmla_common_metadata_requires_uniform_decodes():
