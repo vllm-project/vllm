@@ -1504,6 +1504,17 @@ class VllmConfig:
                 "`--enable-mamba-cache-stochastic-rounding`."
             )
 
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.mamba_config.backend == MambaBackendEnum.TRITON
+            and self.speculative_config is not None
+        ):
+            raise ValueError(
+                "Triton Mamba stochastic rounding is not supported with "
+                "speculative decoding. Use `--mamba-backend flashinfer`, "
+                "or disable `--enable-mamba-cache-stochastic-rounding`."
+            )
+
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
