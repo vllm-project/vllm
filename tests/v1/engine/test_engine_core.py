@@ -65,6 +65,62 @@ def make_request() -> EngineCoreRequest:
     )
 
 
+def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
+    request = make_request()
+    request.request_id = req_id
+    request.sampling_params.max_tokens = max_tokens
+    return request
+
+
+class DummyExecutor(UniProcExecutor):
+    """Executor whose execute_model/sample_tokens run on a thread pool, so
+    tests can drive the concurrent-batch queue without blocking."""
+
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        super().initialize_from_config(kv_cache_configs)
+
+        # Create a thread pool with a single worker
+        self.thread_pool = ThreadPoolExecutor(max_workers=1)
+
+    def execute_model(
+        self,
+        scheduler_output,
+        non_block=False,
+    ) -> Future[ModelRunnerOutput | None]:
+        """Make execute_model non-blocking."""
+        # DummyExecutor used only for testing async case.
+        assert non_block
+
+        def _execute():
+            output = self.collective_rpc("execute_model", args=(scheduler_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
+            return copy.deepcopy(output[0])
+
+        # Use the thread pool instead of creating a new thread
+        return self.thread_pool.submit(_execute)
+
+    def sample_tokens(
+        self, grammar_output, non_block=False
+    ) -> Future[ModelRunnerOutput]:
+        """Make sample_tokens non-blocking."""
+        # DummyExecutor used only for testing async case.
+        assert non_block
+
+        def _execute():
+            output = self.collective_rpc("sample_tokens", args=(grammar_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
+            return copy.deepcopy(output[0])
+
+        # Use the thread pool instead of creating a new thread
+        return self.thread_pool.submit(_execute)
+
+    def shutdown(self):
+        if hasattr(self, "thread_pool"):
+            self.thread_pool.shutdown(wait=False)
+
+
 @create_new_process_for_each_test()
 def test_engine_core():
     """Setup the EngineCore."""
@@ -244,58 +300,6 @@ def test_engine_core_advanced_sampling():
 @create_new_process_for_each_test()
 def test_engine_core_concurrent_batches():
     """Test that the engine can handle multiple concurrent batches."""
-
-    def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
-        request = make_request()
-        request.request_id = req_id
-        request.sampling_params.max_tokens = max_tokens
-        return request
-
-    class DummyExecutor(UniProcExecutor):
-        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-            super().initialize_from_config(kv_cache_configs)
-
-            # Create a thread pool with a single worker
-            self.thread_pool = ThreadPoolExecutor(max_workers=1)
-
-        def execute_model(
-            self,
-            scheduler_output,
-            non_block=False,
-        ) -> Future[ModelRunnerOutput | None]:
-            """Make execute_model non-blocking."""
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("execute_model", args=(scheduler_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def sample_tokens(
-            self, grammar_output, non_block=False
-        ) -> Future[ModelRunnerOutput]:
-            """Make sample_tokens non-blocking."""
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("sample_tokens", args=(grammar_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def shutdown(self):
-            if hasattr(self, "thread_pool"):
-                self.thread_pool.shutdown(wait=False)
-
     engine_args = EngineArgs(
         model=MODEL_NAME,
         # To test concurrent batches.
@@ -394,6 +398,68 @@ def test_engine_core_concurrent_batches():
             )
         expected_num_tokens[req_id] += 1
         req_id = (req_id + 1) % 2
+
+
+@create_new_process_for_each_test()
+def test_engine_core_no_schedule_ahead_of_uncapped_lone_prefill():
+    """An uncapped lone-prefill chunk must complete before the next batch is
+    scheduled behind it, so a request that arrives mid-prefill re-engages
+    long_prefill_token_threshold after the in-flight chunk only."""
+    engine_args = EngineArgs(
+        model=MODEL_NAME,
+        max_num_seqs=2,
+        enable_prefix_caching=False,
+        max_num_batched_tokens=10,
+        long_prefill_token_threshold=5,
+        enforce_eager=True,
+        async_scheduling=False,
+    )
+    vllm_config = engine_args.create_engine_config()
+    with (
+        set_default_torch_num_threads(1),
+        patch.object(
+            VllmConfig,
+            "max_concurrent_batches",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+    ):
+        engine_core = EngineCore(
+            vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
+        )
+
+    # PROMPT_TOKENS is 12 tokens: the lone request prefills in chunks of 10.
+    engine_core.add_request(
+        *engine_core.preprocess_add_request(make_request_with_max_tokens("0", 5))
+    )
+
+    # Batch 1: (10, req0), uncapped under the lone-request exemption.
+    assert engine_core.step_with_batch_queue()[0] is None
+    assert len(engine_core.batch_queue) == 1
+    scheduler_output = engine_core.batch_queue[0][1]
+    assert scheduler_output.num_scheduled_tokens["0"] == 10
+    assert scheduler_output.has_uncapped_lone_prefill
+
+    # The engine must not queue a second chunk behind the uncapped one:
+    # this call pops batch 1 instead of scheduling batch 2.
+    assert engine_core.step_with_batch_queue()[0] is not None
+    assert len(engine_core.batch_queue) == 0
+
+    # With the arrival visible, the next schedule is capped and co-schedules
+    # the newcomer.
+    engine_core.add_request(
+        *engine_core.preprocess_add_request(make_request_with_max_tokens("1", 5))
+    )
+    assert engine_core.step_with_batch_queue()[0] is None
+    scheduler_output = engine_core.batch_queue[0][1]
+    # req0 got no sampled token: the runner discards samples taken on a
+    # partial prefill chunk, so 12 prompt tokens - 10 computed remain.
+    assert scheduler_output.num_scheduled_tokens["0"] == 2
+    assert scheduler_output.num_scheduled_tokens["1"] == 5
+    assert not scheduler_output.has_uncapped_lone_prefill
+
+    while engine_core.scheduler.has_requests():
+        engine_core.step_with_batch_queue()
 
 
 @pytest.mark.parametrize("encoder_only", [True, False])
