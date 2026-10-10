@@ -63,6 +63,14 @@ class PoolerConfig:
     `None` uses the pooler's default, which is `True` in most cases.
     """
 
+    enable_flash_late_interaction: bool = True
+    """
+    Whether the engine-side late-interaction scorer may use the fused
+    flash-maxsim Triton kernel. Disabled automatically when the API server
+    is started with `--no-enable-flash-late-interaction`; the reference
+    scorer is used instead.
+    """
+
     ## for embedding models
     dimensions: int | None = None
     """
@@ -176,8 +184,7 @@ class PoolerConfig:
         return self.tok_pooling_type
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

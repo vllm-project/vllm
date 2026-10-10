@@ -9,7 +9,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -33,7 +33,6 @@ steps:
       pytest -v -s lora/test_peft_helper.py &&
       pytest -v -s lora/test_resolver.py &&
       pytest -v -s lora/test_utils.py &&
-      pytest -v -s lora/test_add_lora.py  &&
       pytest -v -s lora/test_worker.py'
 
 - label: LoRA Fused/MoE Kernels
@@ -120,7 +119,7 @@ steps:
   agent_tags:
     label: production
     gpu: 2+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -138,8 +137,7 @@ steps:
       pytest -v -s lora/test_quant_model.py --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model0]" --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model1]" --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
-      pytest -v -s lora/test_llama_tp.py::test_llama_lora &&
-      pytest -s -v lora/test_minicpmv_tp.py'
+      pytest -v -s lora/test_llama_tp.py::test_llama_lora'
 
 - label: LoRA Multimodal
   key: lora-multimodal
@@ -148,6 +146,30 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/lora
+    - tests/lora
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      pytest -v -s lora/test_whisper.py'
+
+- label: LoRA Add + Multimodal
+  key: lora-add-multimodal
+  timeout_in_minutes: 45
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
     mem: 24+
   no_plugin: true
   working_dir: "."
@@ -163,5 +185,6 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      pytest -v -s lora/test_default_mm_loras.py && 
-      pytest -v -s lora/test_whisper.py'
+      pytest -v -s lora/test_add_lora.py &&
+      pytest -v -s lora/test_default_mm_loras.py &&
+      pytest -s -v lora/test_minicpmv_tp.py'

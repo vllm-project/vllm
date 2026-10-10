@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.generate.generative_scoring.serving import (
+    GenerativeScoringRequest,
     GenerativeScoringResponse,
     ServingGenerativeScoring,
 )
@@ -31,26 +32,22 @@ def generative_scoring(request: Request) -> ServingGenerativeScoring | None:
     dependencies=[Depends(validate_json_request)],
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
 @load_aware_call
-async def create_generative_scoring(raw_request: Request):
+async def create_generative_scoring(
+    request: GenerativeScoringRequest, raw_request: Request
+):
     handler = generative_scoring(raw_request)
     if handler is None:
         raise NotImplementedError(
             "The model does not support the Generative Scoring API"
         )
 
-    raw_body = await raw_request.json()
-
-    from vllm.entrypoints.generate.generative_scoring.serving import (
-        GenerativeScoringRequest,
-    )
-
-    gen_request = GenerativeScoringRequest(**raw_body)
-    result = await handler.create_generative_scoring(gen_request, raw_request)
+    result = await handler.create_generative_scoring(request, raw_request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)

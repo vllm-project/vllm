@@ -46,6 +46,7 @@ def server():
         json.dumps({"image": MAXIMUM_IMAGES}),
         "--chat-template",
         str(vlm2vec_jinja_path),
+        "--trust-request-mm-kwargs",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

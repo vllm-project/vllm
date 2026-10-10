@@ -26,28 +26,112 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## Get Responses prompt token IDs
+
+Use `/v1/responses/render` to get prompt token IDs before choosing a model
+replica. Rendering applies prompt construction and preprocessing without running
+inference.
+
 The Responses render endpoint uses the same prompt construction as
 `/v1/responses` and returns one token-in `GenerateRequest`. It is stateless:
 inline history is supported, but `previous_response_id` is not. Callers must
 resolve stored response state and include the resulting history in the request
 before rendering.
 
+Configure the renderer and generation workers with the same model, tokenizer,
+chat template, and preprocessing options. Render the full request, including
+instructions, history, tools, and any template or truncation options, so the
+returned IDs reflect the prompt the model will receive.
+
 For multimodal requests, the `GenerateRequest` contains the model-processed
 multimodal payload, which can be substantially larger than the source image or
 video. The caller must forward that payload unchanged to the generation service
 and provision transport limits and memory accordingly.
 
+For example, start a standard inference server with scale-out endpoints enabled:
+
 ```bash
-curl http://localhost:8000/v1/responses/render \
+vllm serve meta-llama/Llama-3.1-8B-Instruct --enable-scale-out
+```
+
+Send a Responses request and use `jq` to extract the `token_ids` field:
+
+```bash
+curl --fail --silent --show-error http://localhost:8000/v1/responses/render \
     -H "Content-Type: application/json" \
     -d '{
         "model": "meta-llama/Llama-3.1-8B-Instruct",
         "input": "Explain prefix caching in one sentence.",
         "max_output_tokens": 32
-    }'
+    }' | jq '.token_ids'
 ```
 
+To count the rendered prompt tokens for this text request, replace the `jq`
+filter with `'.token_ids | length'`. The endpoint returns the full
+`GenerateRequest`; `jq` filters the response on the client. Keep the complete
+response if you will forward it to `/inference/v1/generate`, including any
+multimodal features.
+
+If the server has `--api-key` or `VLLM_API_KEY` configured, add
+`-H "Authorization: Bearer <api-key>"` to the request. See
+[API key authentication limitations](../../usage/security.md#api-key-authentication-limitations)
+for the existing authentication boundaries.
+
 For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).
+
+## Generate Output Logprobs
+
+`/inference/v1/generate` is a token in / token out API, so its output logprobs
+identify tokens by integer ID rather than by the OpenAI string token. With
+`sampling_params.logprobs` set and `output_mode: "tokens"` (the default), each
+choice carries a `GenerateLogProbs`; `output_mode: "text"` returns decoded
+`ChatCompletionLogProbs` instead (see [token in, token out](token_in_token_out.md)):
+
+```json
+{
+  "logprobs": {
+    "content": [
+      {
+        "token_id": 262,
+        "logprob": -0.10,
+        "rank": 1,
+        "top_logprobs": [
+          {"token_id": 262, "logprob": -0.10, "rank": 1},
+          {"token_id": 257, "logprob": -1.20, "rank": 2}
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `content` has one entry per generated token, in generation order.
+- `top_logprobs` is a list, not a dict: JSON turns dict keys into strings and
+  the ordering would be implicit. It follows the engine's order: the sampled
+  token first, then the remaining candidates in rank order. With non-greedy
+  sampling the sampled token can sit outside the top k (for example ranks
+  `[5, 1, 2]` at `logprobs=2`); it then takes one of the `logprobs` slots and
+  the rank-k candidate is left out, as on the OpenAI endpoints.
+- `rank` is the token's rank in the vocabulary distribution (1 = most likely)
+  on every entry, the sampled one included; a top-k candidate's rank is its
+  top-k position. The list is not sorted by it, so sort by `rank` if you need
+  rank order. It is `null` when the engine could not rank the token (a NaN
+  logprob, which is sent as `-9999.0`).
+- There is no `token` or `bytes` field. The generate server has no tokenizer;
+  [derender](derenderer.md) fills those in when it converts the response to the
+  OpenAI shapes.
+- `prompt_logprobs` on the same response is unchanged
+  (`list[dict[int, Logprob] | None]`).
+
+!!! warning "Changed in this release"
+    Output logprobs used to be `ChatCompletionLogProbs` with every token written
+    as a `"token_id:N"` placeholder string, and `bytes` set to the UTF-8 bytes of
+    that placeholder by the Rust frontend but left unset by the Python one.
+    Clients that read only `content[i].logprob` are unaffected. Clients that
+    parsed the placeholder should read `content[i].token_id` instead.
+    `return_tokens_as_token_ids` on `/v1/chat/completions` and `/v1/completions`
+    is unchanged: it is a user-facing OpenAI option and still uses the
+    `token_id:N` format.
 
 ## Multimodal Render Features
 
@@ -68,6 +152,13 @@ should split those fields:
   connector. Omitting `kwargs_data` without `ec_transfer_params` is rejected.
 - Legacy clients that ignore `mm_metadata` and keep sending `kwargs_data`
   continue to work.
+
+Callers that need only the token layout and item hashes, such as cache-aware
+routers, can set `"return_mm_kwargs": false` on the render request. The response
+then keeps `mm_hashes` and `mm_placeholders` and sets `kwargs_data` and
+`mm_metadata` to null, so the processed tensors are neither serialized nor sent.
+Do not forward such a response to `/inference/v1/generate`, which reads a null
+`kwargs_data` as every item being cached.
 
 ## Example
 

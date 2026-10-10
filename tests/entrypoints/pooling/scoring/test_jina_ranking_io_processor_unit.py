@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm import PoolingParams
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
@@ -30,12 +30,18 @@ def test_online_forwards_truncate_prompt_tokens_to_proxy(monkeypatch):
     silently disables truncate_prompt_tokens for Jina rerank/score.
     """
     proc = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
-    proc.valid_inputs_online = MagicMock(
-        return_value=ScoringData(data_1=["query"], data_2=["doc"])
+    monkeypatch.setattr(
+        proc,
+        "valid_inputs_online",
+        MagicMock(return_value=ScoringData(data_1=["query"], data_2=["doc"])),
     )
-    proc._get_token_limits = MagicMock(return_value=(0, 0))
-    proc.ensure_str = MagicMock(side_effect=lambda data: list(data))
-    proc.format_docs_prompts_func = MagicMock(return_value="formatted prompt")
+    monkeypatch.setattr(proc, "_get_token_limits", MagicMock(return_value=(0, 0)))
+    monkeypatch.setattr(
+        proc, "ensure_str", MagicMock(side_effect=lambda data: list(data))
+    )
+    monkeypatch.setattr(
+        proc, "format_docs_prompts_func", MagicMock(return_value="formatted prompt")
+    )
 
     captured: dict[str, object] = {}
 
@@ -70,7 +76,7 @@ def offline_processor_and_context():
     backend = Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     proc = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
-    proc.tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
+    proc.tokenizer = TokenizersBackend(tokenizer_object=backend)
     proc.model_config = SimpleNamespace(max_model_len=1024, is_encoder_decoder=False)
     proc.renderer = SimpleNamespace(
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)

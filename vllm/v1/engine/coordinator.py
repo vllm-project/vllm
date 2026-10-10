@@ -9,8 +9,8 @@ import weakref
 import msgspec.msgpack
 import zmq
 
-from vllm.config import ParallelConfig
-from vllm.logger import init_logger
+from vllm.config import LoggingConfig, ParallelConfig
+from vllm.logger import configure_logging, init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
@@ -77,7 +77,10 @@ class DPCoordinator:
             zmq_addr_pipe.close()
 
     def __init__(
-        self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
+        self,
+        parallel_config: ParallelConfig,
+        enable_wave_coordination: bool = True,
+        logging_config: LoggingConfig | None = None,
     ):
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
@@ -108,6 +111,7 @@ class DPCoordinator:
                 "back_publish_address": back_publish_address,
                 "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
+                "logging_config": logging_config,
             },
             daemon=True,
         )
@@ -167,7 +171,11 @@ class DPCoordinatorProc:
         zmq_addr_pipe=None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
+        logging_config: LoggingConfig | None = None,
     ):
+        if logging_config is not None:
+            configure_logging(logging_config)
+
         coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms,

@@ -5,16 +5,17 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::{Stream, StreamExt as _};
+use asynk_strim_attr::{TryYielder, try_stream};
+use futures::{Stream, StreamExt as _, pin_mut};
 use thiserror_ext::AsReport as _;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{Span, info, info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_llm::current_unix_timestamp_secs;
-use vllm_text::{DecodedTextEvent, Prompt, SampledDelta, TextOutputStreamExt as _, TextRequest};
+use vllm_text::{
+    DecodedTextEvent, Prompt, SampledDelta, TextOutputStream, TextOutputStreamExt as _, TextRequest,
+};
 
 use super::convert::{self, ResponseOpts};
 use super::{InferenceServer, pb};
@@ -255,8 +256,9 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let finish_info = vllm_text::Finished {
             usage: collected.usage,
             finish_reason: collected.finish_reason,
-            kv_transfer_params: collected.kv_transfer_params,
-            ec_transfer_params: collected.ec_transfer_params,
+            kv_transfer_params: collected.kv_transfer_params.map(Box::new),
+            ec_transfer_params: collected.ec_transfer_params.map(Box::new),
+            sampling_mask: collected.sampling_mask,
         };
 
         let outputs = convert::to_sequence_output(
@@ -303,67 +305,72 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "submission", error))?;
 
-        let (tx, rx) = mpsc::channel(32);
-
-        let task_span = request_span.clone();
-        tokio::spawn(
-            async move {
-                futures::pin_mut!(stream);
-                while let Some(event) = stream.next().await {
-                    let response = match event {
-                        Err(error) => Err(log_text_error(&task_span, started_at, "stream", error)),
-                        Ok(DecodedTextEvent::Start {
-                            prompt_token_ids,
-                            prompt_logprobs,
-                        }) => {
-                            let prompt_info = convert::to_prompt_info(
-                                &prompt_token_ids,
-                                prompt_logprobs.as_ref(),
-                                &response_opts,
-                            );
-                            Ok(pb::GenerateResponse {
-                                prompt_info: Some(prompt_info),
-                                outputs: None,
-                            })
-                        }
-                        Ok(DecodedTextEvent::TextDelta {
-                            decoded,
-                            sampled:
-                                SampledDelta {
-                                    token_ids,
-                                    logprobs,
-                                },
-                            finished,
-                        }) => convert::to_sequence_output(
-                            &decoded.text,
-                            &token_ids,
-                            logprobs.as_ref(),
-                            finished.as_deref(),
-                            &response_opts,
-                        )
-                        .map(|outputs| pb::GenerateResponse {
-                            prompt_info: None,
-                            outputs: Some(outputs),
-                        }),
-                    };
-
-                    let failed = response.is_err();
-                    if tx.send(response).await.is_err() || failed {
-                        break;
-                    }
-                }
-                info!(
-                    parent: &task_span,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "gRPC inference stream closed"
-                );
-            }
-            .instrument(request_span),
-        );
-
-        let response_stream = ReceiverStream::new(rx);
+        let response_stream =
+            generate_stream_responses(stream, response_opts, request_span.clone(), started_at)
+                .instrument(request_span);
         Ok(Response::new(Box::pin(response_stream)))
     }
+}
+
+/// Convert one decoded text stream into gRPC streaming responses.
+///
+/// The response body owns the generation stream, so a client disconnect drops
+/// it and aborts the request in the engine, even before any output arrives.
+#[try_stream]
+async fn generate_stream_responses(
+    stream: impl TextOutputStream,
+    response_opts: ResponseOpts,
+    request_span: Span,
+    started_at: Instant,
+    mut y: TryYielder<pb::GenerateResponse, Status>,
+) -> Result<(), Status> {
+    pin_mut!(stream);
+
+    while let Some(event) = stream.next().await {
+        let response = match event {
+            Err(error) => Err(log_text_error(&request_span, started_at, "stream", error)),
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids,
+                prompt_logprobs,
+            }) => {
+                let prompt_info = convert::to_prompt_info(
+                    &prompt_token_ids,
+                    prompt_logprobs.as_ref(),
+                    &response_opts,
+                );
+                Ok(pb::GenerateResponse {
+                    prompt_info: Some(prompt_info),
+                    outputs: None,
+                })
+            }
+            Ok(DecodedTextEvent::TextDelta {
+                decoded,
+                sampled:
+                    SampledDelta {
+                        token_ids,
+                        logprobs,
+                    },
+                finished,
+            }) => convert::to_sequence_output(
+                &decoded.text,
+                &token_ids,
+                logprobs.as_ref(),
+                finished.as_deref(),
+                &response_opts,
+            )
+            .map(|outputs| pb::GenerateResponse {
+                prompt_info: None,
+                outputs: Some(outputs),
+            }),
+        };
+        y.yield_ok(response?).await;
+    }
+    info!(
+        parent: &request_span,
+        elapsed_ms = started_at.elapsed().as_millis() as u64,
+        "gRPC inference stream closed"
+    );
+    Ok(())
 }
 
 fn text_error_to_status(error: vllm_text::Error) -> Status {

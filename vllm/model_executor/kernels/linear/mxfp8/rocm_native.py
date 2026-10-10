@@ -22,6 +22,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+from .rocm_block32_gemm import BLOCK_ROWS, rocm_mxfp8_block32_gemm
 
 
 @triton.jit
@@ -119,6 +120,16 @@ def _mxfp8_dot_scaled_linear(
     return out
 
 
+# gfx950's async-copy LDS (default in the triton 3.8 this branch pins) leaves no
+# room for num_stages=3 at BLOCK_K=256; use 2 there.
+_BK256_STAGES = 3
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    if on_gfx950():
+        _BK256_STAGES = 2
+
+
 def _select_cfg(M, N, K):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) — graph-tuned on gfx950.
 
@@ -166,7 +177,7 @@ def _select_cfg(M, N, K):
         # 3.6; on triton 3.7 its large BLOCK_M register/LDS footprint spills or hits
         # "out of resources", so use 128x128x256 -- within the known-good footprint.)
         if M >= 4096 and K >= 1024 and K % 256 == 0 and occ >= 256:
-            return 128, 128, 256, 8, 3
+            return 128, 128, 256, 8, _BK256_STAGES
         return 128, 128, 128, 8, 3
     # large-K (K >= 2048). BLOCK_K is K-divisibility-guarded (the K-loop is unmasked):
     # served large-K is 2048/6144 (%256==0), but fall back to 128 (always divides, since
@@ -186,7 +197,7 @@ def _select_cfg(M, N, K):
     # Covers the qkv-class local N=1536 (TP=8 qkv / TP=4 shared_gate_up) and the deep-K
     # / very-large-M shapes.
     if K % 256 == 0 and (1280 < N <= 1536 or (occ >= 128 and (K >= 4096 or M >= 4096))):
-        return 128, 128, 256, 8, 3
+        return 128, 128, 256, 8, _BK256_STAGES
     # small local-N (e.g. TP=8 shared_gate_up N=768): a 64-wide BLOCK_N doubles the
     # N-tile count -> better CU fill than 128x128 at this mid-large M (~1.4x there).
     if N <= 1024 and K % 256 == 0:
@@ -197,8 +208,21 @@ def _select_cfg(M, N, K):
 _DOT_SCALED_K_ALIGN = 128
 
 
+def _as_block32_scale(weight_scale: torch.Tensor) -> torch.Tensor | None:
+    """The [N / 32, K / 32] block scales, if every 32 rows share their scales."""
+    N = weight_scale.shape[0]
+    if N % BLOCK_ROWS != 0:
+        return None
+    blocks = weight_scale.view(N // BLOCK_ROWS, BLOCK_ROWS, -1)
+    if not torch.equal(blocks, blocks[:, :1].expand_as(blocks)):
+        return None
+    return blocks[:, 0].contiguous()
+
+
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
+
+    supports_pre_processed_weights = True
 
     @classmethod
     def is_supported(
@@ -222,7 +246,13 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         N, K = weight.shape
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
-        if K % _DOT_SCALED_K_ALIGN != 0:
+        block_scale = _as_block32_scale(weight_scale)
+        if block_scale is not None:
+            # Checkpoints with 32x32 scale blocks (DeepSeek V4/V4.1) get them
+            # back from the loader expanded per row; keep the blocks and use
+            # the block-scaled GEMM, which also handles any K % 32 == 0.
+            weight_scale = block_scale
+        elif K % _DOT_SCALED_K_ALIGN != 0:
             weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -240,7 +270,13 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             )
         out_shape = (*x.shape[:-1], layer.weight.shape[0])
         x2d = x.reshape(-1, x.shape[-1])
-        if layer.weight.element_size() >= 2:
+        if layer.weight_scale.shape[0] != layer.weight.shape[0]:
+            # One scale row per 32 weight rows (see process_weights_after_loading).
+            x_q, x_scale = mxfp8_e4m3_quantize(x2d)
+            out = rocm_mxfp8_block32_gemm(
+                x_q, x_scale, layer.weight, layer.weight_scale, x.dtype
+            )
+        elif layer.weight.element_size() >= 2:
             out = torch.nn.functional.linear(x2d, layer.weight.to(x.dtype))
         elif x2d.shape[-1] % _DOT_SCALED_K_ALIGN == 0:
             out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)

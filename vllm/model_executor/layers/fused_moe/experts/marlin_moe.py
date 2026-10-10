@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
+    get_marlin_workspace,
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
@@ -95,7 +95,7 @@ def _fused_marlin_moe(
     N = marlin_moe_intermediate_size(w1, w2)
     w13_num_shards = 2 if activation.is_gated else 1
     if workspace is None:
-        workspace = marlin_make_workspace_new(hidden_states.device, 4)
+        workspace = get_marlin_workspace(hidden_states.device)
 
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
@@ -251,26 +251,56 @@ def fused_marlin_moe(
     input_dtype: torch.dtype | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
-    """
-    This function computes a Mixture of Experts (MoE) layer using two sets of
+    """This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
 
-    Parameters:
-    - hidden_states (torch.Tensor): The input tensor to the MoE layer.
-    - w1 (torch.Tensor): The first set of expert weights.
-    - w2 (torch.Tensor): The second set of expert weights.
-    - w1_scale (torch.Tensor): Scale to be used for w1.
-    - w2_scale (torch.Tensor): Scale to be used for w2.
-    - topk_weights (torch.Tensor): Top-k weights.
-    - topk_ids (torch.Tensor): Indices of topk-k elements.
-    - w1_zeros (torch.Tensor|None): Optional zero points to be used for w1.
-    - w2_zeros (torch.Tensor|None): Optional zero points to be used for w2.
-    - num_bits (bool): The number of bits in expert weights quantization.
+    Args:
+        hidden_states (torch.Tensor): The input tensor to the MoE layer.
+        w1 (torch.Tensor): The first set of expert weights.
+        w2 (torch.Tensor): The second set of expert weights.
+        bias1 (torch.Tensor|None): Optional bias for the first GEMM.
+        bias2 (torch.Tensor|None): Optional bias for the second GEMM.
+        w1_scale (torch.Tensor): Scale to be used for w1.
+        w2_scale (torch.Tensor): Scale to be used for w2.
+        topk_weights (torch.Tensor): Top-k weights.
+        topk_ids (torch.Tensor): Indices of topk-k elements.
+        quant_type_id (int): Id of the `ScalarType` the expert weights are
+            quantized to. Determines the 4- or 8-bit Marlin kernel path.
+        apply_router_weight_on_input (bool): Apply the topk weights to the
+            input rather than the output. Only valid when topk is 1.
+        global_num_experts (int): Total number of experts across all expert
+            parallel shards. -1 means the local expert count.
+        activation (MoEActivation): Activation applied between the two GEMMs.
+        activation_func (Callable|None): Override for the activation
+            implementation.
+        moe_sum (Callable|None): Override for the final reduction over the
+            topk dimension. Defaults to `ops.moe_sum` / `torch.sum`.
+        expert_map (torch.Tensor|None): Maps global expert indices to the
+            local expert space of this expert parallel shard.
+        input_global_scale1 (torch.Tensor|None): NVFP4 global input scale for
+            the first GEMM.
+        input_global_scale2 (torch.Tensor|None): NVFP4 global input scale for
+            the second GEMM.
+        global_scale1 (torch.Tensor|None): NVFP4 global weight scale for w1.
+        global_scale2 (torch.Tensor|None): NVFP4 global weight scale for w2.
+        w1_zeros (torch.Tensor|None): Optional zero points to be used for w1.
+        w2_zeros (torch.Tensor|None): Optional zero points to be used for w2.
+        workspace (torch.Tensor|None): Scratch buffer for the Marlin kernels.
+        intermediate_cache13 (torch.Tensor|None): Scratch buffer for the
+            first and third intermediate activations.
+        intermediate_cache2 (torch.Tensor|None): Scratch buffer for the
+            second intermediate activation.
+        output (torch.Tensor|None): Tensor to write the result into. A new
+            tensor is allocated when omitted.
+        input_dtype (torch.dtype|None): dtype the activations are quantized
+            to. A 1-byte dtype raises the M block size to at least 16.
+        activation_config (ApplyMoEActivationConfig|None): Extra
+            configuration forwarded to the activation.
 
     Returns:
-    - torch.Tensor: The output tensor after applying the MoE layer.
-    """
+        torch.Tensor: The output tensor after applying the MoE layer.
 
+    """
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
         scalar_types.uint4,
@@ -399,8 +429,7 @@ def batched_fused_marlin_moe(
     activation_func: Callable[..., None] | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
-    """
-    This function massages the inputs so the batched hidden_states can be
+    """This function massages the inputs so the batched hidden_states can be
     presented as a 2D contiguous tensor that could be used with
     _fused_marlin_moe.
 
@@ -423,7 +452,6 @@ def batched_fused_marlin_moe(
     expert_ids tensors, so only relevant/valid rows of A (hidden_states)
     are accessed and are processed with the correct expert_ids.
     """
-
     assert hidden_states.ndim == 3, (
         f"hidden states must be batched. e.g. [B, MAX_TOKENS, K]."
         f"But got {hidden_states.size()}"

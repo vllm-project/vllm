@@ -119,8 +119,7 @@ class LoadRecoveryExampleConnector(ExampleConnector):
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
-        """
-        Update KVConnector state after block allocation.
+        """Update KVConnector state after block allocation.
 
         If blocks were allocated, add to _requests_need_load,
         such that we load the KVs in the next forward pass.

@@ -27,6 +27,11 @@ async def client(server):
         yield http_client
 
 
+@pytest.fixture(scope="module")
+def tokenizer():
+    return get_tokenizer(MODEL_NAME)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -52,6 +57,7 @@ def _make_generate_response(
     logprobs: dict | None = None,
     prompt_logprobs: list | None = None,
     kv_transfer_params: dict | None = None,
+    metrics: dict | None = None,
 ) -> dict:
     choice: dict = {
         "index": 0,
@@ -64,17 +70,17 @@ def _make_generate_response(
         "choices": [choice],
         "prompt_logprobs": prompt_logprobs,
         "kv_transfer_params": kv_transfer_params,
+        "metrics": metrics,
     }
 
 
-def _make_logprobs_with_placeholders(token_id: int = 1234) -> dict:
+def _make_generate_logprobs(token_id: int = 1234) -> dict:
+    """A `GenerateLogProbs` payload: integer token ids, no token/bytes."""
     entry = {
-        "token": f"token_id:{token_id}",
+        "token_id": token_id,
         "logprob": -1.0,
-        "bytes": None,
-        "top_logprobs": [
-            {"token": f"token_id:{token_id + 1}", "logprob": -2.0, "bytes": None}
-        ],
+        "rank": 1,
+        "top_logprobs": [{"token_id": token_id + 1, "logprob": -2.0, "rank": 2}],
     }
     return {"content": [entry]}
 
@@ -147,7 +153,7 @@ async def test_derender_chat_usage_default(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_logprobs(client):
-    """token_id:N placeholders in content.token are resolved to real strings."""
+    """Integer token ids are decoded to real strings by derender."""
     gen_req = await _render_chat(client)
     synthetic_ids = gen_req["token_ids"][:3]
     token_id = synthetic_ids[0]
@@ -158,7 +164,7 @@ async def test_derender_chat_logprobs(client):
             "model": MODEL_NAME,
             "generate_response": _make_generate_response(
                 synthetic_ids,
-                logprobs=_make_logprobs_with_placeholders(token_id),
+                logprobs=_make_generate_logprobs(token_id),
             ),
         },
     )
@@ -169,8 +175,8 @@ async def test_derender_chat_logprobs(client):
     content = logprobs["content"]
     assert content is not None and len(content) == 1
     token_str = content[0]["token"]
-    assert not token_str.startswith("token_id:"), (
-        f"Placeholder was not resolved: {token_str!r}"
+    assert token_str and not token_str.startswith("token_id:"), (
+        f"token id was not decoded: {token_str!r}"
     )
 
 
@@ -187,7 +193,7 @@ async def test_derender_chat_logprobs_bytes(client):
             "model": MODEL_NAME,
             "generate_response": _make_generate_response(
                 synthetic_ids,
-                logprobs=_make_logprobs_with_placeholders(token_id),
+                logprobs=_make_generate_logprobs(token_id),
             ),
         },
     )
@@ -201,7 +207,7 @@ async def test_derender_chat_logprobs_bytes(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_top_logprobs(client):
-    """top_logprobs entries also have their placeholders resolved."""
+    """top_logprobs entries are decoded too."""
     gen_req = await _render_chat(client)
     synthetic_ids = gen_req["token_ids"][:3]
     token_id = synthetic_ids[0]
@@ -212,7 +218,7 @@ async def test_derender_chat_top_logprobs(client):
             "model": MODEL_NAME,
             "generate_response": _make_generate_response(
                 synthetic_ids,
-                logprobs=_make_logprobs_with_placeholders(token_id),
+                logprobs=_make_generate_logprobs(token_id),
             ),
         },
     )
@@ -221,7 +227,7 @@ async def test_derender_chat_top_logprobs(client):
     top = content[0]["top_logprobs"]
     assert len(top) == 1
     assert not top[0]["token"].startswith("token_id:"), (
-        f"top_logprobs placeholder not resolved: {top[0]['token']!r}"
+        f"top_logprobs token id not decoded: {top[0]['token']!r}"
     )
 
 
@@ -264,6 +270,49 @@ async def test_derender_chat_kv_transfer_params_passthrough(client):
     )
     assert response.status_code == 200
     assert response.json()["kv_transfer_params"] == kv
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_metrics_passthrough(client):
+    gen_req = await _render_chat(client)
+    metrics = {
+        "speculative_decoding": {
+            "mean_acceptance_length": 2.0,
+            "draft_acceptance_rate": 0.5,
+            "acceptance_histogram": [0, 1],
+            "num_spec_steps": 1,
+            "num_accepted_draft_tokens": 1,
+            "num_draft_tokens": 2,
+            "num_spec_tokens": 1,
+        }
+    }
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(
+                gen_req["token_ids"][:3], metrics=metrics
+            ),
+        },
+    )
+    assert response.status_code == 200
+    actual = response.json()["metrics"]
+    assert set(actual) == {
+        "time_to_first_token_ms",
+        "generation_time_ms",
+        "queue_time_ms",
+        "mean_itl_ms",
+        "tokens_per_second",
+        "speculative_decoding",
+    }
+    assert all(
+        actual[name] is None for name in actual if name != "speculative_decoding"
+    )
+    assert actual["speculative_decoding"] == {
+        **metrics["speculative_decoding"],
+        "per_step_accepted": None,
+        "per_step_drafted": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -325,6 +374,58 @@ async def test_derender_chat_model_omitted_resolves_served_name(client):
     )
     assert response.status_code == 200
     assert response.json()["model"] == MODEL_NAME
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_leading_space_seeded_from_prompt(client, tokenizer):
+    """prompt_token_ids keeps the first token's leading space on this
+    Metaspace tokenizer, matching the coupled path."""
+    gen_req = await _render_chat(client)
+    prompt_token_ids = gen_req["token_ids"]
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+
+    unseeded = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(output_ids),
+        },
+    )
+    seeded = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(output_ids),
+            "prompt_token_ids": prompt_token_ids,
+        },
+    )
+    assert unseeded.status_code == 200
+    assert seeded.status_code == 200
+    unseeded_content = unseeded.json()["choices"][0]["message"]["content"]
+    seeded_content = seeded.json()["choices"][0]["message"]["content"]
+
+    assert not unseeded_content.startswith(" ")
+    assert seeded_content.startswith(" ")
+    assert seeded_content.lstrip(" ") == unseeded_content
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_oversized_prompt_token_ids_rejected(client):
+    """prompt_token_ids longer than max_model_len returns 400."""
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+    oversized_prompt_ids = [42] * 1_000_000
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(synthetic_ids),
+            "prompt_token_ids": oversized_prompt_ids,
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +543,84 @@ async def test_derender_completion_prompt_tokens_length_mismatch(client):
 
 
 @pytest.mark.asyncio
+async def test_derender_completion_prompt_token_ids_length_mismatch(client):
+    """len(prompt_token_ids) != len(generate_responses) returns 400, the
+    same as the existing prompt_tokens length check."""
+    gr1 = await _render_completion(client, "Hello")
+    ids1 = gr1["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(ids1, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [[1, 2], [3, 4]],
+        },
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_leading_space_seeded_from_prompt(client, tokenizer):
+    """Completions counterpart of
+    test_derender_chat_leading_space_seeded_from_prompt."""
+    gr1 = await _render_completion(client, "Hello world")
+    prompt_token_ids = gr1["token_ids"]
+    output_ids = tokenizer.encode("Hello there, output", add_special_tokens=False)
+
+    unseeded = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(output_ids, gr1["request_id"]),
+            ],
+        },
+    )
+    seeded = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(output_ids, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [prompt_token_ids],
+        },
+    )
+    assert unseeded.status_code == 200
+    assert seeded.status_code == 200
+    unseeded_text = unseeded.json()["choices"][0]["text"]
+    seeded_text = seeded.json()["choices"][0]["text"]
+
+    assert not unseeded_text.startswith(" ")
+    assert seeded_text.startswith(" ")
+    assert seeded_text.lstrip(" ") == unseeded_text
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_oversized_prompt_token_ids_rejected(client):
+    """A prompt_token_ids entry longer than max_model_len returns 400."""
+    gr1 = await _render_completion(client, "Hello")
+    ids1 = gr1["token_ids"][:3]
+    oversized_prompt_ids = [42] * 1_000_000
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(ids1, gr1["request_id"]),
+            ],
+            "prompt_token_ids": [oversized_prompt_ids],
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_derender_completion_empty_generate_responses(client):
     """Empty generate_responses list returns 400."""
     response = await client.post(
@@ -453,8 +632,8 @@ async def test_derender_completion_empty_generate_responses(client):
 
 @pytest.mark.asyncio
 async def test_derender_completion_logprobs(client):
-    """token_id:N placeholders in logprobs are resolved; CompletionLogProbs
-    flat-list structure is returned with non-empty tokens and text_offsets."""
+    """Integer token ids are decoded; CompletionLogProbs flat-list structure is
+    returned with non-empty tokens and text_offsets."""
     gr1 = await _render_completion(client, "Hello world")
     ids1 = gr1["token_ids"][:3]
     token_id = ids1[0]
@@ -467,7 +646,7 @@ async def test_derender_completion_logprobs(client):
                 _make_completion_generate_response(
                     ids1,
                     gr1["request_id"],
-                    logprobs=_make_logprobs_with_placeholders(token_id),
+                    logprobs=_make_generate_logprobs(token_id),
                 ),
             ],
         },
@@ -478,7 +657,7 @@ async def test_derender_completion_logprobs(client):
     tokens = logprobs["tokens"]
     assert len(tokens) == 1
     assert not tokens[0].startswith("token_id:"), (
-        f"Placeholder was not resolved: {tokens[0]!r}"
+        f"token id was not decoded: {tokens[0]!r}"
     )
     assert len(logprobs["token_logprobs"]) == 1
     assert isinstance(logprobs["token_logprobs"][0], float)
@@ -555,7 +734,7 @@ async def test_derender_chat_oversized_token_ids_rejected(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_too_many_choices_rejected(client):
-    """choices count exceeding VLLM_MAX_N_SEQUENCES returns 400."""
+    """Choices count exceeding VLLM_MAX_N_SEQUENCES returns 400."""
     # Default VLLM_MAX_N_SEQUENCES is 16384; use a larger count.
     oversized_choices = [
         {"index": i, "token_ids": [42], "finish_reason": "stop"} for i in range(20_000)
@@ -614,7 +793,7 @@ async def test_derender_chat_oversized_logprobs_rejected(client):
     """logprobs.content longer than max_model_len returns 400."""
     oversized_logprobs: dict = {
         "content": [
-            {"token": "x", "logprob": -1.0, "bytes": None, "top_logprobs": []}
+            {"token_id": 42, "logprob": -1.0, "rank": 1, "top_logprobs": []}
             for _ in range(1_000_000)
         ]
     }
@@ -645,11 +824,11 @@ async def test_derender_chat_oversized_top_logprobs_rejected(client):
     oversized_top_logprobs = {
         "content": [
             {
-                "token": "x",
+                "token_id": 42,
                 "logprob": -1.0,
-                "bytes": None,
+                "rank": 1,
                 "top_logprobs": [
-                    {"token": f"t{i}", "logprob": -float(i), "bytes": None}
+                    {"token_id": i, "logprob": -float(i), "rank": i + 1}
                     for i in range(25)
                 ],
             }
@@ -800,7 +979,12 @@ def _e2e_generate_response(
 
 @pytest.mark.asyncio
 async def test_e2e_plain_roundtrip(parser_client, parser_tokenizer):
-    """Plain text without reasoning markers roundtrips correctly."""
+    """Plain text without reasoning markers roundtrips correctly.
+
+    Markerless output has no ``</think>``, which deepseek_r1 classifies
+    wholly as reasoning, so the text lands there rather than in content.
+    What this pins is detokenization fidelity through the parser path.
+    """
     messages = [{"role": "user", "content": "What is 2+2?"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -814,16 +998,22 @@ async def test_e2e_plain_roundtrip(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200, resp.text
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert content == expected
+    message = resp.json()["choices"][0]["message"]
+    assert message["reasoning"] == expected
+    assert message["content"] is None
 
 
 @pytest.mark.asyncio
 async def test_e2e_token_identity(parser_client, parser_tokenizer):
-    """encode(derender(token_ids)) == token_ids (RL invariant)."""
+    """encode(derender(token_ids)) == token_ids (RL invariant).
+
+    Markerless output comes back as reasoning (see
+    ``test_e2e_plain_roundtrip``), so re-encode that.
+    """
     messages = [{"role": "user", "content": "Hi"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -836,17 +1026,22 @@ async def test_e2e_token_identity(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    re_encoded = _encode(parser_tokenizer, content)
+    reasoning = resp.json()["choices"][0]["message"]["reasoning"]
+    re_encoded = _encode(parser_tokenizer, reasoning)
     assert output_ids == re_encoded
 
 
 @pytest.mark.asyncio
 async def test_e2e_non_ascii_roundtrip(parser_client, parser_tokenizer):
-    """CJK + emoji roundtrip without U+FFFD."""
+    """CJK + emoji roundtrip without U+FFFD.
+
+    Markerless output comes back as reasoning (see
+    ``test_e2e_plain_roundtrip``).
+    """
     messages = [{"role": "user", "content": "Reply in Chinese"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -859,11 +1054,12 @@ async def test_e2e_non_ascii_roundtrip(parser_client, parser_tokenizer):
             "model": PARSER_MODEL,
             "generate_response": _e2e_generate_response(output_ids),
             "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {"model": PARSER_MODEL, "messages": messages},
         },
     )
     assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert "�" not in content
+    reasoning = resp.json()["choices"][0]["message"]["reasoning"]
+    assert "�" not in reasoning
 
 
 @pytest.mark.asyncio
@@ -976,8 +1172,10 @@ async def test_e2e_parsed_reasoning_and_tool_call(parser_client, parser_tokenize
 
 
 @pytest.mark.asyncio
-async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
-    """Without chat_request, derender falls back to plain detokenization."""
+async def test_e2e_no_chat_request_rejected(parser_client, parser_tokenizer):
+    """Without chat_request a parser configured model rejects with 400
+    rather than silently falling back to plain detokenization. This is to
+    prevent the leak of raw reasoning/tool markup into content."""
     messages = [{"role": "user", "content": "Hello"}]
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
@@ -992,9 +1190,8 @@ async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
             "prompt_tokens": len(gen_req["token_ids"]),
         },
     )
-    assert resp.status_code == 200
-    content = resp.json()["choices"][0]["message"]["content"]
-    assert "Hi" in content
+    assert resp.status_code == 400
+    assert "chat_request" in resp.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -1098,6 +1295,72 @@ async def test_e2e_harmony_plain_roundtrip(harmony_client, harmony_tokenizer):
     content = resp.json()["choices"][0]["message"]["content"]
     assert content is not None and len(content) > 0
     assert "Four" in content
+
+
+@pytest.fixture(scope="module")
+def harmony_default_server():
+    """gpt-oss render server with NO parser flags.
+
+    Regression fixture: the model-default reasoning parser
+    ("openai_gptoss", applied by verify_and_update_config) must be
+    resolved by the render server without any --reasoning-parser flag,
+    otherwise harmony markup leaks unparsed into derender output.
+    """
+    _ensure_harmony_vocab()
+    with RemoteLaunchRenderServer(
+        HARMONY_MODEL, ["--trust-remote-code"]
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def harmony_default_client(harmony_default_server):
+    async with httpx.AsyncClient(
+        base_url=harmony_default_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_harmony_reasoning_default_parser(
+    harmony_default_client, harmony_tokenizer
+):
+    """GPT-OSS reasoning parses on a bare launch (no parser flags)."""
+    messages = [{"role": "user", "content": "Add 2 and 3."}]
+    gen_req = await _e2e_render_chat(harmony_default_client, HARMONY_MODEL, messages)
+
+    reasoning_text = "The user wants 2 plus 3."
+    answer_text = "The answer is 5."
+    assistant_msg = {
+        "role": "assistant",
+        "thinking": reasoning_text,
+        "content": answer_text,
+    }
+    output_ids = _harmony_extract_assistant_ids(harmony_tokenizer, assistant_msg)
+
+    decoded = harmony_tokenizer.decode(output_ids)
+    if reasoning_text not in decoded:
+        pytest.skip("Harmony template did not render thinking")
+
+    resp = await harmony_default_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HARMONY_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HARMONY_MODEL,
+                "messages": messages,
+                "include_reasoning": True,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    msg = resp.json()["choices"][0]["message"]
+    assert msg["reasoning"] is not None
+    assert reasoning_text in msg["reasoning"]
+    assert answer_text in (msg["content"] or "")
+    assert "<|channel|>" not in (msg["content"] or "")
 
 
 @pytest.mark.asyncio

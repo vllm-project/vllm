@@ -178,6 +178,7 @@ def _run_vllm_requests(
                 beam_width=n,
                 max_tokens=output_len,
                 ignore_eos=True,
+                watermarking=False,
             ),
         )
         if do_profile:
@@ -195,8 +196,7 @@ def run_vllm_chat(
     warmup_requests: list[SampleRequest] | None = None,
     prequeue_requests: bool = False,
 ) -> tuple[float, list[RequestOutput]]:
-    """
-    Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
+    """Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
     multimodal models as it properly handles multimodal inputs and chat
     formatting. For non-multimodal models, use run_vllm() instead.
     """
@@ -536,6 +536,7 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
 
     Returns:
         A namespace satisfying get_samples's attribute reads.
+
     """
     d = vars(args).copy()
     # random_*: prefer --random-* over legacy --input/output/prefix-len.
@@ -553,10 +554,6 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
     # matching prior throughput behaviour of omitting output_len when unset.
     d["hf_output_len"] = output_len
     d["sharegpt_output_len"] = output_len
-    # sonnet reads dedicated attrs; fall back to SonnetDataset's own defaults.
-    d["sonnet_input_len"] = input_len if input_len is not None else 550
-    d["sonnet_output_len"] = output_len if output_len is not None else 150
-    d["sonnet_prefix_len"] = prefix_len
     # Explicit --enable-multimodal-chat wins; otherwise auto-enable for the
     # multimodal chat backend (preserves today's vllm-chat handling). Callers
     # without a --backend flag (e.g. bench mm-processor) drive every request
@@ -627,10 +624,7 @@ def assign_loras(requests, args):
 
 
 def validate_args(args):
-    """
-    Validate command-line arguments.
-    """
-
+    """Validate command-line arguments."""
     # === Deprecation and Defaulting ===
     if args.dataset is not None:
         warnings.warn(
@@ -712,14 +706,14 @@ def validate_args(args):
         )
 
     # --prefix-len: only used when dataset_name is 'random', 'random-mm',
-    # 'sonnet', or not set.
+    # or not set.
     if (
-        args.dataset_name not in {"random", "random-mm", "sonnet", None}
+        args.dataset_name not in {"random", "random-mm", None}
         and args.prefix_len is not None
     ):
         warnings.warn(
             "--prefix-len will be ignored since --dataset-name\
-                 is not 'random', 'random-mm', 'sonnet', or not set.",
+                 is not 'random', 'random-mm', or not set.",
             stacklevel=2,
         )
 
@@ -805,7 +799,6 @@ def add_cli_args(parser: FlexibleArgumentParser):
         choices=[
             "sharegpt",
             "random",
-            "sonnet",
             "burstgpt",
             "hf",
             "prefix_repetition",
@@ -1144,6 +1137,7 @@ def main(args: argparse.Namespace):
     # Output JSON results if specified
     if args.output_json:
         results = {
+            "model_id": args.model,
             "elapsed_time": elapsed_time,
             "num_requests": len(requests),
             "total_num_tokens": total_num_tokens,

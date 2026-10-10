@@ -22,10 +22,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kNvfp4DynamicToken,
     kNvfp4Static,
 )
 
@@ -39,7 +41,10 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "fp8_per_block_dynamic": kFp8Dynamic128Sym,
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
+    "nvfp4_per_token": kNvfp4DynamicToken,
     "int8_per_channel_static": kInt8StaticChannelSym,
+    # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
+    "int4_per_group_32": kInt4Static32,
 }
 
 

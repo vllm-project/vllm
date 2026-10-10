@@ -10,7 +10,6 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
-    PIN_MEMORY,
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
@@ -25,24 +24,6 @@ _DEFAULT_MAX_CONCURRENCY = 2
 def set_default_max_concurrency(n: int) -> None:
     global _DEFAULT_MAX_CONCURRENCY
     _DEFAULT_MAX_CONCURRENCY = max(2, n)
-
-
-def async_copy_to_gpu(
-    x: torch.Tensor | np.ndarray,
-    out: torch.Tensor | None = None,
-    device: torch.device | None = None,
-) -> torch.Tensor:
-    if isinstance(x, np.ndarray):
-        x = torch.from_numpy(x)
-    assert x.is_cpu
-
-    if out is None:
-        assert device is not None
-        out = torch.empty_like(x, device=device)
-
-    # pin_memory() is no-op if the memory is already pinned.
-    pinned = x.pin_memory() if PIN_MEMORY else x
-    return out.copy_(pinned, non_blocking=True)
 
 
 class UvaBuffer:
@@ -73,8 +54,8 @@ class NonUvaBuffer:
 
     def uva(self, n: int | None = None) -> torch.Tensor:
         if n is None:
-            return self._uva.copy_(self.cpu)
-        return self._uva[:n].copy_(self.cpu[:n])
+            return self._uva.copy_(self.cpu, non_blocking=True)
+        return self._uva[:n].copy_(self.cpu[:n], non_blocking=True)
 
 
 class UvaBufferPool:
@@ -329,7 +310,7 @@ def _apply_write_kernel(
     MULTI_GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    row_idx = tl.load(write_indices_ptr + pid)
+    row_idx = tl.load(write_indices_ptr + pid).to(tl.int64)
     start_idx = tl.load(write_starts_ptr + pid)
 
     cu_start = tl.load(write_cu_lens_ptr + pid - 1) if pid > 0 else 0

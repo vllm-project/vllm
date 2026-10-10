@@ -227,10 +227,155 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
         self.assertEqual(len(self.storage.id_index), 0)
         self.assertEqual(len(self.storage.ring_buffer.metadata), 0)
 
-        # Verify that new items can be added after clearing
+        # Verify that new items can be added after clearing. IDs keep
+        # increasing so handles issued before the clear cannot alias new data.
         address, monotonic_id = self.storage.put("new_item", "new_value")
         self.assertIn("new_item", self.storage.key_index)
-        self.assertEqual((address, monotonic_id), (0, 0))
+        self.assertEqual((address, monotonic_id), (0, 5))
+
+    def _open_reader(self) -> SingleWriterShmObjectStorage:
+        reader = SingleWriterShmObjectStorage.create_from_handle(self.storage.handle())
+        self.addCleanup(reader.close)
+        return reader
+
+    def test_reader_get_and_touch_each_require_valid_signature(self):
+        address, monotonic_id = self.storage.put("key", "value")
+        signature = self.storage.get_signature("key")
+        reader = self._open_reader()
+
+        reader.touch("key", address, monotonic_id, signature)
+        self.assertEqual(reader.get(address, monotonic_id, signature, "key"), "value")
+
+        flipped = [signature[0] ^ 1, *signature[1:]]
+        for bad in (None, flipped, [signature], signature[:-1], [256] * 32):
+            with self.assertRaisesRegex(ValueError, "SHM handle signature"):
+                reader.get(address, monotonic_id, bad, "key")
+            with self.assertRaisesRegex(ValueError, "SHM handle signature"):
+                reader.touch("key", address, monotonic_id, bad)
+
+    def test_signature_is_bound_to_key_and_address(self):
+        address, monotonic_id = self.storage.put("key", "value")
+        signature = self.storage.get_signature("key")
+        reader = self._open_reader()
+
+        with self.assertRaisesRegex(ValueError, "SHM handle signature"):
+            reader.get(address, monotonic_id, signature, "other_key")
+        with self.assertRaisesRegex(ValueError, "SHM handle signature"):
+            reader.get(address + 1, monotonic_id, signature, "key")
+
+    def test_writer_rejects_handle_no_longer_in_key_index(self):
+        address, monotonic_id = self.storage.put("key", "value")
+        signature = self.storage.get_signature("key")
+        self.storage.verify_signature("key", address, monotonic_id, signature)
+
+        self.storage.clear()
+
+        with self.assertRaisesRegex(ValueError, "SHM handle signature"):
+            self.storage.verify_signature("key", address, monotonic_id, signature)
+
+    def test_handle_issued_before_clear_reads_own_data_until_reused(self):
+        address, monotonic_id = self.storage.put("key", "value")
+        signature = self.storage.get_signature("key")
+        reader = self._open_reader()
+
+        self.storage.clear()
+
+        # Requests still draining after a clear keep reading their own data.
+        self.assertEqual(reader.get(address, monotonic_id, signature, "key"), "value")
+
+        self.storage.put("key", "new_value")
+
+        with self.assertRaisesRegex(ValueError, "modified or is invalid"):
+            reader.get(address, monotonic_id, signature, "key")
+        with self.assertRaisesRegex(ValueError, "modified or is invalid"):
+            reader.touch("key", address, monotonic_id, signature)
+
+
+class TestShmObjectStorageReferenceCounting(unittest.TestCase):
+    """One writer and four readers, as with tensor-parallel workers."""
+
+    def setUp(self):
+        ring_buffer = SingleWriterShmRingBuffer(
+            data_buffer_size=1024 * 100, create=True
+        )
+        self.writer = SingleWriterShmObjectStorage(
+            max_object_size=1024 * 10,
+            n_readers=4,
+            ring_buffer=ring_buffer,
+            serde_class=MsgpackSerde,
+        )
+        self.addCleanup(self.writer.close)
+        handle = self.writer.handle()
+        handle.reader_lock = Lock()
+        self.readers = [
+            SingleWriterShmObjectStorage.create_from_handle(handle) for _ in range(4)
+        ]
+        for reader in self.readers:
+            self.addCleanup(reader.close)
+
+    def _reference(self, key: str) -> tuple[int, int, list[int], str]:
+        """Take one writer reference to the key, as one request item does."""
+        if self.writer.is_cached(key):
+            address, monotonic_id = self.writer.get_cached(key)
+        else:
+            address, monotonic_id = self.writer.put(key, "value")
+        return address, monotonic_id, self.writer.get_signature(key), key
+
+    @staticmethod
+    def _touch(reader: SingleWriterShmObjectStorage, reference) -> None:
+        address, monotonic_id, signature, key = reference
+        reader.touch(key, address, monotonic_id, signature)
+
+    def _is_evictable(self, key: str) -> bool:
+        self.writer.free_unused()
+        return not self.writer.is_cached(key)
+
+    def test_item_referenced_again_before_every_reader_fetched_it(self):
+        """A second request must not leave the item unevictable forever."""
+        first = self._reference("image")
+        self.writer.touch("image")
+        second = self._reference("image")
+        self.writer.release_touches()
+
+        # Every reader starts on the first request; the ones that finish it
+        # go on to the second while the others are still fetching.
+        for reader in self.readers:
+            self._touch(reader, first)
+        for reader in self.readers:
+            reader.get(*first)
+            self._touch(reader, second)
+            reader.get(*second)
+
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_new_item_twice_in_one_request_is_not_evicted_early(self):
+        """The item must stay until the last reader has fetched it."""
+        self.writer.touch("image")
+        references = [self._reference("image"), self._reference("image")]
+        self.writer.release_touches()
+
+        for reader in self.readers[:-1]:
+            for reference in references:
+                self._touch(reader, reference)
+            for reference in references:
+                reader.get(*reference)
+        for reference in references:
+            self._touch(self.readers[-1], reference)
+        self.assertFalse(self._is_evictable("image"))
+
+        for reference in references:
+            self.readers[-1].get(*reference)
+        self.assertTrue(self._is_evictable("image"))
+
+    def test_touch_protects_item_until_released(self):
+        reference = self._reference("image")
+        for reader in self.readers:
+            reader.get(*reference)
+
+        self.writer.touch("image")
+        self.assertFalse(self._is_evictable("image"))
+        self.writer.release_touches()
+        self.assertTrue(self._is_evictable("image"))
 
 
 # Reader process function
@@ -242,11 +387,11 @@ def reader_process(process_id, storage_handle, items_to_read):
 
     errors = []
 
-    for key, original_value, address, monotonic_id in items_to_read:
+    for key, original_value, address, monotonic_id, signature in items_to_read:
         time.sleep(random.random() / 100)
         try:
             # Read data from shared memory
-            retrieved_value = reader_storage.get(address, monotonic_id)
+            retrieved_value = reader_storage.get(address, monotonic_id, signature, key)
 
             # Verify data integrity
             assert retrieved_value == original_value
@@ -289,7 +434,8 @@ def run_multiprocess_example():
         for key, value in test_data:
             print(f"Storing {key}: {value}")
             address, monotonic_id = storage.put(key, value)
-            stored_items.append((key, value, address, monotonic_id))
+            signature = storage.get_signature(key)
+            stored_items.append((key, value, address, monotonic_id, signature))
             print(f"  -> Stored at address {address}, ID {monotonic_id}")
 
         print("\n--- Retrieving Data ---")

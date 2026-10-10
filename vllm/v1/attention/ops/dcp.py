@@ -27,6 +27,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
     DirectCPWorkspace,
     direct_cp_enabled,
@@ -133,8 +134,7 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         N_ROUNDED: tl.constexpr,
         IS_BASE_E: tl.constexpr,
     ):
-        """
-        Apply the all-gathered lses to correct each local rank's attention
+        """Apply the all-gathered lses to correct each local rank's attention
         output. we still need perform a cross-rank reduction to obtain the
         final attention output.
 
@@ -147,6 +147,17 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
                 Pointer to output tensor of shape [ B, H, D ]
             vlse_ptr (triton.PointerType):
                 Pointer to output tensor of shape [ B, H ]
+            outputs_stride_B (int): Batch stride of ``outputs_ptr``
+            outputs_stride_H (int): Head stride of ``outputs_ptr``
+            outputs_stride_D (int): Head-dim stride of ``outputs_ptr``
+            lses_stride_N (int): Rank stride of ``lses_ptr``
+            lses_stride_B (int): Batch stride of ``lses_ptr``
+            lses_stride_H (int): Head stride of ``lses_ptr``
+            lse_idx (int): Index of this rank's lse within the all-gathered tensor
+            HEAD_DIM: Head dimension, as a constexpr
+            N_ROUNDED: Rank count rounded to a power of two, as a constexpr
+            IS_BASE_E: Whether the lses are natural-log based, as a constexpr
+
         """
         batch_idx = tl.program_id(axis=0).to(tl.int64)
         head_idx = tl.program_id(axis=1).to(tl.int64)
@@ -376,9 +387,11 @@ def correct_attn_out(
         lses: Tensor of shape [ N, B, H ]
         cp_rank: Current rank in the context-parallel group
         ctx: Triton context to avoid recompilation
+        is_lse_base_on_e: Whether the lses use base e rather than base 2
 
     Returns:
         Tuple of (out, lse) with corrected attention and final log-sum-exp.
+
     """
     if ctx is None:
         ctx = CPTritonContext()
@@ -431,8 +444,7 @@ def _cp_lse_common(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     if cp_group.world_size == 1:
@@ -466,8 +478,7 @@ def cp_lse_ag_out_rs(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
@@ -499,8 +510,7 @@ def cp_lse_ag_out_ar(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ):
-    """
-    cp_attn_out: [ B, H, D ]
+    """cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
@@ -528,8 +538,7 @@ def _lse_weighted_combine(
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    CPU reference implementation for LSE-weighted combination.
+    """CPU reference implementation for LSE-weighted combination.
 
     This is a pure PyTorch implementation used for testing and validation.
 
@@ -545,6 +554,7 @@ def _lse_weighted_combine(
 
     Returns:
         Combined output [B, H, D], and optionally global LSE [B, H]
+
     """
     N, B, H, D = outputs.shape
 
@@ -936,8 +946,7 @@ def dcp_a2a_lse_reduce(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Combine partial attention outputs across DCP ranks using All-to-All.
+    """Combine partial attention outputs across DCP ranks using All-to-All.
 
     The output and LSE are packed into a single output-dtype buffer, sent
     with one All-to-All, then unpacked and combined with exact LSE weighting.
@@ -955,6 +964,7 @@ def dcp_a2a_lse_reduce(
     Returns:
         Combined output [B, H/N, D] (head-scattered)
         If return_lse=True, also returns global_lse [B, H/N]
+
     """
     world_size = cp_group.world_size
 
@@ -1002,16 +1012,9 @@ def dcp_a2a_lse_reduce(
 
 def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
-    speculative_config = vllm_config.speculative_config
-    speculative_tokens = vllm_config.num_speculative_tokens
-    tokens_per_seq = (
-        1
-        + (
-            2
-            if speculative_config is not None and speculative_config.parallel_drafting
-            else 1
-        )
-        * speculative_tokens
+    # num_speculative_tokens also counts a diffusion canvas.
+    tokens_per_seq = max(
+        1 + vllm_config.num_speculative_tokens, max_decode_query_len(vllm_config)
     )
     return min(
         scheduler_config.max_num_batched_tokens,

@@ -7,12 +7,14 @@ import os
 import queue
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import msgspec
 import numpy as np
@@ -48,6 +50,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    HeartbeatInfo,
+    RemoteMeta,
+    ReqMeta,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -74,6 +79,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 from .utils import (
+    create_model_runner_output,
     create_request,
     create_scheduler,
     create_vllm_config,
@@ -83,8 +89,7 @@ from .utils import (
 
 @pytest.fixture(scope="module", autouse=True)
 def clear_kv_transfer():
-    """
-    The test cases in this file use `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
+    """The test cases in this file use `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
     causing the global variable `_KV_CONNECTOR_AGENT`
     to be assigned but never deleted.
 
@@ -110,7 +115,7 @@ def get_default_xfer_telemetry(
     class AttributeDict(dict):
         __slots__ = ()
         __getattr__ = dict.__getitem__
-        __setattr__ = dict.__setitem__  # type: ignore[assignment]
+        __setattr__ = dict.__setitem__
 
     # We can't instantiate nixlXferTelemetry because it's read only and
     # ray env does not have NIXL, so we must fake it
@@ -139,6 +144,7 @@ class FakeNixlWrapper:
     def __init__(self, agent_name: str, *args, **kwargs):
         self._cycles_before_xfer_done = 0
         self._check_xfer_state_cycles: defaultdict[int, int] = defaultdict(lambda: 0)
+        self.invalid_remote_agents: set[str] = set()
 
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
@@ -159,6 +165,7 @@ class FakeNixlWrapper:
         return self.AGENT_METADATA
 
     def add_remote_agent(self, agent_metadata: bytes) -> str:
+        self.invalid_remote_agents.discard(self.REMOTE_AGENT_NAME)
         return self.REMOTE_AGENT_NAME
 
     def get_new_notifs(self) -> dict[str, list[bytes]]:
@@ -179,6 +186,9 @@ class FakeNixlWrapper:
 
     def remove_remote_agent(self, agent: str) -> None:
         pass
+
+    def check_remote_metadata(self, agent: str) -> bool:
+        return agent not in self.invalid_remote_agents
 
     def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
         pass
@@ -244,7 +254,6 @@ nixl_agent = FakeNixlWrapper
 
 def test_basic_interface():
     """Unit test for basic NixlConnector interface functionality."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -283,8 +292,7 @@ def test_basic_interface():
 
 
 def test_prompt_less_than_block_size():
-    """
-    Test that we can handle case where prompt is < block.
+    """Test that we can handle case where prompt is < block.
 
     In this case, the P worker will still send remote_block_ids of the
     partial block. The D worker should schedule an async read
@@ -348,13 +356,65 @@ def test_abort_immediately_remote_prefill_enqueues_empty_recv():
     assert req_meta.awaiting_kvs is False
 
 
+def test_prefill_exports_cached_tokens_in_kv_transfer_params():
+    """The P worker reports its own prefix-cache hits in the returned
+    kv_transfer_params so the D worker can surface them in
+    prompt_tokens_details instead of the ~100% local hit it measures
+    when pulling the KVs from the remote.
+    """
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = BLOCK_SIZE * 3
+
+    # Warm the prefix cache with a request sharing the full prompt.
+    warmup = create_request(
+        request_id=1,
+        num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
+        block_size=BLOCK_SIZE,
+    )
+    scheduler.add_request(warmup)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output([warmup], use_eos=True)
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # P-side request with the same prompt hits the local cache on all but
+    # the last block (recomputed to obtain logits).
+    request = create_request(
+        request_id=2,
+        num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
+        block_size=BLOCK_SIZE,
+        do_remote_decode=True,
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert request.prefill_stats is not None
+    assert request.prefill_stats.num_cached_tokens == NUM_TOKENS - BLOCK_SIZE
+
+    # max_tokens=1, so the request finishes and returns kv_transfer_params.
+    model_runner_output = create_model_runner_output([request])
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
+
+    output = engine_core_outputs[0].outputs[0]
+    assert output.finish_reason is not None
+    assert output.kv_transfer_params is not None
+    assert (
+        output.kv_transfer_params["remote_prefill_cached_tokens"]
+        == NUM_TOKENS - BLOCK_SIZE
+    )
+
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
 def test_kv_transfer_handshake(dist_init):
     """Unit test for basic NixlConnector interface functionality."""
-
     # Test setup, we creates a scheduler that contains a NixlConnector
     # of role SCHEDULER, and expect it to be serving NixlAgentMetadata from
     # all workers of the instance.
@@ -777,7 +837,6 @@ class TestNixlHandshake:
         prefill_tp_size,
     ):
         """Test that NixlConnector's start_load_kv should be non-blocking."""
-
         vllm_config = create_vllm_config()
         vllm_config.parallel_config.tensor_parallel_size = decode_tp_size
 
@@ -832,8 +891,7 @@ class TestNixlHandshake:
     def test_prefill_tp_size_greater_than_decode_tp_size(
         self, local_tp_size: int, default_vllm_config, dist_init, monkeypatch
     ):
-        """
-        Verify remote TP > local TP handshake succeeds with different
+        """Verify remote TP > local TP handshake succeeds with different
         remote configurations.
         """
         monkeypatch.setattr(
@@ -843,11 +901,16 @@ class TestNixlHandshake:
 
         vllm_config = create_vllm_config()
 
-        connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
-        )
+        # num_blocks=1 keeps the fake handshake's region_num_blocks consistent
+        # with the minimal single-block registration below (num_descs == 1);
+        # _fa_desc_replicated cross-checks the two.
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=1)
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
-            vllm_config, connector.engine_id, hand_shake_latency=0
+            vllm_config,
+            connector.engine_id,
+            hand_shake_latency=0,
+            kv_cache_config=kv_cache_config,
         )
         worker = connector.connector_worker
 
@@ -906,8 +969,7 @@ class TestNixlHandshake:
     def test_prefill_tp_size_greater_than_decode_tp_size_mla(
         self, default_vllm_config, dist_init
     ):
-        """
-        Verify remote TP > local TP handshake succeeds with different
+        """Verify remote TP > local TP handshake succeeds with different
         remote configurations for an MLA model.
         """
         vllm_config = create_vllm_config()
@@ -1013,7 +1075,6 @@ class TestNixlHandshake:
         dist_init,
     ):
         """Test that multiple start_load_kv calls should occur concurrently."""
-
         vllm_config = create_vllm_config()
 
         # Test worker role in decode server.
@@ -1067,18 +1128,24 @@ class TestNixlHandshake:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
 
+    @pytest.mark.parametrize(
+        ("kv_cache_layout", "enable_permute_local_kv"),
+        # enable_permute_local_kv only covers a local LBNHC cache.
+        [("LBHNC", False), ("BLHNC", True)],
+    )
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
     def test_handshake_fails_on_kv_cache_layout_mismatch(
-        self, default_vllm_config, dist_init
+        self, default_vllm_config, dist_init, kv_cache_layout, enable_permute_local_kv
     ):
-        """
-        Verify that adding a remote agent fails if kv_cache_layout differs.
+        """Verify that adding a remote agent fails if kv_cache_layout differs.
         This test is only relevant for heterogeneous TP.
         """
-        vllm_config = create_vllm_config()
+        vllm_config = create_vllm_config(
+            enable_permute_local_kv=enable_permute_local_kv
+        )
 
         # Mock TP world size to 2 to force heterogeneous TP when
         # remote_tp_size=1
@@ -1091,7 +1158,10 @@ class TestNixlHandshake:
                 vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
             )
             connector.connector_worker = FakeNixlConnectorWorker(
-                vllm_config, connector.engine_id, hand_shake_latency=0
+                vllm_config,
+                connector.engine_id,
+                hand_shake_latency=0,
+                kv_cache_layout=kv_cache_layout,
             )
             worker = connector.connector_worker
 
@@ -1132,8 +1202,7 @@ class TestNixlHandshake:
     def test_handshake_succeed_on_kv_cache_layout_mismatch_with_experimental(
         self, default_vllm_config, dist_init
     ):
-        """
-        Verify that adding a remote agent fails if kv_cache_layout differs.
+        """Verify that adding a remote agent fails if kv_cache_layout differs.
         This test is only relevant for heterogeneous TP.
         """
         vllm_config = create_vllm_config(enable_permute_local_kv=True)
@@ -1571,11 +1640,9 @@ def test_reqs_to_send_deadline_rebased_to_worker_clock(default_vllm_config, dist
 
 
 def test_kv_connector_stats_aggregation():
-    """
-    Test KV transfer stats aggregation across TP ranks using
+    """Test KV transfer stats aggregation across TP ranks using
     KVOutputAggregator (used by MultiprocExecutor).
     """
-
     # Create KVOutputAggregator for 3 workers (simulating TP=3), same thing
     # done in MultiprocExecutor.execute_model
     aggregator = KVOutputAggregator(expected_finished_count=3)
@@ -1635,14 +1702,122 @@ def test_kv_connector_stats_aggregation():
     assert cli_stats["Avg xfer time (ms)"] == 1500.0
     assert cli_stats["Avg post time (ms)"] == 1500.0
     assert cli_stats["Avg number of descriptors"] == 1.5
+    # Reduced values must be plain Python scalars so CLI logging renders
+    # them without numpy reprs (eg np.float64(...)).
+    assert all(not isinstance(v, np.generic) for v in cli_stats.values())
+
+
+def test_kv_connector_stats_failure_grouping():
+    """Transfer, handshake and notification failures are reported as one
+    transport-failure count, while KV expiry is reported separately: the
+    former are sporadic lower-transport-layer events, the latter an
+    autoscaler signal."""
+    stats = NixlKVConnectorStats()
+    assert stats.is_empty()
+
+    stats.record_failed_transfer()
+    stats.record_failed_handshake()
+    stats.record_failed_notification()
+    stats.record_kv_expired_req()
+    stats.record_notification_after_expiry()
+    assert not stats.is_empty()
+
+    # No successful transfers: latency stats are zero but the failure
+    # counts still surface.
+    reduced = stats.reduce()
+    assert reduced["Num successful transfers"] == 0
+    assert reduced["Num failed transfers"] == 3
+    assert reduced["Num KV expired reqs"] == 1
+    assert reduced["Num notifs after expiry"] == 1
+
+
+def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
+    """vllm:nixl_num_failed_transfers counts handshake and notification
+    failures too, while vllm:nixl_num_kv_expired_reqs stays a separate
+    counter."""
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+        NixlPromMetrics,
+    )
+
+    registry = CollectorRegistry()
+
+    class RegistryGauge(Gauge):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    class RegistryCounter(Counter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    class RegistryHistogram(Histogram):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, registry=registry, **kwargs)
+
+    vllm_config = create_vllm_config()
+    metric_types = {
+        Gauge: RegistryGauge,
+        Counter: RegistryCounter,
+        Histogram: RegistryHistogram,
+    }
+    prom = NixlPromMetrics(
+        vllm_config,
+        metric_types,
+        labelnames=["engine"],
+        per_engine_labelvalues={0: ["engine-0"]},
+    )
+
+    stats = NixlKVConnectorStats()
+    stats.record_failed_transfer()
+    stats.record_failed_handshake()
+    stats.record_failed_notification()
+    stats.record_kv_expired_req()
+    stats.record_notification_after_expiry()
+    prom.observe(stats.data, engine_idx=0)
+
+    def counter_value(name: str) -> float:
+        for metric in registry.collect():
+            for sample in metric.samples:
+                if sample.name == name:
+                    return sample.value
+        raise AssertionError(f"metric {name} not found in registry")
+
+    assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
+    assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
+    assert counter_value("vllm:nixl_num_notifications_after_expiry_total") == 1.0
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_notification_after_expiry_is_counted(default_vllm_config, dist_init):
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    worker._reqs_to_process.add("known")
+    worker._reqs_to_send["known"] = time.perf_counter() + 10
+    worker.nixl_wrapper.get_new_notifs = MagicMock(
+        return_value={"decode-agent": [b"known:1", b"unknown:1"]}
+    )
+
+    assert worker._get_new_notifs() == {"known"}
+
+    stats = connector.get_kv_connector_stats()
+    assert isinstance(stats, NixlKVConnectorStats)
+    assert stats.data["num_notifications_after_expiry"] == [1]
 
 
 def test_multi_kv_connector_stats_aggregation():
-    """
-    Test MultiKVConnectorStats aggregation across TP ranks using
+    """Test MultiKVConnectorStats aggregation across TP ranks using
     KVOutputAggregator (used by MultiprocExecutor).
     """
-
     aggregator = KVOutputAggregator(expected_finished_count=3)
 
     from dataclasses import dataclass
@@ -1783,8 +1958,7 @@ def test_scheduler_kv_connector_stats_aggregation():
     FakeNixlWrapper,
 )
 def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
-    """
-    Test lifecycle of an aborted Remote Prefill request hitting the timeout.
+    """Test lifecycle of an aborted Remote Prefill request hitting the timeout.
     -----> P
             |  {process request}
      <-/--- |  {result is NOT delivered, eg proxy is down}
@@ -1919,6 +2093,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     worker.kv_caches_base_addr = {"local": {0: [100, 200]}}
     worker._has_mamba = False
     worker._mixed_mem_types = True
+    worker._skip_dram_xfer = False
     worker.region_mem_types = ["DRAM", "VRAM"]
     worker.region_num_blocks = [2, 2]
     worker._desc_is_dram_by_block_size = {}
@@ -1946,7 +2121,9 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
 
     assert handle == 22
     assert worker._dram_src_handles_by_block_size[worker.block_size] == 11
-    assert [block[2] for block in blocks] == [0, 0, 3, 3]
+    # Must stay an array: P_TP > D_TP splits call .tolist() on it.
+    assert isinstance(blocks, np.ndarray)
+    assert blocks[:, 2].tolist() == [0, 0, 3, 3]
     memory_types = [
         call.args[1] for call in worker.nixl_wrapper.get_xfer_descs.call_args_list
     ]
@@ -1967,6 +2144,12 @@ def recv_worker():
     worker._recving_transfers = defaultdict(list)
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
+    worker._handshake_lock = threading.RLock()
+    worker._handshake_futures = {}
+    worker._remote_agents = {}
+    worker._engine_by_address = {}
+    worker._failed_remote_engines = set()
+    worker._invalid_remote_engines = set()
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -1978,6 +2161,7 @@ def recv_worker():
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker.tp_rank = 0
+    worker._skip_dram_xfer = False
     worker._log_failure = MagicMock()  # type: ignore[method-assign]
     worker.xfer_stats = NixlKVConnectorStats()
     worker.nixl_wrapper = MagicMock()
@@ -2035,6 +2219,66 @@ def test_mixed_memory_read_failure_does_not_notify_producer(recv_worker):
     worker.nixl_wrapper.send_notif.assert_not_called()
 
 
+def test_hisparse_dram_rank0_only_read_keeps_device_part(recv_worker):
+    worker = recv_worker
+    worker.tp_rank = 1
+    worker._skip_dram_xfer = True
+    worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
+    worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
+    worker._dram_src_handles_by_block_size = {16: None}
+    worker.nixl_wrapper.make_prepped_xfer.side_effect = [102]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+    worker._read_blocks_mixed(
+        request_id="request",
+        local_block_size_key=16,
+        local_device_handle=20,
+        local_dram_handle=None,
+        remote_xfer_side_handle=30,
+        local_block_descs_ids=np.array([0, 2]),
+        remote_block_descs_ids=np.array([5, 7]),
+        notif_agent="prefill",
+        notif_id=b"request:1",
+    )
+
+    (device_read,) = worker.nixl_wrapper.make_prepped_xfer.call_args_list
+    assert device_read.args[:2] == ("READ", 20)
+    np.testing.assert_array_equal(device_read.args[2], [0])
+    np.testing.assert_array_equal(device_read.args[4], [7])
+
+    assert worker.get_finished() == (set(), {"request"})
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "prefill", notif_msg=b"request:1"
+    )
+
+
+def test_hisparse_dram_rank0_only_dram_only_read_completes(recv_worker):
+    """With nothing left to read, the request still completes and notifies."""
+    worker = recv_worker
+    worker.tp_rank = 1
+    worker._skip_dram_xfer = True
+    worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
+    worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
+
+    worker._read_blocks_mixed(
+        request_id="request",
+        local_block_size_key=16,
+        local_device_handle=20,
+        local_dram_handle=None,
+        remote_xfer_side_handle=30,
+        local_block_descs_ids=np.array([0, 1]),
+        remote_block_descs_ids=np.array([5, 6]),
+        notif_agent="prefill",
+        notif_id=b"request:1",
+    )
+
+    worker.nixl_wrapper.make_prepped_xfer.assert_not_called()
+    assert worker.get_finished() == (set(), {"request"})
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "prefill", notif_msg=b"request:1"
+    )
+
+
 def element_byte_addrs(view: torch.Tensor) -> list[int]:
     """Absolute byte addresses of every element of a (possibly strided) view."""
     offsets = torch.zeros(view.shape, dtype=torch.int64)
@@ -2070,8 +2314,7 @@ def test_register_kv_caches(
     layout,
     separate_kv_head_groups,
 ):
-    """
-    Test that register_kv_caches() properly calls nixl_wrapper methods with
+    """Test that register_kv_caches() properly calls nixl_wrapper methods with
     correct data.
 
     This test verifies:
@@ -2080,7 +2323,6 @@ def test_register_kv_caches(
     2. nixl_wrapper.get_xfer_descs() is called with blocks_data containing
        block layout info
     """
-
     vllm_config = create_vllm_config(attention_backend=attn_backend)
     vllm_config.cache_config.kv_cache_layout = layout
 
@@ -2308,17 +2550,14 @@ class FakePlatform(Platform):
 
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
-        """
-        Returns a mapping from device_type to a tuple of supported
+        """Returns a mapping from device_type to a tuple of supported
         kv_buffer_device for nixl.
         """
         return {"oot": ("oot",)}
 
     @classmethod
     def get_nixl_memory_type(cls) -> str | None:
-        """
-        Returns the nixl memory type for the current platform.
-        """
+        """Returns the nixl memory type for the current platform."""
         return "VRAM"
 
 
@@ -2331,8 +2570,7 @@ class FakePlatform(Platform):
 def test_kv_buffer_to_nixl_memory_types(
     default_vllm_config, dist_init, kv_buffer_device, nixl_memory_type
 ):
-    """
-    Test that register_kv_caches() passes the correct memory types from the
+    """Test that register_kv_caches() passes the correct memory types from the
     config to the nixl_wrapper.
     """
     vllm_config = create_vllm_config()
@@ -2553,6 +2791,51 @@ def test_engine_with_inflight_transfer_is_not_evicted(default_vllm_config, dist_
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
+def test_heartbeated_engine_is_not_evicted(default_vllm_config, dist_init, monkeypatch):
+    """Heartbeats keep a remote engine's NIXL state alive.
+
+    Requests waiting in the D scheduler issue no reads, but their engine is
+    heartbeated through its remote agents. If the TTL expires anyway, the
+    next heartbeat evicts the engine and starts a new handshake, which loads
+    every remote agent again.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+
+    worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=10.0)
+    nixl_wrapper = worker.nixl_wrapper
+
+    now = {"t": 1000.0}
+    monkeypatch.setattr(base_worker.time, "perf_counter", lambda: now["t"])
+    worker._engine_last_active[engine_id] = now["t"]
+
+    metadata = NixlConnectorMetadata()
+    metadata.heartbeat_by_engine = {
+        engine_id: HeartbeatInfo(
+            req_ids={"remote-req"}, host="localhost", port=1234, tp_size=2
+        )
+    }
+
+    with (
+        patch.object(nixl_wrapper, "send_notif") as mock_send,
+        patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem,
+        patch.object(worker, "_handshake_initiation_executor") as mock_executor,
+    ):
+        # One heartbeat every 5 s for twice the TTL, and no reads.
+        for _ in range(4):
+            now["t"] += 5.0
+            worker._send_heartbeats(metadata)
+
+    assert engine_id in worker._remote_agents
+    mock_rem.assert_not_called()
+    mock_executor.submit.assert_not_called()
+    # Every heartbeat reached both remote agents.
+    assert mock_send.call_count == 8
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_engine_ttl_disabled(default_vllm_config, dist_init):
     """Eviction is disabled when engine_ttl <= 0."""
     worker, engine_id = _setup_worker_with_remote_engine(engine_ttl=0.0)
@@ -2565,6 +2848,373 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
     # Nothing should be evicted.
     assert engine_id in worker._remote_agents
     assert engine_id in worker.dst_xfer_side_handles
+
+
+@pytest.mark.cpu_test
+class TestPeerReplacement:
+    @pytest.fixture(autouse=True)
+    def setup(self, monkeypatch):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        config = create_vllm_config(kv_connector_extra_config={"engine_ttl": 0})
+        config.kv_transfer_config.kv_buffer_device = "cpu"
+        platform = SimpleNamespace(
+            device_type="cpu",
+            discover_numa_topology=lambda: [],
+            get_nixl_memory_type=lambda: "DRAM",
+            is_rocm=lambda: False,
+        )
+        with (
+            patch.object(bw, "NixlWrapper", FakeNixlWrapper),
+            patch.object(bw, "current_platform", platform),
+            patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+            patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+            patch.object(
+                bw, "get_current_attn_backends", return_value=[FlashAttentionBackend]
+            ),
+        ):
+            self.worker = FakeNixlConnectorWorker(config, "local", hand_shake_latency=0)
+            self.nixl = self.worker.nixl_wrapper
+            self.transport = MagicMock(wraps=self.nixl)
+            self.worker.nixl_wrapper = self.transport
+            monkeypatch.setattr(
+                self.worker._handshake_initiation_executor,
+                "submit",
+                lambda *args: Future(),
+            )
+            self._connect("old")
+            yield
+            self.worker.shutdown()
+
+    def _connect(self, engine_id="new", host="localhost", port=1234):
+        future = self.worker._ensure_handshake(engine_id, host, port, 1)
+        self.worker.REMOTE_ENGINE_ID = engine_id
+        self.nixl.REMOTE_AGENT_NAME = engine_id
+        future.set_result(self.worker._nixl_handshake(host, port, 1, engine_id))
+
+    def _request(self, engine_id="new", blocks=(1,), awaiting_kvs=True, req_id=None):
+        metadata = NixlConnectorMetadata()
+        metadata.reqs_to_recv[req_id or f"{engine_id}-req"] = ReqMeta(
+            local_block_ids=(blocks,),
+            local_physical_block_ids=(blocks,),
+            tp_size=1,
+            remote=RemoteMeta(
+                ([2],), "localhost", 1234, engine_id, f"{engine_id}-prefill"
+            ),
+            awaiting_kvs=awaiting_kvs,
+        )
+        return metadata
+
+    def _fail_old_peer(self):
+        self.worker.start_load_kv(self._request("old"))
+        self.nixl.invalid_remote_agents.add("old")
+        self.transport.check_xfer_state.return_value = "ERR"
+
+    def test_cleans_old_peer_after_confirmed_handshake(self):
+        self._connect("healthy", host="other-host")
+        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        self.worker.start_load_kv(self._request())
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_not_called()
+
+        self._connect()
+        self.worker.get_transfer_results()
+        self.transport.release_dlist_handle.assert_called_once_with(old_handle)
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert set(self.worker._remote_agents) == {"new", "healthy"}
+        assert self.worker._engine_by_address == {
+            ("localhost", 1234): "new",
+            ("other-host", 1234): "healthy",
+        }
+        with pytest.raises(KeyError):
+            self.worker.transfer_topo.get_engine_info("old")
+
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        assert self.worker.get_transfer_results().finished_recving == {"new-req"}
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    @pytest.mark.parametrize("host,port", [("other-host", 1234), ("localhost", 5678)])
+    def test_preserves_other_addresses(self, host, port):
+        self._connect(host=host, port=port)
+        self.worker.get_transfer_results()
+        assert "old" in self.worker._remote_agents
+        self.transport.remove_remote_agent.assert_not_called()
+
+    def test_preserves_old_peer_when_handshake_fails(self):
+        self.worker.start_load_kv(self._request())
+        self.worker._handshake_futures["new"].set_exception(
+            RuntimeError("handshake failed")
+        )
+        assert self.worker.get_transfer_results().failed_recving == {"new-req"}
+        assert "old" in self.worker._remote_agents
+        assert self.worker._engine_by_address == {("localhost", 1234): "old"}
+        self.transport.remove_remote_agent.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "states,failed",
+        [
+            (["PROC", "DONE"], False),
+            (["ERR", "PROC", "DONE"], True),
+            (["ERR", "PROC", "ERR"], True),
+        ],
+        ids=["healthy", "failed-sibling-completes", "failed-sibling-fails"],
+    )
+    @pytest.mark.parametrize("invalidated", [False, True])
+    def test_waits_for_reads_before_cleanup_and_failure_reporting(
+        self, states, failed, invalidated
+    ):
+        if invalidated:
+            self.nixl.invalid_remote_agents.add("old")
+        self.worker._recving_metadata.update(self._request("old").reqs_to_recv)
+        self.worker._recving_transfers["old-req"] = [1, 2] if failed else [1]
+        self.transport.check_xfer_state.side_effect = states
+        self._connect()
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == set()
+        assert self.worker.get_block_ids_with_load_errors() == set()
+        self.transport.remove_remote_agent.assert_not_called()
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"old-req"}
+        assert result.failed_recving == ({"old-req"} if failed else set())
+        assert self.worker.get_block_ids_with_load_errors() == (
+            {1} if failed else set()
+        )
+        assert self.transport.release_xfer_handle.call_count == (2 if failed else 1)
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert not self.worker._invalid_remote_engines
+
+    def test_waits_for_queued_notification(self):
+        metadata = self._request("old", blocks=())
+        self.worker._recving_metadata.update(metadata.reqs_to_recv)
+        self.worker._background_nixl_handshake(
+            "old-req", "old", metadata.reqs_to_recv["old-req"]
+        )
+        self._connect()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_not_called()
+
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        self.transport.send_notif.assert_called_once_with(
+            "old", notif_msg=b"old-prefill:1"
+        )
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"old-req"}
+        assert result.failed_recving == set()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    @pytest.mark.parametrize("invalidated", [False, True])
+    def test_waits_for_other_handshakes(self, invalidated):
+        if invalidated:
+            self._fail_old_peer()
+        else:
+            self._connect()
+        self.worker._ensure_handshake("other", "other-host", 1234, 1)
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_not_called()
+        self.transport.check_remote_metadata.assert_not_called()
+
+        self._connect("other", host="other-host")
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    @pytest.mark.parametrize("invalidated", [False, True])
+    def test_rehandshakes_queued_request_for_released_engine(self, invalidated):
+        # A request queued after its engine's handshake, but drained only after
+        # that engine was replaced and released, must not read from it.
+        if invalidated:
+            self._fail_old_peer()
+        metadata = self._request("old", blocks=(), awaiting_kvs=False)
+        self.worker._ready_requests.put(("old-req", metadata.reqs_to_recv["old-req"]))
+        if not invalidated:
+            self._connect()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        assert "old" in self.worker._handshake_futures
+        self.transport.send_notif.assert_not_called()
+
+    @pytest.mark.parametrize("missing", [False, True, RuntimeError("probe failed")])
+    def test_recovery_requires_confirmed_missing_metadata(self, missing):
+        self._fail_old_peer()
+        # A missing rank suffices even if another rank still has metadata.
+        self.worker._remote_agents["old"][(0, 1)] = "old-other-rank"
+        self.nixl.invalid_remote_agents.clear()
+        if missing is True:
+            self.nixl.invalid_remote_agents.add("old-other-rank")
+        elif isinstance(missing, Exception):
+            self.transport.check_remote_metadata.side_effect = missing
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        assert self.worker.get_block_ids_with_load_errors() == {1}
+        assert ("old" not in self.worker._remote_agents) is (missing is True)
+        assert self.transport.release_dlist_handle.call_count == (missing is True)
+
+    @pytest.mark.parametrize("handshake_fails", [False, True])
+    def test_recovery_rehandshakes_same_id_with_fresh_descriptors(
+        self, handshake_fails
+    ):
+        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+        self._fail_old_peer()
+        self.worker.get_transfer_results()
+        self.transport.release_dlist_handle.assert_called_once_with(old_handle)
+        assert not self.worker._engine_by_address
+        with pytest.raises(KeyError):
+            self.worker.transfer_topo.get_engine_info("old")
+        self.transport.make_prepped_xfer.reset_mock()
+
+        self.worker.start_load_kv(self._request("old", req_id="next"))
+        self.transport.make_prepped_xfer.assert_not_called()
+        if handshake_fails:
+            self.worker._handshake_futures["old"].set_exception(
+                RuntimeError("handshake failed")
+            )
+            result = self.worker.get_transfer_results()
+            assert result.failed_recving == result.finished_recving == {"next"}
+            assert "old" not in self.worker._remote_agents
+            assert self.worker._ready_requests.empty()
+            return
+
+        self._connect("old")
+        fresh_handle = self.worker.dst_xfer_side_handles["old"][0]
+        assert fresh_handle != old_handle
+        assert self.worker._engine_by_address == {("localhost", 1234): "old"}
+        self.transport.check_xfer_state.return_value = "DONE"
+        self.worker.start_load_kv(NixlConnectorMetadata())
+        assert self.transport.make_prepped_xfer.call_args.args[3] == fresh_handle
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == {"next"} and not result.failed_recving
+        self.transport.release_dlist_handle.assert_called_once_with(old_handle)
+
+    def test_recovery_drains_reads_and_rejects_new_ones_without_harming_other_peers(
+        self,
+    ):
+        self._connect("healthy", host="other-host")
+        self.worker._recving_metadata.update(self._request("old").reqs_to_recv)
+        self.worker._recving_metadata.update(self._request("healthy").reqs_to_recv)
+        self.worker._recving_transfers.update(
+            {"old-req": [10, 11], "healthy-req": [12]}
+        )
+        self.nixl.invalid_remote_agents.add("old")
+        self.transport.check_xfer_state.side_effect = (
+            lambda h: "ERR" if h == 10 else "PROC"
+        )
+        old_handle = self.worker.dst_xfer_side_handles["old"][0]
+
+        result = self.worker.get_transfer_results()
+        assert not result.finished_recving and not result.failed_recving
+        self.transport.release_dlist_handle.assert_not_called()
+        self.worker.start_load_kv(self._request("old", req_id="blocked"))
+        self.transport.make_prepped_xfer.assert_not_called()
+
+        self.transport.check_xfer_state.side_effect = (
+            lambda h: "DONE" if h == 11 else "PROC"
+        )
+        result = self.worker.get_transfer_results()
+        assert (
+            result.finished_recving == result.failed_recving == {"old-req", "blocked"}
+        )
+        assert set(self.worker._remote_agents) == {"healthy"}
+        assert self.worker._recving_transfers == {"healthy-req": [12]}
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        calls = self.transport.mock_calls
+        assert calls.index(call.release_xfer_handle(11)) < calls.index(
+            call.release_dlist_handle(old_handle)
+        )
+
+    def test_repeated_invalidation_backs_off_before_rehandshake(self):
+        # A peer that is invalidated again soon after recovery (eg a persistent
+        # RDMA fault) must not re-handshake on every request.
+        self._fail_old_peer()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+        self._connect("old")
+        self._fail_old_peer()
+        assert self.worker.get_transfer_results().failed_recving == {"old-req"}
+        assert "old" in self.worker._remote_agents
+
+        self.transport.make_prepped_xfer.reset_mock()
+        self.worker.start_load_kv(self._request("old", req_id="next"))
+        assert self.worker.get_transfer_results().failed_recving == {"next"}
+        self.transport.make_prepped_xfer.assert_not_called()
+        assert "old" not in self.worker._handshake_futures
+        self.transport.remove_remote_agent.assert_called_once()
+
+        backoff, release_at = self.worker._invalid_engine_backoff["old"]
+        assert backoff == 1.0
+        self.worker._invalid_engine_backoff["old"] = (backoff, release_at - backoff)
+        self.worker.get_transfer_results()
+        assert self.transport.remove_remote_agent.call_count == 2
+        assert "old" not in self.worker._remote_agents
+
+    def test_recovery_waits_until_failed_handle_can_be_released(self):
+        self._fail_old_peer()
+        with patch.object(
+            self.transport, "release_xfer_handle", side_effect=RuntimeError("in use")
+        ):
+            result = self.worker.get_transfer_results()
+            assert not result.finished_recving and not result.failed_recving
+            assert self.worker._recving_transfers["old-req"]
+            self.transport.release_dlist_handle.assert_not_called()
+
+        result = self.worker.get_transfer_results()
+        assert result.finished_recving == result.failed_recving == {"old-req"}
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+
+    @pytest.mark.parametrize("expired", [False, True])
+    def test_success_and_expiry_do_not_probe_metadata(self, expired):
+        metadata = self._request("old")
+        if expired:
+            metadata.reqs_to_recv["old-req"].remote.blocks_expiry_time = 0.0
+            self.worker._bidirectional_kv_xfer_enabled = True
+        with (
+            patch.object(self.worker.xfer_stats, "record_failed_transfer") as failure,
+            patch.object(self.worker.xfer_stats, "record_kv_expired_req") as expiry,
+        ):
+            self.worker.start_load_kv(metadata)
+            result = self.worker.get_transfer_results()
+            assert result.finished_recving == {"old-req"}
+            assert result.failed_recving == ({"old-req"} if expired else set())
+            assert expiry.call_count == int(expired)
+            failure.assert_not_called()
+        self.transport.check_remote_metadata.assert_not_called()
+        self.transport.remove_remote_agent.assert_not_called()
+
+    @pytest.mark.parametrize("awaiting_kvs", [False, True])
+    def test_invalid_peer_empty_recv_is_reported_only_when_awaited(self, awaiting_kvs):
+        self._fail_old_peer()
+        self.worker._recving_transfers["old-req"].append(11)
+        self.transport.check_xfer_state.side_effect = (
+            lambda h: "PROC" if h == 11 else "ERR"
+        )
+        self.worker.get_transfer_results()
+        self.transport.make_prepped_xfer.reset_mock()
+
+        self.worker.start_load_kv(
+            self._request("old", blocks=(), awaiting_kvs=awaiting_kvs, req_id="empty")
+        )
+        result = self.worker.get_transfer_results()
+        expected = {"empty"} if awaiting_kvs else set()
+        assert result.finished_recving == result.failed_recving == expected
+        self.transport.make_prepped_xfer.assert_not_called()
+        self.transport.send_notif.assert_not_called()
+        self.transport.remove_remote_agent.assert_not_called()
+
+    def test_eviction_clears_pending_recovery(self):
+        self.worker._failed_remote_engines.add("old")
+        self.worker._invalid_remote_engines.add("old")
+        self.worker._engine_ttl = 1
+        self.worker._engine_last_active["old"] = time.perf_counter() - 10
+        self.worker._evict_stale_engines()
+        self.worker.get_transfer_results()
+        self.transport.remove_remote_agent.assert_called_once_with("old")
+        assert not self.worker._failed_remote_engines
+        assert not self.worker._invalid_remote_engines
 
 
 def test_transfer_topology_unregister():
@@ -2604,8 +3254,7 @@ def test_transfer_topology_unregister():
     FakeNixlWrapper,
 )
 def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_init):
-    """
-    Create and schedule a request so that P adds it to in-batch tracking via
+    """Create and schedule a request so that P adds it to in-batch tracking via
     the real scheduler, then simulate an abort (request not in next scheduler
     iteration) and verify the worker no longer tracks it as in-batch.
     """
@@ -2738,7 +3387,7 @@ def test_empty_recv_is_reported_only_when_awaited(
     request is named in neither _recving_transfers nor _failed_recv_reqs and
     never reaches finished_recving. The scheduler has no other way to release a
     WAITING_FOR_REMOTE_KVS request, and there is no timeout, so it sits in
-    skipped_waiting holding its blocks for the life of the process.
+    kv_holding_waiting holding its blocks for the life of the process.
 
     Notify-only (awaiting_kvs=False): request_finished seeding an empty recv to
     free P's blocks for a request aborted before it was scheduled, or a readback
@@ -2785,6 +3434,52 @@ def test_empty_recv_is_reported_only_when_awaited(
 
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert (request_id in done_recving) is awaiting_kvs
+
+
+@pytest.mark.parametrize("is_hma", [False, True])
+@pytest.mark.parametrize(
+    "local_block_ids,awaiting_kvs",
+    [((), False), (([],), False), (([],), True), (([1, 2, 3],), True)],
+)
+def test_handshake_failure_reports_only_awaited_recvs(
+    recv_worker, is_hma, local_block_ids, awaiting_kvs
+):
+    """A failed cleanup handshake must not complete an already-aborted request."""
+    worker = recv_worker
+    worker._is_hma_required = is_hma
+    worker._recving_metadata.clear()
+    worker._remote_agents = {}
+    worker._handshake_lock = contextlib.nullcontext()
+    worker._ready_requests = queue.Queue()
+    worker._reqs_to_process = set()
+    worker.pcp_rank = 0
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="request",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            "remote_block_ids": ([4, 5, 6],),
+            "remote_engine_id": "prefill",
+            "remote_request_id": "prefill-request",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+        },
+        awaiting_kvs=awaiting_kvs,
+    )
+    handshake = Future[None]()
+    handshake.set_exception(RuntimeError("handshake failed"))
+    with patch.object(worker, "_ensure_handshake", return_value=handshake):
+        worker.start_load_kv(metadata)
+
+    results = worker.get_transfer_results()
+    expected = {"request"} if awaiting_kvs else set()
+    assert results.finished_recving == results.failed_recving == expected
+    assert worker.get_block_ids_with_load_errors() == (
+        set(local_block_ids[0]) if awaiting_kvs and not is_hma else set()
+    )
+    assert not worker._recving_metadata
+    assert not worker._recv_failures
+    assert not worker._pending_recv_notifs
 
 
 @patch(
@@ -2993,6 +3688,11 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id in done_recving
     assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
+
+    # Handshake failures are recorded as transport failures, separately
+    # from KV expiry.
+    assert connector.connector_worker.xfer_stats.data["num_failed_handshakes"]
+    assert connector.connector_worker.xfer_stats.data["num_failed_transfers"] == []
 
 
 @patch(
@@ -3509,15 +4209,16 @@ def test_compatibility_hash_validation(
     should_fail,
     enforce_handshake_compat,
 ):
-    """
-    Test NIXL compatibility hash validation during handshake.
+    """Test NIXL compatibility hash validation during handshake.
 
-    Parameters:
+    Parameters
+    ----------
         mismatch_type: description of what is being tested
         config_overrides: dict of config to override for the remote instance
         version_override: version dict e.g. {"vllm_version": "0.6.1"}
         should_fail: whether the handshake should fail
         enforce_handshake_compat: whether to enforce compatibility checking
+
     """
     local_vllm_config = create_vllm_config(
         model="facebook/opt-125m",
@@ -3645,8 +4346,7 @@ def test_compatibility_hash_validation(
     FakeNixlWrapper,
 )
 def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario):
-    """
-    Test that msgspec decode errors are properly handled during handshake.
+    """Test that msgspec decode errors are properly handled during handshake.
 
     Tests both DecodeError and ValidationError for both decoders:
     - NixlHandshakePayload decoder

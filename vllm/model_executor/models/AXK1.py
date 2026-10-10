@@ -29,6 +29,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import AXK1Config
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
@@ -44,6 +45,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -77,7 +79,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.AXK1 import AXK1Config
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
@@ -115,7 +116,6 @@ class AXK1MoE(nn.Module):
         self.ep_size = self.ep_group.size()
         assert config.n_routed_experts is not None
         assert config.num_experts_per_tok is not None
-        assert config.scoring_func is not None
         assert config.hidden_act is not None
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int | None = config.n_shared_experts
@@ -128,14 +128,12 @@ class AXK1MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
-        if config.topk_method == "noaux_tc":
+        if getattr(config, "topk_method", "noaux_tc") == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32)
             )
@@ -187,7 +185,7 @@ class AXK1MoE(nn.Module):
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
+            scoring_func=getattr(config, "scoring_func", "sigmoid"),
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
@@ -200,6 +198,7 @@ class AXK1MoE(nn.Module):
             if self.is_fused_shared_expert_enabled
             else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -324,9 +323,9 @@ class AXK1Attention(nn.Module):
         assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(
@@ -400,8 +399,7 @@ class AXK1Attention(nn.Module):
 
 
 class AXK1MLAAttention(nn.Module):
-    """
-    Main reference: DeepseekV2 paper, and FlashInfer Implementation
+    """Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
         For more info see MLACommonImpl in:
@@ -497,9 +495,9 @@ class AXK1MLAAttention(nn.Module):
         assert config.rope_parameters is not None
         if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
+                "deepseek_llama_scaling"
+                if config.rope_parameters.get("attention_factor") == 1.0
+                else "deepseek_yarn"
             )
 
         self.rotary_emb = get_rope(
@@ -646,11 +644,10 @@ class AXK1DecoderLayer(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
     def _is_layer_sparse(self) -> bool:
-        assert self.config.moe_layer_freq is not None
         return (
             self.config.n_routed_experts is not None
             and self.layer_idx >= self.config.first_k_dense_replace
-            and self.layer_idx % self.config.moe_layer_freq == 0
+            and self.layer_idx % getattr(self.config, "moe_layer_freq", 1) == 0
         )
 
     def forward(

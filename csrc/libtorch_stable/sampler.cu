@@ -45,11 +45,6 @@ __global__ void apply_repetition_penalties_kernel(
   }
 }
 
-__device__ __forceinline__ auto convert_to_uint32(float x) -> uint32_t {
-  uint32_t bits = __float_as_uint(x);
-  return (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
-}
-
 template <int step>
 static inline __device__ uint32_t extractBinIdx(float x) {
   if constexpr (step == 0) {

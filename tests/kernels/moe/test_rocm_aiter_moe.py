@@ -22,6 +22,7 @@ import importlib
 import math
 import warnings
 from typing import Any, NamedTuple
+from unittest import mock
 
 import pytest
 import torch
@@ -29,7 +30,7 @@ import torch.nn.functional as F
 
 from tests.kernels.utils import _assert_deterministic
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx942, on_gfx950
+from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -565,6 +566,66 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
 
 
+@pytest.mark.parametrize(
+    "value,expected_act,expected_env",
+    [
+        # Unset / auto / legacy "1" all mean the a4w4 default.
+        (None, "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("auto", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("1", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("a4w4", "a4w4", {"AITER_SITUV2_A4W4": "1"}),
+        ("0", "a16w4", {}),
+        ("a16w4", "a16w4", {}),
+        ("A8W4", "a8w4", {"AITER_SITUV2_A8W4": "1"}),
+    ],
+)
+def test_aiter_moe_situv2_activation_syncs_aiter_env(
+    value: str | None,
+    expected_act: str,
+    expected_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Each SiTUv2 activation choice sets exactly its AITER dispatch env."""
+    import os
+
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        # Stale AITER overrides must be replaced by the vLLM selection.
+        mp.setenv("AITER_SITUV2_A8W4", "1")
+        mp.setenv("AITER_SITUV2_A4W4", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        if value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", value)
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.get_fused_moe_situv2_activation() == expected_act
+        assert rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved() is (
+            expected_act == "a8w4"
+        )
+        assert rocm_aiter_ops.is_fused_moe_situv2_enabled() is (expected_act != "a16w4")
+        for name in ("AITER_SITUV2_A8W4", "AITER_SITUV2_A4W4"):
+            assert os.environ.get(name) == expected_env.get(name)
+
+
+def test_aiter_moe_situv2_rejects_unknown_activation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "a8w8")
+        _reload_envs()
+        import vllm.envs as envs
+
+        with pytest.raises(ValueError, match="VLLM_ROCM_USE_AITER_MOE_SITUV2"):
+            _ = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
+
+
 @pytest.mark.parametrize("moe_padding", [True, False])
 def test_aiter_moe_padding_env_var(
     moe_padding: bool,
@@ -575,6 +636,185 @@ def test_aiter_moe_padding_env_var(
         mp.setenv("VLLM_ROCM_MOE_PADDING", "1" if moe_padding else "0")
         envs = _reload_envs()
         assert envs.VLLM_ROCM_MOE_PADDING is moe_padding
+
+
+# a4w4 (FP4 activation) opt-in gating test ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env_value", "model_type", "expected"),
+    [
+        # Unset/"0" is opt-in-only: a4w4 never turns on by itself, even on
+        # a validated model type.
+        (None, "deepseek_v41", False),
+        ("0", "deepseek_v41", False),
+        ("1", "deepseek_v41", True),
+        ("1", "deepseek_v41_text", True),
+    ],
+)
+def test_aiter_moe_a4w4_dsv4_is_opt_in(
+    env_value: str | None,
+    model_type: str,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """vllm-project/vllm#58819's a4w4 MoE activation path must stay a plain
+    explicit opt-in (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1), with no
+    default-on behavior, but is still only permitted on the model types
+    this flag has been validated for."""
+    import types
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    fake_vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(model_type=model_type)
+        )
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        if env_value is None:
+            mp.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
+        else:
+            mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", env_value)
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        with mock.patch(
+            "vllm.config.get_current_vllm_config_or_none",
+            return_value=fake_vllm_config,
+        ):
+            moe_config = make_dummy_moe_config(
+                num_experts=4,
+                experts_per_token=2,
+                hidden_dim=256,
+                intermediate_size=512,
+                in_dtype=torch.bfloat16,
+            )
+
+        assert moe_config.use_mxfp4_w4a4_dsv4 is expected
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "gpt_oss", None])
+def test_aiter_moe_a4w4_dsv4_rejects_unvalidated_model_type(
+    model_type: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Forcing a4w4 on a model type this flag hasn't been GSM8K/AgentX
+    validated for must raise: it also flips the MXFP4 weight-shuffle layout
+    (ATOM SEPARATED vs INTERLEAVE), which silently produces garbled output
+    on the wrong model rather than just being a slower path — the same bug
+    class vllm-project/vllm#58819's own second commit fixed for DeepSeek
+    V4.1 itself."""
+    import types
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    fake_vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=types.SimpleNamespace(model_type=model_type)
+        )
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        with (
+            mock.patch(
+                "vllm.config.get_current_vllm_config_or_none",
+                return_value=fake_vllm_config,
+            ),
+            pytest.raises(ValueError, match="VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4"),
+        ):
+            make_dummy_moe_config(
+                num_experts=4,
+                experts_per_token=2,
+                hidden_dim=256,
+                intermediate_size=512,
+                in_dtype=torch.bfloat16,
+            )
+
+
+# Dispatch-policy forwarding test ------------------------------------------
+
+
+@pytest.mark.parametrize("dispatch_policy", [0, 1, 2])
+def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
+    dispatch_policy: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VLLM_ROCM_AITER_MOE_DISPATCH_POLICY should reach rocm_aiter_ops.fused_moe
+    unchanged, the same forwarding AiterExperts.apply does via
+    rocm_aiter_fused_experts, for every documented policy value (0=auto,
+    1=always single-pass, 2=always multi-pass). See vllm-project/vllm#54966.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        rocm_aiter_fused_experts,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=8,
+        hidden_dim=256,
+        intermediate_dim=512,
+        num_experts=4,
+        topk=2,
+        seed=5,
+    )
+    w1_shuffled, w2_shuffled = _shuffle_moe_weights(case["w1"], case["w2"])
+    moe_config = make_dummy_moe_config(
+        num_experts=4,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        in_dtype=torch.bfloat16,
+    )
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", str(dispatch_policy))
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.get_moe_dispatch_policy() == dispatch_policy, (
+            "rocm_aiter_ops cached a stale dispatch policy after the env var changed."
+        )
+
+        with mock.patch.object(
+            rocm_aiter_ops, "fused_moe", wraps=rocm_aiter_ops.fused_moe
+        ) as fused_moe_mock:
+            rocm_aiter_fused_experts(
+                hidden_states=case["hidden_states"],
+                w1=w1_shuffled,
+                w2=w2_shuffled,
+                topk_weights=case["topk_weights"],
+                topk_ids=case["topk_ids"],
+                moe_config=moe_config,
+                activation=MoEActivation.SILU,
+                moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            )
+
+        assert (
+            fused_moe_mock.call_args.kwargs["moe_sorting_dispatch_policy"]
+            == dispatch_policy
+        ), (
+            "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY was not forwarded to "
+            "rocm_aiter_ops.fused_moe."
+        )
 
 
 # Enum tests --------------------------------------------------------------
@@ -1077,3 +1317,252 @@ def test_aiter_fused_moe_mi3xx_fp8_accuracy():
         pass_rate=1.0,
         max_violation_factor=1.5,
     )
+
+
+# Weight alignment tests --------------------------------------------------
+#
+# AITER's CK 2stages MoE kernel rejects an intermediate size not divisible by
+# its tile width (64 at or below inter_dim 192, 128 above). Some model + TP
+# splits land on an unaligned size (e.g. 1792 / TP=8 = 224), so the AITER path
+# rounds the intermediate dim up in ``maybe_roundup_sizes`` and allocates the
+# weights at the padded size.
+
+ALIGNMENT_HIDDEN = 64
+ALIGNMENT_NUM_EXPERTS = 2
+
+
+def _make_alignment_moe_config(intermediate: int):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    return make_dummy_moe_config(
+        num_experts=ALIGNMENT_NUM_EXPERTS,
+        hidden_dim=ALIGNMENT_HIDDEN,
+        intermediate_size=intermediate,
+    )
+
+
+def _make_aiter_method(moe_config):
+    """Build the unquantized method with the backend pinned to AITER.
+
+    ``select_unquantized_moe_backend`` needs a real ROCm + AITER runtime, so
+    stub it out and set the backend directly.
+    """
+    from unittest.mock import patch
+
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method"
+        ".select_unquantized_moe_backend",
+        return_value=(UnquantizedMoeBackend.AITER, None),
+    ):
+        return UnquantizedFusedMoEMethod(moe_config)
+
+
+def _roundup(method, moe_config, intermediate):
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+
+    return method.maybe_roundup_sizes(
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=intermediate,
+        act_dtype=moe_config.in_dtype,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("intermediate", "expected_padded"),
+    [
+        (64, 64),  # already aligned, untouched
+        (96, 128),
+        (160, 192),
+        (192, 192),  # must stay 192: it is valid and has tuned configs
+        (224, 256),  # K2-Horizon-375B at TP=8
+        (256, 256),
+        (448, 512),  # K2-Horizon-375B at TP=4
+        (4096, 4096),
+    ],
+)
+def test_aiter_moe_roundup_pads_intermediate(
+    intermediate,
+    expected_padded,
+    default_vllm_config,
+):
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+
+    hidden, padded = _roundup(method, moe_config, intermediate)
+
+    assert padded == expected_padded
+    assert hidden == ALIGNMENT_HIDDEN
+    # Padding must not move a size across the <= 192 threshold, or the
+    # alignment we picked is not the one the kernel dispatches the padded
+    # shape to.
+    assert aiter_moe_intermediate_alignment(padded) == (
+        aiter_moe_intermediate_alignment(intermediate)
+    )
+
+
+@pytest.mark.parametrize("backend_name", ["TRITON", "FLASHINFER_CUTLASS"])
+def test_aiter_moe_roundup_is_not_applied_to_other_backends(
+    backend_name,
+    default_vllm_config,
+):
+    """Backends with no alignment requirement keep the unaligned size."""
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+
+    intermediate = 224
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+    method.unquantized_backend = UnquantizedMoeBackend[backend_name]
+
+    _, padded = _roundup(method, moe_config, intermediate)
+
+    assert padded == intermediate
+
+
+@pytest.mark.parametrize("intermediate", [224, 448])
+def test_aiter_moe_reload_zeroes_intermediate_padding(
+    intermediate,
+    monkeypatch,
+    default_vllm_config,
+):
+    """A reload must re-zero pad lanes left dirty in the weight storage.
+
+    The reload writes back only the logical slices, so the pad lanes hold
+    garbage (NaN here) that the AITER conversion must zero. Two passes also
+    cover reloading into storage that already holds a previous conversion.
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+    assert padded != intermediate
+
+    moe_config = _make_alignment_moe_config(intermediate)
+    assert moe_config.is_act_and_mul
+    method = _make_aiter_method(moe_config)
+    # RoutedExperts records the rounded-up size after maybe_roundup_sizes.
+    moe_config.intermediate_size_per_partition = padded
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+
+    method.create_weights(
+        layer=layer,
+        num_experts=ALIGNMENT_NUM_EXPERTS,
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=padded,
+        params_dtype=torch.float32,
+    )
+
+    # Identity shuffle keeps pad lanes sliceable; both stubs need real ROCm.
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized"
+        ".rocm_aiter_ops.shuffle_weights",
+        lambda w13, w2: (w13, w2),
+    )
+    monkeypatch.setattr(
+        method,
+        "_init_moe_kernel",
+        lambda _layer: setattr(method, "moe_kernel", MagicMock()),
+    )
+
+    up = padded  # up projection starts one padded block into the fused rows
+
+    for _ in range(2):
+        gate = torch.randn(ALIGNMENT_NUM_EXPERTS, intermediate, ALIGNMENT_HIDDEN)
+        up_proj = torch.randn(ALIGNMENT_NUM_EXPERTS, intermediate, ALIGNMENT_HIDDEN)
+        down = torch.randn(ALIGNMENT_NUM_EXPERTS, ALIGNMENT_HIDDEN, intermediate)
+
+        # NaN the pads, then write only the logical slices like the loader.
+        layer.w13_weight.data.fill_(float("nan"))
+        layer.w2_weight.data.fill_(float("nan"))
+        layer.w13_weight.data[:, :intermediate].copy_(gate)
+        layer.w13_weight.data[:, up : up + intermediate].copy_(up_proj)
+        layer.w2_weight.data[:, :, :intermediate].copy_(down)
+
+        method.process_weights_after_loading(layer)
+
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        assert torch.equal(w13[:, :intermediate], gate)
+        assert torch.equal(w13[:, up : up + intermediate], up_proj)
+        assert torch.equal(w2[:, :, :intermediate], down)
+        assert torch.all(w13[:, intermediate:up] == 0)
+        assert torch.all(w13[:, up + intermediate :] == 0)
+        assert torch.all(w2[:, :, intermediate:] == 0)
+
+
+def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
+    """Run the real AITER CK MoE kernel and report whether it dispatched."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        ActivationMethod,
+        QuantMethod,
+    )
+
+    case = _make_moe_case(
+        num_tokens=num_tokens,
+        hidden_dim=1024,
+        intermediate_dim=intermediate,
+        num_experts=8,
+        topk=2,
+        seed=0,
+    )
+    try:
+        _run_fused_moe(
+            case["hidden_states"],
+            case["w1"],
+            case["w2"],
+            case["topk_weights"],
+            case["topk_ids"],
+            activation_method=int(ActivationMethod.SILU),
+            quant_method=int(QuantMethod.NO),
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not on_cdna(),
+    reason="CDNA ROCm only",
+)
+@pytest.mark.parametrize("intermediate", [192, 224, 256])
+# With topk=2 and 8 experts, these token counts select block_m 32 / 64 / 128
+# respectively (AITER's get_block_size_M, on both 256- and 304-CU parts).
+@pytest.mark.parametrize("num_tokens", [1024, 2560, 5120])
+def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens):
+    """The alignment rule must hold at every reachable ``block_m``.
+
+    Stage 1 checks ``NPerBlock`` and stage 2 ``KPerBlock``; both vary with
+    ``block_m``, so a size validated at one tile size says nothing about the
+    others.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    _assert_aiter_supported()
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+
+    assert _aiter_accepts_intermediate(intermediate, num_tokens) == (
+        intermediate % alignment == 0
+    )
+    assert _aiter_accepts_intermediate(padded, num_tokens)

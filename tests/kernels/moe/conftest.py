@@ -3,6 +3,7 @@
 import pytest
 
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.v1.worker.workspace import reset_workspace_manager
 
 NEEDS_CLEAN_ENTRY = frozenset(
     {
@@ -57,5 +58,6 @@ def pytest_runtest_setup(item):
     # Not tryfirst: the skipping plugin evaluates skip marks in a tryfirst
     # hook, so tests about to be skipped never reach this, while fixture setup
     # still runs afterwards.
-    if item.path.name in NEEDS_CLEAN_ENTRY:
+    if item.path.name in NEEDS_CLEAN_ENTRY or "dist_init" in item.fixturenames:
+        reset_workspace_manager()
         cleanup_dist_env_and_memory()

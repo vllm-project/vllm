@@ -34,6 +34,7 @@ def vqa_ppl_test(
         mm_processor_kwargs = {}
 
     processor = AutoProcessor.from_pretrained(model_info.name)
+    image_token_id = processor.image_token_id
 
     images = []
     prompts = []
@@ -99,8 +100,10 @@ def vqa_ppl_test(
             for token_data in token_datas[1:]:
                 assert token_data is not None
                 assert len(token_data) == 1
-                token_log_prob = list(token_data.values())[0].logprob
-                token_log_probs.append(token_log_prob)
+                token_id, token_log_prob = next(iter(token_data.items()))
+                if token_id == image_token_id:
+                    continue
+                token_log_probs.append(token_log_prob.logprob)
 
             neg_log_likelihood = -torch.tensor(
                 token_log_probs, dtype=torch.float32, device="cpu"
@@ -132,11 +135,12 @@ def vqa_ppl_test(
                 inputs = inputs.to("cuda")
                 input_ids = inputs["input_ids"]
 
-                outputs = hf_model.model(**inputs, labels=input_ids)
+                labels = input_ids.masked_fill(input_ids == image_token_id, -100)
+                outputs = hf_model.model(**inputs, labels=labels)
                 neg_log_likelihood = outputs.loss
                 neg_log_likelihood = neg_log_likelihood.to(torch.float32).cpu()
 
-                num_loss_tokens = input_ids.shape[1] - 1
+                num_loss_tokens = int((labels[:, 1:] != -100).sum())
                 nll_sum += neg_log_likelihood * num_loss_tokens
                 n_tokens += num_loss_tokens
 

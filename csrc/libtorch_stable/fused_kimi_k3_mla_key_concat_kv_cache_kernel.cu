@@ -35,8 +35,9 @@
  *
  *   fp8_ds_mla (fused_kimi_k3_mla_key_concat_ds_mla_insert):
  *     - full key concat (bf16), and cache insert in DeepSeek's 656-byte
- *       block-scaled layout (NoPE fp8 in 4 tiles of 128 with per-tile dynamic
- *       scales, RoPE bf16), bit-compatible with concat_and_cache_ds_mla_kernel.
+ *       block-scaled layout (NoPE fp8 in 4 tiles of 128 with per-tile
+ *       power-of-two scales, RoPE bf16), bit-compatible with
+ *       concat_and_cache_ds_mla_kernel.
  *
  * Both use Programmatic Dependent Launch (PDL) to overlap the tail of the
  * producing GEMMs on sm_90+, and are structured after
@@ -68,7 +69,6 @@
   #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
 #endif
 #include <cuda_runtime.h>
-#include <cfloat>
 #include <type_traits>
 
 #ifdef USE_ROCM
@@ -111,9 +111,9 @@ constexpr float kFp8Max = 224.0f;
 #else
 constexpr float kFp8Max = 448.0f;
 #endif
-// Divisor for fp8_ds_mla per-tile dynamic scales (matches cache_kernels.cu).
-// fp8_ds_mla 656B entry: [0,512) NoPE fp8 (4 tiles of 128), [512,528) 4 fp32
-// tile scales, [528,656) RoPE 64 bf16.
+// Divisor for fp8_ds_mla per-tile power-of-two scales (matches
+// cache_kernels.cu). fp8_ds_mla 656B entry: [0,512) NoPE fp8 (4 tiles of 128),
+// [512,528) 4 fp32 tile scales, [528,656) RoPE 64 bf16.
 constexpr float kFp8ScaleDivisor = kFp8Max;
 
 // Copy 8 source elements (one uint4 of bf16/fp16) to `dst`. FP8=false stores a
@@ -325,7 +325,7 @@ __device__ __forceinline__ void writeLatent576(
 }
 
 // Write [kv_c | k_pe] into the fp8_ds_mla 656B entry using one warp: NoPE 512
-// as fp8 in 4 tiles of 128 (per-tile dynamic absmax scale, 4 fp32 scales at
+// as fp8 in 4 tiles of 128 (per-tile power-of-two scale, 4 fp32 scales at
 // [512,528)), RoPE 64 as bf16 at [528,656). Bit-compatible with
 // concat_and_cache_ds_mla_kernel.
 template <typename scalar_t, bool APPLY_ROPE = false>
@@ -349,7 +349,8 @@ __device__ __forceinline__ void writeDsMlaCache(
   for (int offset = 4; offset > 0; offset /= 2) {
     max_abs = fmaxf(max_abs, VLLM_SHFL_XOR_SYNC_WIDTH(max_abs, offset, 8));
   }
-  float const tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
+  float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, 1e-4f);
+  tile_scale = exp2f(ceilf(log2f(tile_scale)));
   if ((laneId & 7) == 0) {
     reinterpret_cast<float*>(row)[kKvLoraRank / 4 + tile] = tile_scale;
   }
@@ -598,7 +599,7 @@ __global__ void fusedKimiK3MLAKVConcatPackKernel(
 // ds_mla variant: concat full key (bf16) + fp8_ds_mla latent cache insert
 //
 // Cache entry (656 bytes), matching concat_and_cache_ds_mla_kernel:
-//   [0, 512)   NoPE 512 vals as fp8, 4 tiles of 128, each dynamically scaled
+//   [0, 512)   NoPE 512 vals as fp8, 4 tiles of 128, power-of-two scaled
 //   [512, 528) 4 fp32 per-tile scales
 //   [528, 656) RoPE 64 vals as bf16 (unquantized)
 // The cache slot uses one warp: lane L quantizes NoPE elems [L*16, L*16+16)

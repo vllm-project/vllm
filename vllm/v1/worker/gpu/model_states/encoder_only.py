@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -168,6 +169,7 @@ class EncoderOnlyModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
         ubatch_idx: int = 0,
+        model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         assert ubatch_idx == 0, "DBO is not supported"
         attn_metadata = super().prepare_attn(
@@ -178,6 +180,7 @@ class EncoderOnlyModelState(DefaultModelState):
             attn_groups,
             kv_cache_config,
             for_capture,
+            model_specific_attn_metadata=model_specific_attn_metadata,
         )
         attn_metadata.update(
             self._build_encoder_attn_metadata(input_batch, cudagraph_mode, for_capture)
@@ -185,10 +188,7 @@ class EncoderOnlyModelState(DefaultModelState):
         return attn_metadata
 
     def _build_encoder_attn_metadata(
-        self,
-        input_batch: InputBatch,
-        cudagraph_mode: CUDAGraphMode,
-        for_capture: bool,
+        self, input_batch: InputBatch, cudagraph_mode: CUDAGraphMode, for_capture: bool
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
