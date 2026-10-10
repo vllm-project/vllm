@@ -85,6 +85,7 @@ def mhc_pre_delayed_tilelang(
     x: torch.Tensor | None = None,
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
+    stats_only: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run mHC pre with a carried pre-mix and return the next pre-mix.
 
@@ -104,11 +105,14 @@ def mhc_pre_delayed_tilelang(
             the first layer's broadcast embedding and summed projection.
         norm_weight: Optional BF16 RMSNorm weight for the collapsed input.
         norm_eps: RMSNorm epsilon for the collapsed input.
+        stats_only: Generate coefficients without collapsing the input, when
+            a producer has already computed it. Requires norm_weight.
 
     Returns:
         Post and residual coefficients, optionally normalized BF16 layer input,
         and the next FP32 pre-mix, with shapes (tokens, hc_mult, 1),
         (tokens, hc_mult, hc_mult), (tokens, hidden_size), and (tokens, hc_mult).
+        The layer input is an empty BF16 tensor when stats_only is set.
 
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
@@ -126,6 +130,7 @@ def mhc_pre_delayed_tilelang(
 
     assert residual.ndim == 3 and residual.dtype == torch.bfloat16
     assert residual.is_contiguous()
+    assert not stats_only or norm_weight is not None
     num_tokens, hc_mult, hidden_size = residual.shape
     if x is None:
         x = residual.view(num_tokens, hc_mult * hidden_size)
@@ -147,13 +152,20 @@ def mhc_pre_delayed_tilelang(
     comb = torch.empty(
         num_tokens, hc_mult * hc_mult, dtype=torch.float32, device=residual.device
     )
-    layer_input = torch.empty(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
+    layer_input = (
+        # The stats specialization never reads or writes this placeholder.
+        residual.view(-1)[: num_tokens * hidden_size].view(num_tokens, hidden_size)
+        if stats_only
+        else torch.empty(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
+        )
     )
     outputs = (
         post.unsqueeze(-1),
         comb.view(num_tokens, hc_mult, hc_mult),
-        layer_input,
+        torch.empty(0, dtype=torch.bfloat16, device=residual.device)
+        if stats_only
+        else layer_input,
         next_pre_mix,
     )
     if num_tokens == 0:
@@ -207,6 +219,7 @@ def mhc_pre_delayed_tilelang(
             use_pre_mix_in=pre_mix is not None,
             save_pre_mix=True,
             rms_numel=input_size,
+            split_mode="stats" if stats_only else "fused",
         )
         return outputs
     mhc_pre_big_fuse_tilelang(
@@ -250,6 +263,7 @@ def _mhc_pre_delayed_tilelang_fake(
     x: torch.Tensor | None = None,
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
+    stats_only: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens, hc_mult, hidden_size = residual.shape
     return (
@@ -259,7 +273,9 @@ def _mhc_pre_delayed_tilelang_fake(
         torch.empty(
             num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=residual.device
         ),
-        torch.empty(
+        torch.empty(0, dtype=torch.bfloat16, device=residual.device)
+        if stats_only
+        else torch.empty(
             num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
         ),
         torch.empty(num_tokens, hc_mult, dtype=torch.float32, device=residual.device),

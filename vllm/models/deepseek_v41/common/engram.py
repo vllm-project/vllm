@@ -1274,6 +1274,76 @@ def _fused_engram_post_wkv_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["num_kv_tokens"])
+def _fused_engram_mhc_input_kernel(
+    hidden_states,
+    kv,
+    q_weight,
+    k_weight,
+    token_mask,
+    pre_mix,
+    norm_weight,
+    output,
+    layer_input,
+    num_kv_tokens,
+    eps,
+    clamp_value,
+    norm_eps,
+    DIM: tl.constexpr,
+    HC_MULT: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    HAS_PRE_MIX: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    source_valid = token_idx < num_kv_tokens
+    offsets = tl.arange(0, BLOCK_SIZE)
+    valid = offsets < DIM
+    value = tl.load(
+        kv + token_idx * (HC_MULT + 1) * DIM + HC_MULT * DIM + offsets,
+        source_valid & valid,
+        other=0.0,
+    ).to(tl.float32)
+    collapsed = tl.full((BLOCK_SIZE,), 0, tl.float32)
+    for hc in range(HC_MULT):
+        hidden = tl.load(
+            hidden_states + (token_idx * HC_MULT + hc) * DIM + offsets,
+            valid,
+            other=0.0,
+        ).to(tl.float32)
+        key = tl.load(
+            kv + (token_idx * (HC_MULT + 1) + hc) * DIM + offsets,
+            source_valid & valid,
+            other=0.0,
+        ).to(tl.float32)
+        q = tl.load(q_weight + hc * DIM + offsets, valid, other=0.0).to(tl.float32)
+        k = tl.load(k_weight + hc * DIM + offsets, valid, other=0.0).to(tl.float32)
+        hidden_rms = tl.rsqrt(tl.sum(hidden * hidden, axis=0) / DIM + eps)
+        key_rms = tl.rsqrt(tl.sum(key * key, axis=0) / DIM + eps)
+        dot = tl.sum(hidden * q * k * key, axis=0)
+        dot *= hidden_rms * key_rms * tl.rsqrt(DIM * 1.0)
+        gate_input = tl.sqrt(tl.maximum(tl.abs(dot), clamp_value))
+        gate_input = tl.where(dot < 0.0, -gate_input, gate_input)
+        gate = tl.sigmoid(gate_input)
+        if HAS_MASK:
+            active = tl.load(token_mask + token_idx, source_valid, other=0)
+            gate = tl.where(active, gate, 0.0)
+        # Both the projection and the collapse consume the rounded residual.
+        updated = tl.fma(gate, value, hidden).to(tl.bfloat16)
+        tl.store(output + (token_idx * HC_MULT + hc) * DIM + offsets, updated, valid)
+        if HAS_PRE_MIX:
+            pre = tl.load(pre_mix + token_idx * HC_MULT + hc)
+        else:
+            pre = tl.where(hc == 0, 1.0, 0.0)
+        collapsed += pre * updated.to(tl.float32)
+    # Delayed mHC rounds its collapse before RMSNorm, including the sum of squares.
+    rounded = collapsed.to(tl.bfloat16).to(tl.float32)
+    rounded = tl.where(valid, rounded, 0.0)
+    rstd = tl.rsqrt(tl.sum(rounded * rounded, axis=0) / DIM + norm_eps)
+    weight = tl.load(norm_weight + offsets, valid, other=0.0).to(tl.float32)
+    tl.store(layer_input + token_idx * DIM + offsets, rounded * rstd * weight, valid)
+
+
 @triton.jit(do_not_specialize=["num_tokens", "token_start", "num_elements"])
 def _engram_select_rows_kernel(
     gathered,
@@ -1673,15 +1743,12 @@ class Engram(nn.Module):
         rows = tensor_model_parallel_all_gather(rows, dim=1)
         return rows[:, : self.embed_tokens.n_hash_cols]
 
-    def forward(
+    def _prepare_wkv(
         self,
         hidden_states: torch.Tensor,
         hash_ids: torch.Tensor,
         token_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
-        tokens, pre sequence-parallel shard); token_mask: [T], False shuts
-        the gate so those positions pass through untouched."""
+    ) -> tuple[torch.Tensor, int, torch.Tensor | None]:
         if self._batch is not None:
             kv = self.wkv(self._batch.wkv_input(self, hash_ids.shape[0]))
         else:
@@ -1697,6 +1764,73 @@ class Engram(nn.Module):
             num_kv_tokens = min(shard_size, num_kv_tokens - start)
             if token_mask is not None:
                 token_mask = token_mask[start : start + num_kv_tokens]
+        return kv, num_kv_tokens, token_mask
+
+    def forward_with_mhc(
+        self,
+        hidden_states: torch.Tensor,
+        hash_ids: torch.Tensor,
+        token_mask: torch.Tensor | None,
+        pre_mix: torch.Tensor | None,
+        norm_weight: torch.Tensor,
+        norm_eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the injected residual and its delayed, normalized mHC input."""
+        assert not self.use_sequence_parallel
+        kv, num_kv_tokens, token_mask = self._prepare_wkv(
+            hidden_states, hash_ids, token_mask
+        )
+        num_tokens, hc_mult, dim = hidden_states.shape
+        assert (hc_mult, dim) == (self.hc_mult, self.dim)
+        assert kv.shape == (num_kv_tokens, (hc_mult + 1) * dim)
+        assert norm_weight.shape == (dim,)
+        for tensor in (hidden_states, kv, self.q_weight, self.k_weight, norm_weight):
+            assert tensor.dtype == torch.bfloat16 and tensor.is_contiguous()
+        if pre_mix is not None:
+            assert pre_mix.shape == (num_tokens, hc_mult)
+            assert pre_mix.dtype == torch.float32 and pre_mix.is_contiguous()
+        assert token_mask is None or token_mask.is_contiguous()
+        output = torch.empty_like(hidden_states)
+        layer_input = torch.empty(
+            num_tokens, dim, dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        if num_tokens:
+            block_size = triton.next_power_of_2(dim)
+            _fused_engram_mhc_input_kernel[(num_tokens,)](
+                hidden_states,
+                kv,
+                self.q_weight,
+                self.k_weight,
+                token_mask if token_mask is not None else hidden_states,
+                pre_mix if pre_mix is not None else hidden_states,
+                norm_weight,
+                output,
+                layer_input,
+                num_kv_tokens,
+                self.eps,
+                self.clamp_value,
+                norm_eps,
+                DIM=dim,
+                HC_MULT=hc_mult,
+                BLOCK_SIZE=block_size,
+                HAS_MASK=token_mask is not None,
+                HAS_PRE_MIX=pre_mix is not None,
+                num_warps=8 if block_size >= 2048 else 4,
+            )
+        return output, layer_input
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        hash_ids: torch.Tensor,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
+        tokens, pre sequence-parallel shard); token_mask: [T], False shuts
+        the gate so those positions pass through untouched."""
+        kv, num_kv_tokens, token_mask = self._prepare_wkv(
+            hidden_states, hash_ids, token_mask
+        )
 
         num_tokens, hc_mult, dim = hidden_states.shape
         assert hc_mult == self.hc_mult and dim == self.dim
