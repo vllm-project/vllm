@@ -969,7 +969,12 @@ class Scheduler(SchedulerInterface):
                                 request, block_aligned_local
                             )
                         )
-                        if request.skip_reading_prefix_cache:
+                        if request.skip_reading_prefix_cache or (
+                            request.sampling_params is not None
+                            and request.sampling_params.prompt_logprob_token_ids
+                            is not None
+                        ):
+                            # Connectors cannot bound a load at the first scored row.
                             ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
