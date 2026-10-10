@@ -45,6 +45,12 @@ class EEPNotificationType(enum.Enum):
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
+class EngineCoreReadyState(enum.IntEnum):
+    IDLE = 0
+    BUSY = 1
+    SLEEPING = 2
+
+
 class FinishReason(enum.IntEnum):
     """Reason a request finished - stop, length, abort, error, or repetition.
 
@@ -281,6 +287,11 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
+
+    # Lightweight readiness progress published by EngineCore. These fields
+    # are consumed by the frontend and are not exposed in request results.
+    ready_progress_seq: int | None = None
+    ready_state: EngineCoreReadyState | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

@@ -214,6 +214,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
+- `/ready` - GPU execution and EngineCore forward-progress check
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics
