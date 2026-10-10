@@ -112,7 +112,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         self.gdn_prefill_backend: Literal[
-            "triton", "flashinfer", "cutedsl", "aiter_flydsl"
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)

@@ -90,10 +90,20 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+def xpu_gdn_kernel_available() -> bool:
+    """Whether vllm-xpu-kernels was built with the fused SYCL GDN op."""
+    return hasattr(torch.ops._xpu_C, "gdn_attention")
+
+
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl"]]:
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"]]:
     """Resolve GDN prefill backend.
+
+    The SYCL kernel is chosen when ``requested in ["sycl", "auto"]``, the
+    platform is XPU and ``_xpu_C::gdn_attention`` is built. Unlike the other
+    backends it is a fused whole-layer op, so selecting it also replaces the
+    conv1d and decode kernels, not just prefill.
 
     FlashInfer's GDN prefill kernel is chosen when:
     * ``requested in ["flashinfer", "auto"]``;
@@ -119,6 +129,20 @@ def _resolve_gdn_prefill_backend(
         else "auto"
     )
     backend = str(backend_cfg).strip().lower()
+
+    if backend == "sycl" and not current_platform.is_xpu():
+        raise ValueError("GDN prefill backend 'sycl' is only supported on XPU.")
+
+    if current_platform.is_xpu():
+        if backend in ("auto", "sycl") and xpu_gdn_kernel_available():
+            return backend, "sycl"
+        if backend == "sycl":
+            raise ValueError(
+                "GDN prefill backend 'sycl' was requested but "
+                "torch.ops._xpu_C.gdn_attention is not available. Rebuild "
+                "vllm-xpu-kernels with VLLM_GDN_ENABLED."
+            )
+        return backend, "triton"
 
     head_k_dim = getattr(
         vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
@@ -217,6 +241,7 @@ def _log_gdn_backend_decision(
         "cutedsl": "CuteDSL",
         "aiter_flydsl": "AITER FlyDSL",
         "triton": "Triton/FLA",
+        "sycl": "SYCL",
     }[active_backend]
     logger.info_once(
         "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
@@ -298,6 +323,9 @@ class ChunkGatedDeltaRule(CustomOp):
                 backend,
             )
         _log_gdn_backend_decision(vllm_config, backend, active_backend)
+
+        # On XPU "sycl" bypasses this module entirely (fused whole-layer op),
+        # so the chunked prefill path stays on Triton/FLA.
 
         if active_backend == "flashinfer":
             self._forward_method = self.forward_cuda
@@ -483,8 +511,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self.gdn_xpu_backend: str | None = None
         self.qkvz_layout = "interleaved" if gqa_interleaved_layout else "flat"
         if current_platform.is_xpu():
+            requested, gdn_xpu_backend = _resolve_gdn_prefill_backend(vllm_config)
+            _log_gdn_backend_decision(vllm_config, requested, gdn_xpu_backend)
+            self.gdn_xpu_backend = gdn_xpu_backend
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
@@ -1062,7 +1094,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """Forward pass with three parts:
         1. Input projection
-        2. Core attention (custom op)
+        2. Core attention (custom op, SYCL or Triton per --gdn-prefill-backend)
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
@@ -1081,15 +1113,29 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        z = torch.empty_like(core_attn_out)
 
-        torch.ops.vllm.gdn_attention_core_xpu(
-            core_attn_out,
-            z,
-            projected_states_qkvz,
-            projected_states_ba,
-            self.prefix,
-        )
+        if self.gdn_xpu_backend == "triton":
+            # Triton consumes unpacked q/k/v/z/b/a; the SYCL op unpacks
+            # internally and takes the raw projections instead.
+            mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
+                projected_states_qkvz, projected_states_ba, num_tokens
+            )
+            torch.ops.vllm.qwen_gdn_attention_core(
+                mixed_qkv,
+                b.contiguous(),
+                a.contiguous(),
+                core_attn_out,
+                layer_name=_encode_layer_name(self.prefix),
+            )
+        else:
+            z = torch.empty_like(core_attn_out)
+            torch.ops.vllm.gdn_attention_core_xpu(
+                core_attn_out,
+                z,
+                projected_states_qkvz,
+                projected_states_ba,
+                self.prefix,
+            )
 
         # ============================================================
         # Part 3: Output Projection
