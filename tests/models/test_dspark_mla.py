@@ -343,7 +343,7 @@ def test_k3_dspark_mla_kv_cache_spec_groups_with_target_mla():
     """The draft's MLA layers must share a KV cache group with the target's."""
     from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
-    from vllm.v1.core.kv_cache_utils import _get_kv_cache_groups_uniform_page_size
+    from vllm.v1.core.kv_cache_planning import _get_kv_cache_groups_uniform_page_size
 
     vllm_config = SimpleNamespace(
         model_config=None, cache_config=SimpleNamespace(block_size=64)

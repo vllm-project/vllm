@@ -23,7 +23,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
 )
 from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+from vllm.v1.core.kv_cache_planning import DefaultKVCacheConfigBuilder
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.utils import allocate_kv_cache, customize_attention_spec
@@ -96,7 +96,9 @@ def test_allocation_and_warmup_follow_addressing_mode(
     group = KVCacheGroupSpec(
         list(specs), UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
     )
-    cache = get_kv_cache_config_from_groups(config, [group], 2**20)
+    builder = DefaultKVCacheConfigBuilder()
+    num_blocks = 2**20 // builder._get_pool_bytes_per_block(config, [group])
+    cache = builder.get_kv_cache_config_from_groups(config, [group], num_blocks)
     views = allocate_kv_cache(cache, torch.device(device), layout)
     register = MagicMock()
     monkeypatch.setattr(
