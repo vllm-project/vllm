@@ -68,6 +68,10 @@ class TestGranite20bFcToolParser(ToolParserTests):
             parallel_tool_calls_names=["get_weather", "get_time"],
             # xfail markers
             xfail_streaming={
+                "test_streaming_split_invariance": (
+                    "Streamed result depends on delta boundaries; the tool call is "
+                    "lost when a delta carries it whole (#47907)"
+                ),
                 "test_surrounding_text": (
                     "Granite 20B FC streaming requires <function_call> at start"
                 ),
