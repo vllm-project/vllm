@@ -22,6 +22,7 @@ from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    Qwen3Parser,
     qwen3_config,
 )
 
@@ -1199,3 +1200,399 @@ def test_mimo_preserves_verbatim_parameter_values(
     )
     assert collect_function_name(results) == "run"
     assert json.loads(collect_tool_arguments(results)) == {"text": value}
+
+
+class TestQuotedToolCallsInReasoning:
+    @pytest.fixture
+    def thinking_parser(self, mock_request):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionToolsParam,
+        )
+
+        # Offer the quoted name so name validation alone cannot hide the bug.
+        tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            )
+        ]
+        mock_request.tools = tools
+
+        # This class needs thinking enabled, unlike the file's parser fixture.
+        tokenizer = make_mock_tokenizer(
+            {
+                "<think>": 500,
+                "</think>": 501,
+                TOOL_CALL_START: 502,
+                TOOL_CALL_END: 503,
+            }
+        )
+        return Qwen3Parser(tokenizer, tools=tools)
+
+    @staticmethod
+    def _encode_chunk(text):
+        markers = {
+            "<think>": 500,
+            "</think>": 501,
+            TOOL_CALL_START: 502,
+            TOOL_CALL_END: 503,
+        }
+        ids = []
+        offset = 0
+        while offset < len(text):
+            marker = next((m for m in markers if text.startswith(m, offset)), None)
+            if marker is not None:
+                ids.append(markers[marker])
+                offset += len(marker)
+            else:
+                ids.append(ord(text[offset]))
+                offset += 1
+        return ids
+
+    @pytest.fixture
+    def quoted_reasoning(self):
+        # This complete block is an example in reasoning, not an emitted call.
+        return (
+            "I am quoting an example, not calling a tool:\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Paris</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "That was only an example."
+        )
+
+    def test_quoted_markup_does_not_emit_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        reasoning, content, calls = thinking_parser.parse(text, mock_request)
+
+        assert reasoning == quoted_reasoning
+        assert content == "Done."
+        assert calls is None
+
+    def test_quoted_markup_survives_in_reasoning(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        reasoning, content, calls = thinking_parser.parse(text, mock_request)
+
+        # Prevent a fix that suppresses the phantom by deleting the example.
+        assert reasoning == quoted_reasoning
+        assert content == "Done."
+        assert calls is None
+
+    def test_streaming_quoted_markup_in_reasoning_is_not_a_tool_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        chunks = [text[:15], text[15:61], text[61:104], text[104:]]
+        reasoning_parts = []
+        content_parts = []
+        tool_call_deltas = []
+        previous_text = ""
+        for index, chunk in enumerate(chunks):
+            delta = thinking_parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            previous_text += chunk
+            if delta is not None:
+                if delta.reasoning:
+                    reasoning_parts.append(delta.reasoning)
+                if delta.content:
+                    content_parts.append(delta.content)
+                if delta.tool_calls:
+                    tool_call_deltas.extend(delta.tool_calls)
+        assert tool_call_deltas == []
+        assert "".join(reasoning_parts) == quoted_reasoning
+        assert "".join(content_parts) == "Done."
+
+    def test_streaming_quoted_markup_with_reasoning_adapter_skip_mode(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        # The serving-layer reasoning adapter runs with tool parsing skipped.
+        # It must still defer the opener, or it would mistake this example for
+        # an implicit reasoning end before </think> arrives.
+        text = "<think>" + quoted_reasoning + "</think>Done."
+        parser = thinking_parser
+        parser.skip_tool_parsing = True
+        reasoning_parts = []
+        for index, chunk in enumerate((text[:51], text[51:104], text[104:])):
+            delta = parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == 2,
+            )
+            if delta is not None and delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+        assert "".join(reasoning_parts) == quoted_reasoning
+
+    def test_empty_held_span_is_preserved_as_reasoning(
+        self, thinking_parser, mock_request
+    ):
+        text = "<think><tool_call></think>Done."
+        delta = thinking_parser.parse_delta(
+            delta_text=text,
+            delta_token_ids=self._encode_chunk(text),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=True,
+        )
+        assert delta is not None
+        assert delta.reasoning == TOOL_CALL_START
+        assert delta.content == "Done."
+        assert delta.tool_calls == []
+
+    def test_multiple_quoted_blocks_remain_reasoning(
+        self, thinking_parser, mock_request
+    ):
+        quoted = "<tool_call>first</tool_call> then <tool_call>second</tool_call>"
+        text = "<think>" + quoted + "</think>Done."
+        delta = thinking_parser.parse_delta(
+            delta_text=text,
+            delta_token_ids=self._encode_chunk(text),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=True,
+        )
+        assert delta is not None
+        assert delta.reasoning == quoted
+        assert delta.content == "Done."
+        assert delta.tool_calls == []
+
+    def test_reasoning_adapter_skip_mode_preserves_implicit_tool_markup(
+        self, thinking_parser, mock_request
+    ):
+        text = (
+            "<think>Reasoning <tool_call><function=get_weather></function></tool_call>"
+        )
+        parser = thinking_parser
+        parser.skip_tool_parsing = True
+        deltas = []
+        for index, chunk in enumerate((text[:29], text[29:47], text[47:])):
+            delta = parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == 2,
+            )
+            if delta is not None:
+                deltas.append(delta)
+        combined = "".join(delta.content or "" for delta in deltas)
+        assert "<tool_call>" in combined
+        assert "<function=get_weather>" in combined
+        assert all(not delta.tool_calls for delta in deltas)
+
+    def test_streaming_tool_start_split_across_chunks(
+        self, thinking_parser, mock_request
+    ):
+        text = "<think>Quoted: <tool_call><tool_call></tool_call></think>Done."
+        split = text.index(TOOL_CALL_START) + len("<tool_")
+        chunks = [text[:split], text[split:]]
+        reasoning_parts = []
+        tool_call_deltas = []
+        for index, chunk in enumerate(chunks):
+            delta = thinking_parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            if delta is not None:
+                if delta.reasoning:
+                    reasoning_parts.append(delta.reasoning)
+                if delta.tool_calls:
+                    tool_call_deltas.extend(delta.tool_calls)
+        assert "".join(reasoning_parts) == "Quoted: <tool_call><tool_call></tool_call>"
+        assert tool_call_deltas == []
+
+    def test_reset_clears_a_held_quoted_tool_span(self, thinking_parser, mock_request):
+        parser = thinking_parser
+        parser.parse_delta(
+            delta_text="<think>Before <tool_call>",
+            delta_token_ids=self._encode_chunk("<think>Before <tool_call>"),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=False,
+        )
+        parser._reset()
+        parser.skip_tool_parsing = False
+        delta = parser.parse_delta(
+            delta_text="ordinary answer",
+            delta_token_ids=self._encode_chunk("ordinary answer"),
+            request=mock_request,
+            prompt_token_ids=[500],
+            finished=True,
+        )
+        assert delta is not None
+        assert delta.reasoning == "ordinary answer"
+        assert delta.content is None
+        assert delta.tool_calls == []
+
+    def test_streaming_quoted_markup_then_real_call_emits_only_real_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        text = (
+            "<think>" + quoted_reasoning + "</think>"
+            "\n<tool_call><function=get_weather>"
+            "<parameter=city>Tokyo</parameter></function></tool_call>"
+        )
+        # Split both the quoted example and actual call across chunk boundaries.
+        chunks = [text[:49], text[49:97], text[97:151], text[151:190], text[190:]]
+        names = []
+        arguments = []
+        reasoning_parts = []
+        parser = thinking_parser
+        for index, chunk in enumerate(chunks):
+            delta = parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            if delta is None:
+                continue
+            if delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+            for call in delta.tool_calls or []:
+                if call.function and call.function.name:
+                    names.append(call.function.name)
+                if call.function and call.function.arguments:
+                    arguments.append(call.function.arguments)
+        assert "".join(reasoning_parts) == quoted_reasoning
+        assert names == ["get_weather"]
+        assert json.loads("".join(arguments)) == {"city": "Tokyo"}
+
+    def test_implicit_reasoning_end_still_parses_tool_call(
+        self, thinking_parser, mock_request
+    ):
+        text = (
+            "<think>Reasoning before an implicit tool call.\n"
+            "<tool_call><function=get_weather>"
+            "<parameter=city>Tokyo</parameter></function></tool_call>"
+        )
+        chunks = [text[:37], text[37:68], text[68:]]
+        tool_call_deltas = []
+        for index, chunk in enumerate(chunks):
+            delta = thinking_parser.parse_delta(
+                delta_text=chunk,
+                delta_token_ids=self._encode_chunk(chunk),
+                request=mock_request,
+                prompt_token_ids=[500] if index == 0 else None,
+                finished=index == len(chunks) - 1,
+            )
+            if delta is not None and delta.tool_calls:
+                tool_call_deltas.extend(delta.tool_calls)
+        assert tool_call_deltas
+        assert any(
+            tc.function and tc.function.name == "get_weather" for tc in tool_call_deltas
+        )
+
+    def test_partial_deferred_span_flushes_as_tool_call_from_adapter(
+        self, thinking_parser
+    ):
+        from vllm.parser.engine.registered_adapters import (
+            Qwen3ParserReasoningAdapter,
+        )
+
+        parser = Qwen3ParserReasoningAdapter(
+            thinking_parser.model_tokenizer, tools=thinking_parser._tools
+        )
+        parser.adjust_initial_state_from_prompt([500])
+        chunk = "Reasoning <tool_call><function=get_weather>"
+        ids = self._encode_chunk(chunk)
+        delta = parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text=chunk,
+            delta_text=chunk,
+            previous_token_ids=(),
+            current_token_ids=ids,
+            delta_token_ids=ids,
+        )
+        assert delta is not None and delta.reasoning == "Reasoning "
+        assert delta.tool_calls == []
+
+        delta = parser.finish_streaming()
+        assert delta is not None
+        assert len(delta.tool_calls) == 1
+        assert delta.tool_calls[0].function.name == "get_weather"
+        assert delta.tool_calls[0].function.arguments == "{}"
+
+    def test_implicit_reasoning_end_flushes_through_reasoning_adapter(
+        self, thinking_parser, mock_request
+    ):
+        from vllm.parser.engine.registered_adapters import (
+            Qwen3ParserReasoningAdapter,
+        )
+
+        reasoning_parser = Qwen3ParserReasoningAdapter(
+            thinking_parser.model_tokenizer, tools=thinking_parser._tools
+        )
+        reasoning_parser.adjust_initial_state_from_prompt([500])
+        chunks = [
+            "Reasoning ",
+            "<tool_call>",
+            "<function=get_weather>",
+            "<parameter=city>Tokyo</parameter>",
+            "</function>",
+            "</tool_call>",
+        ]
+        deltas = []
+        for chunk in chunks:
+            ids = self._encode_chunk(chunk)
+            delta = reasoning_parser.extract_reasoning_streaming(
+                previous_text="",
+                current_text=chunk,
+                delta_text=chunk,
+                previous_token_ids=(),
+                current_token_ids=ids,
+                delta_token_ids=ids,
+            )
+            if delta is not None:
+                deltas.append(delta)
+        delta = reasoning_parser.finish_streaming()
+        if delta is not None:
+            deltas.append(delta)
+
+        calls = [tc for delta in deltas for tc in delta.tool_calls or []]
+        assert any(
+            call.function and call.function.name == "get_weather" for call in calls
+        )
+        assert "".join(delta.reasoning or "" for delta in deltas) == "Reasoning "
+
+    def test_quoted_markup_then_real_call_emits_only_real_call(
+        self, thinking_parser, mock_request, quoted_reasoning
+    ):
+        # Different cities make an accidental substitution visible.
+        text = (
+            "<think>" + quoted_reasoning + "</think>\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        reasoning, content, calls = thinking_parser.parse(text, mock_request)
+
+        assert reasoning == quoted_reasoning
+        assert content is None
+        assert calls is not None and len(calls) == 1
+        assert calls[0].name == "get_weather"
+        args = json.loads(calls[0].arguments)
+        assert args == {"city": "Tokyo"}

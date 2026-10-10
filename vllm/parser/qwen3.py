@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -229,9 +231,8 @@ class Qwen3Parser(ParserEngine):
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
-        kwargs.setdefault(
-            "parser_engine_config",
-            qwen3_config(
+        if "parser_engine_config" not in kwargs:
+            parser_engine_config = qwen3_config(
                 thinking=self.thinking_enabled,
                 name=self.CONFIG_NAME,
                 think_start=self.THINK_START,
@@ -239,13 +240,59 @@ class Qwen3Parser(ParserEngine):
                 tool_start=self.TOOL_START,
                 tool_end=self.TOOL_END,
                 turn_boundary_tokens=self.TURN_BOUNDARIES,
-            ),
-        )
+            )
+            # Keep this behavior scoped to Qwen3. Other parsers reuse the
+            # grammar but do not opt into the reasoning lookahead semantics.
+            if self.CONFIG_NAME == "qwen3":
+                parser_engine_config = replace(
+                    parser_engine_config,
+                    defer_reasoning_tool_start=self.thinking_enabled,
+                )
+            kwargs["parser_engine_config"] = parser_engine_config
         super().__init__(
             tokenizer,
             tools,
             **kwargs,
         )
+        if self.parser_engine_config.defer_reasoning_tool_start:
+            self._engine.defer_reasoning_tool_start = False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Defer tool starts only when the prompt ends in an open Qwen3 think block."""
+        if not self.parser_engine_config.defer_reasoning_tool_start:
+            return
+
+        start_id = self._reasoning_start_token_id
+        end_ids = self._reasoning_end_token_ids
+        boundary_ids = self._turn_boundary_token_ids
+        prompt_has_open_think = False
+        for token_id in reversed(prompt_token_ids):
+            if token_id in boundary_ids:
+                break
+            if token_id in end_ids:
+                break
+            if token_id == start_id:
+                prompt_has_open_think = True
+                break
+        self._engine.defer_reasoning_tool_start = prompt_has_open_think
+        # The reasoning adapter calls initialize_streaming() on its first
+        # generated delta. Preserve prompt-derived state through that call.
+        self._streaming_initialized = True
+
+    def _single_pass_parse(
+        self,
+        text: str,
+        token_ids: Sequence[int],
+        initial_state=None,
+    ):
+        previous = self._engine.defer_reasoning_tool_start
+        self._engine.defer_reasoning_tool_start = bool(
+            self.parser_engine_config.defer_reasoning_tool_start
+        )
+        try:
+            return super()._single_pass_parse(text, token_ids, initial_state)
+        finally:
+            self._engine.defer_reasoning_tool_start = previous
 
     def extract_reasoning(
         self,
@@ -254,4 +301,11 @@ class Qwen3Parser(ParserEngine):
     ) -> tuple[str | None, str | None]:
         if not self.thinking_enabled:
             return None, model_output
-        return super().extract_reasoning(model_output, request)
+        previous = self._engine.defer_reasoning_tool_start
+        self._engine.defer_reasoning_tool_start = bool(
+            self.parser_engine_config.defer_reasoning_tool_start
+        )
+        try:
+            return super().extract_reasoning(model_output, request)
+        finally:
+            self._engine.defer_reasoning_tool_start = previous
