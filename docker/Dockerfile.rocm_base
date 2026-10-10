@@ -26,7 +26,33 @@ ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 
-FROM ${BASE_IMAGE} AS base
+# Drop parts of the ROCm SDK that nothing below or at runtime uses:
+# composable_kernel (consumers build CK from their own submodules), the
+# Fortran toolchain, rocALUTION and hipTensor. Files are removed directly so
+# the rocm-libs meta package keeps apt consistent. Parent directory mtimes are
+# restored so the squashed layer below is reproducible and stays shared across
+# rebuilds of this image.
+FROM ${BASE_IMAGE} AS rocm_sdk
+RUN set -eu; \
+    candidates="$(set -e; \
+        dpkg -L composablekernel-dev rocalution rocalution-dev \
+            hiptensor hiptensor-dev; \
+        ls -d /opt/rocm/lib/llvm/bin/*flang* /opt/rocm/lib/llvm/lib/libFortran*.a)"; \
+    files=""; \
+    for f in $candidates; do \
+        if [ -f "$f" ] || [ -L "$f" ]; then files="$files $f"; fi; \
+    done; \
+    mtimes="$(for d in $(dirname $files | sort -u); do \
+        printf '%s|%s\n' "$d" "$(stat -c %y "$d")"; done)"; \
+    rm -f $files; \
+    printf '%s\n' "$mtimes" | while IFS='|' read -r d t; do touch -m -d "$t" "$d"; done
+
+# Squash the SDK so the removed files do not persist in a lower layer.
+FROM scratch AS rocm_sdk_squashed
+COPY --from=rocm_sdk / /
+CMD ["/bin/bash"]
+
+FROM rocm_sdk_squashed AS base
 
 ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV ROCM_PATH=/opt/rocm
@@ -63,7 +89,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11<3.1.0' Cython
+RUN pip install --no-cache-dir -U packaging 'cmake<4' ninja wheel 'setuptools<80' 'pybind11<3.1.0' Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
@@ -122,7 +148,10 @@ RUN cd triton \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && if [ ! -f setup.py ]; then cd python; fi \
     && MAX_JOBS=16 python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install && cp dist/*.whl /app/install
+    && python3 -m wheel unpack dist/*.whl -d /tmp/triton-wheel \
+    && find /tmp/triton-wheel -name '*.so' -exec strip --strip-debug {} + \
+    && mkdir -p /app/install \
+    && python3 -m wheel pack /tmp/triton-wheel/* -d /app/install
 
 
 ###
@@ -420,7 +449,7 @@ RUN cd /src/projects/rocprofiler-sdk \
 
 FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install /install/*.whl
+    pip install --no-cache-dir /install/*.whl
 
 COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
 ENV ROCPROFILER_QUEUE_INTERPOSITION=0
