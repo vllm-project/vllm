@@ -23,9 +23,10 @@ _TOPK = 16
 # fixed planner allocation used by the MSA decode kernel.
 _MAX_QUERY_HEAD_ROWS = 65536
 _MAX_DECODE_QUERY_LEN = 32
-# Kernel benchmarks put the CUTLASS crossover at 16 requests for TP1 and TP4.
-# NVFP4 has no Triton fallback, so it takes CUTLASS at every batch size.
-_MIN_CUTLASS_BATCH_SIZE = 16
+_DEFAULT_MIN_CUTLASS_BATCH_SIZE = 16
+_B300_EAGLE3_QUERY_HEAD_ROWS = 1024
+_B300_EAGLE3_MAX_QUERY_LEN = 8
+_B300_EAGLE3_HEAD_GEOMETRIES = {(64, 4), (32, 2), (16, 1)}
 
 
 def is_nvfp4_kv_cache(kv_cache_dtype: str) -> bool:
@@ -235,6 +236,21 @@ def _supported_head_geometry(num_q_heads: int, num_kv_heads: int) -> bool:
     )
 
 
+def _min_cutlass_batch_size(
+    decode_query_len: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+) -> int:
+    if (
+        not current_platform.is_device_capability((10, 3))
+        or not 1 <= decode_query_len <= _B300_EAGLE3_MAX_QUERY_LEN
+        or (num_q_heads, num_kv_heads) not in _B300_EAGLE3_HEAD_GEOMETRIES
+    ):
+        return _DEFAULT_MIN_CUTLASS_BATCH_SIZE
+    query_head_rows = decode_query_len * num_q_heads
+    return (_B300_EAGLE3_QUERY_HEAD_ROWS + query_head_rows - 1) // query_head_rows
+
+
 def supports_cutlass_sparse_decode(
     *,
     decode_backend: MiniMaxM3MSADecodeBackend,
@@ -267,9 +283,14 @@ def should_prepare_decode_metadata(
     kv_cache_dtype: str,
     page_size: int,
     topk_blocks: int,
+    min_batch_size: int | None = None,
 ) -> bool:
     """Return whether a graph shape can use the CUTLASS decode path."""
     total_q = batch_size * decode_query_len
+    if min_batch_size is None:
+        min_batch_size = _min_cutlass_batch_size(
+            decode_query_len, num_q_heads, num_kv_heads
+        )
     return (
         supports_cutlass_sparse_decode(
             decode_backend=decode_backend,
@@ -280,7 +301,7 @@ def should_prepare_decode_metadata(
             topk_blocks=topk_blocks,
         )
         and 1 <= decode_query_len <= _MAX_DECODE_QUERY_LEN
-        and (batch_size >= _MIN_CUTLASS_BATCH_SIZE or is_nvfp4_kv_cache(kv_cache_dtype))
+        and (batch_size >= min_batch_size or is_nvfp4_kv_cache(kv_cache_dtype))
         and total_q * num_q_heads <= _MAX_QUERY_HEAD_ROWS
     )
 
