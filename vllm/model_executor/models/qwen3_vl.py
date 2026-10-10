@@ -52,7 +52,7 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import (
     MultiModalConfig,
     MultiModalDummyOptions,
@@ -148,7 +148,7 @@ from .qwen2_vl import (
     Qwen2VLProcessingInfo,
     _create_qwen2vl_field_factory,
 )
-from .qwen3 import Qwen3ForCausalLM, Qwen3Model
+from .qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -1748,6 +1748,22 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         return PromptUpdateDetails.from_seq(all_token_ids)
 
 
+def mrope_positions_factor(vllm_config: VllmConfig) -> int:
+    # Video pruning keeps the positions of the tokens it drops. A drafter gets
+    # the target's positions, so it follows the target.
+    spec = vllm_config.speculative_config
+    model_config = (spec and spec.target_model_config) or vllm_config.model_config
+    mm_config = model_config.multimodal_config
+    pruned = mm_config is not None and mm_config.is_multimodal_pruning_enabled()
+    return 4 if pruned else 1
+
+
+class Qwen3VLDecoderLayer(Qwen3DecoderLayer):
+    def __init__(self, **kwargs) -> None:
+        factor = mrope_positions_factor(get_current_vllm_config())
+        super().__init__(**kwargs, mrope_positions_factor=factor)
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -1761,6 +1777,8 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     }
 )
 class Qwen3LLMModel(Qwen3Model):
+    decoder_layer_type = Qwen3VLDecoderLayer
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
