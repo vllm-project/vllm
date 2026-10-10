@@ -2020,6 +2020,7 @@ class VllmConfig:
                 "Modify KVEventsConfig.enable_kv_cache_events "
                 "to True to enable."
             )
+        self._validate_diffusion_single_pass_reads()
         current_platform.check_and_update_config(self)
 
         # After the platform hook, which has the last word on async scheduling.
@@ -3080,6 +3081,24 @@ class VllmConfig:
             raise ValueError(
                 "Adaptive verification is not currently compatible "
                 "with pipeline parallelism"
+            )
+
+    def _validate_diffusion_single_pass_reads(self) -> None:
+        diffusion_config = self.diffusion_config
+        if diffusion_config is None or not diffusion_config.single_pass_reads:
+            return
+        if self.device_config.device_type != "cpu":
+            raise ValueError("single_pass_reads is only supported on the CPU backend.")
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "single_pass_reads is not compatible with pipeline parallelism."
+            )
+        if (
+            self.kv_transfer_config is not None
+            or self.cache_config.kv_offloading_size is not None
+        ):
+            raise ValueError(
+                "single_pass_reads does not support KV connectors or KV offloading."
             )
 
     def _validate_batch_sharded_sampling(self) -> None:

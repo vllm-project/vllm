@@ -17,6 +17,7 @@ via Gemma4MultimodalEmbedder.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -58,6 +59,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.utils.diffusion import is_one_step_read
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
@@ -343,6 +345,9 @@ class DiffusionGemmaForConditionalGeneration(
             if self.final_logit_softcapping is not None:
                 logits = _softcap_logits(logits, self.final_logit_softcapping)
             return logits
+        return self.compute_prompt_logits(hidden_states)
+
+    def compute_prompt_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is not None and self.final_logit_softcapping is not None:
             logits = _softcap_logits(logits, self.final_logit_softcapping)
@@ -848,6 +853,67 @@ class DiffusionGemmaRequestStates:
         )
 
 
+def _prefill_canvas_rows(input_batch: Any) -> np.ndarray:
+    n = input_batch.num_reqs
+    num_logits = np.diff(input_batch.cu_num_logits_np[: n + 1])
+    prefilling = (
+        input_batch.num_computed_prefill_tokens_np[:n] < input_batch.prefill_len_np[:n]
+    )
+    return np.flatnonzero(prefilling & (num_logits > 0))
+
+
+@dataclass(frozen=True)
+class _CanvasSplit:
+    query_lens: np.ndarray
+    row_map: torch.Tensor
+    prompt_rows: torch.Tensor
+    canvas_rows: torch.Tensor
+    widths: torch.Tensor
+
+    @classmethod
+    def from_batch(
+        cls, query_lens: np.ndarray, num_logits: np.ndarray, fused_rows: np.ndarray
+    ) -> _CanvasSplit:
+        rows_per_req = np.ones(len(query_lens), dtype=np.int64)
+        rows_per_req[fused_rows] = 2
+        row_map = np.repeat(np.arange(len(query_lens)), rows_per_req)
+        prompt_rows = np.cumsum(rows_per_req)[fused_rows] - 2
+        widths = num_logits[fused_rows]
+        split_query_lens = query_lens[row_map]
+        split_query_lens[prompt_rows] -= widths
+        split_query_lens[prompt_rows + 1] = widths
+        return cls(
+            query_lens=split_query_lens,
+            row_map=torch.from_numpy(row_map),
+            prompt_rows=torch.from_numpy(prompt_rows),
+            canvas_rows=torch.from_numpy(prompt_rows + 1),
+            widths=torch.from_numpy(widths),
+        )
+
+    @property
+    def num_rows(self) -> int:
+        return len(self.query_lens)
+
+    @property
+    def query_start_loc(self) -> torch.Tensor:
+        cu_query_lens = np.concatenate(([0], np.cumsum(self.query_lens)))
+        return torch.from_numpy(cu_query_lens.astype(np.int32))
+
+    def gather(self, per_request: torch.Tensor) -> torch.Tensor:
+        return per_request[self.row_map.to(per_request.device)]
+
+    def seq_lens(self, seq_lens: torch.Tensor) -> torch.Tensor:
+        split = self.gather(seq_lens)
+        split[self.prompt_rows.to(split.device)] -= self.widths.to(split)
+        return split
+
+    def causal(self, is_encoder_phase: torch.Tensor) -> torch.Tensor:
+        causal = self.gather(is_encoder_phase).to(torch.int32)
+        causal[self.prompt_rows.to(causal.device)] = 1
+        causal[self.canvas_rows.to(causal.device)] = 0
+        return causal
+
+
 class DiffusionGemmaModelState(ModelState):
     """ModelState for DiffusionGemma.
 
@@ -874,6 +940,9 @@ class DiffusionGemmaModelState(ModelState):
 
         diffusion_config = vllm_config.diffusion_config
         canvas_length = diffusion_config.canvas_length if diffusion_config else 32
+        self.single_pass_reads = bool(
+            diffusion_config is not None and diffusion_config.single_pass_reads
+        )
 
         text_config = self.model_config.hf_text_config
         self.gen_config = self.model_config.try_get_generation_config()
@@ -918,6 +987,9 @@ class DiffusionGemmaModelState(ModelState):
 
     def get_supported_generation_tasks(self):
         return ("generate",)
+
+    def compute_prompt_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.model.compute_prompt_logits(hidden_states)
 
     def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
         diffusion_config = self.vllm_config.diffusion_config
@@ -1003,6 +1075,7 @@ class DiffusionGemmaModelState(ModelState):
         decode_slots_np: np.ndarray,
         decode_idx_np: np.ndarray,
         query_start_loc_np: np.ndarray,
+        num_logits_np: np.ndarray,
         inputs_embeds: torch.Tensor,
         sc_embeds: torch.Tensor,
     ) -> None:
@@ -1013,8 +1086,8 @@ class DiffusionGemmaModelState(ModelState):
         # denoise step, masked to zero by the sampler for slots not denoising
         # this step; only the MLP runs here. CPU metadata -> no GPU syncs.
         for slot, idx in zip(decode_slots_np.tolist(), decode_idx_np.tolist()):
-            start = int(query_start_loc_np[idx])
             end = int(query_start_loc_np[idx + 1])
+            start = end - int(num_logits_np[idx])
             canvas = slice(start, end)
             soft = sc_embeds[slot, : end - start]
             inputs_embeds[canvas] = self.model.self_conditioning(
@@ -1060,6 +1133,7 @@ class DiffusionGemmaModelState(ModelState):
                 slots_np[is_decode_indices_np],
                 is_decode_indices_np,
                 input_batch.query_start_loc_np,
+                num_logits_np,
                 inputs_embeds,
                 states.self_conditioning_embeds,
             )
@@ -1096,6 +1170,21 @@ class DiffusionGemmaModelState(ModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
 
+        canvas_rows = (
+            _prefill_canvas_rows(input_batch)
+            if self.single_pass_reads
+            else np.empty(0, dtype=np.int64)
+        )
+        if len(canvas_rows) > 0:
+            return self._prepare_split_attn(
+                input_batch,
+                canvas_rows,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+            )
+
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
 
@@ -1127,6 +1216,39 @@ class DiffusionGemmaModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             causal=causal,
+        )
+
+    def _prepare_split_attn(
+        self,
+        input_batch,
+        canvas_rows: np.ndarray,
+        block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+    ) -> dict[str, Any]:
+        num_reqs = input_batch.num_reqs
+        split = _CanvasSplit.from_batch(
+            np.diff(input_batch.query_start_loc_np[: num_reqs + 1]),
+            np.diff(input_batch.cu_num_logits_np[: num_reqs + 1]),
+            canvas_rows,
+        )
+        query_start_loc_cpu = split.query_start_loc
+        slots = input_batch.idx_mapping[:num_reqs]
+
+        return build_attn_metadata(
+            attn_groups=attn_groups,
+            num_reqs=split.num_rows,
+            num_tokens=input_batch.num_tokens,
+            query_start_loc_gpu=query_start_loc_cpu.to(input_batch.seq_lens.device),
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=int(split.query_lens.max()),
+            seq_lens=split.seq_lens(input_batch.seq_lens[:num_reqs]),
+            max_seq_len=self.max_model_len,
+            block_tables=tuple(split.gather(table) for table in block_tables),
+            slot_mappings=slot_mappings,
+            kv_cache_config=kv_cache_config,
+            causal=split.causal(self.diffusion_states.is_encoder_phase[slots]),
         )
 
     num_new_sampled_tokens_per_step: int = 0
@@ -1181,6 +1303,9 @@ class DiffusionSampler:
         self.tp_group_name = tp_group_name
         self.canvas_length = (
             diffusion_config.canvas_length if diffusion_config is not None else 32
+        )
+        self.single_pass_reads = bool(
+            diffusion_config is not None and diffusion_config.single_pass_reads
         )
         self.t_min = t_min
         self.t_max = t_max
@@ -1250,6 +1375,13 @@ class DiffusionSampler:
             states.set_pins(req_idx, [int(p) for p in pins])
         if extra.get("diffusion_read_only"):
             states.set_read_only(req_idx)
+        if self.single_pass_reads and is_one_step_read(sampling_params):
+            slots = np.array([req_idx], dtype=np.int64)
+            slots_gpu = async_tensor_h2d(slots, device=states.is_encoder_phase.device)
+            states.apply_seed_canvases(slots, slots_gpu)
+            self.req_states.draft_tokens[req_idx, : self.canvas_length] = states.canvas[
+                req_idx
+            ]
         if extra.get("diffusion_constrained"):
             ids = list(getattr(sampling_params, "logprob_token_ids", None) or [])
             if not ids:
@@ -1306,6 +1438,20 @@ class DiffusionSampler:
             ps_gpu
         ]
         states.is_encoder_phase.index_fill_(0, ps_gpu, False)
+
+    def _start_fused_canvases(self, input_batch: Any, slots_np: np.ndarray) -> None:
+        canvas_rows = _prefill_canvas_rows(input_batch)
+        if len(canvas_rows) == 0:
+            return
+        is_encoder_phase = self.diffusion_states.is_encoder_phase
+        is_encoder_phase.index_fill_(
+            0,
+            async_tensor_h2d(
+                slots_np[canvas_rows].astype(np.int64),
+                device=is_encoder_phase.device,
+            ),
+            False,
+        )
 
     def _handle_prefill(
         self,
@@ -1391,6 +1537,9 @@ class DiffusionSampler:
 
         if len(prefill_indices_np) > 0:
             self._finish_prefills(input_batch, prefill_indices_np)
+
+        if self.single_pass_reads:
+            self._start_fused_canvases(input_batch, slots_np)
 
         num_decode = len(decode_indices_np)
         self._decode_slots.np[:num_decode] = decode_slots_np

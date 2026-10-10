@@ -2139,7 +2139,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert self.prompt_logprobs_worker is not None
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
-            self.model.compute_logits,
+            self.model_state.compute_prompt_logits,
             hidden_states,
             input_batch,
             self.req_states.all_token_ids.gpu,
@@ -2148,7 +2148,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         prompt_token_id_logprobs_dict = (
             self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
-                self.model.compute_logits,
+                self.model_state.compute_prompt_logits,
                 hidden_states,
                 input_batch,
                 self.req_states.prompt_len.np,
