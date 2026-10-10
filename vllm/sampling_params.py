@@ -630,6 +630,25 @@ class SamplingParams(
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
+        for name in (
+            "top_k",
+            "seed",
+            "max_tokens",
+            "min_tokens",
+            "logprobs",
+            "prompt_logprobs",
+            "prompt_logprob_start",
+            "stream_interval",
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise VLLMValidationError(
+                    f"{name} must be an int, got {type(value).__name__}.",
+                    parameter=name,
+                    value=value,
+                )
         if self.extra_args:
             self._verify_extra_args()
         if not -2.0 <= self.presence_penalty <= 2.0:
@@ -678,10 +697,6 @@ class SamplingParams(
         if self.top_k < -1:
             raise VLLMValidationError(
                 f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
-            )
-        if not isinstance(self.top_k, int):
-            raise VLLMValidationError(
-                f"top_k must be an integer, got {type(self.top_k).__name__}"
             )
         if not 0.0 <= self.min_p <= 1.0:
             raise VLLMValidationError(f"min_p must be in [0, 1], got {self.min_p}.")

@@ -280,3 +280,24 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_tokens": 2.5},
+        {"max_tokens": 4.0},
+        {"max_tokens": True},
+        {"min_tokens": 1.5},
+        {"logprobs": 3.5},
+        {"prompt_logprobs": 1.5},
+        {"seed": 1.5},
+        {"top_k": 1.5},
+        {"stream_interval": 2.5},
+    ],
+)
+def test_non_int_token_fields_rejected(kwargs: dict):
+    """The engine decodes these fields as msgspec ints, so a float or bool that
+    passed construction made LLM.generate() hang (#60998)."""
+    with pytest.raises(VLLMValidationError, match="must be an int"):
+        SamplingParams(**kwargs)
