@@ -50,14 +50,38 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
         HTTPStatus.OK.value: {
             "model": ChatCompletionStreamResponse,
             "description": (
-                "JSON response when stream=false. With stream=true, the schema "
-                "describes successful JSON payloads in SSE data events, not the "
-                "SSE framing, [DONE] marker, error events, or keep-alive comments."
+                "JSON response when stream=false. With stream=true, SSE data "
+                "events contain a response chunk, an error, or [DONE]. "
+                "Keep-alive comments are not data events."
             ),
             "content": {
                 "text/event-stream": {
-                    "schema": {
-                        "$ref": "#/components/schemas/ChatCompletionStreamResponse"
+                    "itemSchema": {
+                        "type": "object",
+                        "required": ["data"],
+                        "properties": {
+                            "data": {
+                                "type": "string",
+                                "anyOf": [
+                                    {"const": "[DONE]"},
+                                    {
+                                        "contentMediaType": "application/json",
+                                        "contentSchema": {
+                                            "$ref": (
+                                                "#/components/schemas/"
+                                                "ChatCompletionStreamResponse"
+                                            )
+                                        },
+                                    },
+                                    {
+                                        "contentMediaType": "application/json",
+                                        "contentSchema": {
+                                            "$ref": "#/components/schemas/ErrorResponse"
+                                        },
+                                    },
+                                ],
+                            },
+                        },
                     }
                 },
             },

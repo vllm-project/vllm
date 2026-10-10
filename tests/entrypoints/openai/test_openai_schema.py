@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+from argparse import Namespace
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Final
+from unittest.mock import AsyncMock
 
 import pytest
 import schemathesis
@@ -20,6 +24,7 @@ from schemathesis.config import (
     ProjectsConfig,
     SchemathesisConfig,
 )
+from schemathesis.core.failures import FailureGroup
 
 from vllm.platforms import current_platform
 
@@ -32,13 +37,48 @@ DEFAULT_TIMEOUT_SECONDS: Final[int] = 10 * _ROCM_TIMEOUT_MULTIPLIER
 LONG_TIMEOUT_SECONDS: Final[int] = 60 * _ROCM_TIMEOUT_MULTIPLIER
 
 
-@pytest.mark.parametrize("endpoint", ["chat_completion", "completion"])
-def test_openapi_response_payloads(endpoint: str) -> None:
-    """Each completion endpoint must export distinct JSON and SSE payload schemas.
+@pytest.mark.parametrize("offline", [False, True])
+def test_server_openapi_version(offline: bool) -> None:
+    """Production app construction must declare the version required by itemSchema.
 
-    Check refs against serialized models and reject malformed choices so missing,
-    swapped, or unconstrained schemas fail without starting an inference engine.
+    Exercise build_app with online and offline docs selected by offline. The
+    completion_contract fixture sets 3.2 itself, so its tests cannot catch a
+    missing production version setting that leaves /openapi.json declaring 3.1.
+    The /docs assertion only checks page availability, not browser rendering;
+    this test does not validate the whole document against the OpenAPI spec.
     """
+    from vllm.entrypoints.launchers.app import build_app
+
+    args = Namespace(
+        disable_fastapi_docs=False,
+        enable_offline_docs=offline,
+        root_path="",
+        allowed_origins=["*"],
+        allow_credentials=False,
+        allowed_methods=["*"],
+        allowed_headers=["*"],
+        api_key=None,
+        enable_request_id_headers=False,
+        enable_fault_tolerance=False,
+        middleware=[],
+        log_error_stack=False,
+    )
+    app = build_app(args, supported_tasks=())
+    # No lifespan: schema generation does not need an inference engine.
+    client = TestClient(app)
+    assert client.get("/openapi.json").json()["openapi"] == "3.2.0"
+    assert client.get("/docs").status_code == 200
+
+
+@pytest.fixture(params=["chat_completion", "completion"])
+def completion_contract(request):
+    """Supply an engine-free contract fixture for request.param's completion API.
+
+    Return (app, path, models, choices), with models and choices ordered as unary
+    then streaming. The app uses the real router but sets OpenAPI 3.2 explicitly;
+    test_server_openapi_version separately checks production app construction.
+    """
+    endpoint = request.param
     if endpoint == "chat_completion":
         from vllm.entrypoints.openai.chat_completion.api_router import router
         from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -64,15 +104,40 @@ def test_openapi_response_payloads(endpoint: str) -> None:
         choices = ({"index": 0, "text": "hello"},) * 2
 
     app = FastAPI()
+    app.openapi_version = "3.2.0"
     app.include_router(router)
+    return app, path, models, choices
+
+
+def test_openapi_response_payloads(completion_contract) -> None:
+    """Export the intended unary/chunk refs and constrain their decoded payloads.
+
+    For each API supplied by completion_contract, inspect /openapi.json and
+    validate serialized model dictionaries against the referenced schemas,
+    rejecting malformed choices. For SSE, extract contentSchema and validate
+    the decoded chunk directly: no streaming request or SSE parsing occurs.
+    test_openapi_sse_events checks that the surrounding event declaration also
+    lets an SSE-aware consumer reach those payload constraints.
+    """
+    app, path, models, choices = completion_contract
     with TestClient(app) as client:
         document = client.get("/openapi.json").json()
     operation = document["paths"][path]["post"]
+    assert document["openapi"] == "3.2.0"
     content = operation["responses"]["200"]["content"]
     for media, model, choice in zip(
         ("application/json", "text/event-stream"), models, choices
     ):
-        schema = content[media]["schema"]
+        if media == "application/json":
+            schema = content[media]["schema"]
+        else:
+            assert "schema" not in content[media]
+            event = content[media]["itemSchema"]
+            assert event["required"] == ["data"]
+            data = event["properties"]["data"]
+            assert data["type"] == "string"
+            assert data["anyOf"][0] == {"const": "[DONE]"}
+            schema = data["anyOf"][1]["contentSchema"]
         assert schema["$ref"] == f"#/components/schemas/{model.__name__}"
         validator = Draft202012Validator(
             {**schema, "components": document["components"]}
@@ -83,6 +148,62 @@ def test_openapi_response_payloads(endpoint: str) -> None:
         validator.validate(payload)
         payload["choices"] = "not an array"
         assert not validator.is_valid(payload)
+
+
+@pytest.mark.parametrize("payload_kind", ["chunk", "error", "invalid", "non_json"])
+def test_openapi_sse_events(completion_contract, payload_kind: str) -> None:
+    """Make the exported SSE contract usable through actual route responses.
+
+    Unlike direct payload validation, Schemathesis must parse SSE framing and
+    validate the event envelope and its JSON data using /openapi.json. The real
+    route wraps a mocked serving handler's stream: chunk/error payload_kind
+    cases must pass, while invalid choices and non-JSON data must fail. Valid
+    streams also exercise acceptance of [DONE] and keep-alive comments.
+    This catches a chunk schema attached to the event envelope instead of its
+    data. It does not test inference, production event generation, or require
+    that production emits [DONE] last.
+    """
+    from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
+
+    app, path, models, choices = completion_contract
+    payload = models[1](model="test", choices=[choices[1]], usage={}).model_dump(
+        mode="json"
+    )
+    if payload_kind == "error":
+        payload = ErrorResponse(
+            error=ErrorInfo(message="failed", type="InternalServerError", code=500)
+        ).model_dump(mode="json")
+    elif payload_kind == "invalid":
+        payload["choices"] = "not an array"
+    data = "not JSON" if payload_kind == "non_json" else json.dumps(payload)
+
+    async def events():
+        """Emit one sample, a keep-alive comment and the terminal marker."""
+        yield f": keep-alive\n\ndata: {data}\n\ndata: [DONE]\n\n"
+
+    chat = "chat" in path
+    method = "create_chat_completion" if chat else "create_completion"
+    serving = SimpleNamespace(**{method: AsyncMock(return_value=events())})
+    setattr(
+        app.state,
+        "openai_serving_chat" if chat else "openai_serving_completion",
+        serving,
+    )
+    body = {"model": "test", "stream": True}
+    body.update(
+        {"messages": [{"role": "user", "content": "hello"}]}
+        if chat
+        else {"prompt": "hello"}
+    )
+    schema = schemathesis.openapi.from_asgi("/openapi.json", app)
+    case = schema[path]["POST"].Case(body=body, media_type="application/json")
+    expectation = (
+        pytest.raises(FailureGroup, match="SSE")
+        if payload_kind in {"invalid", "non_json"}
+        else nullcontext()
+    )
+    with expectation:
+        case.call_and_validate()
 
 
 @pytest.fixture(scope="module")

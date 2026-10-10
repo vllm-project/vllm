@@ -22,6 +22,7 @@ def attach_router(app: FastAPI) -> None:
     if args is None or not getattr(args, "enable_offline_docs", False):
         return
 
+    # Vendored from swagger-api/swagger-ui v5.33.1 dist/ for OpenAPI 3.2 support.
     static_dir = pathlib.Path(__file__).parent / "static"
 
     if not static_dir.exists():

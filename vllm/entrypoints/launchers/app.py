@@ -21,6 +21,12 @@ def build_app(
     supported_tasks: tuple["SupportedTask", ...] | None = None,
     model_config: ModelConfig | None = None,
 ) -> FastAPI:
+    """Build the serving app from CLI args, tasks and optional model metadata.
+
+    Registers routes, plugins and middleware without starting an engine. The
+    OpenAPI document uses 3.2 to describe individual SSE events with itemSchema;
+    args controls whether the schema and online/offline docs are exposed.
+    """
     if supported_tasks is None:
         warnings.warn(
             "The 'supported_tasks' parameter was not provided to "
@@ -39,6 +45,7 @@ def build_app(
         app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
     else:
         app = FastAPI(lifespan=lifespan)
+    app.openapi_version = "3.2.0"
     app.state.args = args
     app.root_path = args.root_path
 
