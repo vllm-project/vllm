@@ -141,6 +141,74 @@ def _aiter_mla_native_h24_metadata_supported() -> bool:
     return "num_heads==24" in source
 
 
+@functools.lru_cache(maxsize=1)
+def _aiter_mla_native_h12_kernels() -> bool:
+    """Whether AITER ships the native H12 fp8 decode path (ROCm/aiter#5695).
+
+    The decode dispatch, the metadata planner and the reducer each need an
+    explicit H12 branch. Some AITER builds carry part of that source but still
+    reject 12 heads when sizing the metadata, so also call the sizing helper
+    this backend uses; it only does host-side arithmetic.
+    """
+    try:
+        import inspect
+
+        import aiter.mla as aiter_mla
+        from aiter import dtypes, get_mla_metadata_info_v1
+        from aiter.jit.core import AITER_CSRC_DIR
+
+        mla_dir = Path(AITER_CSRC_DIR) / "kernels" / "mla"
+
+        def _source(path: Path) -> str:
+            return "".join(path.read_text(encoding="utf-8").split())
+
+        planner = _source(mla_dir / "metadata" / "v1_2_device.cuh")
+        reducer = _source(mla_dir / "reduce.cu")
+        dispatch = "".join(inspect.getsource(aiter_mla.mla_decode_fwd).split())
+        if not (
+            "num_heads==12" in planner
+            and "MLA_REDUCE_CASE_EF(NUM_HEAD,12,HEAD_DIM,512," in reducer
+            and "nhead==12" in dispatch
+        ):
+            return False
+        get_mla_metadata_info_v1(1, 1, 12, dtypes.fp8, dtypes.fp8, is_sparse=False)
+    except Exception:
+        return False
+    return True
+
+
+_AITER_MLA_NATIVE_H12: bool | None = None
+
+
+def _aiter_mla_native_h12_supported() -> bool:
+    """Whether this process runs 12 decode heads natively instead of padding.
+
+    AITER's H12 decode is gfx950-only, needs fp8 query and KV, and covers
+    12 * qlen <= 128. With an fp8 KV cache this backend quantizes the query to
+    fp8, and qlen is 1 + num_speculative_tokens. The answer is fixed on the
+    first call that has a vLLM config (backend setup), because the padded head
+    count sizes buffers that forward reuses.
+    """
+    global _AITER_MLA_NATIVE_H12
+    if _AITER_MLA_NATIVE_H12 is not None:
+        return _AITER_MLA_NATIVE_H12
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.platforms.rocm import on_gfx950
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return False
+    spec_config = vllm_config.speculative_config
+    max_qlen = 1 + (spec_config.num_speculative_tokens if spec_config else 0)
+    _AITER_MLA_NATIVE_H12 = (
+        on_gfx950()
+        and str(vllm_config.cache_config.cache_dtype).startswith("fp8")
+        and 12 * max_qlen <= 128
+        and _aiter_mla_native_h12_kernels()
+    )
+    return _AITER_MLA_NATIVE_H12
+
+
 def _aiter_mla_native_h24_supported() -> bool:
     """Whether the complete AITER decode path supports native H24."""
     return (
@@ -1718,6 +1786,8 @@ class AiterMLAHelper:
     @staticmethod
     def get_actual_mla_num_heads(num_heads: int) -> int:
         if num_heads == 24 and _aiter_mla_native_h24_supported():
+            return num_heads
+        if num_heads == 12 and _aiter_mla_native_h12_supported():
             return num_heads
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         return -(-num_heads // m) * m
