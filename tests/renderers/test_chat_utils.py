@@ -14,7 +14,14 @@ from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal.utils import (
+    encode_audio_url,
+    encode_image_url,
+    encode_video_url,
+)
+from vllm.renderers.chat_utils import (
     MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ChatCompletionMessageParam,
@@ -25,13 +32,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
     validate_chat_template,
-)
-from vllm.exceptions import VLLMValidationError
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.utils import (
-    encode_audio_url,
-    encode_image_url,
-    encode_video_url,
 )
 from vllm.utils.serial_utils import tensor2base64
 
