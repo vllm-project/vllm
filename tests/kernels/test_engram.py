@@ -199,7 +199,8 @@ def test_engram_mhc_preserves_delayed_input_on_replay(
         post, comb, unused, next_pre = mhc_pre_delayed_tilelang(
             residual, *args, **kwargs, stats_only=True
         )
-        assert unused is None
+        assert unused.shape == (0,)
+        assert unused.dtype == torch.bfloat16 and unused.device == residual.device
         return residual, post, comb, layer_input, next_pre
 
     actual = run_fused()

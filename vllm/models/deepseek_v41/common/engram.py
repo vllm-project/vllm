@@ -1329,7 +1329,7 @@ def _fused_engram_mhc_input_kernel(
             active = tl.load(token_mask + token_idx, source_valid, other=0)
             gate = tl.where(active, gate, 0.0)
         # Both the projection and the collapse consume the rounded residual.
-        updated = (hidden + gate * value).to(tl.bfloat16)
+        updated = tl.fma(gate, value, hidden).to(tl.bfloat16)
         tl.store(output + (token_idx * HC_MULT + hc) * DIM + offsets, updated, valid)
         if HAS_PRE_MIX:
             pre = tl.load(pre_mix + token_idx * HC_MULT + hc)

@@ -86,7 +86,7 @@ def mhc_pre_delayed_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
     stats_only: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run mHC pre with a carried pre-mix and return the next pre-mix.
 
     Args:
@@ -112,7 +112,7 @@ def mhc_pre_delayed_tilelang(
         Post and residual coefficients, optionally normalized BF16 layer input,
         and the next FP32 pre-mix, with shapes (tokens, hc_mult, 1),
         (tokens, hc_mult, hc_mult), (tokens, hidden_size), and (tokens, hc_mult).
-        The layer input is None when stats_only is set.
+        The layer input is an empty BF16 tensor when stats_only is set.
 
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
@@ -163,7 +163,9 @@ def mhc_pre_delayed_tilelang(
     outputs = (
         post.unsqueeze(-1),
         comb.view(num_tokens, hc_mult, hc_mult),
-        None if stats_only else layer_input,
+        torch.empty(0, dtype=torch.bfloat16, device=residual.device)
+        if stats_only
+        else layer_input,
         next_pre_mix,
     )
     if num_tokens == 0:
@@ -262,7 +264,7 @@ def _mhc_pre_delayed_tilelang_fake(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
     stats_only: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens, hc_mult, hidden_size = residual.shape
     return (
         torch.empty(
@@ -271,7 +273,7 @@ def _mhc_pre_delayed_tilelang_fake(
         torch.empty(
             num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=residual.device
         ),
-        None
+        torch.empty(0, dtype=torch.bfloat16, device=residual.device)
         if stats_only
         else torch.empty(
             num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
