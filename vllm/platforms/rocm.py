@@ -441,6 +441,51 @@ def use_rocm_custom_paged_attention(
         )
 
 
+def _rdna_prefer_triton_attn(
+    attn_selector_config: "AttentionSelectorConfig",
+    vllm_config: "VllmConfig | None",
+) -> bool:
+    """Whether TRITON_ATTN should be preferred over ROCM_ATTN on RDNA4/gfx1100.
+
+    ROCM_ATTN is fast on RDNA only when its HIP paged-attention decode kernel
+    applies (the static conditions of use_rocm_custom_paged_attention());
+    otherwise it falls back to Triton kernels without split-KV that are much
+    slower than TRITON_ATTN. The fallback stays preferred where it measured
+    faster: fp8 KV cache (its prefill reads the new tokens unquantized) and
+    head sizes <= 64."""
+    cfg = attn_selector_config
+    if (cfg.kv_cache_dtype or "auto").startswith("fp8") or cfg.head_size <= 64:
+        return False
+    return not _rdna_rocm_attn_can_use_custom_paged_attention(cfg, vllm_config)
+
+
+def _rdna_rocm_attn_can_use_custom_paged_attention(
+    attn_selector_config: "AttentionSelectorConfig",
+    vllm_config: "VllmConfig | None",
+) -> bool:
+    """Selection-time check of the static conditions in
+    use_rocm_custom_paged_attention() for RDNA."""
+    cfg = attn_selector_config
+    if not (
+        cfg.head_size == 128
+        and cfg.dtype in (torch.half, torch.bfloat16)
+        and cfg.block_size in (None, 16)
+        and cfg.kv_cache_dtype in (None, "auto")
+        and not cfg.has_sink
+        and not cfg.has_sliding_window
+    ):
+        return False
+    if vllm_config is None or vllm_config.model_config is None:
+        return True
+    model_config = vllm_config.model_config
+    # Hybrid models raise the attention block size above 16.
+    if model_config.is_hybrid:
+        return False
+    num_kv_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+    num_heads = model_config.get_num_attention_heads(vllm_config.parallel_config)
+    return 3 <= num_heads // num_kv_heads <= 16
+
+
 @cache
 def flash_attn_triton_available() -> bool:
     if not on_gfx1x():
@@ -699,6 +744,20 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        # On RDNA4 and gfx1100, prefer TRITON_ATTN over ROCM_ATTN when ROCM_ATTN
+        # cannot use its HIP paged-attention decode kernel. Other RDNA parts
+        # (e.g. gfx1151) are not switched until TRITON_ATTN is tuned for them.
+        if (
+            (on_rdna4() or on_gfx1100())
+            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
+            and AttentionBackendEnum.TRITON_ATTN in backend_priorities
+            and _rdna_prefer_triton_attn(attn_selector_config, vllm_config)
+        ):
+            backend_priorities.remove(AttentionBackendEnum.TRITON_ATTN)
+            backend_priorities.insert(
+                backend_priorities.index(AttentionBackendEnum.ROCM_ATTN),
+                AttentionBackendEnum.TRITON_ATTN,
+            )
         is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
