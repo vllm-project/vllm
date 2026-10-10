@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    DeepGemmSm100MegaMoEBackend,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
@@ -451,7 +454,9 @@ def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
     ):
         param.data.random_(1, 128)
         originals.append(param.data.clone())
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
+    monkeypatch.setattr(
+        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
+    )
     monkeypatch.setattr(
         "vllm.utils.deep_gemm._import_deep_gemm",
         lambda: SimpleNamespace(
@@ -547,7 +552,9 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
         intermediate_size=intermediate_size,
         num_shared_experts=1,
     )
-    experts._check_runtime_supported = lambda: None
+    monkeypatch.setattr(
+        experts, "_ensure_backend", lambda: DeepGemmSm100MegaMoEBackend()
+    )
 
     def fp8_parameter(*shape):
         return torch.nn.Parameter(
@@ -664,6 +671,10 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
 
     class FakeExperts(torch.nn.Module):
         has_fused_shared_experts = fused
+        _backend = DeepGemmSm100MegaMoEBackend()
+
+        def _ensure_backend(self):
+            return self._backend
 
         def forward(self, hidden_states, *args, **kwargs):
             return torch.ones_like(hidden_states)
