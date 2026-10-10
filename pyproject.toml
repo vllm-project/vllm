@@ -268,3 +268,7 @@ no-build-isolation-package = ["torch"]
 # openai-harmony alongside it silently overwrites those files, so keep it out
 # of every resolution; gpt-oss pulls it in transitively.
 exclude-dependencies = ["openai-harmony"]
+
+# do-not-merge: NIXL 1.5.0rc1.dev72182327 RC verification wheels.
+[tool.uv.pip]
+find-links = ["https://github.com/svc-networking-sw/nixl-ver/releases/download/1.5.0rc1.dev72182327/index.html"]
