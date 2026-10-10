@@ -123,13 +123,15 @@ def _silu_mul_fp8_quant_deep_gemm(
         gate = tl.load(
             input_ptr + base_gate_offset + t * stride_i_t, mask=mask, other=0.0
         ).to(tl.float32)
-        up = tl.load(
-            input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0
-        ).to(tl.float32)
+        up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
         if clamp_limit > 0.0:
-            gate = tl.minimum(gate, clamp_limit)
-            up = tl.clamp(up, -clamp_limit, clamp_limit)
+            gate = tl.minimum(gate, clamp_limit).to(input_ptr.dtype.element_ty)
+            up = tl.clamp(up.to(tl.float32), -clamp_limit, clamp_limit).to(
+                input_ptr.dtype.element_ty
+            )
+
+        up = up.to(tl.float32)
 
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
