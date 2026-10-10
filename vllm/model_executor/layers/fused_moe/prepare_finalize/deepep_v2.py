@@ -6,7 +6,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -70,23 +70,9 @@ def _unpack_mxfp8_scale(
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
-    Supports two modes controlled by the `use_cudagraph` constructor arg:
-
-    **Decode mode (use_cudagraph=True):**
-      - do_expand=False, do_cpu_sync=False
-      - Tokens returned in original order with recv_topk_idx (global IDs)
-      - Worst-case tensor allocation; padding rows zeroed via
-        handle.psum_num_recv_tokens_per_scaleup_rank
-      - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta carries no counts)
-
-    **Prefill mode (use_cudagraph=False):**
-      - do_expand=True, do_cpu_sync=True
-      - Per-expert-contiguous layout; exact memory allocation
-      - Saves GPU memory (no worst-case allocation)
-      - Not cudagraph-capturable (CPU polling), but prefill doesn't
-        use cudagraphs anyway
-      - Provides expert_tokens_meta for efficient batched expert kernels
+    Uses non-expanded dispatch without CPU synchronization in every forward.
+    The receive capacity is bounded by the DP-wide padded token count. Expert
+    kernels consume routing IDs and GPU-side receive counts.
 
     Dispatch always uses async_with_compute_stream=False. finalize_async
     issues the combine with async_with_compute_stream=True (except under
@@ -113,7 +99,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_experts: int,
         num_topk: int,
         use_fp8_dispatch: bool = False,
-        use_cudagraph: bool = False,
         sp_size: int = 1,
     ):
         super().__init__()
@@ -124,28 +109,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_experts = num_experts
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
-        self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
 
-        # arange(num_local_experts) + rank_expert_offset. Rank-constant, so it
-        # is built once per device instead of once per layer per step.
-        self._global_expert_ids_cache: torch.Tensor | None = None
-
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
-
-    def _global_expert_ids(self, num_local: int, device: torch.device) -> torch.Tensor:
-        ids = self._global_expert_ids_cache
-        if ids is None or ids.numel() != num_local or ids.device != device:
-            ids = (
-                torch.arange(num_local, dtype=torch.int64, device=device)
-                + self.rank_expert_offset
-            )
-            self._global_expert_ids_cache = ids
-        return ids
 
     def output_is_reduced(self) -> bool:
         return True
@@ -171,40 +141,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
     ) -> Callable:
-        has_scales = token_scales is not None
-
         token_data = tokens
-        if has_scales:
+        if token_scales is not None:
             token_data = (tokens, token_scales)
 
-        # Decode: do_expand=False + do_cpu_sync=False (cudagraph-safe)
-        # Prefill: do_expand=True + do_cpu_sync=True (memory-efficient)
-        do_expand = not self.use_cudagraph
-        do_cpu_sync = not self.use_cudagraph
-
-        # In do_expand=False mode, the recv buffer is the worst case
-        # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
-        # (= max_num_batched_tokens) makes the experts process ~R*8192 rows even
-        # for a handful of decode tokens. Bound it to the actual DP-padded batch
-        # size (uniform across ranks): max(num_tokens_across_dp).
-        #
-        # DeepEP JIT-compiles a separate dispatch kernel per distinct
-        # num_max_tokens_per_rank, so feeding it the raw per-step size would make
-        # it recompile for every batch size (a cicc storm that starves the GPU at
-        # high concurrency). Round up to a power of 2 instead: this bounds the
-        # set to ~log2(max_num_batched_tokens) values (compiled once, then
-        # cached) while staying small for decode (e.g. 1 token -> 1) and capped
-        # at the buffer's init capacity for prefill. With sequence parallelism,
-        # each EP rank holds a ceil(n / sp_size) shard of its DP rank's batch.
-        num_max_tokens_per_rank = None
-        if not do_expand:
-            dp_meta = get_forward_context().dp_metadata
-            if dp_meta is not None:
-                n = int(dp_meta.num_tokens_across_dp_cpu.max())
-                n = cdiv(n, self.sp_size)
-            else:
-                n = tokens.shape[0]
-            num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+        # Bound worst-case receive rows by the largest DP batch, sharded for SP.
+        # Power-of-two buckets limit DeepEP's per-capacity JIT specializations.
+        dp_meta = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_meta is not None:
+            n = int(dp_meta.num_tokens_across_dp_cpu.max())
+            n = cdiv(n, self.sp_size)
+        else:
+            n = tokens.shape[0]
+        num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
 
         (
             recv_x,
@@ -218,8 +171,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_weights=rank_topk_weights,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            do_expand=do_expand,
-            do_cpu_sync=do_cpu_sync,
+            do_expand=False,
+            do_cpu_sync=False,
             async_with_compute_stream=False,
         )
 
@@ -228,11 +181,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         return lambda: self._receiver(
             event,
-            has_scales,
             recv_x,
             recv_topk_idx,
-            num_experts,
-            handle.num_recv_tokens_per_expert_list,
             recv_topk_weights,
             handle.psum_num_recv_tokens_per_scaleup_rank,
             a1_scale,
@@ -243,11 +193,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def _receiver(
         self,
         event: deep_ep.EventOverlap,
-        has_scales: bool,
         recv_x: tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
-        recv_topk_idx: torch.Tensor | None,
-        num_experts: int,
-        recv_expert_num_tokens: list[int],
+        recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor | None,
         psum_recv_per_rank: torch.Tensor,
         a1_scale: torch.Tensor | None,
@@ -262,73 +209,19 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             expert_x, expert_x_scale = recv_x, None
 
-        if recv_expert_num_tokens:
-            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-                recv_expert_num_tokens,
-                device=expert_x.device,
-            )
-        else:
-            # Decode/cudagraph path (do_cpu_sync=False) skips the CPU sync and
-            # leaves recv_expert_num_tokens empty. A present-but-empty
-            # ExpertTokensMetadata violates the decode-mode contract above
-            # (expert_tokens_meta must be None) and crashes DeepEP combine
-            # during profile_run when CUDA graphs are enabled.
-            expert_tokens_meta = None
-
-        if recv_topk_idx is None:
-            # do_expand=True (prefill mode): build topk_ids from
-            # per-expert token counts.
-            assert expert_tokens_meta is not None
-            total_tokens = sum(recv_expert_num_tokens)
-            if total_tokens > 0:
-                recv_topk_idx = torch.repeat_interleave(
-                    self._global_expert_ids(
-                        len(recv_expert_num_tokens), expert_x.device
-                    ),
-                    expert_tokens_meta.expert_num_tokens,
-                    output_size=total_tokens,
-                )
-            else:
-                recv_topk_idx = torch.empty(
-                    0,
-                    dtype=torch.int64,
-                    device=expert_x.device,
-                )
-            recv_topk_idx = recv_topk_idx.unsqueeze(1)
-        else:
-            # do_expand=False (decode/cudagraph mode): the dispatch only writes
-            # rows [0, num_recv_tokens); the rest of the worst-case-allocated
-            # buffer is left UNINITIALIZED. For valid rows, recv_topk_idx holds
-            # LOCAL expert IDs (-1 for non-local slots). Convert valid local IDs
-            # to global and force everything else to -1:
-            #   * non-local / out-of-range expert slots, and
-            #   * every row >= num_recv_tokens (uninitialized padding): its
-            #     stale contents can alias valid expert IDs and would otherwise
-            #     be treated as real routed tokens by experts that build routing
-            #     over *all* rows (e.g. triton MoE backend's make_routing_data),
-            #     polluting the per-expert token lists and corrupting real tokens.
-            recv_topk_idx = _globalize_recv_topk_idx(
-                recv_topk_idx,
-                psum_recv_per_rank,
-                self.rank_expert_offset,
-                self.num_experts,
-            )
-
-        # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
-        if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
-            recv_topk_weights = recv_topk_weights.unsqueeze(1)
-
-        if self.use_cudagraph:
-            # Carry the per-rank prefix sum so SiTU can skip padding rows.
-            # expert_num_tokens stays None: count-based consumers (DeepGEMM,
-            # Triton) must treat a None field as "no counts" and derive their
-            # own, exactly as in the meta-absent decode case.
-            if expert_tokens_meta is None:
-                expert_tokens_meta = mk.ExpertTokensMetadata(
-                    expert_num_tokens=None,
-                    expert_num_tokens_cpu=None,
-                )
-            expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
+        # Dispatch leaves padding rows uninitialized. Convert local expert IDs
+        # to global IDs and mask padding before expert kernels build routing.
+        recv_topk_idx = _globalize_recv_topk_idx(
+            recv_topk_idx,
+            psum_recv_per_rank,
+            self.rank_expert_offset,
+            self.num_experts,
+        )
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=None,
+            expert_num_tokens_cpu=None,
+        )
+        expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
 
         if _quantize_before_dispatch(quant_config, defer_input_quant):
             if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:

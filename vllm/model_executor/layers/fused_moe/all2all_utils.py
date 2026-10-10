@@ -289,9 +289,6 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
-        vllm_config = get_current_vllm_config()
-        use_cudagraph = not vllm_config.model_config.enforce_eager
-
         prepare_finalize = DeepEPV2PrepareAndFinalize(
             buffer=handle,
             num_dispatchers=all2all_manager.world_size,
@@ -300,7 +297,6 @@ def maybe_make_prepare_finalize(
             num_experts=moe.num_experts,
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
-            use_cudagraph=use_cudagraph,
             sp_size=moe.moe_parallel_config.sp_size,
         )
 

@@ -906,6 +906,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
+    - pytest -v -s kernels/moe/test_deepep_v2_async_finalize.py
   mirror:
     amd:
       label: ":amd: (MI355) MoRI EP Numerics"
