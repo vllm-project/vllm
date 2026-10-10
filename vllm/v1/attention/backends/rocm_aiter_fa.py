@@ -1091,7 +1091,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 alibi_slopes=self.alibi_slopes,
                 return_lse=True,
-                sink_ptr=self.sinks,
+                # The causal call above already adds the sink to each query's
+                # LSE; adding it per context chunk would overcount it on merge.
+                sink_ptr=None,
             )
             if chunked_output is None:
                 chunked_output = suf_out
