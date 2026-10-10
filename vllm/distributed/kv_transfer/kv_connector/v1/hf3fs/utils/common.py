@@ -59,6 +59,9 @@ class RequestSchedulingState:
     # Scheduling phase
     phase: str = "NEW"  # NEW -> WAITING_TO_LOAD -> ACTIVE -> FINISHED
 
+    # Request-specific namespace for external cache keys.
+    cache_salt: str = ""
+
     def needs_loading(self) -> bool:
         """Check if request needs loading."""
         return self.load_op is not None and self.load_op.num_blocks_to_load > 0
@@ -96,6 +99,7 @@ class HF3FSRequestMetadata:
     block_ids: list[int]
     load_block_op: LoadBlockInfo | None = None
     save_block_op: SaveBlockInfo | None = None
+    cache_salt: str = ""
 
     @staticmethod
     def from_scheduling_state(
@@ -125,6 +129,7 @@ class HF3FSRequestMetadata:
             block_ids=state.allocated_block_ids,
             load_block_op=load_op,
             save_block_op=SaveBlockInfo(skip_leading_blocks=skip_blocks),
+            cache_salt=state.cache_salt,
         )
 
 
