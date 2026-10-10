@@ -281,7 +281,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
-    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e) {
+    Idx_t stride_ys_g, Idx_t stride_ys_p, Idx_t stride_counts_e,
+    float clamp_limit) {
 #ifndef USE_ROCM
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
 
@@ -504,8 +505,15 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   #pragma unroll
       for (int32_t k = 0; k < 2; ++k) {
-        __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(s_gate_comp[k]));
-        res[k] = __hmul2(gate, s_up_comp[k]);
+        __nv_bfloat162 gate = s_gate_comp[k];
+        __nv_bfloat162 up = s_up_comp[k];
+        if (clamp_limit > 0.0f) {
+          const __nv_bfloat162 clamp = __float2bfloat162_rn(clamp_limit);
+          const __nv_bfloat162 neg_clamp = __float2bfloat162_rn(-clamp_limit);
+          gate = __hmin2(gate, clamp);
+          up = __hmin2(__hmax2(up, neg_clamp), clamp);
+        }
+        res[k] = __hmul2(silu2_v2(__bfloat1622float2(gate)), up);
       }
 
       auto _y_max2 = __hmax2(__habs2(res[0]), __habs2(res[1]));
@@ -600,7 +608,7 @@ void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& tokens_per_expert,  // (E)
     torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
     torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
-    bool cast_scale_ue8m0) {
+    bool cast_scale_ue8m0, double clamp_limit) {
 #ifndef USE_ROCM
 
   // This kernel currently only supports H % 128 == 0 and assumes a
@@ -664,7 +672,8 @@ void persistent_masked_m_silu_mul_quant(
                       tokens_per_expert.const_data_ptr()),                     \
                   E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,    \
                   stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,          \
-                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e);                  \
+                  STRIDE_YS_G, STRIDE_YS_P, stride_counts_e,                   \
+                  static_cast<float>(clamp_limit));                            \
         });
 
   #define LAUNCH_ON_H(scale_t, STRIDE_YS_E, STRIDE_YS_T, STRIDE_YS_G,         \

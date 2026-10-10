@@ -65,11 +65,6 @@ def _top_k_per_row_prefill(
     top_k: int,
 ) -> None:
     if envs.VLLM_BATCH_INVARIANT:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            require_batch_invariant_quant_kernel,
-        )
-
-        require_batch_invariant_quant_kernel()
         torch.ops._C.deterministic_top_k_per_row_prefill(
             logits,
             row_starts,
