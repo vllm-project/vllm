@@ -1420,6 +1420,81 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_fused_rms_gated_mxfp4_gemm_impl(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    epsilon: float,
+    activation: str,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """RMSNormGated (norm before gate, one group per norm_weight slice), then
+    an MXFP4 dynamic-quant linear (``gemm_with_dynamic_quant`` on the
+    ASM-layout weights). x and z are (M, K).
+
+    Below M=32 the preshuffled Triton GEMM takes unshuffled per-1x32 scales,
+    which is what AITER's fused gated-RMSNorm + MXFP4 quant writes, so there
+    the activation quant runs in the norm kernel instead of as a separate
+    launch. Everywhere else this is the unfused sequence.
+    """
+    m = x.shape[0]
+    if m < 32 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(
+        weight.shape[0], weight.shape[1]
+    ):
+        from aiter.ops.triton.quant import fused_rms_gated_mxfp4_quant
+
+        x_q, x_s = fused_rms_gated_mxfp4_quant(
+            x,
+            norm_weight,
+            z,
+            epsilon,
+            norm_before_gate=True,
+            activation=activation,
+            group_size=norm_weight.numel(),
+        )
+        return torch.ops.vllm.gemm_with_dynamic_quant(
+            x_q,
+            weight,
+            weight_scale,
+            rocm_use_aiter_fp4_asm_gemm=True,
+            out_dtype=out_dtype,
+            x_scales=x_s,
+        )
+
+    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+        rmsnorm_fn,
+    )
+
+    group = norm_weight.numel()
+    normed = rmsnorm_fn(
+        x.view(-1, group),
+        norm_weight,
+        None,
+        z=z.view(-1, group),
+        eps=epsilon,
+        norm_before_gate=True,
+        activation=activation,
+    ).view(x.shape)
+    return torch.ops.vllm.gemm_with_dynamic_quant(
+        normed, weight, weight_scale, True, out_dtype
+    )
+
+
+def _rocm_aiter_fused_rms_gated_mxfp4_gemm_fake(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    epsilon: float,
+    activation: str,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty((x.shape[0], weight.shape[0]), dtype=out_dtype, device=x.device)
+
+
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -2915,6 +2990,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_gated_mxfp4_gemm",
+                op_func=_rocm_aiter_fused_rms_gated_mxfp4_gemm_impl,
+                fake_impl=_rocm_aiter_fused_rms_gated_mxfp4_gemm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
@@ -3041,6 +3122,11 @@ class rocm_aiter_ops:
     def get_fused_rms_gated_fp8_group_quant_op() -> OpOverload:
         """Return the fused gated-RMSNorm + FP8 group quant custom op."""
         return torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant.default
+
+    @staticmethod
+    def get_fused_rms_gated_mxfp4_gemm_op() -> OpOverload:
+        """Return the fused gated-RMSNorm + MXFP4 linear custom op."""
+        return torch.ops.vllm.rocm_aiter_fused_rms_gated_mxfp4_gemm.default
 
     @staticmethod
     def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
@@ -3935,10 +4021,12 @@ class rocm_aiter_ops:
     def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        # Input = weight.shape[1] (bytes); *4 for fp4 and aiter config 2*k
+        # k_bytes = weight.shape[1] (two fp4 per byte). AITER names these
+        # config files by the logical K, which is what gemm_afp4wfp4_preshuffle
+        # itself looks up, so probe the same file.
         try:
             return _triton_gemm_config_is_tuned(
-                "GEMM-AFP4WFP4_PRESHUFFLED", n, 4 * k_bytes
+                "GEMM-AFP4WFP4_PRESHUFFLED", n, 2 * k_bytes
             )
         except (AssertionError, ImportError):
             return False
