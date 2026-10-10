@@ -207,8 +207,6 @@ mkdocs.yaml @hmellor
 # AMD per-model amd/ subtrees
 /vllm/models/*/amd @tjtanaa @dllehr-amd @hongxiayang
 /vllm/models/deepseek_v4/amd @tjtanaa @dllehr-amd @hongxiayang @zyongye
-/vllm/models/deepseek_v32/amd/mono @tjtanaa @dllehr-amd @hongxiayang @amd-sriram
-/vllm/models/deepseek_v32/amd/ops/mono @tjtanaa @dllehr-amd @hongxiayang @amd-sriram
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche

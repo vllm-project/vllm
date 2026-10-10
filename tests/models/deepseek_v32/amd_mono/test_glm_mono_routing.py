@@ -209,7 +209,9 @@ def test_decode_step_runs_every_layer_in_the_kernel(monkeypatch, tokens):
     rows = spec.width_for(tokens)
     assert hidden.shape == (rows, H) and not hidden.any()
     assert residual.shape == (rows, H)
-    assert torch.equal(residual[:tokens], torch.full((tokens, H), 8.0, dtype=torch.bfloat16))
+    assert torch.equal(
+        residual[:tokens], torch.full((tokens, H), 8.0, dtype=torch.bfloat16)
+    )
     norm = lambda x: x  # noqa: E731
     assert mono.final_norm(norm, residual).shape == (tokens, H)
 
