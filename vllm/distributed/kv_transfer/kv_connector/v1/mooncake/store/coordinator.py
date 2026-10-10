@@ -170,6 +170,56 @@ class MooncakeStoreCoordinator:
         )
         return length // alignment * alignment
 
+    @staticmethod
+    def validate_recurrent_lookup(groups: Sequence[KVCacheGroupSpec]) -> None:
+        """Limit selective leasing to prefix-monotone KV and exact states."""
+        for group in groups:
+            if not group.kv_cache_spec.prefix_cacheable:
+                continue
+            spec = _unwrap_spec(group.kv_cache_spec)
+            if isinstance(spec, MambaSpec):
+                if spec.mamba_cache_mode != "align":
+                    raise ValueError("Selective Mooncake lookup requires align Mamba")
+            elif not isinstance(spec, FullAttentionSpec):
+                raise ValueError(
+                    "Selective Mooncake lookup supports FullAttention and Mamba"
+                )
+
+    def recurrent_candidates(
+        self,
+        block_hashes: Sequence[BlockHash],
+        num_tokens: int,
+        kv_exists: set[tuple[int, bytes]],
+    ) -> range:
+        """Plan legal state boundaries without leasing any recurrent keys.
+
+        Full-attention evidence is prefix-monotone. A single coordinator pass
+        with hypothetical recurrent states bounds every shorter aligned resume
+        point, including Eagle. Clamp before leasing so a full-prompt state is
+        never selected just to recompute the final token at an earlier state.
+        """
+        self.validate_recurrent_lookup(self.kv_cache_groups)
+        upper = self.align_lookup_length(
+            min(num_tokens, len(block_hashes) * self.hash_block_size)
+        )
+        if upper <= 0:
+            return range(0)
+        planning_exists = kv_exists | {
+            (gid, bytes(block_hash))
+            for gid in self.mamba_group_ids
+            for block_hash in block_hashes[: upper // self.hash_block_size]
+        }
+        pool = ExternalCachedBlockPool(self.hash_block_size, planning_exists)
+        _, upper = self.find_longest_cache_hit(block_hashes, upper, pool)
+        if upper >= num_tokens:
+            upper = self.align_lookup_length(num_tokens - 1)
+        step = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+        return range(step, upper + 1, step)
+
     def _verify_and_split_kv_cache_groups(self) -> None:
         """Mirrors KVCacheCoordinator.verify_and_split_kv_cache_groups but
         dispatches via spec_manager_map (we don't allocate managers).

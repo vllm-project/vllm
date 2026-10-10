@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+from itertools import product
 from math import lcm
 
+import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
 )
@@ -50,6 +53,69 @@ def _make_coord(
         retention_interval=retention_interval,
         enable_partial_hash_hits=enable_partial_hash_hits,
     )
+
+
+@pytest.mark.parametrize(
+    "hash_size,mamba_sizes", [(16, (16,)), (4, (16,)), (8, (16, 32))]
+)
+@pytest.mark.parametrize("eagle", [False, True])
+@pytest.mark.parametrize("num_tokens", [32, 33])
+def test_recurrent_candidates_match_coordinator_reference(
+    hash_size, mamba_sizes, eagle, num_tokens
+):
+    groups = [
+        KVCacheGroupSpec(
+            ["kv"],
+            FullAttentionSpec(
+                block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32
+            ),
+        )
+    ] + [
+        KVCacheGroupSpec([f"state{i}"], _mamba_align(size))
+        for i, size in enumerate(mamba_sizes)
+    ]
+    coord = _make_coord(groups, hash_size, use_eagle=eagle)
+    hashes = [BlockHash(bytes([i])) for i in range(32 // hash_size)]
+    step = hash_size if coord.enable_partial_hash_hits else coord.lcm_block_size
+    for bits in product((False, True), repeat=len(hashes)):
+        kv_exists = {
+            (0, bytes(h)) for h, exists in zip(hashes, bits, strict=True) if exists
+        }
+        expected = []
+        for boundary in range(step, num_tokens, step):
+            state_exists = {
+                (gid, bytes(hashes[boundary // hash_size - 1]))
+                for gid in coord.mamba_group_ids
+            }
+            _, hit = coord.find_longest_cache_hit(
+                hashes,
+                coord.align_lookup_length(num_tokens),
+                ExternalCachedBlockPool(hash_size, kv_exists | state_exists),
+            )
+            if hit == boundary:
+                expected.append(boundary)
+        assert (
+            list(coord.recurrent_candidates(hashes, num_tokens, kv_exists)) == expected
+        )
+
+
+def test_recurrent_candidates_reject_nonmonotone_kv_and_nonalign_state():
+    sliding = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sliding_window=32,
+    )
+    with pytest.raises(ValueError, match="FullAttention"):
+        MooncakeStoreCoordinator.validate_recurrent_lookup(
+            [KVCacheGroupSpec(["swa"], sliding)]
+        )
+    state = replace(_mamba_align(16), mamba_cache_mode="all")
+    with pytest.raises(ValueError, match="align"):
+        MooncakeStoreCoordinator.validate_recurrent_lookup(
+            [KVCacheGroupSpec(["state"], state)]
+        )
 
 
 # ----- ExternalCachedBlockPool -----
