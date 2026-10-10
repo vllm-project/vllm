@@ -34,7 +34,18 @@ NARROW = 8192
 WIDE = 262144
 
 
-def _inputs(rows, width, ends, starts, *, block_size, col_stride, dtype):
+def _inputs(
+    rows,
+    width,
+    ends,
+    starts,
+    *,
+    block_size,
+    col_stride,
+    dtype,
+    topk_blocks=TOPK_BLOCKS,
+    max_block=None,
+):
     """Logits, bounds and candidate blocks shared by both kernels."""
     torch.manual_seed(0)
     # A column stride > 1 keeps the kernels honest about stride_col; the decode
@@ -47,7 +58,11 @@ def _inputs(rows, width, ends, starts, *, block_size, col_stride, dtype):
     row_ks = torch.tensor(starts, device="cuda", dtype=dtype) if starts else None
     nblocks = (width + block_size - 1) // block_size
     candidates = torch.randint(
-        0, nblocks, (rows, TOPK_BLOCKS), device="cuda", dtype=torch.int32
+        0,
+        nblocks if max_block is None else max_block,
+        (rows, topk_blocks),
+        device="cuda",
+        dtype=torch.int32,
     )
     # -1 is the "no block" sentinel the selector emits for short rows.
     candidates[:, ::7] = -1
@@ -123,6 +138,62 @@ def test_matches_shared_kernel_with_starts(block_size):
     _assert_agrees_within_ends(ref, got, row_ke, 1)
 
 
+@pytest.mark.parametrize("copies", [1, 4, 8])
+@pytest.mark.parametrize("max_block", [2048, None])
+def test_matches_shared_kernel_model_shape(max_block, copies):
+    """DeepSeek-V4.1-Flash decode: 2048 candidate blocks of 8 columns.
+
+    With ``max_block`` small the candidates crowd into a few tiles, so most
+    tiles keep many blocks and the rest keep none; with it unset they spread
+    over the whole width. ``copies`` takes the batch across the row counts at
+    which the fused kernel switches to wider tiles.
+    """
+    ends = [0, 1, 2048, 15000, 16384, 32000, 131073, WIDE] * copies
+    logits, row_ks, row_ke, candidates = _inputs(
+        len(ends),
+        WIDE,
+        ends,
+        None,
+        block_size=BLOCK_SIZE,
+        col_stride=1,
+        dtype=torch.int32,
+        topk_blocks=2048,
+        max_block=max_block,
+    )
+    ref, got = _run_both(logits, row_ks, row_ke, candidates, BLOCK_SIZE, 1)
+    _assert_agrees_within_ends(ref, got, row_ke, 1)
+
+
+def test_matches_shared_kernel_candidates_past_width():
+    """Candidates past the logits width keep the row's last column.
+
+    The selector can emit block ids beyond a narrower consumer's width; both
+    kernels clamp those to the last column rather than dropping them.
+    """
+    width = NARROW
+    ends = [width, width, width - 1, 4096]
+    logits, row_ks, row_ke, candidates = _inputs(
+        len(ends),
+        width,
+        ends,
+        None,
+        block_size=BLOCK_SIZE,
+        col_stride=1,
+        dtype=torch.int32,
+    )
+    nblocks = width // BLOCK_SIZE
+    candidates[0, 3] = nblocks + 5
+    candidates[2, 3] = nblocks
+    candidates[3, 3] = nblocks + 1
+    # Row 1 has no out-of-range candidate and must not keep its last column
+    # unless that block was selected.
+    candidates[1][candidates[1] == nblocks - 1] = 0
+    ref, got = _run_both(logits, row_ks, row_ke, candidates, BLOCK_SIZE, 1)
+    _assert_agrees_within_ends(ref, got, row_ke, 1)
+    assert got[0, width - 1] == logits[0, width - 1]
+    assert got[1, width - 1] == float("-inf")
+
+
 def test_matches_shared_kernel_row_repeat():
     """Speculative decode: next_n logit rows share one bound."""
     row_repeat = 3
@@ -145,11 +216,13 @@ def test_leaves_columns_past_end_untouched():
 
     Skipping the tail is where the speedup comes from, so a change that
     quietly restores full-width sanitizing should fail here rather than just
-    get slower. Work stops at the tile boundary containing ``end``, not at
-    ``end`` itself, so that is the bound asserted.
+    get slower. The fused kernel on gfx942 and gfx950 masks its stores to
+    ``end`` itself; elsewhere work stops at the tile boundary containing
+    ``end``, so that is the bound asserted.
     """
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         _MASK_TILE,
+        _ON_MI3XX,
         _apply_candidate_mask_strided,
     )
 
@@ -167,7 +240,7 @@ def test_leaves_columns_past_end_untouched():
     logits.fill_(sentinel)
     _apply_candidate_mask_strided(logits, row_ks, row_ke, candidates, BLOCK_SIZE, 1)
     for row, end in enumerate(ends):
-        touched = min(-(-end // _MASK_TILE) * _MASK_TILE, WIDE)
+        touched = end if _ON_MI3XX else min(-(-end // _MASK_TILE) * _MASK_TILE, WIDE)
         tail = logits[row, touched:]
         assert torch.equal(tail, torch.full_like(tail, sentinel)), (
             f"row {row} (end {end}) was written past column {touched}"
