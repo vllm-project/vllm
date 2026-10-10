@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm import envs
@@ -68,12 +68,18 @@ def with_cancellation(handler_func):
     In the case where a `StreamingResponse` is returned by the handler, this
     wrapper will stop listening for disconnects and instead the response object
     will start listening for disconnects.
+
+    The handler must receive its Request as the second positional argument or
+    as raw_request. Returns its result (or propagates its exception) when it
+    finishes first. Otherwise cancels it and returns an empty 200 Response,
+    bypassing response-model validation for the disconnected client.
     """
 
     # Functools.wraps is required for this wrapper to appear to fastapi as a
     # normal route handler, with the correct request type hinting.
     @functools.wraps(handler_func)
     async def wrapper(*args, **kwargs):
+        """Race the handler against disconnect; see with_cancellation's contract."""
         # The request is either the second positional arg or `raw_request`
         request = args[1] if len(args) > 1 else kwargs["raw_request"]
 
@@ -88,7 +94,7 @@ def with_cancellation(handler_func):
 
         if handler_task in done:
             return handler_task.result()
-        return None
+        return Response()
 
     return wrapper
 
