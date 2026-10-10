@@ -471,7 +471,7 @@ def test_auto_backend_falls_back_for_structural_tag_unsupported_features():
     params._validate_structured_outputs(
         _StubModelConfig(is_diffusion=False),
         StructuredOutputsConfig(backend="auto"),
-        tokenizer=object(),
+        tokenizer=object.__new__(TokenizersBackend),
     )
     assert params.structured_outputs._backend == "guidance"
 
