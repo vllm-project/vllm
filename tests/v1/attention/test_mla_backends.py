@@ -1625,6 +1625,13 @@ def _run_backend_correctness(
         if kv_cache_dtype in b.get_class().supported_kv_cache_dtypes
     ]
     if (
+        kv_cache_dtype.startswith("fp8")
+        and AttentionBackendEnum.TRITON_MLA in backends_to_test
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(89)
+    ):
+        backends_to_test.remove(AttentionBackendEnum.TRITON_MLA)
+    if (
         q_scale != 1.0 or k_scale != 1.0
     ) and AttentionBackendEnum.CUTLASS_MLA in backends_to_test:
         # CUTLASS_MLA does not support non-1 Q/K scales
