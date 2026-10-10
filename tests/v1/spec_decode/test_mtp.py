@@ -57,6 +57,40 @@ def test_glm_mtp_defers_lm_head(default_vllm_config):
     assert layer.shared_head.head is None
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    ["vllm.models.deepseek_v32.nvidia.mtp", "vllm.models.deepseek_v32.amd.mtp"],
+)
+def test_deepseek_v32_mtp_defers_lm_head(default_vllm_config, module_name):
+    import importlib
+
+    from vllm.model_executor.models import deepseek_mtp
+
+    mtp = importlib.import_module(module_name)
+
+    config = mock.MagicMock(
+        hidden_size=16,
+        rms_norm_eps=1e-5,
+        index_topk=8,
+        model_type="deepseek_mtp",
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = config
+    vllm_config.speculative_config.num_speculative_tokens = 1
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+    vllm_config.scheduler_config.max_num_seqs = 1
+
+    with (
+        mock.patch.object(mtp, "DeepseekV32DecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(deepseek_mtp, "ParallelLMHead") as parallel_lm_head,
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        layer = mtp.DeepseekV32MultiTokenPredictorLayer(vllm_config, "model.layers.1")
+
+    parallel_lm_head.assert_not_called()
+    assert layer.shared_head.head is None
+
+
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     """Create an MTP proposer with unified model configuration."""
     model_config = ModelConfig(
