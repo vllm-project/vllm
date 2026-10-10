@@ -737,10 +737,6 @@ class ServerRole:
         """
         results: list[StoreResult] = self._timeout_pending_store_jobs()
 
-        if self._pending_store_results:
-            results.extend(self._pending_store_results)
-            self._pending_store_results.clear()
-
         # Scope the poll to this peer: the transport is shared across all peer
         # sessions of the engine, and poll() drains completed handles. An
         # unscoped poll here would consume sibling sessions' completions and
@@ -827,6 +823,11 @@ class ServerRole:
                     self._transport.cancel(ids_to_cancel)
                 results.extend(self._fail_round_jobs(rnd))
                 self._maybe_prune(kv_request_id)
+
+        # Finalizing transfers can queue results for supplied but unfetched blocks.
+        if self._pending_store_results:
+            results.extend(self._pending_store_results)
+            self._pending_store_results.clear()
 
         return results
 

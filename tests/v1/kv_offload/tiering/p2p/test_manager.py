@@ -36,6 +36,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     SessionPollResult,
     StoreResult,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1158,6 +1159,108 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
 
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
+
+    def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
+        mgr_a, mgr_b = _build_paired_managers()
+        ctx = _req_context(_remote_kv_source_kv_params("B", 2))
+        mgr_a.on_new_request(ctx)
+        for _ in range(3):
+            list(mgr_a.get_finished_jobs())
+            list(mgr_b.get_finished_jobs())
+        assert mgr_a._sessions["B:2"].ready
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        mgr_a.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=[]))
+
+        # Stop the server's progress without closing its live connection.
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        assert list(mgr_a.get_finished_jobs()) == []
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        assert "B:2" not in mgr_a._sessions
+        assert "B:2" not in mgr_a._data._remote_peers
+
+        # A replacement session must not restart the expired request's probes.
+        mgr_a._sessions["B:2"] = _FakeSession(peer_id="B:2")  # type: ignore[assignment]
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        mgr_a.on_request_finished(ctx)
+        assert "req-1" not in mgr_a._failed_req_ids
+
+    def test_lookup_expiry_allows_zmq_reconnect(self, lookup_clock):
+        """The peer must retire the timed-out session before a new handshake."""
+        import zmq
+        from zmq.utils.monitor import recv_monitor_message
+
+        from .test_zmq_transport import _make_transport
+
+        managers = []
+        monitors = []
+        try:
+            for _ in range(2):
+                mgr = _make_manager()
+                mgr._control, port = _make_transport()
+                mgr._local_id = f"127.0.0.1:{port}"
+                mgr._data = _FakeData(mgr._local_id)
+                managers.append(mgr)
+                monitors.append(
+                    mgr._control._router.get_monitor_socket(zmq.EVENT_DISCONNECTED)
+                )
+            mgr_a, mgr_b = managers
+            peer_a, peer_b = mgr_a._local_id, mgr_b._local_id
+            port_b = int(peer_b.rsplit(":", 1)[1])
+
+            def poll_until(condition):
+                deadline = time.perf_counter() + 5.0
+                while time.perf_counter() < deadline:
+                    list(mgr_a.get_finished_jobs())
+                    list(mgr_b.get_finished_jobs())
+                    if condition():
+                        return
+                    time.sleep(0.005)
+                pytest.fail("P2P session did not reach the expected state")
+
+            def both_ready():
+                return (
+                    peer_b in mgr_a._sessions
+                    and peer_a in mgr_b._sessions
+                    and mgr_a._sessions[peer_b].ready
+                    and mgr_b._sessions[peer_a].ready
+                )
+
+            ctx = _req_context(_remote_kv_source_kv_params("127.0.0.1", port_b))
+            mgr_a.on_new_request(ctx)
+            poll_until(both_ready)
+            old_peer_session = mgr_b._sessions[peer_a]
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
+            mgr_a.on_schedule_end(
+                ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+            )
+
+            lookup_clock.now = _LOOKUP_TIMEOUT_S
+            list(mgr_a.get_finished_jobs())
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+            assert peer_b not in mgr_a._sessions
+            poll_until(lambda: peer_a not in mgr_b._sessions)
+            # Wait for old TCP identities to retire before reconnecting.
+            for monitor in monitors:
+                assert monitor.poll(5000), "old TCP connection did not disconnect"
+                assert recv_monitor_message(monitor)["event"] == zmq.EVENT_DISCONNECTED
+
+            new_ctx = _req_context(
+                _remote_kv_source_kv_params("127.0.0.1", port_b, "req-2")
+            )
+            mgr_a.on_new_request(new_ctx)
+            poll_until(both_ready)
+            assert mgr_b._sessions[peer_a] is not old_peer_session
+            assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        finally:
+            for monitor in monitors:
+                monitor.close(linger=0)
+            # Avoid queuing shutdown messages to an already closed peer.
+            for mgr in managers:
+                mgr._control.close()
+                mgr.shutdown()
 
     def test_both_loads_succeed(self):
         mgr_a, mgr_b = _build_paired_managers()
