@@ -124,7 +124,7 @@ def _warmup_bf16x3_router_gemm(
 
     min_num_tokens = gate.FP32_MAX_TOKENS + 1 if gate.allow_fp32_router_gemm else 1
     logger.info_once(
-        "Warming up BF16x3 router GEMM for K=%d, M=%d.",
+        "Warming up BF16x3 router GEMM for K=%d, N=%d.",
         gate.input_size,
         gate.output_size,
     )
