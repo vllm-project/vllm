@@ -3,6 +3,8 @@
 
 from copy import copy
 
+import pytest
+
 from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind
@@ -10,8 +12,13 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.parallel_sampling import ParentRequest
 
 
-def test_parent_request_to_output_stream() -> None:
-    parent_request = ParentRequest(make_request(SamplingParams(n=2)))
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.CUMULATIVE, RequestOutputKind.DELTA]
+)
+def test_parent_request_to_output_stream(output_kind: RequestOutputKind) -> None:
+    parent_request = ParentRequest(
+        make_request(SamplingParams(n=2, output_kind=output_kind))
+    )
     parent_request.child_requests = {"child_id_0", "child_id_1"}
     output_0 = CompletionOutput(
         index=0, text="child 0", token_ids=[], cumulative_logprob=None, logprobs=None
