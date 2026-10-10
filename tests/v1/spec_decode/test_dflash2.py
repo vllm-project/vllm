@@ -9,7 +9,11 @@ import torch
 from vllm.model_executor.models.qwen3_dflash import (
     _add_global_draft_layer_exclusions,
 )
-from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
+from vllm.model_executor.models.qwen3_dflash2 import (
+    DFlash2Qwen3ForCausalLM,
+    _grouped_conv,
+    _score_edges,
+)
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -140,6 +144,28 @@ def test_selector_edges_match_sequential_reference():
         )
 
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("reduced_vocab", [False, True])
+def test_compute_candidates_returns_target_ids(reduced_vocab: bool):
+    """A reduced draft head's top-k rows are mapped through d2t to target ids."""
+    rows = torch.tensor([[0, 3, 1], [2, 0, 3]])
+    values = torch.randn(2, 3)
+    kept = torch.tensor([5, 9, 12, 40])
+    model = DFlash2Qwen3ForCausalLM.__new__(DFlash2Qwen3ForCausalLM)  # type: ignore[type-abstract]
+    model.lm_head = None
+    model.model = SimpleNamespace(candidate_selector=SimpleNamespace(top_k=3))
+    model.candidate_logits_processor = SimpleNamespace(
+        get_top_k_tokens=lambda head, hidden, k: (rows, values)
+    )
+    model.draft_id_to_target_id = (
+        kept - torch.arange(len(kept)) if reduced_vocab else None
+    )
+
+    ids, out_values = model.compute_candidates(torch.empty(2, 8))
+
+    torch.testing.assert_close(ids, kept[rows] if reduced_vocab else rows)
+    torch.testing.assert_close(out_values, values)
 
 
 def _stub_base(monkeypatch, draft_logits):
