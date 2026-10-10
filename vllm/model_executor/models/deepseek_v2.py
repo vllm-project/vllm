@@ -58,6 +58,10 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.shared_expert_fusion import (
+    SharedExpertFusion,
+    maybe_build_shared_expert_fusion,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
@@ -288,6 +292,30 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
+def _find_shared_expert_fusion(model: nn.Module) -> SharedExpertFusion | None:
+    """The EP shared-expert layout this model was built with, if any.
+
+    Every MoE layer agrees on it (it is derived from parallel geometry, not
+    from anything per-layer), so the first one found answers for all. Returns
+    None on a model whose layers were built with the feature off, which is what
+    keeps `load_weights` on its original path.
+    """
+    # The only caller is DeepseekV2Model.load_weights, which passes the model
+    # whose `layers` this is -- not the ForCausalLM wrapper around it. Accept
+    # either, because reading `model.model.layers` off a DeepseekV2Model
+    # silently returns None, and "no fusion" is exactly what the switch being
+    # off looks like: the shared-expert checkpoint tensors then take the
+    # replicated-MLP path to a module that was never built.
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(getattr(model, "model", None), "layers", None)
+    for layer in layers or ():
+        fusion = getattr(getattr(layer, "mlp", None), "shared_expert_fusion", None)
+        if fusion is not None:
+            return fusion
+    return None
+
+
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
@@ -305,6 +333,7 @@ class DeepseekV2MoE(nn.Module):
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
         self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
@@ -341,12 +370,30 @@ class DeepseekV2MoE(nn.Module):
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-
         self.is_fused_shared_expert_enabled = False
         if config.n_shared_experts is not None:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix
             )
+        # EP-dispatched shared expert (VLLM_FUSE_SHARED_EXPERTS). Rebuilt here
+        # rather than read back off the layer: this decides whether the
+        # replicated MLP is constructed at all, which has to happen before the
+        # layer exists. The factory reaches the same verdict from the same
+        # inputs, and asserts below that it did.
+        self.shared_expert_fusion = maybe_build_shared_expert_fusion(
+            n_shared_experts=config.n_shared_experts,
+            num_physical_experts=self.n_physical_experts,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+            use_ep=parallel_config.enable_expert_parallel,
+            is_act_and_mul=config.hidden_act == "silu",
+            shared_expert_weight=(
+                (1.0 / self.routed_scaling_factor)
+                if (apply_routed_scale_to_output and self.routed_scaling_factor)
+                else 1.0
+            ),
+            warn_on_uneven=False,
+        )
 
         if (
             self.is_rocm_aiter_moe_enabled
@@ -356,7 +403,11 @@ class DeepseekV2MoE(nn.Module):
             # Accumulates in fp32; avoids bf16->fp32 cast.
             self.gate.set_out_dtype(self.gate.weight.dtype)
 
-        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
+        if (
+            config.n_shared_experts is None
+            or self.is_fused_shared_expert_enabled
+            or self.shared_expert_fusion is not None
+        ):
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -393,12 +444,36 @@ class DeepseekV2MoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
             reduce_results=reduce_results,
             n_shared_experts=config.n_shared_experts
-            if self.is_fused_shared_expert_enabled
+            if (
+                self.is_fused_shared_expert_enabled
+                or self.shared_expert_fusion is not None
+            )
             else None,
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
             shared_expert_prefix=f"{prefix}.shared_experts",
             router_logits_dtype=self.gate.out_dtype,
         )
+
+        # The two verdicts must agree: this one decided whether to build the
+        # replicated MLP and where load_weights puts the checkpoint's shared
+        # expert, that one decided the expert-id space the router addresses.
+        # A silent disagreement writes the shared expert into a slot no token
+        # is ever routed to, which shows up as a quality regression and
+        # nothing else.
+        built_fusion = getattr(
+            getattr(self.experts, "router", None), "shared_expert_fusion", None
+        )
+        if (built_fusion is None) != (self.shared_expert_fusion is None):
+            raise RuntimeError(
+                "Shared-expert fusion disagreement: the model decided "
+                f"{self.shared_expert_fusion is not None} and the MoE layer "
+                f"decided {built_fusion is not None}."
+            )
+        if built_fusion is not None and built_fusion != self.shared_expert_fusion:
+            raise RuntimeError(
+                f"Shared-expert fusion geometry disagreement: model has "
+                f"{self.shared_expert_fusion}, layer has {built_fusion}."
+            )
 
         if (
             self.is_rocm_aiter_moe_enabled
@@ -1592,6 +1667,14 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # The EP-dispatched layout (VLLM_FUSE_SHARED_EXPERTS). Read off a built
+        # layer rather than recomputed, so the slot the checkpoint's shared
+        # expert lands in is by construction the one the router will send
+        # tokens to.
+        ep_shared_fusion = _find_shared_expert_fusion(self)
+        fuse_shared_into_experts = (
+            self.is_fused_shared_expert_enabled or ep_shared_fusion is not None
+        )
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -1659,8 +1742,8 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
-            is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+            is_fusion_moe_shared_experts_layer = fuse_shared_into_experts and (
+                "mlp.shared_experts" in name
             )
 
             if _try_load_fp8_indexer_wk(
@@ -1754,7 +1837,9 @@ class DeepseekV2Model(nn.Module):
                         # can route it
                         chunk_name = name.replace(
                             "mlp.shared_experts",
-                            f"mlp.experts.{self.config.n_routed_experts + j}",
+                            "mlp.experts.0"
+                            if ep_shared_fusion is not None
+                            else f"mlp.experts.{self.config.n_routed_experts + j}",
                         )
 
                     # Use expert_params_mapping to locate the destination
@@ -1768,6 +1853,28 @@ class DeepseekV2Model(nn.Module):
                         # Anyway, this is an expert weight and should not be
                         # attempted to load as other weights later
                         is_expert_weight = True
+
+                        if ep_shared_fusion is not None:
+                            if is_fusion_moe_shared_experts_layer:
+                                # This rank's own copy, in its own slot. Only
+                                # this rank's id is written: every other rank
+                                # loads its own from the same checkpoint
+                                # tensor, and `weight_loader` rejects any id
+                                # that is not local to it anyway.
+                                expert_id = ep_shared_fusion.shared_expert_global_ids(
+                                    ep_shared_fusion.ep_rank
+                                )[j]
+                            else:
+                                # Routed experts are no longer contiguous:
+                                # rank r's block starts at r*S, not r*R.
+                                expert_id = (
+                                    expert_id
+                                    + (
+                                        expert_id
+                                        // ep_shared_fusion.routed_slots_per_rank
+                                    )
+                                    * ep_shared_fusion.num_shared_experts
+                                )
 
                         # Do not modify `name` since the loop may continue here
                         # Instead, create a new variable

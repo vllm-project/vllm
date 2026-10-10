@@ -1280,6 +1280,14 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
+    num_local_shared_experts: int = 0
+    """How many of ``num_local_experts`` are this rank's shared-expert copies.
+
+    They sit at the end of the local range and are outside EPLB's jurisdiction:
+    EPLB permutes logical experts among physical slots, and a shared-expert copy
+    has no logical expert to be. Zero unless VLLM_FUSE_SHARED_EXPERTS is on.
+    """
+
     # Defaults to hidden_dim if not specified.
     hidden_dim_unpadded: int | None = None
     # Defaults to intermediate_size_per_partition if not specified.

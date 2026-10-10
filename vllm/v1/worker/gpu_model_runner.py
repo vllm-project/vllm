@@ -3905,6 +3905,7 @@ class GPUModelRunner(
         bool,
         torch.Tensor | None,
         CUDAGraphStat | None,
+        bool,
     ]:
         uniform_decode = self._is_uniform_decode(
             max_num_scheduled_tokens=max_num_scheduled_tokens,
@@ -3945,16 +3946,22 @@ class GPUModelRunner(
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
+        # Outside DP this rank is the only rank: its own view of its batch is
+        # by definition the global one, and no peer can disagree with it.
+        uniform_decode_across_dp = uniform_decode
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
-                coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=allow_microbatching,
-                    num_tokens_padded=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    cudagraph_mode=cudagraph_mode.value,
-                )
+            (
+                should_ubatch,
+                num_tokens_across_dp,
+                synced_cudagraph_mode,
+                uniform_decode_across_dp,
+            ) = coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
+                parallel_config=self.parallel_config,
+                allow_microbatching=allow_microbatching,
+                num_tokens_padded=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                cudagraph_mode=cudagraph_mode.value,
             )
 
             # Extract DP-synced values
@@ -3985,6 +3992,7 @@ class GPUModelRunner(
             should_ubatch,
             num_tokens_across_dp,
             cudagraph_stats,
+            uniform_decode_across_dp,
         )
 
     def _register_layerwise_nvtx_hooks(self) -> None:
@@ -4206,6 +4214,7 @@ class GPUModelRunner(
                 should_ubatch,
                 num_tokens_across_dp,
                 cudagraph_stats,
+                uniform_decode_across_dp,
             ) = self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
@@ -4370,6 +4379,7 @@ class GPUModelRunner(
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
+                uniform_decode_across_dp=uniform_decode_across_dp,
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
@@ -5863,29 +5873,33 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
-            self._determine_batch_execution_and_padding(
-                num_tokens=num_tokens_unpadded,
-                num_reqs=num_reqs,
-                num_scheduled_tokens_np=num_scheduled_tokens,
-                max_num_scheduled_tokens=max_query_len,
-                use_cascade_attn=False,
-                allow_microbatching=allow_microbatching,
-                force_eager=is_profile
-                or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
-                # `force_uniform_decode` is used for cudagraph capture; because for
-                # capturing mixed prefill-decode batches, we sometimes use
-                # num_tokens == num_reqs which looks like a uniform decode batch to the
-                # dispatcher; but we actually want to capture a piecewise cudagraph
-                force_uniform_decode=uniform_decode,
-                # `force_has_lora` is used for cudagraph capture; because LoRA is
-                # activated later in the context manager, but we need to know the
-                # LoRA state when determining the batch descriptor for capture
-                force_has_lora=num_active_loras > 0,
-                # `force_num_active_loras` is used for cudagraph capture; because we
-                # need to capture graphs for specific num_active_loras counts
-                force_num_active_loras=num_active_loras,
-            )
+        (
+            _cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            _,
+            uniform_decode_across_dp,
+        ) = self._determine_batch_execution_and_padding(
+            num_tokens=num_tokens_unpadded,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens,
+            max_num_scheduled_tokens=max_query_len,
+            use_cascade_attn=False,
+            allow_microbatching=allow_microbatching,
+            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+            # `force_uniform_decode` is used for cudagraph capture; because for
+            # capturing mixed prefill-decode batches, we sometimes use
+            # num_tokens == num_reqs which looks like a uniform decode batch to the
+            # dispatcher; but we actually want to capture a piecewise cudagraph
+            force_uniform_decode=uniform_decode,
+            # `force_has_lora` is used for cudagraph capture; because LoRA is
+            # activated later in the context manager, but we need to know the
+            # LoRA state when determining the batch descriptor for capture
+            force_has_lora=num_active_loras > 0,
+            # `force_num_active_loras` is used for cudagraph capture; because we
+            # need to capture graphs for specific num_active_loras counts
+            force_num_active_loras=num_active_loras,
         )
 
         if cudagraph_runtime_mode is None:
@@ -6072,6 +6086,38 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
+            # A routing policy that reads the EP-wide logical count issues one
+            # collective per forward, and prepare_forward -- where that
+            # collective lives on the real path -- is not called here. Under DP
+            # every rank must run a forward every step, so a rank with no
+            # requests runs this dummy batch while its peers run real ones.
+            # Issuing the collective on only one of those two paths leaves the
+            # EP group out of order: a peer's all_reduce meets this rank's next
+            # dispatch and both wait until DeepEP's CPU-recv timeout fires.
+            # Upstream already replays eplb_step here for the same reason.
+            #
+            # Only the collective is replayed. prepare_forward also drains
+            # async placement commits (rank-local, so asymmetry there cannot
+            # deadlock) and fills the unpadded-token tensors, which a dummy
+            # batch has no use for.
+            #
+            # Gated on skip_eplb the same way eplb_step() below is: it is
+            # True for _warmup_and_capture()'s dummy runs (CUDA graph capture
+            # warmup), where every rank captures independently -- there is no
+            # synchronized peer step for this replay to stay in order with,
+            # so issuing it would be the asymmetric call, not the missing
+            # one.
+            if not skip_eplb and self.eplb_state is not None:
+                from vllm.distributed.eplb.mlb_runtime import get_mlb_routing
+
+                routing = get_mlb_routing()
+                if routing is not None:
+                    # Not finalize_step_counts: that publishes the counts and
+                    # clears the local buffer, so running it here as well as on
+                    # the real path would overwrite the counts with zeros. This
+                    # only matches the collective.
+                    routing.match_step_counts_collective()
+
             with (
                 self.maybe_randomize_inputs(
                     input_ids, inputs_embeds, randomize_inputs=randomize_inputs
@@ -6081,6 +6127,7 @@ class GPUModelRunner(
                     self.vllm_config,
                     num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    uniform_decode_across_dp=uniform_decode_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,

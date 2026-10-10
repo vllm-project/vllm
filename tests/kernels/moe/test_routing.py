@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
+    _eplb_map_and_record_triton,
     eplb_map_to_physical_and_record,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
@@ -819,6 +820,71 @@ def test_eplb_map_no_redundancy(
         assert load.sum().item() == 0
 
 
+def test_eplb_replica_shares_steer_routing_from_a_narrow_table():
+    """A supplied share table decides the replica, and it may be narrower than
+    the candidate map.
+
+    vLLM pads the map to ``MAX_EXPERT_REDUNDANCY + 1`` (1024) columns whatever
+    the redundancy, and the table is walked by a compile-time loop, so a table
+    as wide as the map cannot be compiled in reasonable time. Only the width
+    that can hold real replicas is needed, and the map is still indexed at its
+    own width.
+    """
+    num_tokens, num_logical, R = 4096, 8, 2
+    map_slots = 64  # padding, as vLLM does (it uses 1024)
+    num_physical = num_logical + R - 1
+
+    l2p = torch.full((num_logical, map_slots), -1, dtype=torch.int64, device="cuda")
+    l2p[0, :R] = torch.arange(R, dtype=torch.int64, device="cuda")
+    for i in range(1, num_logical):
+        l2p[i, 0] = R + i - 1
+    rc = torch.tensor([R] + [1] * (num_logical - 1), dtype=torch.int64, device="cuda")
+
+    torch.manual_seed(0)
+    topk_ids = torch.randint(
+        1, num_logical, (num_tokens, 2), dtype=torch.int32, device="cuda"
+    )
+    topk_ids[:, 0] = 0  # every token hits the replicated expert
+    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
+
+    for target in range(R):
+        prob = torch.zeros((num_logical, R), dtype=torch.float32, device="cuda")
+        prob[0, target] = 1.0  # send expert 0's traffic to exactly one replica
+        load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+        _eplb_map_and_record_triton(
+            topk_ids=topk_ids,
+            logical_to_physical_map=l2p,
+            logical_replica_count=rc,
+            expert_load_view=load,
+            record_enabled=rec,
+            num_unpadded_tokens=None,
+            replica_prob=prob,
+        )
+        hot = load[:R]
+        assert int(hot[target]) == num_tokens, (
+            f"share table asked for replica {target}, got {hot.tolist()}"
+        )
+        assert int(hot.sum()) == num_tokens
+
+    # An all-zero row means "no preference" and must fall back to the hash,
+    # not collapse every token onto replica 0.
+    prob = torch.zeros((num_logical, R), dtype=torch.float32, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    _eplb_map_and_record_triton(
+        topk_ids=topk_ids,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        expert_load_view=load,
+        record_enabled=rec,
+        num_unpadded_tokens=None,
+        replica_prob=prob,
+    )
+    hot = load[:R].float()
+    assert (hot.max() / hot.mean()).item() < 1.15, (
+        f"all-zero row did not fall back to the hash: {hot.tolist()}"
+    )
+
+
 @pytest.mark.parametrize("top_k,R", [(2, 2), (4, 2), (8, 4), (8, 8)])
 def test_eplb_map_hot_expert_replica_balance(top_k, R):
     """Hot logical expert with R replicas must be balanced across replicas
@@ -1006,3 +1072,122 @@ def test_eplb_map_num_unpadded_tokens(
 
     exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
     torch.testing.assert_close(load, exp_load)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_a_policy_may_resolve_replicas_itself_and_still_be_recorded():
+    """The contract's primary return is per-token physical ids.
+
+    A runtime that only accepts a share table forces every policy to express
+    its decision as a per-expert distribution, and silently ignores the ones
+    that cannot -- which is what made static and dynamic appear to do nothing
+    here. Taking the ids directly must still leave load recording in this
+    kernel, since that is the reason the boundary is inside it at all.
+    """
+    from vllm.model_executor.layers.fused_moe.router.base_router import (
+        _eplb_map_and_record_triton,
+    )
+
+    torch.manual_seed(0)
+    num_logical, num_physical = 8, 12
+    tokens, topk = 32, 2
+    logical_to_physical = torch.full(
+        (num_logical, 2), -1, dtype=torch.int32, device="cuda"
+    )
+    logical_to_physical[:, 0] = torch.arange(
+        num_logical, dtype=torch.int32, device="cuda"
+    )
+    logical_to_physical[:4, 1] = torch.arange(
+        num_logical, num_physical, dtype=torch.int32, device="cuda"
+    )
+    counts = torch.ones(num_logical, dtype=torch.int32, device="cuda")
+    counts[:4] = 2
+
+    topk_ids = torch.randint(
+        0, num_logical, (tokens, topk), dtype=torch.int32, device="cuda"
+    )
+    # Resolve every token onto the *second* replica where one exists -- a choice
+    # the built-in hash would not make for every token, so the result is
+    # distinguishable from the fallback.
+    chosen = torch.where(
+        counts[topk_ids.long()] > 1,
+        logical_to_physical[topk_ids.long(), 1],
+        logical_to_physical[topk_ids.long(), 0],
+    ).to(torch.int32)
+
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    out = _eplb_map_and_record_triton(
+        topk_ids=topk_ids,
+        logical_to_physical_map=logical_to_physical,
+        logical_replica_count=counts,
+        expert_load_view=load,
+        record_enabled=torch.tensor(1, dtype=torch.int32, device="cuda"),
+        num_unpadded_tokens=None,
+        physical_ids=chosen,
+    )
+    assert torch.equal(out, chosen), "the policy's own ids must be used verbatim"
+    # Recording is the reason this path goes through the kernel rather than
+    # around it: every routed token must still land in the load view.
+    assert int(load.sum()) == tokens * topk
+    for pid in chosen.unique():
+        assert int(load[int(pid)]) == int((chosen == pid).sum())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_policy_resolved_ids_stay_valid_and_fully_recorded():
+    """Whatever a policy hands back, two things must still hold.
+
+    Every id has to name a live replica of the expert the router chose -- the
+    policy replaces the selection, not the routing decision -- and the load
+    view has to account for every routed slot, since recording is the reason
+    resolved ids come through this kernel rather than around it.
+    """
+    torch.manual_seed(0)
+    NL, NP, EP = 64, 80, 8
+    per_rank = NP // EP
+    l2p = torch.full((NL, 2), -1, dtype=torch.int32, device="cuda")
+    l2p[:, 0] = torch.arange(NL, dtype=torch.int32, device="cuda")
+    l2p[:16, 1] = torch.arange(NL, NP, dtype=torch.int32, device="cuda")
+    counts = torch.ones(NL, dtype=torch.int32, device="cuda")
+    counts[:16] = 2
+    topk = torch.randint(0, NL, (2048, 6), dtype=torch.int32, device="cuda")
+
+    # Pin every expert to the replica nearest rank 3 -- a decision the built-in
+    # hash would not make, so a fallback would be visible.
+    mlb_vllm = pytest.importorskip("moe_load_balancer.adapters.vllm")
+    nearest_replica_table = mlb_vllm.nearest_replica_table
+
+    defaults = nearest_replica_table(
+        l2p.to(torch.int64),
+        counts.to(torch.int64),
+        ep_rank=3,
+        num_local_physical_experts=per_rank,
+    ).to(torch.int32)
+    resolved = defaults[topk.to(torch.int64)]
+
+    load = torch.zeros(NP, dtype=torch.int32, device="cuda")
+    out = _eplb_map_and_record_triton(
+        topk_ids=topk,
+        logical_to_physical_map=l2p,
+        logical_replica_count=counts,
+        expert_load_view=load,
+        record_enabled=torch.tensor(1, dtype=torch.int32, device="cuda"),
+        num_unpadded_tokens=None,
+        physical_ids=resolved,
+    )
+    assert torch.equal(out, resolved), "the policy's ids were not used verbatim"
+
+    # Each id names a replica of the right logical expert.
+    logical_of = torch.full((NP,), -1, dtype=torch.int32, device="cuda")
+    for j in range(2):
+        col = l2p[:, j]
+        live = col >= 0
+        logical_of[col[live].to(torch.int64)] = torch.arange(
+            NL, dtype=torch.int32, device="cuda"
+        )[live]
+    assert torch.equal(logical_of[out.to(torch.int64)], topk)
+
+    # And every routed slot is accounted for, slot by slot.
+    assert int(load.sum()) == topk.numel()
+    expected = torch.bincount(out.flatten().to(torch.int64), minlength=NP)
+    assert torch.equal(load.to(torch.int64), expected)

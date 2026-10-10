@@ -31,8 +31,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch.distributed import ProcessGroup, all_reduce
+from torch.distributed import ProcessGroup, all_gather_into_tensor, all_reduce
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.config.utils import compute_hash_cached
 from vllm.distributed.parallel_state import (
@@ -61,6 +62,11 @@ from .rebalance_execute import (
 )
 
 logger = init_logger(__name__)
+
+
+# A step interval this large means the deployment never intends to re-plan;
+# treat it as "placement is pinned" rather than as a very slow cadence.
+_REARRANGEMENT_EFFECTIVELY_DISABLED = 1_000_000
 
 
 def _compute_eplb_load_stats(
@@ -231,6 +237,12 @@ class EplbModelState:
     """
 
 
+# Layers committed by the async worker whose policy notification is still owed.
+# Written from the worker thread, drained on the main thread; set operations are
+# atomic under the GIL and a missed drain only defers by one forward.
+_ASYNC_COMMITTED_LAYERS: set[int] = set()
+
+
 class EplbState:
     """EplbState of each expert parallel model. Key is the model config hash."""
 
@@ -361,13 +373,58 @@ class EplbState:
         self.validate_ep_configuration(model)
         self.is_async = self.parallel_config.eplb_config.use_async
 
+        # Assuming 8 GPUs per node, this supports up to
+        # (1023 + 1) / 8 = 128 nodes for now.
+        # TODO(rui): make this configurable
+        MAX_EXPERT_REDUNDANCY = 1023
+        assert model.num_redundant_experts <= MAX_EXPERT_REDUNDANCY, (
+            f"num_redundant_experts {model.num_redundant_experts} "
+            f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}"
+        )
+        max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
+
+        init_path = self.parallel_config.eplb_config.init_placement_path
+        # A checkpoint says where the experts should *end up*, not where they
+        # are.  The loader has just filled every slot according to the trivial
+        # layout, so the live maps must start trivial and the weights have to be
+        # physically moved -- see `_install_initial_placement` below.  Installing
+        # the checkpoint's map here instead would leave every slot claiming an
+        # expert it does not hold: throughput is unaffected and every output is
+        # silently wrong, which is exactly the failure a throughput benchmark
+        # cannot see.
+        pending_init_p2l: torch.Tensor | None = None
+        if init_path:
+            # Saved as [num_moe_layers, num_physical_experts] -- each layer has
+            # its own optimised placement.
+            p2l_full = torch.load(
+                init_path, map_location="cpu", weights_only=True
+            ).long()
+            assert p2l_full.shape == (
+                model.num_moe_layers,
+                model.num_physical_experts,
+            ), (
+                f"Placement checkpoint shape {tuple(p2l_full.shape)} does not "
+                f"match model ({model.num_moe_layers}, {model.num_physical_experts})"
+            )
+            # Left on CPU: this takes the same path as a periodic
+            # rearrangement, where the target comes straight from
+            # `policy.rebalance_experts` and `compute_logical_maps` asserts CPU.
+            pending_init_p2l = p2l_full
+            logger.info(
+                "EPLB: loaded per-layer placement from %s (layers=%d, "
+                "num_physical=%d); experts will be rearranged to match it",
+                init_path,
+                model.num_moe_layers,
+                model.num_physical_experts,
+            )
+
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
                 model.num_routed_experts,
                 model.num_redundant_experts,
             )
         )
-        physical_to_logical_map = torch.tensor(
+        p2l_1d = torch.tensor(
             physical_to_logical_map_list,
             device=self.device,
         )
@@ -379,20 +436,11 @@ class EplbState:
                 * get_ep_group().world_size
                 // self.parallel_config.data_parallel_size
             )
-            physical_to_logical_map = torch.nn.functional.pad(
-                physical_to_logical_map,
+            p2l_1d = torch.nn.functional.pad(
+                p2l_1d,
                 (0, physical_expert_capacity - model.num_physical_experts),
                 value=-1,
             )
-        # Assuming 8 GPUs per node, this supports up to
-        # (1023 + 1) / 8 = 128 nodes for now.
-        # TODO(rui): make this configurable
-        MAX_EXPERT_REDUNDANCY = 1023
-        assert model.num_redundant_experts <= MAX_EXPERT_REDUNDANCY, (
-            f"num_redundant_experts {model.num_redundant_experts} "
-            f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}"
-        )
-        max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
         logical_to_physical_map = torch.full(
             (model.num_logical_experts, max_slots_per_logical_expert),
             -1,
@@ -403,20 +451,14 @@ class EplbState:
             device=self.device,
             dtype=torch.long,
         )
-
         for i in range(model.num_physical_experts):
-            logical_idx = physical_to_logical_map[i]
+            logical_idx = p2l_1d[i]
             logical_to_physical_map[logical_idx, logical_replica_count[logical_idx]] = i
             logical_replica_count[logical_idx] += 1
 
         # Duplicate initial mapping for all layers
         physical_to_logical_map = (
-            physical_to_logical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-            )
-            .contiguous()
+            p2l_1d.unsqueeze(0).expand(model.num_moe_layers, -1).contiguous()
         )
         physical_to_logical_map_buffer = physical_to_logical_map
         physical_to_logical_map = physical_to_logical_map_buffer[
@@ -424,19 +466,12 @@ class EplbState:
         ]
         logical_to_physical_map = (
             logical_to_physical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-                -1,
-            )
+            .expand(model.num_moe_layers, -1, -1)
             .contiguous()
         )
         logical_replica_count = (
             logical_replica_count.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-            )
+            .expand(model.num_moe_layers, -1)
             .contiguous()
         )
 
@@ -517,6 +552,109 @@ class EplbState:
         )
         self.model_states[model_config.compute_hash()] = model_state
 
+        # Move the experts to where the checkpoint says they belong.  This has
+        # to happen before the routing policy is told about the placement, so
+        # that what it is told is what is actually on the device.
+        if pending_init_p2l is not None:
+            self._install_initial_placement(model_state, pending_init_p2l)
+
+        # Optional: hand L2 replica choice to the MoE Load Balancer.  A no-op
+        # unless an L2 algorithm is configured, in which case vLLM's fused
+        # mapping kernel is bypassed at the routing boundary.
+        #
+        # Read from the config rather than the environment: EPLBConfig resolves
+        # $VLLM_MLB_L2_ALGORITHM once and clears it for placements the policy
+        # cannot act on, so by here the answer already accounts for redundancy.
+        from vllm.distributed.eplb.mlb_runtime import (
+            init_mlb_routing,
+            l2_pipeline_capabilities,
+        )
+
+        l2_algorithm = self.parallel_config.eplb_config.l2_algorithm
+        if l2_algorithm:
+            if self.parallel_config.num_ubatches > 1:
+                caps = l2_pipeline_capabilities(l2_algorithm)
+                if caps is not None and not caps.supports_concurrent_microbatches:
+                    raise ValueError(
+                        f"MoE Load Balancer L2 routing {l2_algorithm!r} is "
+                        "incompatible with DBO: it keeps one solver state per "
+                        "layer, and concurrent micro-batches would clobber each "
+                        "other. Disable DBO, or select a policy that declares "
+                        "supports_concurrent_microbatches. Clearing "
+                        "eplb_config.l2_algorithm also removes the conflict."
+                    )
+            ep_group = get_ep_group()
+            routing = init_mlb_routing(
+                algorithm=l2_algorithm,
+                ep_size=ep_group.world_size,
+                ep_rank=ep_group.rank_in_group,
+                num_logical_experts=model.num_logical_experts,
+                num_physical_experts=model.num_physical_experts,
+                physical_to_logical_map=physical_to_logical_map,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+                expert_weights=model.expert_weights,
+                # The same staging buffer and P2P communicator this state uses
+                # for its own periodic rearrangement. A policy that re-plans
+                # placement mid-run has to move weight to match it, and that is
+                # this file's machinery, not something a policy brings its own
+                # copy of -- see MlbRoutingRuntime._commit_placement_weights.
+                expert_buffer=expert_buffer,
+                communicator=communicator,
+                # A step interval that the run can actually reach means the
+                # placement will be re-planned, which is the case a captured
+                # graph cannot follow when the policy keeps solver state.
+                rearranges=(
+                    self.expert_rearrangement_step_interval
+                    < _REARRANGEMENT_EFFECTIVELY_DISABLED
+                ),
+            )
+            if routing is not None:
+                # The contract is "after initial weight loading and after each
+                # committed update"; weights are loaded by this point, so this
+                # is the first half.
+                routing.announce_initial_placement()
+
+    def _install_initial_placement(
+        self,
+        model_state: EplbModelState,
+        target_physical_to_logical_map: torch.Tensor,
+    ) -> None:
+        """Rearrange the freshly loaded weights into a checkpointed placement.
+
+        The weights sit in the trivial layout after loading, so a checkpoint can
+        only be honoured by physically moving them; writing its map into the
+        live state without the move makes every slot claim an expert it does not
+        hold. That is invisible to a throughput benchmark -- the run is exactly
+        as fast, only the text is wrong -- so it is done here rather than being
+        left to the periodic rearrangement, which `step_interval` may disable.
+
+        Args:
+            model_state: The model whose experts should be moved.
+            target_physical_to_logical_map: ``[num_moe_layers,
+                num_physical_experts]`` placement the weights must end up in.
+
+        """
+        ep_group = get_ep_group().device_group
+        rearrange_expert_weights_inplace(
+            model_state.physical_to_logical_map,
+            target_physical_to_logical_map,
+            model_state.model.expert_weights,
+            model_state.expert_buffer,
+            ep_group,
+            model_state.communicator,
+            False,
+            None,
+        )
+        _commit_eplb_maps(
+            model_state,
+            new_physical_to_logical_map=target_physical_to_logical_map,
+        )
+        logger.info(
+            "EPLB: rearranged experts into the checkpointed placement (%d layers)",
+            target_physical_to_logical_map.shape[0],
+        )
+
     def prepare_forward(
         self,
         model_config: ModelConfig,
@@ -535,6 +673,23 @@ class EplbState:
                 token range.  When ``None``, only ``tensors[0]`` is filled.
 
         """
+        # Finalise LPLB count cache from the previous forward pass.
+        # count_logical_experts fills _lplb_local_count per-layer inside the
+        # graph; we all_reduce and move to _lplb_global_count here (outside
+        # the graph, one collective for all layers).  This gives LP solve a
+        # stable, up-to-date input without any NCCL inside the capture stream.
+        from vllm.distributed.eplb.mlb_runtime import get_mlb_routing
+
+        routing = get_mlb_routing()
+        if routing is not None:
+            # Deliver any placement changes the async worker committed since the
+            # last forward, on this thread, before anything routes against them.
+            if _ASYNC_COMMITTED_LAYERS:
+                pending = sorted(_ASYNC_COMMITTED_LAYERS)
+                _ASYNC_COMMITTED_LAYERS.clear()
+                routing.on_placement_committed(pending)
+            routing.finalize_step_counts()
+
         model_state = self.model_states.get(compute_hash_cached(model_config))
         if model_state is None or model_state.num_unpadded_tokens_tensors is None:
             return
@@ -622,16 +777,31 @@ class EplbState:
                 avg_tokens, max_tokens = tokens_tensors
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 
+                # The figure above reduces over dim 0, which is layers, so it
+                # reports how much a rank's load varies between its own layers.
+                # A balancer acts on something else: how far the busiest rank
+                # is from the average *within a layer*, since a layer's MoE
+                # step ends when its slowest rank does. Reported alongside
+                # rather than instead, so a number that has been quoted before
+                # keeps meaning what it did.
+                per_layer_mean = num_tokens_per_rank.mean(dim=1)
+                per_layer_peak = num_tokens_per_rank.max(dim=1).values
+                rank_imbalance = float(
+                    (per_layer_peak / per_layer_mean.clamp(min=1e-9)).mean()
+                )
+
                 if ep_group.rank() == 0:
                     logger.info(
                         "EPLB step: %d for model %s: avg_tokens=%.2f, "
                         "max_tokens=%d, balancedness=%.4f, "
+                        "rank_imbalance=%.4f, "
                         "steps until the next rearrangement: %d",
                         self.expert_rearrangement_step,
                         eplb_model_state.model_name,
                         avg_tokens,
                         max_tokens,
                         balancedness,
+                        rank_imbalance,
                         self.expert_rearrangement_step_interval
                         - self.expert_rearrangement_step,
                     )
@@ -814,8 +984,54 @@ class EplbState:
 
             global_expert_load_window = logical_expert_load_window[..., :-1].sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
-        # Perform all-reduce to get the expert load across all ranks for each model
-        global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
+        # A policy that places redundant replicas by which rank is overloaded,
+        # not just which logical expert is hot, needs every rank's own count,
+        # which a sum-reducing all-reduce discards. Gather instead and derive
+        # the sum locally -- every other policy sees the identical value it
+        # always has, just computed one way.
+        wants_per_rank = getattr(self.policy, "wants_per_rank_weight", None)
+        if wants_per_rank is not None and wants_per_rank():
+            per_rank_expert_load_windows = self._allgather_list(
+                global_expert_load_windows
+            )
+            global_expert_load_windows = [
+                window.sum(dim=0) for window in per_rank_expert_load_windows
+            ]
+        else:
+            per_rank_expert_load_windows = [None] * len(global_expert_load_windows)
+            global_expert_load_windows = self._allreduce_list(
+                global_expert_load_windows
+            )
+
+        # Env-gated, write-only observation hook (no-op unless the variable is
+        # set): dump the global *logical* expert load. rank_imbalance is a pure
+        # function of (logical load, placement, replica routing), so one recorded
+        # load lets every policy x redundancy combination be scored on CPU
+        # afterwards instead of re-serving the model once per arm.
+        _dump = envs.VLLM_EPLB_DUMP_LOAD_PATH
+        if _dump and not is_profile and ep_group.rank() == 0:
+            # Numbered per rearrangement: the step counter has already been
+            # reset when this runs, so it cannot tell two dumps apart.
+            self._dump_seq = getattr(self, "_dump_seq", 0) + 1
+            _st = next(iter(self.model_states.values()))
+            torch.save(
+                {
+                    "logical_expert_load": global_expert_load_windows[0].cpu(),
+                    "physical_to_logical_map": _st.physical_to_logical_map.cpu(),
+                    "num_logical_experts": _st.model.num_logical_experts,
+                    "num_physical_experts": _st.model.num_physical_experts,
+                    "num_moe_layers": _st.model.num_moe_layers,
+                    "num_expert_groups": _st.model.num_expert_groups,
+                    "ep_size": ep_group.size(),
+                    "rearrangement": self._dump_seq,
+                },
+                f"{_dump}.rearr{self._dump_seq:03d}.pt",
+            )
+            logger.info(
+                "EPLB: dumped logical expert load to %s.rearr%03d.pt",
+                _dump,
+                self._dump_seq,
+            )
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -848,14 +1064,32 @@ class EplbState:
             )
 
         # Get new expert mappings
-        for eplb_model_state, global_expert_load_window in zip(
-            self.model_states.values(), global_expert_load_windows
-        ):
+        rearrange_inputs = zip(
+            self.model_states.values(),
+            global_expert_load_windows,
+            per_rank_expert_load_windows,
+        )
+        for (
+            eplb_model_state,
+            global_expert_load_window,
+            per_rank_expert_load_window,
+        ) in rearrange_inputs:
             if not is_profile:
                 eplb_model_state.last_expert_load = global_expert_load_window
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model. The policy runs on the
                 # host, so the load window and current map have to come back.
+                # Unlike those, per_rank_weight stays on-device: it only ever
+                # feeds ultraep's CUDA placement kernel, never the CPU numpy
+                # solve every other algorithm here uses.
+                rebalance_kwargs = (
+                    {}
+                    if per_rank_expert_load_window is None
+                    else {
+                        "per_rank_weight": per_rank_expert_load_window,
+                        "ep_rank": ep_rank,
+                    }
+                )
                 with gpu_sync_allowed():
                     new_physical_to_logical_map = self.policy.rebalance_experts(
                         global_expert_load_window.cpu(),
@@ -864,6 +1098,7 @@ class EplbState:
                         num_nodes,
                         num_gpus,
                         eplb_model_state.physical_to_logical_map.cpu(),
+                        **rebalance_kwargs,
                     )
 
                 skip_rearrange = False
@@ -923,6 +1158,27 @@ class EplbState:
                         )
 
                 if not skip_rearrange:
+                    # Which layers actually move?  A pluggable routing policy
+                    # may have to rebuild per-layer state, which for `lplb`
+                    # costs a JIT build plus warmup; refreshing untouched
+                    # layers is pure stall.  SGLang gets this list from its own
+                    # updater (`update_layer_ids`); vLLM does not track it, so
+                    # diff here -- before `_commit_eplb_maps` overwrites the
+                    # live map in place, which would make every layer look
+                    # unchanged.
+                    changed_layer_ids = (
+                        (
+                            eplb_model_state.physical_to_logical_map
+                            != new_physical_to_logical_map.to(
+                                eplb_model_state.physical_to_logical_map.device
+                            )
+                        )
+                        .any(dim=-1)
+                        .nonzero()
+                        .flatten()
+                        .tolist()
+                    )
+
                     # Update expert weights
                     rearrange_expert_weights_inplace(
                         eplb_model_state.physical_to_logical_map,
@@ -940,6 +1196,14 @@ class EplbState:
                             eplb_model_state,
                             new_physical_to_logical_map=new_physical_to_logical_map,
                         )
+                        # Weights have moved and the live maps are updated, so
+                        # a pluggable routing policy may now rebuild any
+                        # placement-derived state.
+                        from vllm.distributed.eplb.mlb_runtime import get_mlb_routing
+
+                        routing = get_mlb_routing()
+                        if routing is not None:
+                            routing.on_placement_committed(changed_layer_ids)
 
                 if is_main_rank:
                     assert start_event is not None
@@ -952,6 +1216,16 @@ class EplbState:
                         " (profile) " if is_profile else " ",
                         gpu_elapsed,
                     )
+                    save_path = self.parallel_config.eplb_config.save_placement_path
+                    if save_path and not is_profile:
+                        torch.save(
+                            eplb_model_state.physical_to_logical_map.cpu(),
+                            save_path,
+                        )
+                        logger.info(
+                            "EPLB: saved placement checkpoint to %s",
+                            save_path,
+                        )
             else:
                 eplb_model_state.eplb_stats = EplbStats(
                     # We copy the tensor to snapshot the global_expert_load_window
@@ -1066,6 +1340,26 @@ class EplbState:
             all_reduce_list.append(concat_tensor[offset : offset + shape[0], :])
             offset += shape[0]
         return all_reduce_list
+
+    def _allgather_list(self, tensor_list: list[torch.Tensor]) -> list[torch.Tensor]:
+        """All-gather a list of 2D tensors, one extra leading rank dimension each.
+
+        Only a placement policy that reweighs *which rank* is overloaded, not
+        just which logical expert is hot, needs this -- everything _allreduce_list
+        already serves is a plain sum, recoverable from this by summing dim 0.
+        Kept separate from _allreduce_list rather than folded into it: that
+        helper is shared with _sync_load_pass, a stats path with no reason to
+        pay for a gather it would immediately reduce anyway.
+        """
+        ep_group = get_ep_group().device_group
+        world_size = ep_group.size()
+        gathered = []
+        for tensor in tensor_list:
+            assert tensor.dim() == 2, "All tensors must be 2D."
+            out = tensor.new_empty((world_size, *tensor.shape))
+            all_gather_into_tensor(out, tensor.contiguous(), group=ep_group)
+            gathered.append(out)
+        return gathered
 
     def _sync_load_pass(self) -> list[torch.Tensor]:
         """Sync the expert load pass across all ranks for log stats.
@@ -1203,6 +1497,20 @@ class EplbLayerState:
     Reference to the parent :class:`EplbModelState`'s tensor list so the
     router can read the correct per-[u]batch unpadded token count.
     """
+    moe_layer_idx: int | None = None
+    """
+    Index of this layer among the model's MoE layers.
+
+    The built-in mapping kernel is stateless and does not need it, but a
+    pluggable routing policy (see ``mlb_runtime``) keys its per-layer state by
+    it.  Recording it here is free: ``set_layer_state`` already receives it.
+
+    Note that the layer state deliberately does *not* carry
+    ``physical_to_logical_map``: threading it down would change
+    ``MixtureOfExperts.set_eplb_state``, a public interface implemented by
+    every MoE model.  A policy that needs the physical->logical direction takes
+    the model-level tensor from :class:`EplbState` and slices it by this index.
+    """
 
     def set_layer_state(
         self,
@@ -1211,6 +1519,7 @@ class EplbLayerState:
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> None:
+        self.moe_layer_idx = moe_layer_idx
         self.expert_load_view = expert_load_view[moe_layer_idx]
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
@@ -1434,6 +1743,17 @@ def _move_to_workspace(
         new_physical_to_logical_map=result.new_physical_to_logical_map,
         layer=result.layer_idx,
     )
+
+    # A policy holding placement-derived state has to be told this layer moved,
+    # or it keeps solving against the layout the layer used to have: the
+    # decision stays a valid replica of the right expert, because the dispatch
+    # kernel clamps to the live count and reads the committed map, but the split
+    # it computes is the one that balanced the *previous* placement.
+    #
+    # The notification is queued rather than delivered here. This runs on the
+    # async worker thread, and rebuilding a policy's per-layer state does GPU
+    # work; the main thread drains the queue at the top of the next forward.
+    _ASYNC_COMMITTED_LAYERS.add(result.layer_idx)
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False

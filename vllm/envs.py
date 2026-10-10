@@ -213,6 +213,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_FUSE_SHARED_EXPERTS: bool = False
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -285,6 +286,24 @@ if TYPE_CHECKING:
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DEEPEP_RDMA_BUFFER_SIZE_MB: int | None = None
+    VLLM_DEEPEP_HT_USE_MNNVL: bool = False
+    VLLM_DEEPEP_V2_RDMA_GBS: float = 0.0
+    VLLM_DEEPEP_V2_NVLINK_GBS: float = 0.0
+    VLLM_EPLB_DUMP_LOAD_PATH: str | None = None
+    VLLM_MLB_L1_ALGORITHM: str = ""
+    VLLM_MLB_L2_ALGORITHM: str = ""
+    MLB_ULTRAEP_MOVER: str = "direct"
+    MLB_ULTRAEP_LAGGED_APPLY: bool = False
+    MLB_ULTRAEP_REFRESH_INTERVAL: int = 64
+    MLB_ULTRAEP_REFRESH_MIN_TOKENS: int = 512
+    MLB_KEEP_ZERO_REDUNDANCY_COUNTS: bool = False
+    MLB_FRESH_COUNTS: bool = False
+    MLB_DUMP_LP: str | None = None
+    MLB_DUMP_LP_N: int = 120
+    MLB_DUMP_LP_SKIP: int = 0
+    MLB_TIME_L2: int = 0
+    MLB_TIME_REFRESH: int = 0
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
@@ -1649,6 +1668,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # Dispatch the shared expert(s) through the EP all-to-all instead of
+    # running a replicated MLP on every rank.
+    #
+    # Each EP rank gets its own expert slot for the shared expert, appended
+    # after that rank's routed slots, so a shared-expert token has exactly one
+    # owning rank -- the invariant DeepEP's `expert_id // experts_per_rank`
+    # rank derivation relies on. This is what gives a load balancer something
+    # to decide (MLB's Waterfill L2 picks that rank); with the shared expert
+    # replicated per rank there is no choice to make.
+    #
+    # Distinct from VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS, which fuses the
+    # shared expert into the *local* grouped GEMM under one globally shared
+    # expert id and de-duplicates with a token-level mask -- a layout DeepEP
+    # cannot route.
+    "VLLM_FUSE_SHARED_EXPERTS": lambda: bool(
+        int(os.getenv("VLLM_FUSE_SHARED_EXPERTS", "0"))
+    ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to
     # serve its own token shard. Shard them across TP instead: the MLP then
@@ -2020,6 +2056,78 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
         os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")
     ),
+    # Size the DeepEP high-throughput RDMA buffer separately from the NVL one.
+    # DeepEP caps num_nvl_bytes at INT_MAX whenever num_rdma_bytes != 0, so the
+    # shared knob cannot give internode dispatch (EP > 8 NVL peers) more room.
+    # Unset: same as VLLM_DEEPEP_BUFFER_SIZE_MB.
+    "VLLM_DEEPEP_RDMA_BUFFER_SIZE_MB": lambda: (
+        None
+        if os.getenv("VLLM_DEEPEP_RDMA_BUFFER_SIZE_MB") is None
+        else int(os.environ["VLLM_DEEPEP_RDMA_BUFFER_SIZE_MB"])
+    ),
+    # Let DeepEP's high-throughput buffer use MNNVL (allow_mnnvl) so an EP group
+    # can span trays of a multi-node NVLink domain (e.g. Blackwell multi-node
+    # NVLink systems); the
+    # default IPC path is node-local and fails at startup there.
+    "VLLM_DEEPEP_HT_USE_MNNVL": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_HT_USE_MNNVL", "0"))
+    ),
+    # Link bandwidths (GB/s) handed to DeepEP v2's SM estimator. Its auto-probe
+    # reads rdma_gbs from an IB NIC, which is 0 on an MNNVL machine where the
+    # scale-out ranks ride NVLink, and the estimator then divides by zero.
+    # 0 keeps DeepEP's own probing.
+    "VLLM_DEEPEP_V2_RDMA_GBS": lambda: float(os.getenv("VLLM_DEEPEP_V2_RDMA_GBS", "0")),
+    "VLLM_DEEPEP_V2_NVLINK_GBS": lambda: float(
+        os.getenv("VLLM_DEEPEP_V2_NVLINK_GBS", "0")
+    ),
+    # If set, EplbState dumps the recorded global logical expert load (and the
+    # placement it was recorded under) to <path>.rearr<NNN>.pt at every
+    # rearrangement step, from EP rank 0. Observation only; off by default.
+    "VLLM_EPLB_DUMP_LOAD_PATH": lambda: os.getenv("VLLM_EPLB_DUMP_LOAD_PATH"),
+    # MoE Load Balancer (--eplb-config policy="mlb") integration knobs.
+    # L1 = expert placement algorithm run at each rearrangement ("auto" picks
+    # the balancer's default for the model's expert-group layout); L2 = the
+    # per-token replica routing expression, e.g. "static", "lplb",
+    # "static+waterfill", "ultraep+waterfill". Empty keeps vLLM's built-in
+    # behaviour. The L2 value is also the default of eplb_config.l2_algorithm.
+    "VLLM_MLB_L1_ALGORITHM": lambda: os.getenv("VLLM_MLB_L1_ALGORITHM", "").strip(),
+    "VLLM_MLB_L2_ALGORITHM": lambda: os.getenv("VLLM_MLB_L2_ALGORITHM", "").strip(),
+    # How UltraEP's fast refresh moves re-solved replica weights between EP
+    # ranks: "direct" (pairwise send/recv over the EPLB communicator),
+    # "symm" (one-sided puts through torch symmetric memory; needs one host
+    # or a multi-node NVLink fabric) or "auto" (symm when every rank agrees
+    # it can, otherwise direct).
+    "MLB_ULTRAEP_MOVER": lambda: os.getenv("MLB_ULTRAEP_MOVER", "direct").strip(),
+    # 1: a plan solved on one forward lands on the layer's next forward, which
+    # avoids a per-layer device sync at the price of one step of staleness.
+    "MLB_ULTRAEP_LAGGED_APPLY": lambda: (
+        os.getenv("MLB_ULTRAEP_LAGGED_APPLY", "0").strip() != "0"
+    ),
+    # Re-solve placement and quota every N representative batches; a batch is
+    # representative when it routes at least MIN_TOKENS tokens.
+    "MLB_ULTRAEP_REFRESH_INTERVAL": lambda: int(
+        os.getenv("MLB_ULTRAEP_REFRESH_INTERVAL", "64")
+    ),
+    "MLB_ULTRAEP_REFRESH_MIN_TOKENS": lambda: int(
+        os.getenv("MLB_ULTRAEP_REFRESH_MIN_TOKENS", "512")
+    ),
+    # Diagnostics, off by default. KEEP_ZERO_REDUNDANCY_COUNTS keeps the
+    # per-step logical count collective with no redundant experts (where the
+    # result is discarded) so its cost can be measured; FRESH_COUNTS makes the
+    # balancer gather the count itself per layer instead of using the
+    # one-step-stale count; DUMP_LP saves the LP inputs/outputs of up to
+    # DUMP_LP_N calls after skipping DUMP_LP_SKIP into that directory;
+    # TIME_L2 / TIME_REFRESH time N routing calls / N refreshes with device
+    # syncs and log a summary once.
+    "MLB_KEEP_ZERO_REDUNDANCY_COUNTS": lambda: (
+        os.getenv("MLB_KEEP_ZERO_REDUNDANCY_COUNTS", "0") == "1"
+    ),
+    "MLB_FRESH_COUNTS": lambda: os.getenv("MLB_FRESH_COUNTS", "0") == "1",
+    "MLB_DUMP_LP": lambda: os.getenv("MLB_DUMP_LP") or None,
+    "MLB_DUMP_LP_N": lambda: int(os.getenv("MLB_DUMP_LP_N", "120")),
+    "MLB_DUMP_LP_SKIP": lambda: int(os.getenv("MLB_DUMP_LP_SKIP", "0")),
+    "MLB_TIME_L2": lambda: int(os.getenv("MLB_TIME_L2", "0")),
+    "MLB_TIME_REFRESH": lambda: int(os.getenv("MLB_TIME_REFRESH", "0")),
     # Force DeepEP to use intranode kernel for inter-node communication in
     # high throughput mode. This is useful archive higher prefill throughput
     # on system supports multi-node nvlink (e.g GB200).

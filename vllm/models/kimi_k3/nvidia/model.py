@@ -483,6 +483,8 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 ]
                 if eplb_state.num_unpadded_tokens_tensors is not None
                 else None,
+                layer_state=eplb_state,
+                topk_weights=topk_weights,
             )
 
         backend = self._ensure_backend()

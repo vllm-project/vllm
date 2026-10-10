@@ -36,7 +36,7 @@ _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
-EPLBPolicyOption = Literal["default"]
+EPLBPolicyOption = Literal["default", "mlb"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal[
     "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
@@ -93,6 +93,11 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    l2_algorithm: str = ""
+    """MoE Load Balancer routing expression for the L2 stage, which decides
+    which *replica* of a logical expert each token goes to. Empty leaves vLLM's
+    built-in choice in place. Defaults to ``$VLLM_MLB_L2_ALGORITHM``."""
+
     communicator: EPLBCommunicatorBackend | None = None
     """
     Backend for EPLB expert weight communication:
@@ -103,6 +108,28 @@ class EPLBConfig:
     - "pynccl": Use PyNccl send/recv
     - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
       on CUDA, falls back to "torch_gloo")
+    """
+
+    init_placement_path: str | None = None
+    """
+    Path to a placement checkpoint saved by a previous profiling run.
+
+    When set, the initial physical_to_logical_map is loaded from this file
+    instead of using the trivial (uniform) assignment.  This is the vLLM
+    equivalent of SGLang's ``--init-expert-location``: profile once, save the
+    MLB-optimised placement, then start production with that placement pre-loaded
+    so LPLB has hot experts already replicated.
+
+    The file must have been written by ``save_placement_path`` on a model with
+    the same topology (num_moe_layers, num_physical_experts).
+    """
+
+    save_placement_path: str | None = None
+    """
+    If set, write the current physical_to_logical_map to this path after every
+    rearrangement.  The most recent rearrangement overwrites the previous file.
+    Use in a short profiling run to capture a good placement, then pass the
+    result to ``init_placement_path`` in the serving run.
     """
 
     enable_migration_batching: bool = False
@@ -129,6 +156,10 @@ class EPLBConfig:
             )
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
+
+        if not self.l2_algorithm:
+            self.l2_algorithm = envs.VLLM_MLB_L2_ALGORITHM
+
         return self
 
 
@@ -581,6 +612,48 @@ class ParallelConfig:
                     "enabled. Either enable EPLB or unset "
                     "num_redundant_experts."
                 )
+
+        # An L2 policy chooses among a logical expert's replicas. With no
+        # redundant experts there is exactly one replica each, so there is
+        # nothing to choose: the policy can only reproduce the mapping vLLM
+        # would have used anyway. Leaving it on is not merely useless -- the
+        # routing boundary is crossed per layer per forward, and a policy that
+        # consumes the EP-wide expert load pays a collective to produce a count
+        # it then discards.
+        #
+        # Turning it off here rather than making it cheap deeper down is what
+        # keeps it honest: the decision is visible, made once, and taken before
+        # anything sizes buffers or declares capabilities against it. Output is
+        # unaffected, which is what makes doing it silently unacceptable but
+        # doing it at all safe.
+        #
+        # It belongs on this object rather than on EPLBConfig because only this
+        # one is certain to be the config the run uses. EPLBConfig defaults
+        # l2_algorithm from the environment, so a throwaway instance built
+        # from the field defaults carries an algorithm while its redundancy is
+        # still zero; gating on enable_eplb keeps such instances quiet, and a
+        # run without EPLB has no routing boundary for the policy to sit in.
+        if self.enable_eplb and self.eplb_config.l2_algorithm:
+            from vllm.distributed.eplb.mlb_runtime import l2_inapplicable_reason
+
+            reason = l2_inapplicable_reason(
+                self.eplb_config.l2_algorithm,
+                self.eplb_config.num_redundant_experts,
+            )
+            if reason is not None:
+                # The reason comes from the balancer: which deployments a
+                # policy can work on is a property of the policy, and a
+                # framework that decides it by assumption will switch off a
+                # policy that had work to do.
+                logger.warning(
+                    "Disabling MoE Load Balancer L2 routing (%r): %s. Routing "
+                    "is unchanged by this -- the policy could only have "
+                    "reproduced it -- but the per-layer routing boundary and "
+                    "any load collective it needed are now skipped.",
+                    self.eplb_config.l2_algorithm,
+                    reason,
+                )
+                self.eplb_config.l2_algorithm = ""
 
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size

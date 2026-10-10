@@ -27,6 +27,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLP,
     DeepseekV2MoE,
+    _find_shared_expert_fusion,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
@@ -326,6 +327,16 @@ class DeepseekV32Model(torch.nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # DSA-only: MLA (fused_qkv_a_proj) + the fused indexer wk/weights_proj +
         # routed experts. No MHA (qkv_proj) or ROCm shared-expert-fusion paths.
+        #
+        # The EP-dispatched shared expert (VLLM_FUSE_SHARED_EXPERTS) is handled:
+        # when the MoE layers were built with it, the replicated `shared_experts`
+        # MLP does not exist and the checkpoint's shared-expert tensors go into
+        # this rank's fused expert slot, while routed ids shift past the shared
+        # slots of every earlier rank -- the same routing as
+        # DeepseekV2Model.load_weights, mirrored here because this flat model
+        # has its own loader. Read off a built layer, so the slot the weight
+        # lands in is by construction the one the router sends tokens to.
+        ep_shared_fusion = _find_shared_expert_fusion(self)
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -363,11 +374,16 @@ class DeepseekV32Model(torch.nn.Module):
             ):
                 continue
 
+            is_fused_shared_expert_weight = (
+                ep_shared_fusion is not None and "mlp.shared_experts" in name
+            )
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 # Experts are handled below; skip here before the name rewrite.
                 if ("mlp.experts." in name) and name not in params_dict:
+                    continue
+                if is_fused_shared_expert_weight:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
                 if (
@@ -384,12 +400,34 @@ class DeepseekV32Model(torch.nn.Module):
                 break
             else:
                 is_expert_weight = False
+                # The shared expert's tensor is routed like an expert weight,
+                # under an expert-style name the mapping recognises.
+                expert_name = (
+                    name.replace("mlp.shared_experts", "mlp.experts.0")
+                    if is_fused_shared_expert_weight
+                    else name
+                )
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
-                    if weight_name not in name:
+                    if weight_name not in expert_name:
                         continue
                     is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
+                    if ep_shared_fusion is not None:
+                        if is_fused_shared_expert_weight:
+                            # This rank's own copy, in its own slot; every rank
+                            # loads its own from the same checkpoint tensor.
+                            expert_id = ep_shared_fusion.shared_expert_global_ids(
+                                ep_shared_fusion.ep_rank
+                            )[0]
+                        else:
+                            # Routed experts are no longer contiguous: rank r's
+                            # block starts at r*S, not r*R.
+                            expert_id = (
+                                expert_id
+                                + (expert_id // ep_shared_fusion.routed_slots_per_rank)
+                                * ep_shared_fusion.num_shared_experts
+                            )
+                    name_mapped = expert_name.replace(weight_name, param_name)
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
                     param = params_dict[name_mapped]

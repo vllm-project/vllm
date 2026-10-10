@@ -155,7 +155,10 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
-| `policy` | The policy type for expert parallel load balancing | `"default"` |
+| `policy` | The policy type for expert parallel load balancing: `"default"` (built-in) or `"mlb"` (MoE Load Balancer, see below) | `"default"` |
+| `l2_algorithm` | MoE Load Balancer replica-routing expression (only with `policy: "mlb"`); empty keeps vLLM's built-in replica choice | `""` |
+| `init_placement_path` | Load a saved expert placement at start-up instead of the trivial layout | `null` |
+| `save_placement_path` | Save the expert placement to this path after every rearrangement | `null` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
 
 For example:
@@ -176,6 +179,50 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
+
+### MoE Load Balancer policy
+
+`policy: "mlb"` delegates expert placement, and optionally per-token replica routing, to the
+[MoE Load Balancer](https://github.com/xutizhou/moe_load_balancer) (`moe_load_balancer`), a
+framework-neutral library of expert-parallel load-balancing policies. vLLM imports it lazily, so
+nothing changes unless the policy is selected; install it into the serving environment first.
+
+Two stages are configurable:
+
+- **L1, placement** (`VLLM_MLB_L1_ALGORITHM`): which logical expert lives in which physical slot,
+  decided at every rearrangement. `auto` (default) selects the balancer's default algorithm for the
+  model's expert-group layout; `ultraep` re-solves placement and per-replica quotas online every
+  `MLB_ULTRAEP_REFRESH_INTERVAL` representative batches and moves the affected expert weights itself.
+- **L2, replica routing** (`--eplb-config.l2_algorithm` or `VLLM_MLB_L2_ALGORITHM`): which replica
+  of a logical expert serves each token. Expressions combine a routed-expert policy (`static`,
+  `lplb`, `ultraep`) with an optional shared-expert policy (`+waterfill`), e.g. `lplb+waterfill`.
+  `waterfill` dispatches the shared expert through the expert-parallel all-to-all so that it can be
+  assigned to the least-loaded rank; this widens the expert space by one slot per rank and can be
+  enabled on its own with `VLLM_FUSE_SHARED_EXPERTS=1`. L2 routing is skipped automatically when
+  there are no redundant experts, where it could only reproduce the built-in choice.
+
+```bash
+# Placement fitted by the balancer, online UltraEP refresh, Waterfill for the shared expert
+VLLM_MLB_L1_ALGORITHM=ultraep MLB_ULTRAEP_REFRESH_INTERVAL=8 \
+vllm serve deepseek-ai/DeepSeek-V3 \
+    --tensor-parallel-size 1 --data-parallel-size 8 --enable-expert-parallel \
+    --enable-eplb \
+    --eplb-config '{"policy":"mlb","use_async":false,"num_redundant_experts":16,"l2_algorithm":"ultraep+waterfill","log_balancedness":true}'
+```
+
+`use_async` must be `false` with this policy: the balancer plans synchronously on the caller's
+thread. To fit a placement once and serve with it held, run a short profiling serve with
+`"save_placement_path": "/path/placement.pt"` and start production with
+`"init_placement_path": "/path/placement.pt"` and a `step_interval` that is never reached.
+
+Tuning knobs for the online UltraEP refresh (all read through `vllm.envs`):
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `MLB_ULTRAEP_REFRESH_INTERVAL` | `64` | Re-solve every N representative batches; `8` is a good production value, `1` maximizes balance at the cost of one refresh per step |
+| `MLB_ULTRAEP_REFRESH_MIN_TOKENS` | `512` | A batch counts as representative when it routes at least this many tokens |
+| `MLB_ULTRAEP_MOVER` | `direct` | How re-solved replica weights move between ranks: `direct` (send/recv over the EPLB communicator), `symm` (torch symmetric memory; one host or a multi-node NVLink fabric), `auto` (symm when every rank agrees it can, otherwise direct) |
+| `MLB_ULTRAEP_LAGGED_APPLY` | `0` | `1` lands a plan on the layer's next forward, avoiding a per-layer device sync at the price of one step of staleness; worth about +3% at interval 1 on Blackwell-class step times, nothing at interval 8 |
 
 ### Expert Distribution Formula
 

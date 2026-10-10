@@ -277,7 +277,14 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         num_qps_per_rank = None
 
         if self.internode and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE:
-            num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
+            # The RDMA buffer may be sized separately from the NVL one: DeepEP
+            # caps num_nvl_bytes at INT_MAX whenever num_rdma_bytes != 0, and
+            # on EP groups beyond NUM_MAX_NVL_PEERS (internode dispatch) it is
+            # the RDMA buffer that runs out.
+            rdma_mb = envs.VLLM_DEEPEP_RDMA_BUFFER_SIZE_MB
+            if rdma_mb is None:
+                rdma_mb = envs.VLLM_DEEPEP_BUFFER_SIZE_MB
+            num_rdma_bytes = rdma_mb * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
             num_rdma_bytes = 0
@@ -295,6 +302,23 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_qps_per_rank=num_qps_per_rank,
             explicitly_destroy=True,
         )
+        # On a multi-node NVLink domain (e.g. Blackwell multi-node NVLink
+        # systems) an EP group spans trays,
+        # and the buffer's default IPC path is node-local: it dies at startup
+        # with cudaErrorInvalidResourceHandle. deep_ep 2.0 selects the fabric
+        # path through allow_mnnvl. Opt-in.
+        if envs.VLLM_DEEPEP_HT_USE_MNNVL:
+            import inspect
+
+            import deep_ep  # type: ignore[import-not-found]
+
+            if "allow_mnnvl" in inspect.signature(deep_ep.Buffer.__init__).parameters:
+                kwargs["allow_mnnvl"] = True
+            else:
+                logger.warning(
+                    "VLLM_DEEPEP_HT_USE_MNNVL=1 but this deep_ep build has no "
+                    "allow_mnnvl parameter; leaving the buffer on the IPC path."
+                )
         return kwargs
 
     def get_handle(self, kwargs):
@@ -1174,9 +1198,18 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             buffer_kwargs, deep_ep.ElasticBuffer
         )
         if self._num_sms is None:
+            # Link bandwidths for DeepEP v2's SM estimator. It only probes
+            # rdma_gbs when num_rdma_ranks > 1 but divides by it whenever
+            # num_scaleout_ranks > 1; on an MNNVL machine scale-out rides the
+            # NVLink fabric, so the probe returns 0 and the estimator raises
+            # ZeroDivisionError. These values only size the SM estimate.
+            rdma_gbs = envs.VLLM_DEEPEP_V2_RDMA_GBS
+            nvlink_gbs = envs.VLLM_DEEPEP_V2_NVLINK_GBS
             self._num_sms = handle.get_theoretical_num_sms(
                 num_experts=num_experts,
                 num_topk=kwargs["num_topk"],
+                rdma_gbs=rdma_gbs,
+                nvlink_gbs=nvlink_gbs,
             )
         return handle
 

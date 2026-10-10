@@ -33,6 +33,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
     MoERunner,
 )
+from vllm.model_executor.layers.fused_moe.shared_expert_fusion import (
+    maybe_build_shared_expert_fusion,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -254,6 +257,72 @@ def FusedMoEFactory(
         )
     )
 
+    # Shared-expert fusion has two mutually exclusive layouts (see
+    # shared_expert_fusion.py): AITER's one-global-id-plus-mask, counted by
+    # `num_fused_shared_experts` above, and the EP-dispatched one built here,
+    # which widens the expert space instead. Asking for both is a
+    # configuration error rather than something to resolve silently -- they
+    # disagree about what an expert id means.
+    shared_expert_fusion = maybe_build_shared_expert_fusion(
+        n_shared_experts=n_shared_experts,
+        num_physical_experts=global_num_experts,
+        ep_size=moe_parallel_config.ep_size,
+        ep_rank=moe_parallel_config.ep_rank,
+        use_ep=moe_parallel_config.use_ep,
+        is_act_and_mul=is_act_and_mul,
+        shared_expert_weight=(
+            (1.0 / routed_scaling_factor)
+            if (apply_routed_scale_to_output and routed_scaling_factor)
+            else 1.0
+        ),
+        layer_name=layer_name,
+    )
+    # The fused shared expert carries a constant weight (1/routed_scaling_factor
+    # above), which is only the right magnitude when the routed weights sum to
+    # one -- i.e. when the router renormalizes. Without that, the unfused path
+    # would have scaled the shared expert by sum(routed weights) and this one
+    # does not, so the two stop agreeing and the error shows up as a quality
+    # regression rather than a failure. SGLang's integration carries the same
+    # implicit assumption; making it explicit is cheap.
+    if shared_expert_fusion is not None and not renormalize:
+        raise ValueError(
+            "Shared-expert fusion assumes a renormalizing router: the fused "
+            "shared expert is given a constant weight, which is only correct "
+            "when the routed weights sum to 1. This model routes with "
+            "renormalize=False. Unset VLLM_FUSE_SHARED_EXPERTS (and drop "
+            "waterfill from VLLM_MLB_L2_ALGORITHM, which turns fusion on) to "
+            "keep the shared expert replicated per rank."
+        )
+
+    if shared_expert_fusion is not None and num_fused_shared_experts > 0:
+        raise ValueError(
+            "VLLM_FUSE_SHARED_EXPERTS and the AITER fused-shared-expert path "
+            "are both active. They place the shared expert under different "
+            "expert-id layouts and cannot be combined; unset one of "
+            "VLLM_FUSE_SHARED_EXPERTS / "
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS."
+        )
+
+    # The router still selects among routed experts only; the shared slot is
+    # appended after it. Everything that sizes a buffer per selected expert
+    # (dispatch, the grouped GEMM's workspace) must see the wider value.
+    routed_top_k = top_k
+    if shared_expert_fusion is not None:
+        global_num_experts = shared_expert_fusion.global_num_experts
+        top_k = routed_top_k + shared_expert_fusion.num_shared_experts
+        logger.info_once(
+            "Shared-expert fusion ON: %d routed + %d shared slots per rank "
+            "over %d EP ranks -> global_num_experts %d, top_k %d -> %d, "
+            "shared slot weight %.4f",
+            shared_expert_fusion.routed_slots_per_rank,
+            shared_expert_fusion.num_shared_experts,
+            shared_expert_fusion.ep_size,
+            global_num_experts,
+            routed_top_k,
+            top_k,
+            shared_expert_fusion.shared_expert_weight,
+        )
+
     # Initialize EPLB manager (or None?)
     eplb_state: EplbLayerState | None = None
     if enable_eplb:
@@ -293,7 +362,7 @@ def FusedMoEFactory(
     # monolithic.
     if router is None:
         router = create_fused_moe_router(
-            top_k=top_k,
+            top_k=routed_top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
             renormalize=renormalize,
@@ -333,6 +402,12 @@ def FusedMoEFactory(
             image_sentinel_lo=image_sentinel_lo,
         )
 
+    # Attached rather than passed through every router constructor: the append
+    # happens in BaseRouter after the EPLB mapping, so it is one step in a
+    # template method that all routers already share, not a routing algorithm
+    # any individual one needs to know about.
+    router.shared_expert_fusion = shared_expert_fusion
+
     if params_dtype is None:
         params_dtype = torch.get_default_dtype()
 
@@ -354,6 +429,11 @@ def FusedMoEFactory(
         intermediate_pad=intermediate_pad,
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=logical_num_experts,
+        num_local_shared_experts=(
+            shared_expert_fusion.num_shared_experts
+            if shared_expert_fusion is not None
+            else 0
+        ),
         moe_parallel_config=moe_parallel_config,
         in_dtype=moe_in_dtype,
         moe_backend=vllm_config.kernel_config.moe_backend,
