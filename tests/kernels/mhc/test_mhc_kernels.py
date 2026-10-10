@@ -1702,14 +1702,18 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 128])
 @pytest.mark.parametrize("carried", [False, True])
 def test_mhc_fused_post_pre_delayed_rocm_aiter(
-    num_tokens, carried, default_vllm_config
+    num_tokens, carried, default_vllm_config, monkeypatch
 ):
     """Folding the post into the pre projection must match doing them apart.
 
     The residual is bfloat16, so the two accumulation orders are allowed to
     land a rounding step apart; the tolerance here is one bfloat16 ULP.
+
+    The gfx942 ASM seam is held off here. ``test_gfx942_mhc_seam_dispatch``
+    checks that route.
     """
     set_random_seed(0)
+    monkeypatch.setattr(mhc_layers, "_AITER_MHC_SEAM_PROBE", None)
     hc_mult, hidden_size = 4, 5120
     residual, fn, hc_scale, hc_base, _ = _rocm_mhc_inputs(
         num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
@@ -1758,3 +1762,41 @@ def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_rocm()
+        and mhc_layers._has_aiter_mhc_fused_post_pre_delayed(5120, 4)
+    ),
+    reason="AITER gfx942 mHC seam required",
+)
+@pytest.mark.parametrize("num_tokens", [63, 64])
+def test_gfx942_mhc_seam_dispatch(num_tokens, default_vllm_config, monkeypatch):
+    """VLLM calls the ASM seam from 64 tokens, and it matches post then pre."""
+    set_random_seed(0)
+    hc, h = 4, 5120
+    residual, fn, scale, base, _ = _rocm_mhc_inputs(
+        num_tokens=num_tokens, hidden_size=h, hc_mult=hc
+    )
+    x = torch.randn((num_tokens, h), dtype=torch.bfloat16, device=DEVICE)
+    post = torch.rand(num_tokens, hc, 1, device=DEVICE) + 0.5
+    comb = torch.rand(num_tokens, hc, hc, device=DEVICE) + 0.2
+    pre_args = (fn, scale, base, 1e-6, 1e-6, 1e-6, 1.0, 20)
+    fused = torch.ops.vllm.mhc_fused_post_pre_delayed_aiter
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return fused(*args, **kwargs)
+
+    monkeypatch.setattr(torch.ops.vllm, "mhc_fused_post_pre_delayed_aiter", spy)
+    actual = MHCPreDelayedOp().forward_hip(
+        residual, *pre_args, sublayer_out=x, post_layer_mix=post, comb_res_mix=comb
+    )
+
+    assert len(calls) == (num_tokens >= 64)
+    next_residual = mhc_post_torch(x, residual, post, comb)
+    expected = (next_residual, *mhc_pre_delayed_torch(next_residual, *pre_args))
+    for got, want in zip(actual, expected, strict=True):
+        torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)

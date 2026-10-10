@@ -187,6 +187,18 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             "JIT kernel warmup finished in %.2fs.",
             time.perf_counter() - jit_warmup_start,
         )
+        if current_platform.is_rocm():
+            from vllm.model_executor.layers.mhc import (
+                MHCPreDelayedOp,
+                warmup_mhc_fused_post_pre_delayed,
+            )
+
+            model = worker.get_model()
+            if any(isinstance(module, MHCPreDelayedOp) for module in model.modules()):
+                hf_config = worker.model_config.hf_config
+                warmup_mhc_fused_post_pre_delayed(
+                    int(hf_config.hidden_size), int(hf_config.hc_mult)
+                )
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
