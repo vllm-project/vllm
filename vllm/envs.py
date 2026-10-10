@@ -878,8 +878,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
-    # (CPU backend only) CPU key-value cache space.
-    # default is None and will be set as 4 GB
+    # (CPU backend only) CPU key-value cache space, in GiB.
+    # Default is None (unset); only takes effect when explicitly set.
+    # Legacy setting; prefer --kv-cache-memory-bytes.
     "VLLM_CPU_KVCACHE_SPACE": lambda: (
         int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
         if "VLLM_CPU_KVCACHE_SPACE" in os.environ
