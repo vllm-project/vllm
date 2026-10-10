@@ -391,10 +391,21 @@ def _concat_logprob_stashes(
     def pad(t: torch.Tensor, value: float) -> torch.Tensor:
         return F.pad(t, (0, width - t.shape[1]), value=value)
 
+    def pad_ranks(ranks: torch.Tensor) -> torch.Tensor:
+        # Columns past the ranked ones are topk positions.
+        if ranks.dim() == 1:
+            ranks = ranks.unsqueeze(1)
+        positions = torch.arange(ranks.shape[1], width, device=ranks.device)
+        return torch.cat((ranks, positions.expand(ranks.shape[0], -1)), dim=1)
+
+    ranks = [p.selected_token_ranks for p in parts]
+    if any(r.dim() == 2 for r in ranks):
+        ranks = [pad_ranks(r) for r in ranks]
+
     return LogprobsTensors(
         logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
         logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
-        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
+        selected_token_ranks=torch.cat(ranks),
         cu_num_generated_tokens=cu_num_generated_tokens,
     )
 

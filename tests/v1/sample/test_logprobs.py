@@ -1600,3 +1600,54 @@ def test_token_logprobs_large_batch_int64_row_offset():
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
         f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
     )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@pytest.mark.parametrize("model_runner", ["v1", "v1_unfused", "v2"])
+def test_logprob_token_ids_ranks(model_runner: str, monkeypatch):
+    """logprob_token_ids come in request order, so each one is ranked in the
+    vocab instead of taking its list position as its rank."""
+    from vllm.v1.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.sample.logprob import (
+        LogprobTokenIdsState,
+        compute_topk_scores,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    logits = torch.randn(2, 1000, device=device)
+    # A requested id can be masked out, e.g. by top_k in processed modes.
+    logits[0, 900] = float("-inf")
+    logprobs = torch.log_softmax(logits, dim=-1)
+    sampled = logits.argmax(dim=-1)
+    token_ids = [5, int(sampled[0]), 900]
+
+    if model_runner.startswith("v1"):
+        if model_runner == "v1_unfused":
+            # Platforms whose compile backend does not fuse rank column by column.
+            monkeypatch.setattr(current_platform, "simple_compile_backend", "eager")
+        out = Sampler().gather_specific_token_logprobs(
+            logprobs, {0: token_ids}, sampled
+        )
+    else:
+        # Batch rows map to request states in reverse order.
+        state = LogprobTokenIdsState(max_num_reqs=2, device=device)
+        state.add_request(1, SamplingParams(logprob_token_ids=token_ids))
+        state.add_request(0, SamplingParams(logprobs=len(token_ids)))
+        state.apply_staged_writes()
+        out = compute_topk_scores(
+            logits,
+            len(token_ids),
+            sampled,
+            logprob_token_ids_state=state,
+            expanded_idx_mapping=torch.tensor([1, 0], dtype=torch.int32, device=device),
+            max_per_req_token_ids=len(token_ids),
+        )
+        # The topk row of the same batch keeps its positions as ranks.
+        assert out.selected_token_ranks[1, 1:].tolist() == [1, 2, 3]
+
+    assert out is not None
+    row = [int(sampled[0])] + token_ids
+    assert out.logprob_token_ids[0].tolist() == row
+    expected_ranks = [int((logprobs[0] >= logprobs[0, t]).sum()) for t in row]
+    assert out.selected_token_ranks[0].tolist() == expected_ranks

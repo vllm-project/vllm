@@ -28,8 +28,9 @@ pub struct TokenLogprob {
     /// Preserves the engine's value, including NaN and infinities.
     pub logprob: f32,
     /// The sampled/selected token uses its actual vocab rank. Remaining entries
-    /// use 1-based top-k ranks matching the engine's returned candidate
-    /// order.
+    /// use their actual vocab rank when the engine sends one per entry
+    /// (`logprob_token_ids`), else 1-based top-k ranks matching the engine's
+    /// returned candidate order.
     /// A sampled/selected rank of 0 occurs when its logprob is NaN: the engine's
     /// `(logprobs >= selected_logprob).sum(-1)` counts no matching values.
     pub rank: u32,
@@ -45,10 +46,10 @@ pub struct PositionLogprobs {
 }
 
 impl PositionLogprobs {
-    /// Convert one decoded logprobs row into this per-position form by grouping
-    /// each token/logprob pair together with the sampled/selected token's
-    /// actual vocab rank.
-    fn from_decoded_row(token_ids: &[u32], logprobs: &[f32], sampled_rank: u32) -> Result<Self> {
+    /// Convert one decoded logprobs row into this per-position form. `ranks`
+    /// holds either the sampled/selected token's vocab rank alone, or one vocab
+    /// rank per entry.
+    fn from_decoded_row(token_ids: &[u32], logprobs: &[f32], ranks: &[u32]) -> Result<Self> {
         if token_ids.len() != logprobs.len() {
             bail_ext_value_decode!(
                 "logprobs row length mismatch: token_ids={}, logprobs={}",
@@ -58,10 +59,10 @@ impl PositionLogprobs {
         }
         let mut entries = Vec::with_capacity(token_ids.len());
         for (index, (&token_id, &logprob)) in token_ids.iter().zip(logprobs.iter()).enumerate() {
-            let rank = if index == 0 {
-                sampled_rank
-            } else {
-                index as u32
+            let rank = match ranks {
+                [sampled_rank] if index == 0 => *sampled_rank,
+                [_] => index as u32,
+                _ => ranks[index],
             };
             entries.push(TokenLogprob {
                 token_id,
@@ -251,11 +252,14 @@ impl WireLogprobs {
         )?;
         let logprobs =
             array::decode_array2_f32(self.logprobs, &format!("{field_prefix}.logprobs"), frames)?;
-        let token_ranks = array::decode_array1_u32(
-            self.token_ranks,
-            &format!("{field_prefix}.token_ranks"),
-            frames,
-        )?;
+        // `[rows]` holds the sampled/selected rank only; `[rows, cols]` holds
+        // one rank per entry.
+        let mut token_ranks = self.token_ranks;
+        if token_ranks.shape.len() == 1 {
+            token_ranks.shape.push(1);
+        }
+        let token_ranks =
+            array::decode_array2_u32(token_ranks, &format!("{field_prefix}.token_ranks"), frames)?;
 
         if token_ids.rows != logprobs.rows || token_ids.cols != logprobs.cols {
             bail_ext_value_decode!(
@@ -266,11 +270,18 @@ impl WireLogprobs {
                 logprobs.cols
             );
         }
-        if token_ids.rows != token_ranks.len() {
+        if token_ids.rows != token_ranks.rows {
             bail_ext_value_decode!(
                 "{field_prefix}: token_ranks length {} does not match row count {}",
-                token_ranks.len(),
+                token_ranks.rows,
                 token_ids.rows
+            );
+        }
+        if token_ranks.cols != 1 && token_ranks.cols != token_ids.cols {
+            bail_ext_value_decode!(
+                "{field_prefix}: token_ranks has {} columns, expected 1 or {}",
+                token_ranks.cols,
+                token_ids.cols
             );
         }
 
@@ -288,16 +299,16 @@ impl WireLogprobs {
         }
 
         let mut positions = Vec::with_capacity(token_ids.rows);
-        for ((token_ids_row, logprobs_row), sampled_rank) in token_ids
+        for ((token_ids_row, logprobs_row), ranks_row) in token_ids
             .data
             .chunks(token_ids.cols)
             .zip(logprobs.data.chunks(logprobs.cols))
-            .zip(token_ranks)
+            .zip(token_ranks.data.chunks(token_ranks.cols))
         {
             positions.push(PositionLogprobs::from_decoded_row(
                 token_ids_row,
                 logprobs_row,
-                sampled_rank,
+                ranks_row,
             )?);
         }
 

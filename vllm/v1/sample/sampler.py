@@ -208,17 +208,27 @@ class Sampler(nn.Module):
         # Gather logprobs at the requested token ids.
         gathered_logprobs = logprobs.gather(-1, token_ids_tensor)
 
+        # Compute ranks for every column, since the requested token ids are
+        # not in rank order. log_softmax is monotonic w.r.t. the original
+        # logits, so ranks computed from logprobs are equivalent.
+        if current_platform.simple_compile_backend == "inductor":
+            vocab_logprobs = logprobs.unsqueeze(1)
+            column_logprobs = gathered_logprobs.unsqueeze(-1)
+            # Avoid 0/1 specialization recompile on the batch dimension of the
+            # compiled batched_count_greater_than. See gather_logprobs.
+            torch._dynamo.decorators.mark_unbacked(vocab_logprobs, 0)
+            torch._dynamo.decorators.mark_unbacked(column_logprobs, 0)
+            token_ranks = batched_count_greater_than(vocab_logprobs, column_logprobs)
+        else:
+            # Unfused, the comparison above holds a [batch, cols, vocab] tensor,
+            # so compare one column at a time.
+            token_ranks = torch.stack(
+                [(logprobs >= col).sum(-1) for col in gathered_logprobs.T[..., None]],
+                dim=1,
+            )
+
         # Mask invalid (padded) positions with -inf
         gathered_logprobs = gathered_logprobs.masked_fill(~valid_mask, float("-inf"))
-
-        # Compute ranks for the sampled token. log_softmax is monotonic w.r.t.
-        # the original logits, so ranks computed from logprobs are equivalent.
-        sampled_logprobs = logprobs.gather(-1, sampled.unsqueeze(-1))
-        # Avoid 0/1 specialization recompile on the batch dimension of the
-        # compiled batched_count_greater_than. See gather_logprobs for context.
-        torch._dynamo.decorators.mark_unbacked(logprobs, 0)
-        torch._dynamo.decorators.mark_unbacked(sampled_logprobs, 0)
-        token_ranks = batched_count_greater_than(logprobs, sampled_logprobs)
 
         return LogprobsTensors(
             logprob_token_ids=token_ids_tensor.to(torch.int32),

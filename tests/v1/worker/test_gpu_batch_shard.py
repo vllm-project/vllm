@@ -602,6 +602,121 @@ def test_gather_sampler_output_logprobs_and_nans():
             assert lp.cu_num_generated_tokens is None
 
 
+@requires_cuda
+def test_gather_sampler_output_per_column_ranks():
+    """With logprob_token_ids in the batch every column has a rank: 2-D ranks
+    are cut or padded to the agreed width, and 1-D ranks (a topk-only rank)
+    get topk positions after the sampled token's rank."""
+    from dataclasses import replace as dc_replace
+
+    from vllm.v1.outputs import LogprobsTensors
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+    tp_size = 2
+    rng = np.random.default_rng(21)
+    max_num_reqs = 32
+    batch = _make_batch(rng, num_reqs=6, max_num_reqs=max_num_reqs, max_spec=3)
+    results = _shard_all_ranks(batch, max_num_reqs, tp_size)
+    device = torch.device(DEVICE)
+    cu = batch.cu_num_logits_np
+    num_logits = int(cu[-1])
+    width = results[0][2].max_num_logits_per_req
+    num_cols = 3
+
+    def cuda_fields(b: InputBatch) -> InputBatch:
+        return dc_replace(
+            b,
+            cu_num_logits=b.cu_num_logits.to(device),
+            expanded_local_pos=b.expanded_local_pos.to(device),
+        )
+
+    global_cuda = cuda_fields(batch)
+    local_outputs: list[SamplerOutput | None] = []
+    local_batches: list[InputBatch] = []
+    expected_ranks = torch.zeros(num_logits, num_cols, dtype=torch.int64)
+    for rank, (local, _, metadata) in enumerate(results):
+        local_batches.append(cuda_fields(local))
+        if metadata.num_local_reqs == 0:
+            local_outputs.append(None)
+            continue
+        rows = torch.from_numpy(_owned_rows(cu, _owned_batch_indices(local)))
+        # Rank 0 sampled topk only (1-D ranks, fewer columns); rank 1 sampled
+        # logprob_token_ids (2-D ranks, more columns).
+        local_cols = num_cols - 1 if rank == 0 else num_cols + 2
+        if rank == 0:
+            ranks_t = rows + 7
+            expected_ranks[rows, 0] = ranks_t
+            expected_ranks[rows, 1:] = torch.arange(1, num_cols)
+        else:
+            ranks_t = rows[:, None] * 100 + torch.arange(local_cols)[None, :]
+            expected_ranks[rows] = ranks_t[:, :num_cols]
+        ids = rows[:, None] * 10 + torch.arange(local_cols)[None, :]
+        local_outputs.append(
+            SamplerOutput(
+                sampled_token_ids=torch.zeros(
+                    metadata.num_local_reqs, width, dtype=torch.int64, device=device
+                ),
+                logprobs_tensors=LogprobsTensors(
+                    logprob_token_ids=ids.to(device),
+                    logprobs=ids.float().to(device),
+                    selected_token_ranks=ranks_t.to(device),
+                ),
+                num_nans=None,
+                num_sampled=torch.ones(
+                    metadata.num_local_reqs, dtype=torch.int32, device=device
+                ),
+                num_rejected=torch.zeros(
+                    metadata.num_local_reqs, dtype=torch.int32, device=device
+                ),
+            )
+        )
+
+    recorded: dict[int, list[torch.Tensor]] = {}
+    gathered_full: list[torch.Tensor] = []
+
+    def run(rank: int) -> SamplerOutput:
+        metadata = dc_replace(
+            results[rank][2],
+            gathered_src_indices=results[rank][2].gathered_src_indices.to(device),
+        )
+        calls = {"i": 0}
+
+        def fake_all_gather(x: torch.Tensor, dim: int = 0) -> torch.Tensor:
+            i = calls["i"]
+            calls["i"] += 1
+            if gathered_full:
+                return gathered_full[i]
+            recorded.setdefault(rank, []).append(x.clone())
+            return torch.zeros(
+                tp_size * x.shape[0], *x.shape[1:], dtype=x.dtype, device=x.device
+            )
+
+        with mock.patch.object(
+            batch_shard, "tensor_model_parallel_all_gather", fake_all_gather
+        ):
+            return batch_shard.gather_sampler_output(
+                local_outputs[rank],
+                metadata,
+                device,
+                global_batch=global_cuda,
+                local_batch=local_batches[rank],
+                gather_num_nans=False,
+                logprobs_dims=(num_cols - 1, 2),
+            )
+
+    for rank in range(tp_size):
+        run(rank)
+    gathered_full.extend(
+        torch.cat([recorded[r][i] for r in range(tp_size)])
+        for i in range(len(recorded[0]))
+    )
+
+    for rank in range(tp_size):
+        lp = run(rank).logprobs_tensors
+        assert lp is not None
+        assert torch.equal(lp.selected_token_ranks.cpu(), expected_ranks)
+
+
 def test_finish_requests_frees_slots_in_sorted_order():
     """Request slots must be freed in the same order on every TP rank:
     ownership derives from slot indices, and `finished_req_ids` is a set
