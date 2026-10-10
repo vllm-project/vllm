@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager, suppress
+from itertools import islice
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -1436,22 +1437,35 @@ def multi_thread_pt_weights_iterator(
             bin_file, map_location=pt_load_map_location, weights_only=True
         )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(_load_file, bin_file) for bin_file in hf_weights_files
-        ]
-        futures_iter = tqdm(
-            concurrent.futures.as_completed(futures),
+    with (
+        concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor,
+        tqdm(
             total=len(hf_weights_files),
             desc="Multi-thread loading pt checkpoint shards",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
-        )
-
-        for future in futures_iter:
-            state = future.result()
-            yield from state.items()
-            del state
+        ) as pbar,
+    ):
+        remaining_files = iter(hf_weights_files)
+        pending = {
+            executor.submit(_load_file, bin_file)
+            for bin_file in islice(remaining_files, max_workers)
+        }
+        try:
+            while pending:
+                done, pending = concurrent.futures.wait(
+                    pending, return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                while done:
+                    state = done.pop().result()
+                    yield from state.items()
+                    del state
+                    pbar.update(1)
+                    if (bin_file := next(remaining_files, None)) is not None:
+                        pending.add(executor.submit(_load_file, bin_file))
+        finally:
+            for future in pending:
+                future.cancel()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
