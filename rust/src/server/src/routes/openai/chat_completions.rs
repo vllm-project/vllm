@@ -15,7 +15,9 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::future::try_join_all;
+use futures::stream::{BoxStream, select_all};
+use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
@@ -37,6 +39,9 @@ use crate::routes::openai::chat_completions::types::{
 };
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
+};
+use crate::routes::openai::utils::parallel_sampling::{
+    choice_request_id, choice_seed, merge_choice_usage,
 };
 use crate::routes::openai::utils::types::{
     ChatLogProbs, FunctionCallDelta, FunctionCallResponse, StreamResponseEnvelope, ToolCall,
@@ -80,44 +85,134 @@ pub async fn chat_completions(
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
 
-    let chat_stream =
-        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
-            Ok(stream) => stream,
+    let mut chat_streams = Vec::with_capacity(prepared.n as usize);
+    for index in 0..prepared.n {
+        let chat_request = match choice_chat_request(&prepared.chat_request, index, prepared.n) {
+            Ok(chat_request) => chat_request,
+            Err(error) => return error.into_response(),
+        };
+        match state.chat.chat(chat_request).instrument(request_span.clone()).await {
+            Ok(stream) => chat_streams.push(stream),
             Err(error) => {
                 return chat_submit_error("failed to submit chat request", error).into_response();
             }
-        };
+        }
+    }
 
     if stream {
-        let chunk_stream = chat_completion_chunk_stream(
-            chat_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        );
+        let chunk_streams = chat_streams
+            .into_iter()
+            .zip(0..)
+            .map(|(chat_stream, index)| {
+                chat_completion_chunk_stream(
+                    chat_stream,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    api_server_options,
+                    prepared.options.clone(),
+                )
+                .map_ok(move |chunk| with_choice_index(chunk, index))
+                .boxed()
+            })
+            .collect();
+        let chunk_stream = merge_choice_chunk_streams(chunk_streams);
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_chat_completion(
-            chat_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        )
+        let responses = match try_join_all(chat_streams.into_iter().map(|chat_stream| {
+            collect_chat_completion(
+                chat_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                api_server_options,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
         .await
         {
-            Ok(response) => response,
+            Ok(responses) => responses,
             Err(error) => return error.into_response(),
         };
 
-        Json(response).into_response()
+        Json(merge_choice_responses(responses)).into_response()
     }
+}
+
+/// Build the child chat request for one of `n` choices.
+fn choice_chat_request(base: &ChatRequest, index: u32, n: u32) -> Result<ChatRequest, ApiError> {
+    let mut chat_request = base.clone();
+    chat_request.request_id = choice_request_id(&base.request_id, index, n);
+    chat_request.sampling_params.seed = choice_seed(base.sampling_params.seed, index)?;
+    Ok(chat_request)
+}
+
+/// Set the choice index on every choice of one streamed chunk.
+fn with_choice_index(
+    mut chunk: ChatCompletionStreamResponse,
+    index: u32,
+) -> ChatCompletionStreamResponse {
+    for choice in &mut chunk.choices {
+        choice.index = index;
+    }
+    chunk
+}
+
+/// Interleave per-choice chunk streams into one response stream.
+///
+/// Each choice's usage-only chunk (usage set, no choices) is held back and
+/// folded into one final usage chunk, so clients see a single usage chunk
+/// after all choices finish.
+#[try_stream]
+async fn merge_choice_chunk_streams(
+    streams: Vec<BoxStream<'static, Result<ChatCompletionStreamResponse, ApiError>>>,
+    mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
+) -> Result<(), ApiError> {
+    let mut chunks = select_all(streams);
+    let mut merged_usage_chunk: Option<ChatCompletionStreamResponse> = None;
+
+    while let Some(chunk) = chunks.next().await {
+        let mut chunk = chunk?;
+        if !chunk.choices.is_empty() || chunk.usage.is_none() {
+            y.yield_ok(chunk).await;
+            continue;
+        }
+        if let Some(merged) = merged_usage_chunk.take() {
+            chunk.usage = merged
+                .usage
+                .zip(chunk.usage)
+                .map(|(usage, choice_usage)| merge_choice_usage(usage, choice_usage));
+        }
+        merged_usage_chunk = Some(chunk);
+    }
+
+    if let Some(usage_chunk) = merged_usage_chunk {
+        y.yield_ok(usage_chunk).await;
+    }
+    Ok(())
+}
+
+/// Fold per-choice responses into one response with indexed choices.
+///
+/// Response-level fields such as prompt logprobs and `kv_transfer_params` come
+/// from the first choice.
+fn merge_choice_responses(responses: Vec<ChatCompletionResponse>) -> ChatCompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("n must be at least 1");
+    for response in responses {
+        merged.usage = merged
+            .usage
+            .zip(response.usage)
+            .map(|(usage, choice_usage)| merge_choice_usage(usage, choice_usage));
+        merged.choices.extend(response.choices);
+    }
+    for (choice, index) in merged.choices.iter_mut().zip(0..) {
+        choice.index = index;
+    }
+    merged
 }
 
 async fn collect_chat_completion(

@@ -60,6 +60,7 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
 
     /// How many completions to generate for each prompt
+    #[validate(range(min = 1, max = 10))]
     pub n: Option<u32>,
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based

@@ -15,7 +15,9 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::future::try_join_all;
+use futures::stream::{BoxStream, select_all};
+use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
@@ -40,6 +42,9 @@ use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
+};
+use crate::routes::openai::utils::parallel_sampling::{
+    choice_request_id, choice_seed, merge_choice_usage,
 };
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
@@ -87,49 +92,133 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    let text_stream = match state
-        .chat
-        .text()
-        .generate(prepared.text_request)
-        .instrument(request_span.clone())
-        .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            return text_submit_error("failed to submit completion request", error).into_response();
+    let mut text_streams = Vec::with_capacity(prepared.n as usize);
+    for index in 0..prepared.n {
+        let text_request = match choice_text_request(&prepared.text_request, index, prepared.n) {
+            Ok(text_request) => text_request,
+            Err(error) => return error.into_response(),
+        };
+        match state.chat.text().generate(text_request).instrument(request_span.clone()).await {
+            Ok(stream) => text_streams.push(stream),
+            Err(error) => {
+                return text_submit_error("failed to submit completion request", error)
+                    .into_response();
+            }
         }
-    };
+    }
 
     if stream {
-        let chunk_stream = completion_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        );
+        let chunk_streams = text_streams
+            .into_iter()
+            .zip(0..)
+            .map(|(text_stream, index)| {
+                completion_chunk_stream(
+                    text_stream,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    api_server_options,
+                    prepared.options.clone(),
+                )
+                .map_ok(move |chunk| with_choice_index(chunk, index))
+                .boxed()
+            })
+            .collect();
+        let chunk_stream = merge_choice_chunk_streams(chunk_streams);
         let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_completion(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        )
+        let responses = match try_join_all(text_streams.into_iter().map(|text_stream| {
+            collect_completion(
+                text_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                api_server_options,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
         .await
         {
-            Ok(response) => response,
+            Ok(responses) => responses,
             Err(error) => return error.into_response(),
         };
 
-        Json(response).into_response()
+        Json(merge_choice_responses(responses)).into_response()
     }
+}
+
+/// Build the child text request for one of `n` choices.
+fn choice_text_request(base: &TextRequest, index: u32, n: u32) -> Result<TextRequest, ApiError> {
+    let mut text_request = base.clone();
+    text_request.request_id = choice_request_id(&base.request_id, index, n);
+    text_request.sampling_params.seed = choice_seed(base.sampling_params.seed, index)?;
+    Ok(text_request)
+}
+
+/// Set the choice index on every choice of one streamed chunk.
+fn with_choice_index(mut chunk: CompletionSseChunk, index: u32) -> CompletionSseChunk {
+    if let CompletionSseChunk::Chunk(response) = &mut chunk {
+        for choice in &mut response.choices {
+            choice.index = index;
+        }
+    }
+    chunk
+}
+
+/// Interleave per-choice chunk streams into one response stream.
+///
+/// Each choice's usage chunk is held back and folded into one final usage
+/// chunk, so clients see a single usage chunk after all choices finish.
+#[try_stream]
+async fn merge_choice_chunk_streams(
+    streams: Vec<BoxStream<'static, Result<CompletionSseChunk, ApiError>>>,
+    mut y: TryYielder<CompletionSseChunk, ApiError>,
+) -> Result<(), ApiError> {
+    let mut chunks = select_all(streams);
+    let mut merged_usage_chunk: Option<CompletionStreamResponse> = None;
+
+    while let Some(chunk) = chunks.next().await {
+        match chunk? {
+            CompletionSseChunk::Usage(mut usage_chunk) => {
+                if let Some(merged) = merged_usage_chunk.take() {
+                    usage_chunk.usage = merged
+                        .usage
+                        .zip(usage_chunk.usage)
+                        .map(|(usage, choice_usage)| merge_choice_usage(usage, choice_usage));
+                }
+                merged_usage_chunk = Some(usage_chunk);
+            }
+            chunk => y.yield_ok(chunk).await,
+        }
+    }
+
+    if let Some(usage_chunk) = merged_usage_chunk {
+        y.yield_ok(CompletionSseChunk::Usage(usage_chunk)).await;
+    }
+    Ok(())
+}
+
+/// Fold per-choice responses into one response with indexed choices.
+///
+/// Response-level fields such as `kv_transfer_params` come from the first
+/// choice.
+fn merge_choice_responses(responses: Vec<CompletionResponse>) -> CompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("n must be at least 1");
+    for response in responses {
+        merged.usage = merged
+            .usage
+            .zip(response.usage)
+            .map(|(usage, choice_usage)| merge_choice_usage(usage, choice_usage));
+        merged.choices.extend(response.choices);
+    }
+    for (choice, index) in merged.choices.iter_mut().zip(0..) {
+        choice.index = index;
+    }
+    merged
 }
 
 async fn collect_completion(
