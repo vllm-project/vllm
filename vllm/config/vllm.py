@@ -1411,6 +1411,29 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
+    def _reject_mismatched_float_kv_cache(self) -> None:
+        """Reject an explicit float16/bfloat16 KV dtype that differs from the model."""
+        if self.model_config is None:
+            return
+        kv_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(
+            self.cache_config.cache_dtype
+        )
+        if kv_dtype is None or self.model_config.dtype == kv_dtype:
+            return
+        model_dtype = {
+            torch.float16: "float16",
+            torch.bfloat16: "bfloat16",
+            torch.float32: "float32",
+        }.get(self.model_config.dtype, str(self.model_config.dtype))
+        if model_dtype in ("float16", "bfloat16"):
+            hint = f"Please set `--kv-cache-dtype` to `auto` or `{model_dtype}`."
+        else:
+            hint = "Please set `--kv-cache-dtype` to `auto`."
+        raise ValueError(
+            f'kv_cache_dtype="{self.cache_config.cache_dtype}" is incompatible '
+            f'with dtype="{model_dtype}". {hint}'
+        )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
         # To give each torch profile run a unique instance name.
@@ -1441,6 +1464,7 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
 
         self._check_supports_watermarking()
