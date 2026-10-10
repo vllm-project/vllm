@@ -5217,9 +5217,15 @@ class GPUModelRunner(
             setattr(self, config_name, new_config)
 
     @instrument(span_name="Loading (GPU)")
-    def load_model(self, load_dummy_weights: bool = False) -> None:
+    def load_model(
+        self,
+        load_dummy_weights: bool = False,
+        *,
+        model: nn.Module | None = None,
+    ) -> None:
         """Args:
         load_dummy_weights: load dummy weights instead of real weights.
+        model: a pre-loaded model to skip the model loader.
 
         """
         logger.info_once(
@@ -5235,13 +5241,14 @@ class GPUModelRunner(
         try:
             with DeviceMemoryProfiler() as m:
                 time_before_load = time.perf_counter()
-                if load_dummy_weights:
+                if model is None and load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
                 # Capture warmup providers selected while constructing the model.
                 with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
-                    self.model = model_loader.load_model(
-                        vllm_config=self.vllm_config, model_config=self.model_config
+                    self.model = model or model_loader.load_model(
+                        vllm_config=self.vllm_config,
+                        model_config=self.model_config,
                     )
                 lookback_depth = getattr(self.model, "token_lookback_depth", 0)
                 if lookback_depth > 0:
