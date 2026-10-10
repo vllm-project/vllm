@@ -310,7 +310,7 @@ def _apply_write_kernel(
     MULTI_GROUP: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    row_idx = tl.load(write_indices_ptr + pid)
+    row_idx = tl.load(write_indices_ptr + pid).to(tl.int64)
     start_idx = tl.load(write_starts_ptr + pid)
 
     cu_start = tl.load(write_cu_lens_ptr + pid - 1) if pid > 0 else 0
