@@ -131,6 +131,7 @@ MoEBackend = Literal[
     "flashinfer_cutedsl",
     "flashinfer_moe_ep_cutedsl",
     "flashinfer_b12x",
+    "flashinfer_cutile",
     "b12x",
     "flashinfer_moe_ep_mega_deep_gemm",
     "marlin",
@@ -291,6 +292,17 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
+    nvfp4_moe_dynamic_max_tokens: int = Field(default=0, ge=0)
+    """With moe_backend="flashinfer_cutile", run NVFP4 routed experts as W4A16
+    for forwards of at most this many tokens and W4A4 above it. Zero selects
+    W4A4 for every forward. Both paths share one prepared weight copy."""
+
+    nvfp4_moe_dynamic_w4a16_backend: Literal["cutile", "sm12x"] = "cutile"
+    """FlashInfer W4A16 candidate for nvfp4_moe_dynamic_max_tokens."""
+
+    nvfp4_moe_dynamic_w4a4_backend: Literal["cutile", "sm12x"] = "cutile"
+    """FlashInfer W4A4 backend for moe_backend="flashinfer_cutile"."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
@@ -309,6 +321,9 @@ class KernelConfig:
       load); requires Blackwell, expert parallelism, and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
+    - "flashinfer_cutile": Use FlashInfer unified-MoE cuTile kernels for NVFP4
+      on SM12x, optionally switching to W4A16 per forward (see
+      nvfp4_moe_dynamic_max_tokens)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
     - "flashinfer_moe_ep_mega_deep_gemm": Use the FlashInfer moe_ep
       expert-parallel mega-MoE with the DeepGEMM megakernel, which consumes an

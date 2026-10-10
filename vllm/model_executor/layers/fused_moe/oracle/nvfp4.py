@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    amax_for_moe_activation_quant,
 )
 
 logger = init_logger(__name__)
@@ -47,6 +48,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL = "FLASHINFER_CUTEDSL"
     FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
     FLASHINFER_B12X = "FLASHINFER_B12X"
+    FLASHINFER_CUTILE = "FLASHINFER_CUTILE"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
     HUMMING = "HUMMING"
@@ -119,6 +121,13 @@ def backend_to_kernel_cls(
 
         return [FlashInferB12xExperts]
 
+    elif backend == NvFp4MoeBackend.FLASHINFER_CUTILE:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutile_moe import (  # noqa: E501
+            FlashInferCuTileNvfp4Experts,
+        )
+
+        return [FlashInferCuTileNvfp4Experts]
+
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             CutlassExpertsFp4,
@@ -170,6 +179,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         "flashinfer_moe_ep_cutedsl": NvFp4MoeBackend.FLASHINFER_MOE_EP_CUTEDSL,
         "flashinfer_b12x": NvFp4MoeBackend.FLASHINFER_B12X,
+        "flashinfer_cutile": NvFp4MoeBackend.FLASHINFER_CUTILE,
         "marlin": NvFp4MoeBackend.MARLIN,
         "humming": NvFp4MoeBackend.HUMMING,
         "emulation": NvFp4MoeBackend.EMULATION,
@@ -346,7 +356,35 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
 ]:
     use_a16 = _use_a16(nvfp4_backend, use_a16)
-    if nvfp4_backend == NvFp4MoeBackend.B12X:
+
+    if nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTILE:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutile_moe import (  # noqa: E501
+            prepare_cutile_nvfp4_weights,
+        )
+
+        activation = layer.moe_config.activation
+        view = prepare_cutile_nvfp4_weights(
+            w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2, activation
+        )
+        w13, w13_scale, w13_scale_2 = (
+            view["w1"],
+            view["w1_scale"],
+            view["w1_global_scale"],
+        )
+        w2, w2_scale, w2_scale_2 = view["w2"], view["w2_scale"], view["w2_global_scale"]
+        # W4A4 quantizes activations in-kernel. The SM12x backend takes one
+        # activation global scale per GEMM; without it the E4M3 block scales of
+        # small activations underflow, so pass the calibrated one as the
+        # FlashInfer CUTLASS path does (shared by all experts).
+        if a13_scale is not None and a2_scale is not None:
+            enable_eplb = layer.moe_config.moe_parallel_config.enable_eplb
+            layer.cutile_input_global_scales = tuple(
+                (1.0 / amax_for_moe_activation_quant(s, enable_eplb)).reshape(1)
+                for s in (a13_scale, a2_scale)
+            )
+        a13_scale = None
+        a2_scale = None
+    elif nvfp4_backend == NvFp4MoeBackend.B12X:
         if a13_scale is None or a2_scale is None:
             if not use_a16:
                 raise ValueError("b12x NVFP4 MoE requires activation scales")
@@ -551,8 +589,10 @@ def make_nvfp4_moe_quant_config(
             gemm1_beta=getattr(layer, "swiglu_beta", None),
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif backend == NvFp4MoeBackend.MARLIN or (
-        backend == NvFp4MoeBackend.B12X and use_a16
+    elif (
+        backend == NvFp4MoeBackend.MARLIN
+        or (backend == NvFp4MoeBackend.B12X and use_a16)
+        or (backend == NvFp4MoeBackend.FLASHINFER_CUTILE and a13_scale is None)
     ):
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
