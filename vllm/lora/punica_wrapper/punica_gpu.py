@@ -10,6 +10,7 @@ from typing import Any, final
 
 import torch
 
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
@@ -59,6 +60,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             device=device,
             captured_lora_counts=captured_lora_counts,
         )
+        self.fast_prefill_mapping_meta = LoRAKernelMeta.make(
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
+        )
 
         # When speculative decoding is enabled, max_num_samples is
         # max_batches * (num_speculative_decoding_tokens + 1).
@@ -70,6 +77,28 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             device=device,
             captured_lora_counts=captured_lora_counts,
         )
+
+    def prepare_fast_prefill_token_mapping(
+        self, logits_indices: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if logits_indices is None:
+            return None
+        compact_mapping = self.token_lora_indices[logits_indices]
+        with gpu_sync_allowed():
+            self.fast_prefill_mapping_meta.prepare_tensors(compact_mapping)
+        return compact_mapping
+
+    def _token_mapping_meta_args(
+        self, token_nums: int, token_lora_mapping: torch.Tensor | None = None
+    ):
+        if token_lora_mapping is None and is_forward_context_available():
+            token_lora_mapping = get_forward_context().lora_token_mapping
+        metadata = (
+            self.fast_prefill_mapping_meta
+            if token_lora_mapping is not None
+            else self.token_mapping_meta
+        )
+        return metadata.meta_args(token_nums, self.lora_config.specialize_active_lora)
 
     def update_metadata(
         self,
@@ -115,9 +144,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             y,
-            *self.token_mapping_meta.meta_args(
-                x.size(0), self.lora_config.specialize_active_lora
-            ),
+            *self._token_mapping_meta_args(x.size(0), kwargs.get("token_lora_mapping")),
             scale,
         )
 
@@ -162,8 +189,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_b_stacked,
             y,
-            *self.token_mapping_meta.meta_args(
-                num_tokens, self.lora_config.specialize_active_lora
+            *self._token_mapping_meta_args(
+                num_tokens, kwargs.get("token_lora_mapping")
             ),
             offset_start=offset_start,
             add_inputs=add_inputs,

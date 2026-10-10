@@ -1365,6 +1365,17 @@ class LoRAModelManager:
             self._last_mapping = mapping
             self._last_slot_layout = slot_layout
 
+    def prepare_fast_prefill_token_mapping(
+        self, logits_indices: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Prepare compact LoRA metadata for KV-sharing fast prefill."""
+        if self.supports_mm:
+            target_prefix = self.mm_mapping.language_model[0]
+        else:
+            target_prefix = DEFAULT_LANGUAGE_WRAPPER_KEY
+        wrapper = self.punica_wrapper_mapping[target_prefix]
+        return wrapper.prepare_fast_prefill_token_mapping(logits_indices)
+
     def remove_adapter(self, adapter_id: int) -> bool:
         self.deactivate_adapter(adapter_id)
         if adapter_id not in self._registered_adapters:
