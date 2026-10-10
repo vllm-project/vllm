@@ -74,14 +74,16 @@ def _assert_top_k_width(logprobs, top_k: int) -> None:
         assert len(row) in (top_k, top_k + 1)
 
 
-def _make_llm(*, enable_replay: bool = True, **overrides):
+def _make_llm(
+    *, enable_replay: bool = True, chunk_size: int = CHUNK_SIZE, **overrides
+):
     config = dict(
         model=MODEL,
         dtype="float16",
         max_model_len=512,
         enforce_eager=True,
         enable_chunked_prefill=True,
-        max_num_batched_tokens=CHUNK_SIZE,
+        max_num_batched_tokens=chunk_size,
         enable_prefix_caching=True,
     )
     if enable_replay:
@@ -98,8 +100,9 @@ def _make_llm(*, enable_replay: bool = True, **overrides):
     [(TOP_K, None), (TOP_K, TOP_K)],
     ids=["generated", "generated-and-prompt"],
 )
+@pytest.mark.parametrize("chunk_size", [16, 32, 48])
 def test_aux_output_logprobs_replay_matches_cold_reference(
-    logprobs: int, prompt_logprobs: int | None
+    logprobs: int, prompt_logprobs: int | None, chunk_size: int
 ):
     reference_params = SamplingParams(
         temperature=0,
@@ -119,12 +122,13 @@ def test_aux_output_logprobs_replay_matches_cold_reference(
     # replay is equivalent to the existing non-RL behavior.
     reference_llm = _make_llm(
         enable_replay=False,
+        chunk_size=chunk_size,
         enable_prefix_caching=False,
     )
     reference = reference_llm.generate([PROMPT], reference_params)[0]
     del reference_llm
 
-    replay_llm = _make_llm()
+    replay_llm = _make_llm(chunk_size=chunk_size)
     replay_llm.generate([PREFIX], replay_params)  # Prime complete KV/logprob blocks.
     replay = replay_llm.generate([PROMPT], replay_params)[0]
 

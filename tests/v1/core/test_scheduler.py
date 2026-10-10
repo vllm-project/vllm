@@ -195,6 +195,7 @@ def test_finish_request():
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
         scheduler.aux_output_connector.request_finished.assert_called_with(request)
+        scheduler.aux_output_connector.release_request.assert_called_with(request)
 
 
 def test_get_num_unfinished_requests():

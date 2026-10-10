@@ -1662,6 +1662,8 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.release_request(session)
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
         num_computed_tokens = session.num_computed_tokens
@@ -2321,6 +2323,12 @@ class Scheduler(SchedulerInterface):
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
 
+            # request_finished() runs before this loop consumes the final
+            # prompt artifact. Release the one-shot scheduler latch only after
+            # that consumption point, including streaming-request teardown.
+            if request.is_finished() and self.aux_output_connector is not None:
+                self.aux_output_connector.release_request(request)
+
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
@@ -2739,6 +2747,8 @@ class Scheduler(SchedulerInterface):
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            if self.aux_output_connector is not None:
+                self.aux_output_connector.release_request(request)
 
         return valid_requests
 

@@ -52,6 +52,21 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
+def _format_position_ranges(positions: np.ndarray) -> str:
+    """Format sorted positions as compact inclusive ranges."""
+    if not len(positions):
+        return "[]"
+    starts = np.r_[True, np.diff(positions) > 1]
+    ends = np.r_[np.diff(positions) > 1, True]
+    ranges = [
+        f"{start}"
+        if start == end
+        else f"{start}-{end}"
+        for start, end in zip(positions[starts], positions[ends], strict=True)
+    ]
+    return ",".join(ranges)
+
+
 @dataclass
 class _WorkerRequestState:
     aux_output_keys: list[str] = field(default_factory=list)
@@ -357,6 +372,13 @@ class AuxOutputWorkerConnector:
                 "auxiliary output request token count must be positive"
             )
             state = self._requests[request_id]
+            if request_id in pending.prompt_logprobs:
+                # A streaming session can reuse the worker request state. The
+                # next completed prompt must replace the prior turn's
+                # one-shot artifact and establish a fresh cache prefix.
+                if state.prompt_logprobs_artifact is not None:
+                    state.prompt_logprobs_artifact = None
+                    state.prompt_replay_prefix = None
             if (
                 request_id in pending.replay_prompt_logprobs
                 and state.prompt_replay_prefix is None
@@ -459,6 +481,11 @@ class AuxOutputWorkerConnector:
         if buffer is not None:
             self._publish_blocks(block_batches)
 
+        # Publish logprob blocks before materializing outputs. A later request
+        # in this batch may share a prefix block produced by an earlier one.
+        # Keep the in-memory rows until materialization has consumed them.
+        self._publish_logprob_blocks(pending.request_ids, discard_rows=False)
+
         for request_id, emit_start, token_end in materialize_outputs:
             state = self._requests[request_id]
             assert store is not None and buffer is not None
@@ -505,16 +532,18 @@ class AuxOutputWorkerConnector:
                     int(pending.token_starts[index]) + 1,
                 )
                 block_index = max((position - 1) // self._logprob_block_size, 0)
-                assert block_index < len(state.logprob_keys), (
-                    "auxiliary logprobs artifact has no key for sampled position "
-                    f"{position}"
-                )
+                if block_index >= len(state.logprob_keys):
+                    raise RuntimeError(
+                        "auxiliary logprobs artifact has no key for sampled "
+                        f"position {position}: request={request_id}"
+                    )
                 rows = self._read_logprob_rows([state.logprob_keys[block_index]])
                 mask = rows.positions == position
-                assert int(mask.sum()) == 1, (
-                    "auxiliary logprobs artifact is missing sampled position "
-                    f"{position}"
-                )
+                if int(mask.sum()) != 1:
+                    raise RuntimeError(
+                        "auxiliary logprobs artifact is missing sampled position "
+                        f"{position}: request={request_id}"
+                    )
                 output.logprobs = rows_to_lists(
                     LogprobRows(
                         rows.positions[mask],
@@ -525,10 +554,22 @@ class AuxOutputWorkerConnector:
                 )
             if request_id not in pending.replay_prompt_logprobs:
                 continue
+            visible_output = (
+                int(num_sampled[index]) > 0
+                or int(pending.token_starts[index]) >= state.prompt_len
+            )
             if state.prompt_logprobs_artifact is not None:
-                output.prompt_logprobs = state.prompt_logprobs_artifact
+                # A final prefill chunk can complete the artifact without
+                # producing an EngineCoreOutput. Keep it pending until the
+                # first visible output step consumes it.
+                if visible_output:
+                    output.prompt_logprobs = state.prompt_logprobs_artifact
                 continue
-            assert state.prompt_replay_prefix is not None
+            if state.prompt_replay_prefix is None:
+                raise RuntimeError(
+                    "auxiliary prompt logprobs replay prefix is missing: "
+                    f"request={request_id}"
+                )
             num_hit_blocks = state.prompt_replay_prefix // self._logprob_block_size
             prompt_chunks = [*state.prompt_logprob_rows.values()]
             if state.prompt_logprob_keys and num_hit_blocks:
@@ -554,7 +595,11 @@ class AuxOutputWorkerConnector:
                     )
                 if merged_prompt is None and not len(expected):
                     generated = pending.logprobs.get(request_id)
-                    assert generated is not None
+                    if generated is None:
+                        raise RuntimeError(
+                            "auxiliary prompt logprobs width is unavailable for "
+                            f"empty prompt artifact: request={request_id}"
+                        )
                     width = generated.logprobs.shape[1]
                     merged_prompt = LogprobRows(
                         expected,
@@ -562,23 +607,29 @@ class AuxOutputWorkerConnector:
                         np.empty((0, width), dtype=np.float32),
                         np.empty(0, dtype=np.int32),
                     )
-                assert merged_prompt is not None and np.array_equal(
-                    merged_prompt.positions, expected
-                ), (
-                    "auxiliary prompt logprobs are incomplete: "
-                    f"request={request_id}, expected_rows={len(expected)}, "
-                    f"actual_positions="
-                    f"{None if merged_prompt is None else merged_prompt.positions}"
+                actual = (
+                    np.empty(0, dtype=np.int64)
+                    if merged_prompt is None
+                    else merged_prompt.positions
                 )
+                if not np.array_equal(actual, expected):
+                    missing = np.setdiff1d(expected, actual)
+                    extra = np.setdiff1d(actual, expected)
+                    raise RuntimeError(
+                        "auxiliary prompt logprobs are incomplete: "
+                        f"request={request_id}, "
+                        f"missing_positions={_format_position_ranges(missing)}, "
+                        f"unexpected_positions={_format_position_ranges(extra)}"
+                    )
                 tensors = rows_to_tensors(merged_prompt)
-                output.prompt_logprobs = tensors
                 state.prompt_logprobs_artifact = tensors
+                if visible_output:
+                    output.prompt_logprobs = tensors
 
-        # Publish captured prompt/generated logprob artifacts only after this
-        # step's outputs are materialized: a freshly-computed (non-cached)
-        # request emits its full prompt-logprobs rows from memory, while the
-        # store-backed rows serve later prefix-cache replays.
-        self._publish_logprob_blocks(pending.request_ids)
+        # Reclaim complete in-memory rows after all outputs in this batch have
+        # consumed them. The first publication above makes shared blocks
+        # visible to later requests in the same batch.
+        self._publish_logprob_blocks(pending.request_ids, discard_rows=True)
         return outputs
 
     def _read_logprob_rows(self, keys: Sequence[str]) -> LogprobRows:
@@ -587,10 +638,15 @@ class AuxOutputWorkerConnector:
             raise RuntimeError("logprob replay store is disabled")
         chunks = [decode_rows(store.get_concatenated([key])) for key in keys]
         result = concat_rows(chunks)
-        assert result is not None
+        if result is None:
+            raise RuntimeError(
+                "auxiliary logprobs artifact contains no rows for requested keys"
+            )
         return result
 
-    def _publish_logprob_blocks(self, request_ids: Iterable[str]) -> None:
+    def _publish_logprob_blocks(
+        self, request_ids: Iterable[str], *, discard_rows: bool = True
+    ) -> None:
         store = getattr(self, "_logprob_store", None)
         if store is None:
             return
@@ -633,10 +689,15 @@ class AuxOutputWorkerConnector:
                         continue
                     mask = (rows.positions > start) & (rows.positions <= end)
                     positions = frozenset(int(pos) for pos in rows.positions[mask])
-                    if (
-                        not positions
-                        or positions == state.published_artifact_positions.get(key)
-                    ):
+                    if not positions:
+                        continue
+                    already_published = (
+                        positions == state.published_artifact_positions.get(key)
+                    )
+                    if already_published:
+                        if discard_rows and max_position >= end:
+                            for rows_by_start in row_maps:
+                                self._discard_logprob_rows(rows_by_start, start, end)
                         continue
                     artifact = LogprobRows(
                         rows.positions[mask],
@@ -649,7 +710,11 @@ class AuxOutputWorkerConnector:
                         # Keep the newly computed row when a preemption or
                         # resumed execution recomputes the same position.
                         merged = concat_rows([decode_rows(existing), artifact])
-                        assert merged is not None
+                        if merged is None:
+                            raise RuntimeError(
+                                "auxiliary logprobs block merge produced no rows: "
+                                f"key={key}"
+                            )
                         artifact = merged
                     store.put(
                         [
@@ -660,7 +725,7 @@ class AuxOutputWorkerConnector:
                         ],
                     )
                     state.published_artifact_positions[key] = positions
-                    if max_position >= end:
+                    if discard_rows and max_position >= end:
                         for rows_by_start in row_maps:
                             self._discard_logprob_rows(rows_by_start, start, end)
 
@@ -778,7 +843,14 @@ class AuxOutputWorkerConnector:
                 state = self._requests.setdefault(
                     request_id, _WorkerRequestState(emit_cursor=emit_start)
                 )
-                state.prompt_len = metadata.prompt_lens.get(request_id, 0)
+                prompt_len = metadata.prompt_lens.get(request_id, 0)
+                if state.prompt_len != prompt_len:
+                    # Streaming input reuses the request ID for a new prompt
+                    # turn. The completed artifact is one-shot per turn, and
+                    # the prefix must be recalculated from the new schedule.
+                    state.prompt_logprobs_artifact = None
+                    state.prompt_replay_prefix = None
+                state.prompt_len = prompt_len
                 if state.pending_outputs == 0:
                     # In-flight steps leave the worker cursor behind the
                     # scheduler's optimistic view; only check settled requests.
@@ -851,7 +923,11 @@ class AuxOutputWorkerConnector:
         keys, pending = self._resolve_logprob_keys(
             block_hashes, boundary_token_ids, fingerprint
         )
-        assert not pending, "auxiliary logprobs boundary token is missing"
+        if pending:
+            raise ValueError(
+                "auxiliary logprobs boundary token is missing for a completed "
+                "request"
+            )
         return keys
 
     def _resolve_logprob_keys(
@@ -862,22 +938,28 @@ class AuxOutputWorkerConnector:
     ) -> tuple[list[str], list[tuple[bytes, str]]]:
         prefix = f"vllm-logprobs/v1/{self._generation}/{fingerprint}/"
         hashes = list(block_hashes)
-        assert len(hashes) == len(boundary_token_ids), (
-            "auxiliary logprobs block metadata is misaligned"
-        )
+        if len(hashes) != len(boundary_token_ids):
+            raise ValueError(
+                "auxiliary logprobs block metadata is misaligned: "
+                f"hashes={len(hashes)}, boundaries={len(boundary_token_ids)}"
+            )
         keys = []
         pending = []
         for block_hash, token_id in zip(hashes, boundary_token_ids, strict=True):
             if token_id is None:
                 pending.append((block_hash, fingerprint))
             else:
-                assert not pending, (
-                    "only trailing auxiliary logprobs blocks may lack boundary tokens"
-                )
+                if pending:
+                    raise ValueError(
+                        "only trailing auxiliary logprobs blocks may lack "
+                        "boundary tokens"
+                    )
                 keys.append(f"{prefix}{block_hash.hex()}/{token_id}")
-        assert len(pending) <= 1, (
-            "only one trailing auxiliary logprobs block may lack a boundary token"
-        )
+        if len(pending) > 1:
+            raise ValueError(
+                "only one trailing auxiliary logprobs block may lack a boundary "
+                "token"
+            )
         return keys, pending
 
     def _bind_pending_logprob_blocks(

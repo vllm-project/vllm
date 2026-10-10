@@ -218,29 +218,32 @@ class AuxOutputSchedulerConnector:
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
         request_id = request.request_id
-        assert output is not None and request_id in output, (
-            f"auxiliary output worker output is missing {request_id}"
-        )
+        if output is None or request_id not in output:
+            raise RuntimeError(
+                f"auxiliary output worker output is missing {request_id}"
+            )
         request_output = output[request_id]
         if request_output.rows is None:
             return None
         token_end = request.num_tokens - 1
         local_end = token_end - request_output.token_start
         if local_end < 0:
-            assert not request.is_finished(), (
-                "finished auxiliary output output has no accepted token range: "
+            if request.is_finished():
+                raise RuntimeError(
+                    "finished auxiliary output has no accepted token range: "
+                    f"request={request_id}, token_end={token_end}, "
+                    f"output_start={request_output.token_start}, "
+                    "output_end="
+                    f"{request_output.token_start + len(request_output.rows)}"
+                )
+            return None
+        if local_end > len(request_output.rows):
+            raise RuntimeError(
+                "auxiliary output worker output has an invalid token range: "
                 f"request={request_id}, token_end={token_end}, "
                 f"output_start={request_output.token_start}, "
-                "output_end="
-                f"{request_output.token_start + len(request_output.rows)}"
+                f"output_end={request_output.token_start + len(request_output.rows)}"
             )
-            return None
-        assert local_end <= len(request_output.rows), (
-            "auxiliary output worker output has an invalid token range: "
-            f"request={request_id}, token_end={token_end}, "
-            f"output_start={request_output.token_start}, "
-            f"output_end={request_output.token_start + len(request_output.rows)}"
-        )
         return request_output.rows[:local_end]
 
     @staticmethod
@@ -283,13 +286,15 @@ class AuxOutputSchedulerConnector:
     ) -> LogprobsLists | None:
         if not self._request_replays(request, prompt=False):
             return None
-        assert output is not None and request.request_id in output, (
-            f"auxiliary logprobs output is missing {request.request_id}"
-        )
+        if output is None or request.request_id not in output:
+            raise RuntimeError(
+                f"auxiliary logprobs output is missing {request.request_id}"
+            )
         value = output[request.request_id].logprobs
-        assert value is not None, (
-            f"auxiliary logprobs artifact is missing {request.request_id}"
-        )
+        if value is None:
+            raise RuntimeError(
+                f"auxiliary logprobs artifact is missing {request.request_id}"
+            )
         return value
 
     def take_prompt_logprobs(
@@ -297,26 +302,35 @@ class AuxOutputSchedulerConnector:
     ) -> LogprobsTensors | None:
         if not self._request_replays(request, prompt=True):
             return None
-        # The scheduler calls this on every should_emit_output step while the
-        # worker re-attaches the artifact each step. Without de-duplication
-        # the engine logprobs processor extends prompt_logprobs per step.
-        # "take" semantics: consume the artifact exactly once per request.
+        # Prompt artifacts are complete once per request, but the scheduler
+        # may call this on multiple visible steps (streaming and termination).
+        # "take" semantics prevents the engine logprobs processor from
+        # extending prompt_logprobs with the same rows more than once.
         if self._prompt_logprobs_delivered.get(id(request)) is request:
             return None
-        assert output is not None and request.request_id in output, (
-            f"auxiliary prompt logprobs output is missing {request.request_id}"
-        )
+        if output is None or request.request_id not in output:
+            raise RuntimeError(
+                "auxiliary prompt logprobs output is missing "
+                f"{request.request_id}"
+            )
         request_id = request.request_id
         value = output[request_id].prompt_logprobs
-        assert value is not None, (
-            f"auxiliary prompt logprobs artifact is missing {request_id}"
-        )
+        if value is None:
+            raise RuntimeError(
+                f"auxiliary prompt logprobs artifact is missing {request_id}"
+            )
         self._prompt_logprobs_delivered[id(request)] = request
         return value
 
     def replays_prompt_logprobs(self, request: Request) -> bool:
         """True when this request's prompt logprobs come from the aux plane."""
         return self._request_replays(request, prompt=True)
+
+    def release_request(self, request: Request) -> None:
+        """Release scheduler-side prompt-logprob delivery state."""
+        request_key = id(request)
+        if self._prompt_logprobs_delivered.get(request_key) is request:
+            self._prompt_logprobs_delivered.pop(request_key, None)
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""

@@ -355,6 +355,44 @@ def test_worker_merges_cached_prompt_rows_with_chunked_live_suffix():
     worker.close()
 
 
+def test_worker_publishes_shared_prompt_block_before_same_batch_consumer_reads():
+    worker = _make_logprob_worker()
+    producer = _WorkerRequestState(prompt_len=5, prompt_replay_prefix=0)
+    producer.prompt_logprob_keys = ["shared"]
+    consumer = _WorkerRequestState(prompt_len=5, prompt_replay_prefix=4)
+    consumer.prompt_logprob_keys = ["shared"]
+    worker._requests = {"producer": producer, "consumer": consumer}
+
+    live = _logprob_rows(1, 4)
+    prompt_logprobs = LogprobsTensors(
+        torch.from_numpy(live.token_ids),
+        torch.from_numpy(live.values),
+        torch.from_numpy(live.ranks),
+    )
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["producer", "consumer"],
+        batch_indices=np.array([0, 1], dtype=np.int32),
+        token_starts=np.array([0, 4], dtype=np.int32),
+        query_start_loc=np.array([0, 5, 6], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1, 1], dtype=np.int32),
+        num_rejected=np.array([0, 0], dtype=np.int32),
+        prompt_logprobs={"producer": prompt_logprobs},
+        replay_prompt_logprobs=frozenset({"producer", "consumer"}),
+    )
+
+    outputs = worker._commit_output(pending)
+
+    assert outputs["producer"].prompt_logprobs is not None
+    assert outputs["consumer"].prompt_logprobs is not None
+    np.testing.assert_array_equal(
+        outputs["consumer"].prompt_logprobs.logprob_token_ids.numpy(),
+        live.token_ids,
+    )
+    worker.close()
+
+
 def test_worker_discards_unpopulated_full_prompt_cache_prefix():
     worker = _make_logprob_worker()
     cached = _logprob_rows(1, _BLOCK_SIZE)
@@ -506,6 +544,237 @@ def test_worker_emits_empty_prompt_logprobs_for_single_token_prompt():
 
     assert output.prompt_logprobs is not None
     assert output.prompt_logprobs.logprobs.shape == (0, 2)
+    worker.close()
+
+
+def test_worker_attaches_completed_prompt_logprobs_only_once():
+    worker = _make_logprob_worker()
+    worker._requests["request"] = _WorkerRequestState(prompt_len=1)
+    generated = _logprob_rows(1, 1)
+
+    def pending(*, sampled: int):
+        return PendingAuxOutput(
+            connector=worker,
+            request_ids=["request"],
+            batch_indices=np.array([0], dtype=np.int32),
+            token_starts=np.array([0], dtype=np.int32),
+            query_start_loc=np.array([0, 1], dtype=np.int32),
+            routed_experts_gpu=None,
+            num_sampled=np.array([sampled], dtype=np.int32),
+            num_rejected=np.array([0], dtype=np.int32),
+            logprobs=(
+                {
+                    "request": LogprobsLists(
+                        generated.token_ids,
+                        generated.values,
+                        generated.ranks,
+                    )
+                }
+                if sampled
+                else {}
+            ),
+            replay_logprobs=frozenset({"request"}) if sampled else frozenset(),
+            replay_prompt_logprobs=frozenset({"request"}),
+        )
+
+    first = worker._commit_output(pending(sampled=1))["request"]
+    second = worker._commit_output(pending(sampled=0))["request"]
+    assert first.prompt_logprobs is not None
+    assert second.prompt_logprobs is None
+    worker.close()
+
+
+def test_worker_defers_prompt_artifact_until_visible_output_step():
+    worker = _make_logprob_worker()
+    worker._requests["request"] = _WorkerRequestState(prompt_len=5)
+    prompt = _logprob_rows(1, 4)
+    prompt_tensors = LogprobsTensors(
+        torch.from_numpy(prompt.token_ids),
+        torch.from_numpy(prompt.values),
+        torch.from_numpy(prompt.ranks),
+    )
+
+    def pending(*, sampled: int, prompt_rows=None):
+        return PendingAuxOutput(
+            connector=worker,
+            request_ids=["request"],
+            batch_indices=np.array([0], dtype=np.int32),
+            token_starts=np.array(
+                [0 if prompt_rows is not None else 5], dtype=np.int32
+            ),
+            query_start_loc=np.array(
+                [0, 5 if prompt_rows is not None else 1], dtype=np.int32
+            ),
+            routed_experts_gpu=None,
+            num_sampled=np.array([sampled], dtype=np.int32),
+            num_rejected=np.array([0], dtype=np.int32),
+            prompt_logprobs=(
+                {"request": prompt_rows} if prompt_rows is not None else {}
+            ),
+            replay_prompt_logprobs=frozenset({"request"}),
+        )
+
+    prefill = worker._commit_output(
+        pending(sampled=0, prompt_rows=prompt_tensors)
+    )["request"]
+    assert prefill.prompt_logprobs is None
+
+    # The request can finish on the first decode step without returning a
+    # sampled token; the prompt artifact must still be delivered there.
+    decode = worker._commit_output(pending(sampled=0))["request"]
+    assert decode.prompt_logprobs is not None
+    np.testing.assert_array_equal(
+        decode.prompt_logprobs.logprob_token_ids.numpy(), prompt.token_ids
+    )
+    worker.close()
+
+
+def test_worker_reports_missing_prompt_positions_as_ranges():
+    worker = _make_logprob_worker()
+    worker._requests["request"] = _WorkerRequestState(prompt_len=8)
+    partial = _logprob_rows(1, 2)
+    prompt_tensors = LogprobsTensors(
+        torch.from_numpy(partial.token_ids),
+        torch.from_numpy(partial.values),
+        torch.from_numpy(partial.ranks),
+    )
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([0], dtype=np.int32),
+        query_start_loc=np.array([0, 8], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        prompt_logprobs={"request": prompt_tensors},
+        replay_prompt_logprobs=frozenset({"request"}),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"missing_positions=1-5",
+    ):
+        worker._commit_output(pending)
+    worker.close()
+
+
+def test_worker_reports_missing_generated_logprob_row():
+    worker = _make_logprob_worker()
+    state = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    state.logprob_keys = ["block"]
+    worker._requests["request"] = state
+    worker._logprob_store.put(
+        [BlockObject("block", encode_rows(_logprob_rows(_BLOCK_SIZE + 1, 1)))]
+    )
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([_BLOCK_SIZE - 1], dtype=np.int32),
+        query_start_loc=np.array([0, 1], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        replay_logprobs=frozenset({"request"}),
+    )
+
+    with pytest.raises(RuntimeError, match="missing sampled position"):
+        worker._commit_output(pending)
+    worker.close()
+
+
+def test_worker_preserves_all_generated_logprob_rows_for_multiple_samples():
+    worker = _make_logprob_worker()
+    worker._requests["request"] = _WorkerRequestState(prompt_len=_BLOCK_SIZE)
+    sampled = _logprob_rows(_BLOCK_SIZE + 1, 2)
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request"],
+        batch_indices=np.array([0], dtype=np.int32),
+        token_starts=np.array([_BLOCK_SIZE], dtype=np.int32),
+        query_start_loc=np.array([0, 2], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([2], dtype=np.int32),
+        num_rejected=np.array([0], dtype=np.int32),
+        logprobs={
+            "request": LogprobsLists(
+                sampled.token_ids,
+                sampled.values,
+                sampled.ranks,
+            )
+        },
+        replay_logprobs=frozenset({"request"}),
+    )
+
+    output = worker._commit_output(pending)["request"]
+
+    assert output.logprobs is not None
+    np.testing.assert_array_equal(output.logprobs.logprob_token_ids, sampled.token_ids)
+    worker.close()
+
+
+def test_worker_handles_fanned_out_n_requests_independently():
+    worker = _make_logprob_worker()
+    worker._requests = {
+        "request-0": _WorkerRequestState(prompt_len=_BLOCK_SIZE),
+        "request-1": _WorkerRequestState(prompt_len=_BLOCK_SIZE),
+    }
+    rows = {
+        request_id: _logprob_rows(_BLOCK_SIZE + 1 + index, 1)
+        for index, request_id in enumerate(("request-0", "request-1"))
+    }
+    pending = PendingAuxOutput(
+        connector=worker,
+        request_ids=["request-0", "request-1"],
+        batch_indices=np.array([0, 1], dtype=np.int32),
+        token_starts=np.array([_BLOCK_SIZE, _BLOCK_SIZE], dtype=np.int32),
+        query_start_loc=np.array([0, 1, 2], dtype=np.int32),
+        routed_experts_gpu=None,
+        num_sampled=np.array([1, 1], dtype=np.int32),
+        num_rejected=np.array([0, 0], dtype=np.int32),
+        logprobs={
+            request_id: LogprobsLists(value.token_ids, value.values, value.ranks)
+            for request_id, value in rows.items()
+        },
+        replay_logprobs=frozenset(rows),
+    )
+
+    outputs = worker._commit_output(pending)
+
+    for request_id, expected in rows.items():
+        assert outputs[request_id].logprobs is not None
+        np.testing.assert_array_equal(
+            outputs[request_id].logprobs.logprob_token_ids, expected.token_ids
+        )
+    worker.close()
+
+
+def test_worker_resets_prompt_artifact_when_streaming_prompt_grows():
+    worker = _make_logprob_worker()
+    state = _WorkerRequestState(
+        prompt_len=4,
+        prompt_replay_prefix=0,
+        prompt_logprobs_artifact=LogprobsTensors(
+            torch.empty((1, 2), dtype=torch.int32),
+            torch.empty((1, 2), dtype=torch.float32),
+            torch.empty(1, dtype=torch.int32),
+        ),
+    )
+    worker._requests["session"] = state
+    worker.begin_step(
+        AuxOutputConnectorMetadata(
+            generation=0,
+            requests={"session": 0},
+            block_hashes={},
+            finished_requests=(),
+            prompt_lens={"session": 8},
+        )
+    )
+
+    assert state.prompt_logprobs_artifact is None
+    assert state.prompt_replay_prefix is None
+    assert state.prompt_len == 8
     worker.close()
 
 
@@ -1957,7 +2226,7 @@ def test_scheduler_rejects_missing_prompt_logprob_artifact():
         prompt_logprob_token_ids=None,
     )
 
-    with pytest.raises(AssertionError, match="prompt logprobs artifact is missing"):
+    with pytest.raises(RuntimeError, match="prompt logprobs artifact is missing"):
         connector.take_prompt_logprobs(
             request, {request.request_id: AuxRequestOutput(0)}
         )
@@ -1991,6 +2260,8 @@ def test_prompt_logprob_delivery_latch_follows_request_lifetime():
 
     assert connector.take_prompt_logprobs(first, output) is artifact
     assert connector.take_prompt_logprobs(first, None) is None
+    connector.release_request(first)
+    assert connector.take_prompt_logprobs(first, output) is artifact
 
     del first
     gc.collect()
@@ -2343,7 +2614,7 @@ def test_scheduler_rejects_stale_output_without_aux_outputs():
     )
 
     with pytest.raises(
-        AssertionError, match="auxiliary output worker output is missing"
+        RuntimeError, match="auxiliary output worker output is missing"
     ):
         connector.take_output(
             request,
@@ -2365,7 +2636,7 @@ def test_scheduler_rejects_missing_accepted_aux_output_rows():
         )
     }
 
-    with pytest.raises(AssertionError, match="invalid token range"):
+    with pytest.raises(RuntimeError, match="invalid token range"):
         connector.take_output(request, output)
 
 
@@ -2385,7 +2656,7 @@ def test_scheduler_rejects_aux_output_past_finished_request():
     }
 
     with pytest.raises(
-        AssertionError, match="finished auxiliary output output has no accepted"
+        RuntimeError, match="finished auxiliary output has no accepted"
     ):
         connector.take_output(request, output)
 
