@@ -597,7 +597,7 @@ class CohereServingChatV2(OpenAIServingChat):
             json_schema=(
                 JsonSchemaResponseFormat(
                     name="cohere_v2_json_schema",
-                    json_schema=rf.json_schema,
+                    schema=rf.json_schema,
                 )
                 if rf.json_schema
                 else None
