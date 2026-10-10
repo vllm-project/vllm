@@ -620,6 +620,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        # With --api-server-count > 1, a "mostrecent" gauge that was never set
+        # has no sample, so start the scheduler-state gauges at 0.
+        for engine_idx in engine_indexes:
+            self.gauge_scheduler_running[engine_idx].set(0)
+            self.gauge_scheduler_waiting[engine_idx].set(0)
+            self.gauge_kv_cache_usage[engine_idx].set(0)
+            for gauges in (
+                *self.gauge_waiting_by_reason.values(),
+                *self.gauge_kv_fetch_by_stage.values(),
+            ):
+                gauges[engine_idx].set(0)
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
