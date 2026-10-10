@@ -118,7 +118,8 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     int64_t threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
     int64_t real_num_chunks = ((blockid + 1) * num_chunks) > total_num_chunks ? (total_num_chunks - (blockid * num_chunks)) : num_chunks;
-    int64_t diff_num_chunks = real_num_chunks - num_chunks;
+    // Non-negative: a negative index misses every case in the switch below.
+    int64_t diff_num_chunks = llabs(real_num_chunks - num_chunks);
 
     b32* a_start_ptr = (b32*) (a + blockid * num_chunks * 256); // offset a to where this warp starts
     b32* out_start_ptr = (b32*) (out + blockid * num_chunks * 256);
@@ -135,6 +136,11 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
 
     #pragma unroll
     for (int64_t k = 0; k < num_chunks; k++) {
+        if constexpr(enable_mask) {
+            // Prefetching these would read past the end of the tensor.
+            if (k >= real_num_chunks)
+                break;
+        }
         size_t shared_ptr = __cvta_generic_to_shared(b_frag_ptr);
         #if (__CUDA_ARCH__ >= 900) // SM90
             asm volatile(
@@ -350,6 +356,8 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                 #define SWITCH_WAIT_ASYNC_LOAD_GROUP(i) case i: asm volatile("cp.async.wait_group %0;\n" :: "n"(num_chunks - i - 1)); break;
                 if constexpr(enable_mask) {
                     switch(k + diff_num_chunks) {
+                        // An unmatched index must not skip the barrier.
+                        default: asm volatile("cp.async.wait_group 0;\n"); break;
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(0)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(1)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(2)
