@@ -7,8 +7,8 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use thiserror_ext::AsReport;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
-use zeromq::prelude::SocketSend;
-use zeromq::{XPubSocket, ZmqMessage};
+use zeromq::prelude::{SocketRecv, SocketSend};
+use zeromq::{XPubSocket, ZmqError, ZmqMessage};
 
 use crate::client::imp::ClientInner;
 use crate::coordinator::handle::{CoordinatorCommand, CoordinatorState};
@@ -187,6 +187,32 @@ impl InProcCoordinatorRunner {
         let result: Result<()> = async {
             loop {
                 tokio::select! {
+                    // XPUB applies subscription changes only when they are received.
+                    subscription = self.coordinator_input.recv() => {
+                        match subscription {
+                            Ok(message) => {
+                                let is_subscribe_all = message.len() == 1
+                                    && message.get(0).is_some_and(|frame| frame.as_ref() == [0x01]);
+                                if is_subscribe_all {
+                                    let state = *self.state.lock();
+                                    if state.engines_running {
+                                        debug!(
+                                            current_wave = state.current_wave,
+                                            "replaying active DP wave after engine subscription"
+                                        );
+                                        self.broadcast_start_wave(state.current_wave, None).await?;
+                                    }
+                                }
+                            }
+                            Err(error @ (ZmqError::Codec(_) | ZmqError::Network(_))) => {
+                                warn!(
+                                    error = %error,
+                                    "coordinator subscription peer disconnected"
+                                );
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                     // Received frontend-originated command from the handle.
                     command = self.command_rx.recv() => {
                         let Some(command) = command else {
