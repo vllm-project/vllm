@@ -1288,6 +1288,18 @@ class Platform:
     ) -> None:
         """Raises if this request is unsupported on this platform."""
 
+    @classmethod
+    def supports_per_request_spec_decode_fallback(cls) -> bool:
+        """Whether incompatible speculative requests can use ordinary decode.
+
+        Most speculative backends apply one execution policy to the whole
+        engine, so the generic sampling validator must reject controls that
+        their speculative acceptor cannot honor. A lane-aware backend may
+        override this when it can pin such requests to a non-speculative lane
+        for their entire lifetime.
+        """
+        return False
+
     def __getattr__(self, key: str):
         # Pickle checks dunder methods like __getstate__. If we return None
         # for them, pickle treats it like a real value and tries to call it.

@@ -1188,6 +1188,10 @@ class SamplingParams(
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
+            from vllm.platforms import current_platform
+
+            if current_platform.supports_per_request_spec_decode_fallback():
+                return
             raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
