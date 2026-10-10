@@ -3231,7 +3231,15 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            if req_id not in self.requests:
+                # A timed-out request may be removed before its asynchronous
+                # Mooncake cleanup reports completion. The notification is
+                # stale and there are no scheduler-owned blocks to release.
+                logger.debug(
+                    "Ignoring stale finished recving notification for request %s",
+                    req_id,
+                )
+                continue
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
@@ -3241,7 +3249,15 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            if req_id not in self.requests:
+                # The producer can finish after the request was cancelled or
+                # timed out on the consumer. Its blocks are already handled
+                # by request cleanup, so this completion is safe to ignore.
+                logger.debug(
+                    "Ignoring stale finished sending notification for request %s",
+                    req_id,
+                )
+                continue
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(

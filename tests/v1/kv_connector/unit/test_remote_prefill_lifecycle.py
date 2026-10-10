@@ -128,6 +128,7 @@ def test_basic_lifecycle():
     ].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
+
         num_hashed_blocks += 1 if block._block_hash is not None else 0
     assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
@@ -156,6 +157,18 @@ def test_basic_lifecycle():
     output = outputs[0]
     assert output.finish_reason == FinishReason.STOP
     assert_scheduler_empty(scheduler)
+
+
+def test_stale_kv_completion_after_request_removal_is_ignored():
+    """Late Mooncake cleanup must not crash the scheduler."""
+    scheduler = create_scheduler(create_vllm_config())
+
+    scheduler._update_from_kv_xfer_finished(
+        KVConnectorOutput(
+            finished_recving={"timed-out-request"},
+            finished_sending={"timed-out-request"},
+        )
+    )
 
 
 def test_interleaved_lifecycle():
