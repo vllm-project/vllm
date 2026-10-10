@@ -242,7 +242,10 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
     events = []
     captured_attn = {"layer": object()}
     proposer._graph_attn_metadata = {desc: captured_attn}
-    group = Mock()
+    group = Mock(kv_cache_group_id=0)
+    group.map_to_kernel_block_table.side_effect = lambda table: events.append(
+        ("map", table)
+    )
     group.update_draft_decode_metadata.side_effect = lambda metadata: events.append(
         ("refresh", metadata)
     )
@@ -272,12 +275,18 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
     assert events[0] == ("lora", (3, 8))
     assert events[-1] == ("lora", None)
     if full_graph:
-        assert events[1:3] == [("refresh", captured_attn), ("replay", None)]
+        # Since #57169 a backend with smaller kernel blocks reads a persistent
+        # kernel block table that only a metadata build maps; a replay that
+        # skips the build must map this step's table before it runs.
+        assert events[1][0] == "map"
+        assert events[1][1] is proposer.block_tables.input_block_tables[0]
+        assert events[2:4] == [("refresh", captured_attn), ("replay", None)]
         proposer._build_uniform_attn_metadata.assert_not_called()
         slot_builder.assert_not_called()
         proposer._generate_draft.assert_not_called()
         assert proposer.num_graph_replays == 1
     else:
+        group.map_to_kernel_block_table.assert_not_called()
         group.update_draft_decode_metadata.assert_not_called()
         proposer.cudagraph_manager.run_fullgraph.assert_not_called()
         proposer._build_uniform_attn_metadata.assert_called_once()
@@ -458,7 +467,7 @@ def _cpu_uno_proposer(
     proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})  # type: ignore[method-assign]
     proposer._generate_draft = Mock()  # type: ignore[method-assign]
     proposer.set_lora_hook(lambda mapping: None)
-    proposer.attn_groups = [[Mock()]]
+    proposer.attn_groups = [[Mock(kv_cache_group_id=0)]]
     return proposer
 
 

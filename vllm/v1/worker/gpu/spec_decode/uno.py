@@ -930,10 +930,18 @@ class UnoSpeculator(DraftModelSpeculator):
                 # The graph already owns the metadata and slot-buffer views.
                 # Refresh native backend scheduling state (needed by FA3) using
                 # the updated persistent input buffers, without rebuilding the
-                # eager metadata or its temporary CPU tensors.
+                # eager metadata or its temporary CPU tensors. A backend with
+                # smaller kernel blocks reads its own persistent kernel block
+                # table, which only a metadata build refreshes, so map this
+                # step's block tables into it first.
                 captured_attn = self._graph_attn_metadata[desc]
                 for attn_groups in self.attn_groups:
                     for attn_group in attn_groups:
+                        attn_group.map_to_kernel_block_table(
+                            self.block_tables.input_block_tables[
+                                attn_group.kv_cache_group_id
+                            ]
+                        )
                         attn_group.update_draft_decode_metadata(captured_attn)
                 self.cudagraph_manager.run_fullgraph(desc)
                 if dummy_run or is_profile:
