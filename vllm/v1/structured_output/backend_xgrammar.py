@@ -86,15 +86,16 @@ class XgrammarBackend(StructuredOutputBackend):
     def _resolve_whitespace(self) -> tuple[bool, int | None]:
         """Resolve whitespace parameters for xgrammar.
 
-        disable_any_whitespace=True is syntactic sugar for max_whitespace_cnt=0,
-        so both parameters can be unified here.
+        When whitespace is disabled, xgrammar already enforces that through
+        ``any_whitespace=False``. Its ``max_whitespace_cnt`` parameter must be
+        positive when set, so leave it unset in that case.
 
         Returns:
             (any_whitespace, max_whitespace_cnt)
 
         """
         if self.disable_any_whitespace:
-            return False, 0
+            return False, None
         return True, self.max_whitespace_cnt
 
     def compile_grammar(
