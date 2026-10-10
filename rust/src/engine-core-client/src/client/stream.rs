@@ -5,8 +5,9 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures::Stream;
 use futures::stream::FusedStream;
+use futures::{Stream, StreamExt as _};
+use itertools::Either;
 use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
@@ -37,6 +38,68 @@ impl Deref for EngineCoreStreamOutput {
 
     fn deref(&self) -> &Self::Target {
         &self.output
+    }
+}
+
+/// Consecutive outputs of one request, delivered to its stream together and in
+/// order. Outputs are grouped by the request's `stream_interval` (see
+/// [`EngineCoreClient::call`]) but not merged; consumers merge them after
+/// observing each raw output.
+///
+/// [`EngineCoreClient::call`]: crate::EngineCoreClient::call
+#[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "single outputs stay inline, avoiding an allocation per engine step"
+)]
+pub enum EngineCoreStreamDelivery {
+    /// A single output, sent without being held back.
+    One(EngineCoreStreamOutput),
+    /// Outputs held back by the stream interval, in order. Never empty.
+    Many(Vec<EngineCoreStreamOutput>),
+}
+
+impl EngineCoreStreamDelivery {
+    /// Return the first output.
+    pub fn first(&self) -> &EngineCoreStreamOutput {
+        match self {
+            Self::One(output) => output,
+            Self::Many(outputs) => outputs.first().expect("deliveries are never empty"),
+        }
+    }
+
+    /// Return the last output, the only one that can be terminal.
+    pub fn last(&self) -> &EngineCoreStreamOutput {
+        match self {
+            Self::One(output) => output,
+            Self::Many(outputs) => outputs.last().expect("deliveries are never empty"),
+        }
+    }
+
+    /// Iterate over the outputs in order.
+    pub fn iter(
+        &self,
+    ) -> Either<
+        std::iter::Once<&EngineCoreStreamOutput>,
+        std::slice::Iter<'_, EngineCoreStreamOutput>,
+    > {
+        match self {
+            Self::One(output) => Either::Left(std::iter::once(output)),
+            Self::Many(outputs) => Either::Right(outputs.iter()),
+        }
+    }
+}
+
+impl IntoIterator for EngineCoreStreamDelivery {
+    type Item = EngineCoreStreamOutput;
+    type IntoIter =
+        Either<std::iter::Once<EngineCoreStreamOutput>, std::vec::IntoIter<EngineCoreStreamOutput>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::One(output) => Either::Left(std::iter::once(output)),
+            Self::Many(outputs) => Either::Right(outputs.into_iter()),
+        }
     }
 }
 
@@ -79,10 +142,21 @@ impl EngineCoreOutputStream {
     pub fn engine_index(&self) -> u32 {
         self.engine_index
     }
+
+    /// Flatten the stream into one item per raw output, for consumers that do
+    /// not care how outputs are grouped into deliveries.
+    pub fn into_outputs(self) -> impl Stream<Item = Result<EngineCoreStreamOutput>> + Send + Unpin {
+        self.flat_map(|item| {
+            futures::stream::iter(match item {
+                Ok(delivery) => Either::Left(delivery.into_iter().map(Ok)),
+                Err(error) => Either::Right(std::iter::once(Err(error))),
+            })
+        })
+    }
 }
 
 impl Stream for EngineCoreOutputStream {
-    type Item = Result<EngineCoreStreamOutput>;
+    type Item = Result<EngineCoreStreamDelivery>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.is_terminated() {
@@ -93,10 +167,11 @@ impl Stream for EngineCoreOutputStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(item)) => {
                 match &item {
-                    Ok(output) => {
+                    Ok(delivery) => {
                         // If the output indicates the request is finished, mark the stream as
                         // terminated with cleanly-finished state and expect no more outputs to
-                        // come.
+                        // come. Only the last output of a delivery can be terminal.
+                        let output = delivery.last();
                         if output.finished() {
                             if output.finish_reason == Some(EngineCoreFinishReason::Error) {
                                 error!(
