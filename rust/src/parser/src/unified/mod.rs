@@ -15,7 +15,7 @@ pub use gemma4::Gemma4UnifiedParser;
 pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
-pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
+pub use kimi_k3::KimiK3UnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
