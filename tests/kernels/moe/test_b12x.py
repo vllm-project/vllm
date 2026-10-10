@@ -35,7 +35,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
-    select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -458,7 +457,9 @@ def test_deepseek_v4_b12x_activation_selection(
     config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
     config.moe_backend = "b12x"
 
-    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    backend, experts_cls = select_mxfp4_moe_backend(
+        config, use_deepseek_v4_priority=True
+    )
 
     assert backend == expected_backend
     assert experts_cls is B12xExperts
@@ -487,7 +488,9 @@ def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
     config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
     config.moe_backend = "flashinfer_cutlass"
 
-    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    backend, experts_cls = select_mxfp4_moe_backend(
+        config, use_deepseek_v4_priority=True
+    )
 
     assert backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8
     assert experts_cls is FlashInferExperts

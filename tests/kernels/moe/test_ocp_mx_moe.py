@@ -241,8 +241,16 @@ def reference_moe(
         t = swiglu(
             t, alpha=alpha, beta=beta, limit=limit, interleaved=use_interleaved_layout
         )
+    elif activation == "gelu":
+        gate, up = torch.chunk(t, 2, dim=-1)
+        gate = torch.nn.functional.gelu(gate)
+        t = gate * up
+    elif activation == "situ":
+        gate, up = torch.chunk(t, 2, dim=-1)
+        situ_beta = alpha  # reuse alpha param for situ_beta
+        gate_out = situ_beta * torch.tanh(gate / situ_beta) / (1.0 + torch.exp(-gate))
+        t = gate_out * up
     elif activation == "relu2":
-        # RELU2_NO_MUL: relu(x)^2
         t = torch.relu(t)
         t = t * t
     else:
@@ -1538,12 +1546,36 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": False,
         "requires_gfx950": False,
     },
+    "TRITON_UNFUSED__SILU": {
+        "activation": "SILU",
+        "rtol": 0.3,
+        "percent": 0.95,
+        "requires_aiter": False,
+        "requires_gfx950": False,
+        "backend_override": "TRITON_UNFUSED",
+    },
+    "TRITON_UNFUSED__SWIGLUOAI_UNINTERLEAVE": {
+        "activation": "SWIGLUOAI_UNINTERLEAVE",
+        "rtol": 0.5,
+        "percent": 0.8,
+        "requires_aiter": False,
+        "requires_gfx950": False,
+        "backend_override": "TRITON_UNFUSED",
+    },
     "AITER_MXFP4_BF16": {
         "activation": "SWIGLUOAI",
+        "rtol": 0.1,
+        "percent": 0.6,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
+    "AITER_MXFP4_BF16__SILU": {
+        "activation": "SILU",
         "rtol": 0.1,
         "percent": 0.7,
         "requires_aiter": True,
         "requires_gfx950": True,
+        "backend_override": "AITER_MXFP4_BF16",
     },
     "AITER_TRITON_MXFP4_BF16": {
         "activation": "SILU",
@@ -1551,8 +1583,34 @@ ROCM_BACKEND_CONFIGS = {
         "percent": 0.95,
         "requires_aiter": True,
         "requires_gfx950": False,
-        "interleaved_layout": True,
     },
+    "AITER_MXFP4_BF16__GELU": {
+        "activation": "GELU",
+        "rtol": 0.1,
+        "percent": 0.7,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+        "backend_override": "AITER_MXFP4_BF16",
+    },
+    "AITER_MXFP4_BF16__SWIGLUOAI_UNINTERLEAVE": {
+        "activation": "SWIGLUOAI_UNINTERLEAVE",
+        "rtol": 0.1,
+        "percent": 0.6,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+        "backend_override": "AITER_MXFP4_BF16",
+    },
+    # SITU: AITER doesn't register situ activation type yet
+    # (get_aiter_activation_type("situ") returns None on gfx950).
+    # Uncomment once AITER adds SITU support.
+    # "AITER_MXFP4_BF16__SITU": {
+    #     "activation": "SITU",
+    #     "rtol": 0.1,
+    #     "percent": 0.7,
+    #     "requires_aiter": True,
+    #     "requires_gfx950": True,
+    #     "backend_override": "AITER_MXFP4_BF16",
+    # },
     "AITER_MXFP4_FP8": {
         "activation": "SWIGLUOAI",
         "rtol": 0.5,
@@ -1561,12 +1619,37 @@ ROCM_BACKEND_CONFIGS = {
         "requires_gfx950": True,
     },
     "AITER_MXFP4_MXFP4": {
+        "activation": "SWIGLUOAI",
+        "rtol": 1.0,
+        "percent": 0.55,
+        "cosine_threshold": 0.6,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
+    "AITER_MXFP4_MXFP4__SILU": {
         "activation": "SILU",
         "act_type": "mxfp4",
         "rtol": 1.0,
         "percent": 0.8,
         "requires_aiter": True,
         "requires_gfx950": True,
+        "backend_override": "AITER_MXFP4_MXFP4",
+    },
+    "EMULATION": {
+        "activation": "SWIGLUOAI",
+        "rtol": 0.5,
+        "percent": 0.6,
+        "requires_aiter": False,
+        "requires_gfx950": False,
+    },
+    "EMULATION__SILU": {
+        "activation": "SILU",
+        "rtol": 0.5,
+        "percent": 0.5,
+        "cosine_threshold": 0.85,
+        "requires_aiter": False,
+        "requires_gfx950": False,
+        "backend_override": "EMULATION",
     },
 }
 
@@ -1592,8 +1675,8 @@ def test_rocm_mxfp4_moe_oracle(
     """Test ROCm MXFP4 MoE using oracle functions.
 
     This test validates that the oracle functions work end-to-end:
-    - select_mxfp4_moe_backend() selects a valid backend
-    - convert_gpt_oss_weight_to_mxfp4_moe_kernel_format() converts weights without error
+    - convert_weight_to_mxfp4_moe_kernel_format() converts weights correctly,
+      for interleaved (GPT-OSS, SWIGLUOAI) and contiguous w13 checkpoints
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1613,8 +1696,9 @@ def test_rocm_mxfp4_moe_oracle(
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
+        _interleave_w13,
         backend_to_kernel_cls,
-        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        convert_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
     )
@@ -1629,13 +1713,14 @@ def test_rocm_mxfp4_moe_oracle(
     # AITER must be enabled or aiter_mxfp4_w4a8_moe asserts before dispatch.
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
 
-    # Map string to enum
-    backend = Mxfp4MoeBackend[backend_name]
+    # Map string to enum (handle backend_override for activation variants)
+    actual_backend_name = config.get("backend_override", backend_name)
+    backend = Mxfp4MoeBackend[actual_backend_name]
 
     # Get experts class from oracle
     experts_cls_list = backend_to_kernel_cls(backend)
     if experts_cls_list is None or len(experts_cls_list) == 0:
-        pytest.skip(f"Backend {backend_name} not available")
+        pytest.skip(f"Backend {actual_backend_name} not available")
 
     # Use first experts class
     experts_cls = experts_cls_list[0]
@@ -1703,10 +1788,24 @@ def test_rocm_mxfp4_moe_oracle(
     # Create static input scales for W4A8 backend (AITER_MXFP4_FP8)
     w13_input_scale: torch.Tensor | None = None
     w2_input_scale: torch.Tensor | None = None
-    if backend_name == "AITER_MXFP4_FP8":
+    if actual_backend_name == "AITER_MXFP4_FP8":
         # Static FP8 scales: one scale per expert
         w13_input_scale = torch.ones(num_experts, dtype=torch.float32, device=device)
         w2_input_scale = torch.ones(num_experts, dtype=torch.float32, device=device)
+
+    # Select activation based on backend config
+    activation_name = str(config["activation"])
+    activation = MoEActivation[activation_name]
+
+    # Save contiguous bias refs before potential interleaving
+    w13_bias_ref = w13_bias.clone()
+    w2_bias_ref = w2_bias.clone()
+
+    # SWIGLUOAI models (GPT-OSS) ship gate/up interleaved w13; others are
+    # contiguous. The reference always uses the contiguous weights.
+    is_w13_interleaved = activation == MoEActivation.SWIGLUOAI
+    if is_w13_interleaved:
+        w13_quant, w13_scale, w13_bias = _interleave_w13(w13_quant, w13_scale, w13_bias)
 
     # Create mock layer for oracle functions
     class MockLayer:
@@ -1716,6 +1815,7 @@ def test_rocm_mxfp4_moe_oracle(
         w2_weight_scale: torch.Tensor
         w13_input_scale: torch.Tensor | None
         w2_input_scale: torch.Tensor | None
+        activation: MoEActivation
 
     layer = MockLayer()
     layer.w13_weight = w13_quant
@@ -1724,10 +1824,11 @@ def test_rocm_mxfp4_moe_oracle(
     layer.w2_weight_scale = w2_scale
     layer.w13_input_scale = w13_input_scale
     layer.w2_input_scale = w2_input_scale
+    layer.activation = activation
 
     # Convert weights using oracle
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
-        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+        convert_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
             layer=layer,
             w13_weight=w13_quant,
@@ -1736,10 +1837,15 @@ def test_rocm_mxfp4_moe_oracle(
             w2_weight_scale=w2_scale,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
+            is_w13_interleaved=is_w13_interleaved,
         )
     )
 
     # Build quant config using oracle
+    is_swigluoai_family = activation in (
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    )
     quant_config = make_mxfp4_moe_quant_config(
         mxfp4_backend=backend,
         w1_scale=w13_scale_conv,
@@ -1748,11 +1854,8 @@ def test_rocm_mxfp4_moe_oracle(
         w2_bias=w2_bias_conv,
         a1_scale=w13_input_scale,
         a2_scale=w2_input_scale,
+        swiglu_limit=7.0 if is_swigluoai_family else None,
     )
-
-    # Select activation based on backend
-    activation_name = str(config["activation"])
-    activation = MoEActivation[activation_name]
 
     # Build kernel using oracle
     assert quant_config is not None, "Failed to create quant config"
@@ -1813,16 +1916,20 @@ def test_rocm_mxfp4_moe_oracle(
     w13_dq = mxfp4_dequantize(w13_quant_ref.view(torch.uint8), w13_scale_ref)
     w2_dq = mxfp4_dequantize(w2_quant_ref.view(torch.uint8), w2_scale_ref)
 
-    # Determine activation type and layout
-    # SWIGLUOAI uses interleaved layout (gate/up alternating)
-    # SILU uses chunked layout (first half gate, second half up)
-    use_interleaved = bool(
-        config.get("interleaved_layout", activation == MoEActivation.SWIGLUOAI)
-    )
-    if activation in [MoEActivation.SWIGLUOAI, MoEActivation.SILU]:
-        act_name = "swiglu"
-    else:
-        act_name = "relu2"
+    # # The reference always uses contiguous w13 (the saved ref weights are
+    # # contiguous). For SWIGLUOAI the reference uses interleaved layout in
+    # # the activation; for all others it uses chunked (contiguous) layout.
+    # use_interleaved = activation == MoEActivation.SWIGLUOAI
+
+    # Map MoEActivation to reference_moe activation name and parameters.
+    _ACT_TO_REF = {
+        MoEActivation.SWIGLUOAI: ("swiglu", 1.702, 1.0, 7.0),
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ("swiglu", 1.702, 1.0, 7.0),
+        MoEActivation.SILU: ("swiglu", 1.0, 0.0, None),
+        MoEActivation.GELU: ("gelu", 1.0, 0.0, None),
+        MoEActivation.SITU: ("situ", 1.0, 0.0, None),
+    }
+    ref_act, ref_alpha, ref_beta, ref_limit = _ACT_TO_REF[activation]
 
     ref = reference_moe(
         router_logits,
@@ -1830,15 +1937,15 @@ def test_rocm_mxfp4_moe_oracle(
         num_experts,
         x.to(torch.float32),
         w13_dq.to(torch.float32),
-        w13_bias.to(torch.float32),
+        w13_bias_ref.to(torch.float32),
         w2_dq.to(torch.float32),
-        w2_bias.to(torch.float32),
-        alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
-        beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
-        limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
+        w2_bias_ref.to(torch.float32),
+        alpha=ref_alpha,
+        beta=ref_beta,
+        limit=ref_limit,
         act_type=str(config.get("act_type", "bf16")),
-        activation=act_name,
-        use_interleaved_layout=use_interleaved,
+        activation=ref_act,
+        use_interleaved_layout=False,  # reference always use contiguous layout
     )
 
     # Compute and print accuracy statistics
@@ -1865,6 +1972,25 @@ def test_rocm_mxfp4_moe_oracle(
     for rtol in [0.1, 0.5, 1.0, 2.0]:
         within_tol = (diff <= rtol * out.float().abs()).float().mean()
         print(f"  Within rtol={rtol}: {within_tol * 100:.1f}%")
+
+    # Cosine similarity
+    ref_flat = ref.float().flatten()
+    out_flat = out.float().flatten()
+    cosine_sim = torch.nn.functional.cosine_similarity(
+        ref_flat.unsqueeze(0), out_flat.unsqueeze(0)
+    ).item()
+    norm_ratio = out_flat.norm() / (ref_flat.norm() + 1e-6)
+    print(f"  Cosine similarity: {cosine_sim:.6f}")
+    print(f"  Norm ratio (out/ref): {norm_ratio:.4f}")
+
+    cosine_threshold = config.get("cosine_threshold", 0.9)
+    assert cosine_sim > cosine_threshold, (
+        f"Cosine similarity {cosine_sim:.4f} < {cosine_threshold} — likely a "
+        f"layout or correctness bug, not just quantization noise"
+    )
+    assert 0.5 < norm_ratio < 2.0, (
+        f"Norm ratio {norm_ratio:.4f} outside [0.5, 2.0] — magnitude error"
+    )
 
     # Check accuracy using per-backend thresholds
     check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
