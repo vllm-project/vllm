@@ -123,10 +123,9 @@ class LlamaMLP(nn.Module):
     def forward(self, x, tpsp_active: bool = False):
         x, _ = self.gate_up_proj(x)
         x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
-        if tpsp_active:
-            # TPSP fuses down_proj with the following residual/norm step.
-            return x
-        x, _ = self.down_proj(x)
+        # TPSP fuses down_proj with the following residual/norm step.
+        if not tpsp_active:
+            x, _ = self.down_proj(x)
         return x
 
 
@@ -239,11 +238,10 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        if tpsp_active:
-            # TPSP fuses o_proj with the following residual/norm step.
-            return attn_output
-        output, _ = self.o_proj(attn_output)
-        return output
+        # TPSP fuses o_proj with the following residual/norm step.
+        if not tpsp_active:
+            attn_output, _ = self.o_proj(attn_output)
+        return attn_output
 
     def _init_rotary_emb(
         self,
@@ -450,11 +448,8 @@ class LlamaModel(nn.Module, EagleModelMixin):
         if not self.tpsp_requested or self.tpsp_context is not None:
             return
 
-        backend_cls = current_platform.get_tpsp_backend_cls()
-        if backend_cls is None:
-            logger.warning(
-                "TPSP using regular forward: no fused backend on this device"
-            )
+        if (backend_cls := current_platform.get_tpsp_backend_cls()) is None:
+            logger.warning("TPSP using regular forward: no fused backend")
             self.tpsp_requested = False
             return
 
