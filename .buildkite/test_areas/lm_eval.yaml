@@ -90,19 +90,6 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
 
-# - label: LM Eval Large Models (4xA100)
-#   key: lm-eval-large-models-4xa100
-#   device: a100
-#   optional: true
-#   num_devices: 4
-#   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-#   source_file_dependencies:
-#   - csrc/
-#   - vllm/model_executor/layers/quantization
-#   commands:
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
-
 - label: ":nvidia: (H100) LM Eval Large Models"
   key: lm-eval-large-models-4xh100
   device: h100
@@ -832,38 +819,6 @@ steps:
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-l4.txt
-
-- label: ":nvidia: (A100) LM Eval Humming Default TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-default
-  optional: true
-  timeout_in_minutes: 75
-  device: a100
-  num_devices: 1
-  parallelism: 3
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
-
-- label: ":nvidia: (A100) LM Eval Humming Activation INT8 TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-act
-  optional: true
-  timeout_in_minutes: 45
-  device: a100
-  num_devices: 1
-  parallelism: 2
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-act-int8-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
 - label: ":nvidia: (H100) LM Eval Humming Default TEMPORARY Shard %N"
   key: lm-eval-humming-h100-default
