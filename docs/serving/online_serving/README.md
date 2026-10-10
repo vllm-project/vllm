@@ -27,6 +27,11 @@ We currently support the following OpenAI APIs:
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
+Tool choices are validated against the tools available after applying
+`tool_addition` and `tool_removal` blocks. When no tools remain, the default and
+`auto` choices allow a text response. `any` requires at least one available tool,
+and `tool` must name an available tool; otherwise the request returns HTTP 400.
+
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)

@@ -42,6 +42,8 @@ from vllm.entrypoints.generate.base.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
@@ -2099,6 +2101,82 @@ class TestMidConversationToolChanges:
         assert "bash" not in self._convert_tools(removal)
         readded = self._convert_tools(removal, self._change("tool_addition", "bash"))
         assert list(readded) == ["bash", "search", "fetch"]
+
+    @pytest.mark.parametrize(
+        "request_cls", [AnthropicMessagesRequest, AnthropicCountTokensRequest]
+    )
+    @pytest.mark.parametrize("choice_type", [None, "auto", "none", "any", "tool"])
+    @pytest.mark.parametrize("remaining_tool", [False, True])
+    def test_tool_choice_uses_available_tools(
+        self, request_cls, choice_type, remaining_tool
+    ):
+        tools = [{"name": "bash", "input_schema": {}}]
+        if remaining_tool:
+            tools.append({"name": "search", "input_schema": {}})
+        tool_choice = {"type": choice_type} if choice_type else None
+        if choice_type == "tool":
+            assert tool_choice is not None
+            tool_choice["name"] = "bash"
+        request = request_cls(
+            model="test-model",
+            max_tokens=128,
+            messages=[
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [self._change("tool_removal", "bash")],
+                },
+            ],
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
+        if choice_type == "tool" or (choice_type == "any" and not remaining_tool):
+            with pytest.raises(VLLMValidationError, match="tool_choice"):
+                _convert(request)
+            return
+
+        result = _convert(request)
+        if remaining_tool:
+            assert result.tools is not None
+            assert [tool.function.name for tool in result.tools] == ["search"]
+            expected_choice = {None: "auto", "any": "required"}.get(
+                choice_type, choice_type
+            )
+            assert result.tool_choice == expected_choice
+        else:
+            assert result.tools is None
+            assert result.tool_choice == "none"
+        ChatCompletionRequest.model_validate(result.model_dump())
+
+    @pytest.mark.parametrize("choice_type", ["any", "tool"])
+    def test_readded_tool_can_be_required(self, choice_type):
+        tool_choice = {"type": choice_type}
+        if choice_type == "tool":
+            tool_choice["name"] = "bash"
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        self._change("tool_removal", "bash"),
+                        self._change("tool_addition", "bash"),
+                    ],
+                },
+            ],
+            tools=[{"name": "bash", "input_schema": {}}],
+            tool_choice=tool_choice,
+        )
+        result = _convert(request)
+        assert result.tools is not None
+        assert [tool.function.name for tool in result.tools] == ["bash"]
+        if choice_type == "any":
+            assert result.tool_choice == "required"
+        else:
+            assert isinstance(result.tool_choice, ChatCompletionNamedToolChoiceParam)
+            assert result.tool_choice.function.name == "bash"
+        ChatCompletionRequest.model_validate(result.model_dump())
 
     def test_addition_defines_tool_by_value(self):
         definition = {"name": "db_query", "input_schema": {}}

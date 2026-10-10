@@ -762,11 +762,9 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> None:
         """Convert Anthropic tools to OpenAI format."""
         anthropic_tools = cls._resolve_tools(anthropic_request)
-        if anthropic_tools is None:
-            return
 
         tools = []
-        for tool in anthropic_tools:
+        for tool in anthropic_tools or []:
             tools.append(
                 ChatCompletionToolsParam.model_validate(
                     {
@@ -782,9 +780,14 @@ class AnthropicServingMessages(OpenAIServingChat):
                 )
             )
 
-        if req.tool_choice is None:
+        if not tools and req.tool_choice in (None, "auto"):
+            req.tool_choice = "none"
+        elif req.tool_choice is None:
             req.tool_choice = "auto"
-        req.tools = tools
+        req.tools = tools or None
+        ChatCompletionRequest.check_tool_usage(  # type: ignore[operator]
+            req.model_dump(include={"tools", "tool_choice"})
+        )
 
     async def create_messages(
         self,
