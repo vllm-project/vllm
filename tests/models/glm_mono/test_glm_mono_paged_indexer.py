@@ -33,7 +33,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from aiter.jit.utils.chip_info import get_gfx_runtime
 
-from vllm.models.deepseek_v32.amd.mono import (
+from vllm.models.deepseek_v32.amd.ops.mono import (
     AttentionWeight,
     Glm5MonoKernel,
     KvCacheLayout,

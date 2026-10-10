@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import torch
 
-from vllm.models.deepseek_v32.amd.mono.config import (
+from vllm.models.deepseek_v32.amd.ops.mono.config import (
     GLM5_CONFIG,
     GLM5_KERNEL_SAMPLES,
     HIDDEN,
@@ -35,21 +35,21 @@ from vllm.models.deepseek_v32.amd.mono.config import (
     glm5_tp_config,
     validate_shard,
 )
-from vllm.models.deepseek_v32.amd.mono.glm.kernel import build_glm5_monokernel
-from vllm.models.deepseek_v32.amd.mono.glm.layout import (
+from vllm.models.deepseek_v32.amd.ops.mono.glm.kernel import build_glm5_monokernel
+from vllm.models.deepseek_v32.amd.ops.mono.glm.layout import (
     INDEX_DIM,
     layout,
     stage_tasks,
 )
-from vllm.models.deepseek_v32.amd.mono.layout import TL_COLS
-from vllm.models.deepseek_v32.amd.mono.packing import (
+from vllm.models.deepseek_v32.amd.ops.mono.layout import TL_COLS
+from vllm.models.deepseek_v32.amd.ops.mono.packing import (
     pack_bf16,
     pack_fp8,
     pack_layer_weights,
     pack_ptpc_fp8,
 )
-from vllm.models.deepseek_v32.amd.mono.runtime import SymmetricPeerBuffer
-from vllm.models.deepseek_v32.amd.mono.weights import (
+from vllm.models.deepseek_v32.amd.ops.mono.runtime import SymmetricPeerBuffer
+from vllm.models.deepseek_v32.amd.ops.mono.weights import (
     LayerWeights,
     prepare_mxfp4_expert_storage,
 )

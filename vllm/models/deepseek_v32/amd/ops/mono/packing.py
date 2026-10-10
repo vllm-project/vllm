@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import torch
 
-from vllm.models.deepseek_v32.amd.mono.config import (
+from vllm.models.deepseek_v32.amd.ops.mono.config import (
     GLM5_CONFIG,
     AttentionWeight,
     ExpertWeight,

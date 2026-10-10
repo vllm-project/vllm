@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from vllm.models.deepseek_v32.amd.mono.config import (
+from vllm.models.deepseek_v32.amd.ops.mono.config import (
     MAX_LAYERS_PER_STEP,
 )
 

@@ -41,7 +41,7 @@ from vllm.model_executor.models.utils import (
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.sequence import IntermediateTensors
 
-from .mono_decode import GlmMonoDecode
+from .mono import kernel as mono
 from .rocm import DeepseekV32MLAAttention
 
 
@@ -182,9 +182,10 @@ class DeepseekV32Model(torch.nn.Module):
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
 
-        self.mono_decode: GlmMonoDecode | None = None
+        # GLM-5 MonoKernel; attached after weight loading
+        self.mono: mono.GlmMono | None = None
         if envs.VLLM_ROCM_MONO_DECODE:
-            self.mono_decode = GlmMonoDecode(self, vllm_config)
+            mono.refuse_config(vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -196,11 +197,6 @@ class DeepseekV32Model(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if self.mono_decode is not None and self.mono_decode.eligible(
-            input_ids, inputs_embeds
-        ):
-            assert input_ids is not None
-            return self.mono_decode.forward(input_ids, positions)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -220,13 +216,17 @@ class DeepseekV32Model(torch.nn.Module):
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = mono.forward_layer(
+                self.mono, idx, layer, positions, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        if self.mono is not None and self.mono.active:
+            return self.mono.final_norm(self.norm, residual)
         hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -383,6 +383,14 @@ class DeepseekV32Model(torch.nn.Module):
 
 class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     model_cls = DeepseekV32Model
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.vllm_config = vllm_config
+
+    def process_weights_after_loading(self) -> None:
+        if envs.VLLM_ROCM_MONO_DECODE:
+            self.model.mono = mono.GlmMono(self.model, self.vllm_config)
 
     def set_moe_parameters(self):
         self.num_expert_groups = getattr(self.config, "n_group", 1)

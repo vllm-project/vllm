@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v32.amd.mono.glm.op import Glm5MonoKernel
-    from vllm.models.deepseek_v32.amd.mono.weights import LayerWeights
+    from vllm.models.deepseek_v32.amd.ops.mono.glm.op import Glm5MonoKernel
+    from vllm.models.deepseek_v32.amd.ops.mono.weights import LayerWeights
 
 __all__ = ["Glm5MonoKernel", "LayerWeights"]
 
@@ -20,11 +20,11 @@ __all__ = ["Glm5MonoKernel", "LayerWeights"]
 def __getattr__(name: str):
     """Load GPU wrappers only when callers request them."""
     if name == "Glm5MonoKernel":
-        from vllm.models.deepseek_v32.amd.mono.glm.op import Glm5MonoKernel
+        from vllm.models.deepseek_v32.amd.ops.mono.glm.op import Glm5MonoKernel
 
         return Glm5MonoKernel
     if name == "LayerWeights":
-        from vllm.models.deepseek_v32.amd.mono.weights import LayerWeights
+        from vllm.models.deepseek_v32.amd.ops.mono.weights import LayerWeights
 
         return LayerWeights
     raise AttributeError(name)

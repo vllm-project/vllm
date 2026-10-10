@@ -58,7 +58,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, Int64, T
 
-from vllm.models.deepseek_v32.amd.mono.config import (
+from vllm.models.deepseek_v32.amd.ops.mono.config import (
     EPS,
     FP8_MAX,
     HIDDEN,
@@ -79,7 +79,7 @@ from vllm.models.deepseek_v32.amd.mono.config import (
     KvCacheLayout,
     as_kv_cache_layout,
 )
-from vllm.models.deepseek_v32.amd.mono.glm.layout import (
+from vllm.models.deepseek_v32.amd.ops.mono.glm.layout import (
     BLOCKS,
     DCP_SUMMARY_PAIRS,
     INDEX_DIM,
@@ -118,7 +118,7 @@ from vllm.models.deepseek_v32.amd.mono.glm.layout import (
     ug_split,
     ug_task_rounds,
 )
-from vllm.models.deepseek_v32.amd.mono.layout import (
+from vllm.models.deepseek_v32.amd.ops.mono.layout import (
     CM_DEV,
     CM_SYS,
     LAYER_SLOTS,
@@ -128,7 +128,7 @@ from vllm.models.deepseek_v32.amd.mono.layout import (
     TL_COLS,
     atom_mxfp4_scale_index,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     bpermute_i32,
     div_rn,
     f8_word,
@@ -139,37 +139,37 @@ from vllm.models.deepseek_v32.amd.mono.ops import (
     wave_umax_dpp,
     write_lane_i32,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     exp as _exp,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     fp8_roundtrip as _fp8_roundtrip,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     fp8_to_bf16x8 as _fp8_to_bf16x8,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     mxfp4_to_bf16x8 as _mxfp4_to_bf16x8,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     rcp as _rcp,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     rsq as _rsq,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     rsrc as _rsrc,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     uniform as _uniform,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     uniform_f32 as _uniform_f32,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     xred as _xred,
 )
-from vllm.models.deepseek_v32.amd.mono.ops import (
+from vllm.models.deepseek_v32.amd.ops.mono.ops import (
     xshfl as _xshfl,
 )
 

@@ -6,7 +6,7 @@
 
 """Compile-time storage layout and CTA schedule for the GLM-5 MonoKernel."""
 
-from vllm.models.deepseek_v32.amd.mono.config import (
+from vllm.models.deepseek_v32.amd.ops.mono.config import (
     HIDDEN,
     INTER,
     KV_LORA,
@@ -19,7 +19,7 @@ from vllm.models.deepseek_v32.amd.mono.config import (
     TOP_K,
     V_DIM,
 )
-from vllm.models.deepseek_v32.amd.mono.layout import (
+from vllm.models.deepseek_v32.amd.ops.mono.layout import (
     BLOCKS,
     Q_B_TILE,
     QKV_A_TILE,

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from vllm.models.deepseek_v32.amd.mono.ipc import (
+from vllm.models.deepseek_v32.amd.ops.mono.ipc import (
     close_ipc_handle,
     get_allocation_base,
     get_ipc_handle,

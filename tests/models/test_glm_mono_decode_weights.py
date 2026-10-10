@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.deepseek_v32.amd.mono_decode import _weight_preshuffled, split_kv_b
+from vllm.models.deepseek_v32.amd.mono.weights import _weight_preshuffled, split_kv_b
 
 
 def _dequant(w: torch.Tensor, s: torch.Tensor, bm: int, bk: int) -> torch.Tensor:

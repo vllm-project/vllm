@@ -36,7 +36,7 @@ from aiter.jit.utils.chip_info import get_gfx_runtime  # noqa: E402
 from aiter.utility.fp4_utils import e8m0_to_f32, mxfp4_to_f32  # noqa: E402
 from test_glm_mono_moe import TOPK, make_layer, step_inputs  # noqa: E402
 
-from vllm.models.deepseek_v32.amd.mono import (  # noqa: E402
+from vllm.models.deepseek_v32.amd.ops.mono import (  # noqa: E402
     AttentionWeight,
     Glm5MonoKernel,
     KvCacheLayout,
