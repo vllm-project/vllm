@@ -1135,6 +1135,18 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
     }
 
+    # Match the Rust parser's null spelling policy (#59004) for any
+    # non-string schema type. Explicit string-only parameters stay verbatim.
+    if normalized_types & {
+        "null",
+        "integer",
+        "number",
+        "boolean",
+        "object",
+        "array",
+    } and value.strip().lower() in {"null", "none"}:
+        return None
+
     # Priority: null > integer > number > boolean > object > array > string
     type_priority = [
         "null",
@@ -1151,7 +1163,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             continue
 
         if candidate_type == "null":
-            if value.lower() == "null":
+            if value.strip().lower() in {"null", "none"}:
                 return None
             continue
         if candidate_type == "string":
