@@ -1185,6 +1185,15 @@ class AsyncLLM(EngineClient):
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
+    async def suspend(self, mode: PauseMode = "abort") -> None:
+        await self.engine_core.suspend_async(mode)
+
+    async def resume(self) -> None:
+        await self.engine_core.resume_async()
+
+    async def is_checkpoint_suspended(self) -> bool:
+        return await self.engine_core.is_checkpoint_suspended_async()
+
     async def compute_weight_checksums(self) -> list[dict[str, str]]:
         return await self.engine_core.compute_weight_checksums_async()
 

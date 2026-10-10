@@ -124,6 +124,7 @@ class Executor(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
+        self.is_suspended = False
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
         self.ec_output_aggregator: ECOutputAggregator | None = None
@@ -432,6 +433,26 @@ class Executor(ABC):
             time_after_discard - time_before_discard,
             tags_to_discard,
         )
+
+    def suspend(self):
+        if self.is_suspended:
+            logger.warning("Executor is already suspended.")
+            return
+        time_before = time.perf_counter()
+        self.collective_rpc("suspend")
+        time_after = time.perf_counter()
+        self.is_suspended = True
+        logger.info("It took %.6f seconds to suspend.", time_after - time_before)
+
+    def resume(self):
+        if not self.is_suspended:
+            logger.warning("Executor is not suspended.")
+            return
+        time_before = time.perf_counter()
+        self.collective_rpc("resume")
+        time_after = time.perf_counter()
+        self.is_suspended = False
+        logger.info("It took %.6f seconds to resume.", time_after - time_before)
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
