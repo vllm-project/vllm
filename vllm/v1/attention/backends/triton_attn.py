@@ -117,7 +117,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.num_heads_q = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        # The group's own KV head count, not the model-wide one: on hybrid
+        # models (e.g. Gemma4, whose full-attention layers have fewer KV heads
+        # than its sliding ones) the two differ, and the 2D/3D launch grid
+        # below is built from the group's count.
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
         self.headdim = model_config.get_head_size()
 
         # Check if CUDA Graphs are enabled for decode
