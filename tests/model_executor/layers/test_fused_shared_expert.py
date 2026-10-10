@@ -972,21 +972,35 @@ def test_models_fse_init(
     rocm_aiter_ops.refresh_env_variables()
 
 
+_UNTUNED_GPU = "the GPU is neither gfx950 nor a 304-CU gfx942"
+
+
 @pytest.mark.parametrize(
-    ("setting", "value", "reason"),
+    ("gpu", "setting", "value", "reason"),
     [
-        ("tensor_parallel_size", 4, None),
-        ("tensor_parallel_size", 8, None),
-        ("tensor_parallel_size", 2, "tensor_parallel_size is 2"),
-        ("data_parallel_size", 2, "data_parallel_size is 2"),
-        ("prefill_context_parallel_size", 2, "prefill_context_parallel_size is 2"),
-        ("enable_expert_parallel", True, "expert parallelism is enabled"),
-        ("on_gfx950", False, "the GPU is not gfx950"),
+        ("gfx950", "tensor_parallel_size", 4, None),
+        ("gfx950", "tensor_parallel_size", 8, None),
+        ("gfx950", "tensor_parallel_size", 2, "tensor_parallel_size is 2"),
+        ("gfx942", "tensor_parallel_size", 2, None),
+        ("gfx942", "tensor_parallel_size", 4, None),
+        ("gfx942", "tensor_parallel_size", 8, None),
+        ("gfx942", "tensor_parallel_size", 1, "tensor_parallel_size is 1"),
+        ("gfx950", "data_parallel_size", 2, "data_parallel_size is 2"),
+        (
+            "gfx942",
+            "prefill_context_parallel_size",
+            2,
+            "prefill_context_parallel_size is 2",
+        ),
+        ("gfx950", "enable_expert_parallel", True, "expert parallelism is enabled"),
+        ("gfx942_80cu", None, None, _UNTUNED_GPU),
+        ("other", None, None, _UNTUNED_GPU),
     ],
 )
 def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
     monkeypatch: pytest.MonkeyPatch,
-    setting: str,
+    gpu: str,
+    setting: str | None,
     value: object,
     reason: str | None,
 ) -> None:
@@ -998,10 +1012,21 @@ def test_glm5_next_fuses_shared_experts_only_in_tuned_setups(
         prefill_context_parallel_size=1,
         enable_expert_parallel=False,
     )
-    on_gfx950 = value if setting == "on_gfx950" else True
-    if setting != "on_gfx950":
+    if setting is not None:
         setattr(parallel_config, setting, value)
-    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: on_gfx950)
+    gfx950, gfx942, num_cus = {
+        "gfx950": (True, False, 256),
+        "gfx942": (False, True, 304),
+        "gfx942_80cu": (False, True, 80),
+        "other": (False, False, 120),
+    }[gpu]
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: gfx950)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: gfx942)
+    monkeypatch.setattr(
+        glm5_next_model.current_platform,
+        "num_compute_units",
+        lambda device_id=0: num_cus,
+    )
 
     with patch.object(glm5_next_model.logger, "warning_once") as warning:
         tuned = glm5_next_model._fused_shared_experts_tuned(
