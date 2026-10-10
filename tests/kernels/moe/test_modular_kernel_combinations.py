@@ -83,8 +83,10 @@ def assert_aiter_quant_scheme_case(config: Config) -> None:
     if fe_cls is not AiterExperts:
         return
 
-    if config.quant_config is None:
+    if config.weight_dtype is None:
         w_key, a_key = None, None
+    elif config.weight_dtype == "mxfp4":
+        w_key, a_key = config.mxfp4_quant_key_pair()
     else:
         w_key, a_key = config.fp8_quant_key_pair()
 
@@ -151,13 +153,18 @@ def rank_worker(
             rank_tensors = RankTensors.make(config, pgi)
 
             # Skip unsupported: AITER block-scaled MoE does not
-            # support apply_router_weight_on_input (topk=1 path).
+            # support apply_router_weight_on_input (topk=1 path). The W4A16
+            # MXFP4 AITER kernel (unquantized activation, mxfp4 weight) hits
+            # this same gap -- observed to hang/fault the GPU at topk=1 on
+            # gfx950 -- even though it isn't represented via
+            # config.quant_block_shape. W4A4 (mxfp4 activation too) is
+            # unaffected, so this is scoped to the W4A16 case specifically.
             # https://github.com/ROCm/aiter/issues/2418
             if (
                 topk == 1
                 and config.supports_apply_weight_on_input()
                 and config.fused_experts_type is AiterExperts
-                and config.quant_block_shape is not None
+                and (config.quant_block_shape is not None or config.is_w4a16_mxfp4)
             ):
                 print(
                     f"Skipping[{pgi.rank}]: m={m}, topk={topk}"
@@ -193,7 +200,7 @@ def rank_worker(
             with set_current_vllm_config(vllm_config):
                 ref_out = reference_moe_impl(config, weights, rank_tensors)
 
-            if config.quant_dtype == "nvfp4":
+            if config.quant_dtype == "nvfp4" or config.weight_dtype == "mxfp4":
                 atol = 1e-1 if config.K < 4096 else 2e-1
                 rtol = 1e-1 if config.K < 4096 else 2e-1
             else:
@@ -254,6 +261,7 @@ DTYPEs = [torch.bfloat16]
 MK_ACTIVATIONS = [
     MoEActivation.SILU,
     MoEActivation.GELU,
+    MoEActivation.SWIGLUOAI,
 ]
 
 
@@ -269,10 +277,23 @@ def is_nyi_config(config: Config) -> bool:
         if unsupported_quant_config:
             return True
 
+    # AITER's W4A16 MXFP4 (mxfp4 weight, unquantized activation) scheme only
+    # has a heuristic-dispatch kernel specialization for SWIGLUOAI (matching
+    # gpt-oss' own usage); SILU/GELU hit "Unsupported kernel config for moe
+    # heuristic dispatch" at runtime despite being declared supported by
+    # AiterExperts._supports_activation(). https://github.com/ROCm/aiter/issues/2419
+    is_w4a16_mxfp4 = (
+        config.fused_experts_type is AiterExperts and config.is_w4a16_mxfp4
+    )
+    if config.activation == MoEActivation.SWIGLUOAI:
+        return not is_w4a16_mxfp4
+    if is_w4a16_mxfp4:
+        return True
+
     if config.activation != MoEActivation.SILU:
         if config.fused_experts_type is not AiterExperts:
             return True  # AITER-only for this axis, for now
-        if config.quant_dtype is not None:
+        if config.weight_dtype is not None:
             return True  # unquantized-only for this axis, for now
 
     return False
