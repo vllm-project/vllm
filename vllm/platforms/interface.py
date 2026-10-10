@@ -212,7 +212,6 @@ class TPSPBackend(ABC):
         projection: torch.nn.Module,
         residual: torch.Tensor,
         norm: torch.nn.Module,
-        residual_is_sharded: bool,
         *,
         config: object | None = None,
         norm_type: str = "rms_norm",

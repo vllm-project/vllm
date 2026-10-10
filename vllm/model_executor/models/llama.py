@@ -58,7 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.worker.tpsp_utils import TPSPContext
+from vllm.v1.worker.tpsp_utils import TPSPContext, tpsp_shard_residual
 
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
@@ -333,7 +333,7 @@ class LlamaDecoderLayer(nn.Module):
         next_norm: RMSNorm | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         tpsp_active = next_norm is not None
-        residual_is_sharded = residual is not None
+        residual_is_full = residual is None
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -346,6 +346,8 @@ class LlamaDecoderLayer(nn.Module):
             tpsp_active=tpsp_active,
         )
         if tpsp_active:
+            if residual_is_full:
+                residual = tpsp_shard_residual(residual)
             backend = self.tpsp_context.backend
             hidden_states, residual = backend.fused_gemm_rs_norm_ag(
                 self.tpsp_context.o_proj,
@@ -353,7 +355,6 @@ class LlamaDecoderLayer(nn.Module):
                 self.self_attn.o_proj,
                 residual,
                 self.post_attention_layernorm,
-                residual_is_sharded,
             )
             hidden_states = self.mlp(hidden_states, tpsp_active=True)
             return backend.fused_gemm_rs_norm_ag(
@@ -362,7 +363,6 @@ class LlamaDecoderLayer(nn.Module):
                 self.mlp.down_proj,
                 residual,
                 next_norm,
-                True,
             )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         return self.mlp(hidden_states), residual

@@ -1297,7 +1297,6 @@ class CudaTPSPBackend(TPSPBackend):
         projection: torch.nn.Module,
         residual: torch.Tensor,
         norm: torch.nn.Module,
-        residual_is_sharded: bool,
         *,
         config: object | None = None,
         norm_type: str = "rms_norm",
@@ -1307,20 +1306,9 @@ class CudaTPSPBackend(TPSPBackend):
         context = self._profile_context(projection_context)
         hidden_size = norm.weight.numel()
         rows = (x.size(0) + context.tp_size - 1) // context.tp_size
-        if residual_is_sharded:
-            if residual.shape != (rows, hidden_size):
-                raise RuntimeError("TPSP residual shard has an unexpected shape")
-            local_residual = residual
-        else:
-            if residual.shape != (x.size(0), hidden_size):
-                raise RuntimeError("TPSP full residual has an unexpected shape")
-            start = context.rank * rows
-            count = min(rows, max(0, x.size(0) - start))
-            if count == rows:
-                local_residual = residual[start : start + rows].contiguous()
-            else:
-                local_residual = residual.new_zeros((rows, hidden_size))
-                local_residual[:count] = residual[start : start + count]
+        if residual.shape != (rows, hidden_size):
+            raise RuntimeError("TPSP residual shard has an unexpected shape")
+        local_residual = residual
 
         weight = projection.weight
         key = (weight.data_ptr(), weight._version)

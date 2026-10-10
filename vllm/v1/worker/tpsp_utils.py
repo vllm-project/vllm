@@ -91,6 +91,23 @@ class TPSPContext:
     down_proj: object
 
 
+def tpsp_shard_residual(residual: torch.Tensor) -> torch.Tensor:
+    """Return the current TP rank's padded shard of a full residual."""
+    from vllm.distributed.parallel_state import get_tp_group
+
+    if residual.ndim != 2:
+        raise ValueError("TPSP full residual must be a 2D tensor")
+    group = get_tp_group()
+    rows = math.ceil(residual.size(0) / group.world_size)
+    start = group.rank_in_group * rows
+    count = min(rows, max(0, residual.size(0) - start))
+    if count == rows:
+        return residual[start : start + rows].contiguous()
+    shard = residual.new_zeros((rows, residual.size(1)))
+    shard[:count] = residual[start : start + count]
+    return shard
+
+
 def _projection_inputs(
     tokens: int,
     projection: nn.Module,
@@ -151,7 +168,6 @@ def _run_fused_projection(
         projection,
         inputs.local_residual,
         norm,
-        True,
         config=chunk,
     )[0]
 
@@ -180,7 +196,7 @@ def profile_tpsp(
     if down_norm.weight.numel() != hidden_size:
         raise ValueError("TPSP projections require matching norm hidden sizes")
 
-    def disabled(reason: str) -> None:
+    def disabled(reason: str) -> TPSPContext | None:
         _LOG.warning("TPSP using regular forward: %s", reason)
         return None
 

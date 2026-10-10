@@ -124,6 +124,14 @@ def _check_tpsp_backend(
             backend.tpsp_max_microchunk_tokens + world_size - 1
         ) // world_size
         assert large_context.max_chunk_rows == capped_rows
+        with pytest.raises(RuntimeError, match="residual shard"):
+            backend.fused_gemm_rs_norm_ag(
+                large_context,
+                torch.empty((world_size + 1, 64), dtype=torch.bfloat16, device=device),
+                large_projection,
+                torch.empty((world_size + 1, 64), dtype=torch.bfloat16, device=device),
+                large_norm,
+            )
         if large_context.workspace is not None:
             assert large_context.workspace.numel() == (
                 4 * world_size * capped_rows * 64 + 3 * world_size * 4
@@ -141,7 +149,6 @@ def _check_tpsp_backend(
                         (capped_rows + 1, 64), dtype=torch.bfloat16, device=device
                     ),
                     large_norm,
-                    True,
                     config=capped_rows + 1,
                 )
         backend.close(large_context)
@@ -195,7 +202,6 @@ def _check_tpsp_backend(
                     projection,
                     local_residual,
                     norm,
-                    True,
                     config=64,
                 )
             assert fused_op.call_args.args[11] is context.workspace
@@ -235,7 +241,6 @@ def _check_tpsp_backend(
                     projection,
                     local_residual,
                     norm,
-                    True,
                     config=64,
                     norm_type="layer_norm",
                 )
@@ -369,56 +374,29 @@ def test_tpsp_backend(tp_size: int):
             pytest.skip("TPSP backend is unavailable for this configuration")
 
 
-@pytest.mark.parametrize("tokens,expected_alias", [(4, True), (3, False)])
-def test_tpsp_full_residual_only_allocates_for_padding(
-    monkeypatch, tokens, expected_alias
+@pytest.mark.parametrize(
+    "tokens,rank,expected_alias,expected",
+    [
+        (4, 1, True, [[4, 5], [6, 7]]),
+        (3, 1, False, [[4, 5], [0, 0]]),
+        (1, 1, False, [[0, 0]]),
+        (3, 0, True, [[0, 1], [2, 3]]),
+    ],
+)
+def test_tpsp_shard_residual_only_allocates_for_padding(
+    monkeypatch, tokens, rank, expected_alias, expected
 ):
-    if current_platform.device_type != "cuda":
-        pytest.skip("CUDA TPSP residual slicing")
-    backend_cls = current_platform.get_tpsp_backend_cls()
-    assert backend_cls is not None
     from vllm.distributed import parallel_state
-    from vllm.platforms.cuda import CudaTPSPContext
 
-    device = torch.device("cpu")
     monkeypatch.setattr(
         parallel_state,
         "get_tp_group",
-        lambda: SimpleNamespace(world_size=2, rank_in_group=1),
+        lambda: SimpleNamespace(world_size=2, rank_in_group=rank),
     )
-    projection = nn.Module()
-    projection.weight = nn.Parameter(torch.ones(2, 2, dtype=torch.bfloat16))
-    projection.bias = None
-    norm = nn.Module()
-    norm.weight = nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
-    norm.variance_epsilon = 1e-5
-    backend = backend_cls("test", device)
-    native_context = CudaTPSPContext(device, 2, 1, 0, 2)
-    backend._open_context_ids.add(id(native_context))
-    backend.set_config(native_context, 2)
     residual = torch.arange(tokens * 2, dtype=torch.bfloat16).reshape(tokens, 2)
-    with patch.object(
-        torch.ops._C,
-        "tpsp_fused_matmul_reduce_scatter_norm_all_gather",
-        side_effect=lambda *args: (args[3], None, args[3]),
-    ) as fused_op:
-        backend.fused_gemm_rs_norm_ag(
-            native_context,
-            torch.ones(tokens, 2, dtype=torch.bfloat16),
-            projection,
-            residual,
-            norm,
-            False,
-        )
-    local_residual = fused_op.call_args.args[3]
-    assert (local_residual.data_ptr() == residual[2:].data_ptr()) is expected_alias
-    torch.testing.assert_close(
-        local_residual,
-        torch.tensor(
-            [[4, 5], [6, 7] if tokens == 4 else [0, 0]],
-            dtype=torch.bfloat16,
-        ),
-    )
+    shard = tpsp_utils.tpsp_shard_residual(residual)
+    assert (shard.data_ptr() == residual[rank * 2 :].data_ptr()) is expected_alias
+    torch.testing.assert_close(shard, torch.tensor(expected, dtype=torch.bfloat16))
 
 
 def test_llama_tpsp_disables_compile_on_cpu(monkeypatch):
@@ -521,7 +499,6 @@ def test_llama_tpsp_forward(monkeypatch):
             projection,
             residual,
             norm,
-            residual_is_sharded,
             *,
             config=None,
             norm_type="rms_norm",
@@ -759,7 +736,7 @@ def test_llama_tpsp_without_backend_skips_profiling(monkeypatch):
     nn.Module.__init__(model)
     model.tpsp_requested = True
     model.tpsp_context = None
-    calls = []
+    calls: list[None] = []
 
     def get_backend_cls():
         calls.append(None)
