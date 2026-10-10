@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
+    build_ragged_indices_from_dense_out,
     rocm_inv_rope_einsum,
     rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
@@ -422,32 +423,29 @@ def compute_global_topk_ragged_indices_and_indptr(
     return global_topk_ragged, topk_indptr, topk_lens
 
 
-def _copy_ragged_to_graph_buffers(
-    ragged_indices: torch.Tensor,
-    ragged_indptr: torch.Tensor,
+def _build_ragged_into_graph_buffers(
+    dense_indices: torch.Tensor,
+    dense_lens: torch.Tensor,
     ragged_indices_buffer: torch.Tensor,
     ragged_indptr_buffer: torch.Tensor,
     num_rows: int,
     max_entries_per_row: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Copy dynamic ragged metadata into persistent CUDA graph buffers.
+    """Pack dynamic ragged metadata into persistent CUDA graph buffers.
 
     FULL decode graphs capture kernel argument addresses. Keep the returned
     tensors backed by stable storage, while indptr continues to bound reads.
     """
+    dense = dense_indices.reshape(dense_indices.shape[0], -1)
+    build_ragged_indices_from_dense_out(
+        dense, dense_lens, ragged_indices_buffer, ragged_indptr_buffer
+    )
     indptr_out = ragged_indptr_buffer[: num_rows + 1]
-    indptr_out.copy_(ragged_indptr, non_blocking=True)
-
-    max_entries = max(num_rows * max_entries_per_row, 1)
-    ragged_out = ragged_indices_buffer[:max_entries]
-    source_entries = ragged_indices.numel()
-    if source_entries > 0:
-        ragged_out[:source_entries].copy_(ragged_indices, non_blocking=True)
     if _ON_GFX950:
         # Preserve the graph-stable base pointer while exposing source capacity
         # to the sync-free split selector; indptr still carries the true NNZ.
-        ragged_out = ragged_out[: max(source_entries, 1)]
-    return ragged_out, indptr_out
+        return ragged_indices_buffer[: max(dense.numel(), 1)], indptr_out
+    return ragged_indices_buffer[: max(num_rows * max_entries_per_row, 1)], indptr_out
 
 
 @dataclass
@@ -517,15 +515,11 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
         dense_decode = base.c128a_global_decode_topk_indices
         decode_lens = base.c128a_decode_topk_lens
         if dense_decode is not None and decode_lens is not None:
-            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
-                dense_decode.reshape(dense_decode.shape[0], -1),
-                decode_lens,
-            )
             assert self.c128a_decode_topk_ragged_indices_buffer is not None
             assert self.c128a_decode_topk_ragged_indptr_buffer is not None
-            ragged_indices, ragged_indptr = _copy_ragged_to_graph_buffers(
-                ragged_indices,
-                ragged_indptr,
+            ragged_indices, ragged_indptr = _build_ragged_into_graph_buffers(
+                dense_decode.reshape(dense_decode.shape[0], -1),
+                decode_lens,
                 self.c128a_decode_topk_ragged_indices_buffer,
                 self.c128a_decode_topk_ragged_indptr_buffer,
                 dense_decode.shape[0],
@@ -564,9 +558,7 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             return AttentionCGSupport.ALWAYS
         return super().get_cudagraph_support(vllm_config, kv_cache_spec)
 
-    # Keep fused multi-step decode disabled until update_draft_decode_metadata()
-    # also refreshes the ROCm-specific ragged SWA indices and indptrs.
-    supports_draft_decode_metadata_update = False
+    supports_draft_decode_metadata_update = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -627,15 +619,11 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             and base.decode_swa_indices is not None
             and base.decode_swa_lens is not None
         ):
-            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+            ragged_indices, ragged_indptr = _build_ragged_into_graph_buffers(
                 base.decode_swa_indices.reshape(
                     base.num_decode_tokens, base.decode_swa_width
                 ),
                 base.decode_swa_lens,
-            )
-            ragged_indices, ragged_indptr = _copy_ragged_to_graph_buffers(
-                ragged_indices,
-                ragged_indptr,
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
@@ -648,6 +636,29 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             decode_swa_ragged_indptr=ragged_indptr,
             prefill_swa_ragged_indices=prefill_ragged_indices,
             prefill_swa_ragged_indptr=prefill_ragged_indptr,
+        )
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: DeepseekSparseSWAMetadata,
+    ) -> None:
+        super().update_draft_decode_metadata(metadata)
+        if metadata.num_decode_tokens == 0:
+            return
+        rocm_metadata = cast(DeepseekV4ROCMAiterSparseSWAMetadata, metadata)
+
+        assert rocm_metadata.decode_swa_indices is not None
+        assert rocm_metadata.decode_swa_lens is not None
+        assert rocm_metadata.decode_swa_ragged_indices is not None
+        assert rocm_metadata.decode_swa_ragged_indptr is not None
+
+        build_ragged_indices_from_dense_out(
+            rocm_metadata.decode_swa_indices.reshape(
+                rocm_metadata.num_decode_tokens, -1
+            ),
+            rocm_metadata.decode_swa_lens,
+            rocm_metadata.decode_swa_ragged_indices,
+            rocm_metadata.decode_swa_ragged_indptr,
         )
 
 
