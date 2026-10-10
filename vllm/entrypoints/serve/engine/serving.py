@@ -7,7 +7,6 @@ from fastapi import Request
 
 from vllm import PromptType, SamplingParams, envs
 from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
@@ -25,17 +24,11 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_len,
 )
 from vllm.sampling_params import BeamSearchParams
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
+from vllm.tracing import contains_trace_headers, extract_trace_headers
 from vllm.utils import random_uuid
 
 
 class BaseServing:
-    engine_client: EngineClient
-
     def __init__(
         self,
         models: OpenAIServingModels | OpenAIModelRegistry,
@@ -50,9 +43,6 @@ class BaseServing:
         self, headers: Mapping[str, str]
     ) -> Mapping[str, str] | None:
         if not contains_trace_headers(headers):
-            return None
-        if not await self.engine_client.is_tracing_enabled():
-            log_tracing_disabled_warning()
             return None
         return extract_trace_headers(headers)
 

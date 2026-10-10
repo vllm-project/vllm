@@ -222,11 +222,12 @@ async def test_request_metadata_reaches_every_question(
     )
     response = await serving.create_decision(request, raw_request)
     assert isinstance(response, StructuredDecisionResponse)
+    engine.is_tracing_enabled.assert_not_awaited()
     assert engine.generate.call_count == 2
     for call in engine.generate.call_args_list:
         assert call.args[0].get("cache_salt") == cache_salt
         assert call.kwargs["trace_headers"] == (
-            TRACE_HEADERS if tracing_enabled and request_headers else None
+            TRACE_HEADERS if request_headers else None
         )
 
 
