@@ -1358,6 +1358,28 @@ def launch_core_engines(
         )
 
 
+def _decode_engine_handshake(frames: list[bytes]) -> tuple[bytes, dict] | None:
+    """Return the identity and message of an engine's HELLO or READY, else None."""
+    if len(frames) != 2:
+        return None
+    identity, payload = frames
+    # Besides DecodeError, untyped decoding of arbitrary bytes can raise
+    # UnicodeDecodeError, TypeError (an unhashable map key, msgspec < 0.22) or
+    # RecursionError (deep nesting).
+    try:
+        msg = msgspec.msgpack.decode(payload)
+    except (msgspec.DecodeError, ValueError, TypeError, RecursionError):
+        return None
+    if not (
+        isinstance(msg, dict)
+        and isinstance(msg.get("status"), str)
+        and isinstance(msg.get("local"), bool)
+        and isinstance(msg.get("headless"), bool)
+    ):
+        return None
+    return identity, msg
+
+
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
     core_engines: list[CoreEngine],
@@ -1439,15 +1461,23 @@ def wait_for_engine_startup(
                 )
             )
 
-        # Receive HELLO and READY messages from the input socket.
-        eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
+        # Receive HELLO and READY messages from the input socket. In multi-node
+        # DP it is reachable over the network, so drop anything else.
+        decoded = _decode_engine_handshake(handshake_socket.recv_multipart())
+        if decoded is None:
+            logger.warning_once(
+                "Ignoring a message on the DP startup handshake socket that no "
+                "engine sent (likely a port scanner or health check probing "
+                "--data-parallel-rpc-port); further such warnings are suppressed."
+            )
+            continue
+        eng_identity, msg = decoded
         eng_index = int.from_bytes(eng_identity, "little")
         engine = next((e for e in core_engines if e.identity == eng_identity), None)
         if engine is None:
             raise RuntimeError(
                 f"Message from engine with unexpected data parallel rank: {eng_index}"
             )
-        msg = msgspec.msgpack.decode(ready_msg_bytes)
         status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
             raise RuntimeError(

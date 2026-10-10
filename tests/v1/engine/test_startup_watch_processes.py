@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import socket
+import threading
+import time
 from contextlib import nullcontext
 from multiprocessing import connection
 from threading import Event
 from types import SimpleNamespace
 
+import msgspec
 import pytest
 import torch
 import zmq
@@ -318,3 +322,168 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
         exc_info.value
     )
     assert "Failed frontend proc(s): {'RustFrontend': 1}" in str(exc_info.value)
+
+
+# Messages no engine sends, as seen from port scanners plus the shapes the
+# handshake parse has to reject.
+_STRAY_PAYLOADS = [
+    b"\x03",  # a msgpack int
+    msgspec.msgpack.encode({"probe": 1}),  # a map, but no handshake fields
+    msgspec.msgpack.encode({"status": "HELLO", "local": "yes"}),  # nearly one
+    msgspec.msgpack.encode("probe"),
+    b"\xa3\xe0\x80\x80",  # a str holding invalid UTF-8: UnicodeDecodeError
+    b"\x81\x91\x01\x02",  # a map keyed by an array, which decodes to a tuple key
+    b"\x81\x80\x01",  # a map keyed by a map: TypeError before msgspec 0.22
+    b"GET / HTTP/1.1\r\n\r\n",
+    b"",  # an empty frame
+    b"\x91" * 20000 + b"\x01",  # arrays nested past the limit: RecursionError
+    b"\x81\x01" * 20000 + b"\x01",  # maps nested the same way
+]
+# The request in issue #38677: a metrics scraper pointed at the RPC port. With
+# no ZMTP greeting, libzmq reads it as an unversioned peer and its first bytes
+# as that peer's identity.
+_HTTP_SCRAPE = (
+    b"GET /metrics HTTP/1.1\r\nHost: 172.26.43.196:13345\r\n"
+    b"User-Agent: vm_promscrape\r\nAccept: text/plain;version=0.0.4;q=1,*/*;q=0.1"
+    b"\r\nAccept-Encoding: gzip\r\nX-Prometheus-Scrape-Timeout-Seconds: 10\r\n\r\n"
+)
+
+
+class _Startup:
+    """``wait_for_engine_startup`` on a ROUTER bound to loopback TCP, as the
+    rank 0 front-end binds it in multi-node DP, run on a thread."""
+
+    def __init__(self, core_engines, local_count):
+        self.ctx = zmq.Context()
+        self.ctx.setsockopt(zmq.LINGER, 0)
+        self.socket = self.ctx.socket(zmq.ROUTER)
+        port = self.socket.bind_to_random_port("tcp://127.0.0.1")
+        self.address = f"tcp://127.0.0.1:{port}"
+        self.port = port
+        parallel_config = SimpleNamespace(
+            data_parallel_size_local=local_count,
+            data_parallel_hybrid_lb=True,
+            data_parallel_external_lb=False,
+        )
+        launch = CoreEngineLaunch(
+            engine_manager=None,
+            coordinator=None,
+            addresses=EngineZmqAddresses(inputs=[], outputs=[]),
+            tensor_queue=None,
+        )
+        self.error: BaseException | None = None
+        # Peers stay open until close(): a socket collected early would drop
+        # what it has queued before the ROUTER reads it.
+        self.peers: list[zmq.Socket] = []
+        self.thread = threading.Thread(
+            target=self._run,
+            args=(core_engines, parallel_config, launch),
+            daemon=True,
+        )
+        self.thread.start()
+
+    def _run(self, core_engines, parallel_config, launch):
+        try:
+            wait_for_engine_startup(
+                self.socket,
+                core_engines,
+                parallel_config,
+                coordinated_dp=False,
+                cache_config=None,
+                launch=launch,
+            )
+        except BaseException as e:
+            self.error = e
+
+    def finished(self, timeout: float = 15.0) -> bool:
+        self.thread.join(timeout)
+        return not self.thread.is_alive()
+
+    def connect(self, kind, identity: bytes | None = None, option=None) -> zmq.Socket:
+        sock = self.ctx.socket(kind)
+        if identity is not None:
+            sock.setsockopt(zmq.IDENTITY, identity)
+        if option is not None:
+            sock.setsockopt(*option)
+        sock.connect(self.address)
+        self.peers.append(sock)
+        return sock
+
+    def send_strays(self) -> None:
+        """Everything a ROUTER accepts from a peer that is not an engine."""
+        dealer = self.connect(zmq.DEALER)
+        for payload in _STRAY_PAYLOADS:
+            dealer.send(payload)
+        dealer.send_multipart([b"\x03", b"\x03"])
+        # An engine-sized identity that no engine of this front-end has.
+        self.connect(zmq.DEALER, identity=CoreEngine(7).identity).send(b"\x03")
+        for payload in (b"\x03", msgspec.msgpack.encode({"probe": 1})):
+            req = self.connect(zmq.REQ)  # an empty delimiter frame first
+            req.send(payload)
+        router = self.connect(zmq.ROUTER, option=(zmq.CONNECT_ROUTING_ID, b"fe"))
+        time.sleep(0.2)  # a ROUTER can only address a peer once connected
+        router.send_multipart([b"fe", b"\x03"])
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw:
+            raw.sendall(_HTTP_SCRAPE)
+            time.sleep(0.2)
+        time.sleep(0.5)  # let the front-end take all of it off the socket
+
+    def close(self) -> None:
+        self.ctx.destroy(linger=0)
+        self.thread.join(timeout=5)
+
+
+def _engine(startup: _Startup, index: int, local: bool, junk_first: bool = False):
+    """An engine's side of the handshake, up to and including HELLO."""
+    sock = startup.connect(zmq.DEALER, identity=CoreEngine(index).identity)
+    if junk_first:
+        # Junk under an engine's own identity is dropped too.
+        sock.send(b"\x03")
+    EngineCoreProc.startup_handshake(sock, local_client=local, headless=False)
+    return sock
+
+
+def _ready(sock: zmq.Socket, local: bool) -> None:
+    sock.send(
+        msgspec.msgpack.encode({"status": "READY", "local": local, "headless": False})
+    )
+
+
+def test_wait_for_engine_startup_drops_messages_no_engine_sent(monkeypatch):
+    """Stray traffic on the handshake socket is dropped and startup completes."""
+    monkeypatch.setattr(core_module, "HANDSHAKE_TIMEOUT_MINS", 0.2)
+    startup = _Startup([CoreEngine(0, local=True), CoreEngine(1, local=False)], 1)
+    try:
+        startup.send_strays()
+        assert startup.error is None, f"startup failed: {startup.error!r}"
+        assert startup.thread.is_alive(), "startup ended before any engine"
+
+        local = _engine(startup, 0, local=True, junk_first=True)
+        remote = _engine(startup, 1, local=False)
+        startup.send_strays()
+        _ready(local, local=True)
+        _ready(remote, local=False)
+
+        assert startup.finished(), "startup did not complete"
+        assert startup.error is None, f"startup failed: {startup.error!r}"
+    finally:
+        startup.close()
+
+
+def test_wait_for_engine_startup_still_fails_on_an_unexpected_rank():
+    """A well-formed HELLO from a rank this front-end does not own still fails
+    startup instead of being dropped, which would leave it waiting forever."""
+    startup = _Startup([CoreEngine(0, local=True)], 1)
+    try:
+        startup.send_strays()
+        stranger = startup.connect(zmq.DEALER, identity=CoreEngine(5).identity)
+        stranger.send(
+            msgspec.msgpack.encode(
+                {"status": "HELLO", "local": False, "headless": False}
+            )
+        )
+        assert startup.finished(), "startup did not fail"
+        assert isinstance(startup.error, RuntimeError)
+        assert str(startup.error).endswith("unexpected data parallel rank: 5")
+    finally:
+        startup.close()
