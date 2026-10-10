@@ -156,6 +156,7 @@ class WorkerLoRAManager:
             self._adapter_manager._validate_moe_lora_format(lora)
 
             # Validate classification-head weights.
+            self._adapter_manager._validate_lora_module_names(lora)
             self._adapter_manager._validate_modules_to_save(lora)
             self._adapter_manager._validate_token_classification_lora(lora)
 

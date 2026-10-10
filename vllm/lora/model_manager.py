@@ -1339,6 +1339,61 @@ class LoRAModelManager:
             "the model backbone."
         )
 
+    def _validate_lora_module_names(self, lora_model: LoRAModel) -> None:
+        """Reject adapters whose weights match none of the LoRA layers.
+
+        `activate_adapter` looks LoRA weights up by exact module name and
+        skips names it does not find, so a module naming mismatch (e.g. an
+        adapter trained on a different model class) otherwise silently
+        serves the base model. Weights for layers owned by another pipeline
+        stage or excluded by `target_modules` are expected to be skipped.
+        """
+        known = set(self.modules)
+        for sub_module_names in self.packed_modules.values():
+            known.update(sub_module_names)
+        if self.is_pooling_model:
+            known.update([name.removeprefix("model.") for name in known])
+
+        def is_known(name: str) -> bool:
+            if name in known or name.removesuffix(".base_layer") in known:
+                return True
+            # 3D/shared MoE weights are consumed by the parent experts module.
+            experts_idx = name.find(".experts")
+            return experts_idx != -1 and name[: experts_idx + len(".experts")] in known
+
+        def is_on_missing_pp_layer(name: str) -> bool:
+            module: nn.Module | None = self.model
+            for part in name.split("."):
+                if isinstance(module, PPMissingLayer):
+                    return True
+                module = getattr(module, part, None)
+                if not isinstance(module, nn.Module):
+                    return False
+            return isinstance(module, PPMissingLayer)
+
+        num_applicable = 0
+        unmatched: list[str] = []
+        for name in lora_model.loras:
+            if is_known(name) or is_on_missing_pp_layer(name):
+                num_applicable += 1
+            elif self._match_target_modules(name):
+                unmatched.append(name)
+        if not unmatched:
+            return
+
+        unmatched.sort()
+        msg = (
+            f"{len(unmatched)} of {len(lora_model.loras)} modules of LoRA "
+            f"adapter {lora_model.id} do not match any LoRA-enabled module of "
+            f"{type(self.model).__name__}, e.g. {unmatched[:3]}. Check that "
+            "the adapter's module names match this model (for multimodal "
+            "models, whether it was trained on the text-only or the "
+            "multimodal model class)."
+        )
+        if num_applicable == 0:
+            raise ValueError(f"{msg} The adapter would have no effect.")
+        logger.warning("%s These weights will be ignored.", msg)
+
     def deactivate_adapter(self, adapter_id: int) -> bool:
         if adapter_id not in self._active_adapters:
             return False
