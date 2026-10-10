@@ -3,6 +3,7 @@
 
 from math import lcm
 
+import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
@@ -420,6 +421,49 @@ def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
     # num_prompt=100 -> latest hit boundary = (100-1)//32*32 = 96 -> chunk 11.
     masks = coord.store_mask(128, num_prompt_tokens=100)
     assert masks[1] == [i == 11 for i in range(16)]
+
+
+def test_store_mask_retention_interval_zero_eagle_keeps_lookup_tail():
+    """With EAGLE the replay boundary sits one scheduler block lower, as in
+    core's ``get_replay_boundaries``: the lookup matches that block and drops
+    back from it. The retained SWA tail must span the ``need`` contiguous
+    blocks the lookup requires (cdiv(8 - 1, 8) + 1 = 2 here); the non-EAGLE
+    boundary leaves only one of them inside the saved prefix."""
+    coord = _make_coord(
+        _retention_groups(), hash_block_size=8, use_eagle=True, retention_interval=0
+    )
+    # num_prompt=100 -> boundary 64 -> chunks 7, 8 (8 is the EAGLE peek).
+    masks = coord.store_mask(96, num_prompt_tokens=100)
+    assert masks[0] is None
+    assert masks[1] == [i in (7, 8) for i in range(12)]
+    # Aligned num_prompt=96 -> boundaries 32 (resend) and 64 (longer sibling).
+    masks = coord.store_mask(96, num_prompt_tokens=96)
+    assert masks[1] == [i in (3, 4, 7, 8) for i in range(12)]
+
+
+@pytest.mark.parametrize("num_prompt_tokens", [100, 96])
+def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
+    """Everything store_mask keeps is in the store; the EAGLE lookup of the
+    same prompt must then reach the full block below the one it drops (64 of
+    96). The unaligned prompt hit 0 before the fix; the aligned one already
+    hit."""
+    groups = _retention_groups()
+    coord = _make_coord(groups, hash_block_size=8, use_eagle=True, retention_interval=0)
+    hashes = _hashes(96 // coord.hash_block_size)
+    exists: set[tuple[int, bytes]] = set()
+    store_masks = coord.store_mask(96, num_prompt_tokens=num_prompt_tokens)
+    for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
+        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        for chunk_id, block_hash in enumerate(group_hashes):
+            if mask is None or mask[chunk_id]:
+                exists.add((gid, bytes(block_hash)))
+
+    _masks, hit = coord.find_longest_cache_hit(
+        hashes,
+        max_length=96,
+        cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
+    )
+    assert hit == 64
 
 
 def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
