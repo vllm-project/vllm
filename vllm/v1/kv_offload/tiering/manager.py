@@ -46,6 +46,10 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.tiering.admission import (
+    AlwaysAdmitPolicy,
+    TieringAdmissionPolicy,
+)
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
@@ -164,7 +168,7 @@ class _SecondaryTierFacingParent(ParentManager):
 
     def create_store_job(
         self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> TransferJob:
+    ) -> TransferJob | None:
         return self._m.create_store_job(keys, req_context, self._origin_idx)
 
     def on_request_finished(self, req_context: ReqContext) -> None:
@@ -192,6 +196,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
+        admission_policy: TieringAdmissionPolicy | None = None,
     ):
         """Initialize the TieringOffloadingManager.
 
@@ -199,10 +204,13 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
+            admission_policy: Gate for cascade/promotion submissions.
+                Defaults to AlwaysAdmitPolicy (behavior-preserving).
 
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
+        self._admission_policy = admission_policy or AlwaysAdmitPolicy()
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
@@ -258,10 +266,11 @@ class TieringOffloadingManager(OffloadingManager):
         self._job_id_counter += 1
         return job_id
 
-    def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> None:
+    def _register_job(self, transfer_job: TransferJob, tier_idx: int) -> JobMetadata:
         job_metadata = JobMetadata(transfer_job, tier_idx)
         self._jobs[transfer_job.job_id] = job_metadata
         self._metrics.on_job_registered(job_metadata)
+        return job_metadata
 
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
         return self._jobs.pop(job_id, None)
@@ -343,6 +352,7 @@ class TieringOffloadingManager(OffloadingManager):
                 )
                 transfer_job = job_metadata.transfer_job
                 self._metrics.on_job_finished(job_metadata, completed_job)
+                self._admission_policy.on_completed(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
                     # secondary→primary transfer (promotion) completed.
@@ -354,43 +364,6 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         transfer_job.keys, transfer_job.req_context
                     )
-                    if completed_job.success:
-                        self._update_backpressure(tier, job_metadata, completed_job)
-
-    def _should_store_to_tier(
-        self, tier: SecondaryTierManager, num_blocks: int
-    ) -> bool:
-        detector = tier.bp_detector
-        if detector is None:
-            return True
-        return detector.should_store(num_blocks)
-
-    def _update_backpressure(
-        self,
-        tier: SecondaryTierManager,
-        job_metadata: JobMetadata,
-        completed_job: JobResult,
-    ) -> None:
-        detector = tier.bp_detector
-        if detector is None:
-            return
-        was_under_pressure = detector.is_under_pressure()
-        tj = job_metadata.transfer_job
-        num_bytes = (
-            completed_job.transfer_bytes
-            if completed_job.transfer_bytes is not None
-            else len(tj.keys) * tier.block_size_bytes
-        )
-        detector.update(tj.submit_time, num_bytes)
-        if detector.is_under_pressure() != was_under_pressure:
-            tier_idx = self._tier_index[tier]
-            logger.info(
-                "Tier #%d (%s) back-pressure %s (stats=%s)",
-                tier_idx,
-                tier.tier_type,
-                "activated" if detector.is_under_pressure() else "cleared",
-                detector.stats,
-            )
 
     @override
     def lookup(
@@ -506,9 +479,14 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context forwarded to primary.prepare_write().
 
         Returns:
-            True if promotion was initiated, False if primary tier is full.
+            True if promotion was initiated, False if the admission policy
+            rejected it or the primary tier is full.
 
         """
+        # Admission runs before primary allocation so a rejected promotion
+        # consumes no primary slot and no job ID.
+        if not self._admission_policy.should_admit([key], tier_idx, True):
+            return False
         # Allocate space in primary tier for promoted chunk.
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
@@ -553,15 +531,16 @@ class TieringOffloadingManager(OffloadingManager):
             tier = self.secondary_tiers[tier_idx]
             for entry in pending_by_ctx.values():
                 job_id = self._next_job_id()
-                job_metadata = TransferJob(
+                transfer_job = TransferJob(
                     job_id=job_id,
                     keys=entry.keys,
                     chunk_ids=np.array(entry.chunk_ids, dtype=np.int32),
                     is_promotion=True,
                     req_context=entry.req_context,
                 )
-                self._register_job(job_metadata, tier_idx)
-                tier.submit_load(job_metadata)
+                job_metadata = self._register_job(transfer_job, tier_idx)
+                self._admission_policy.on_admitted(job_metadata)
+                tier.submit_load(transfer_job)
 
         self._pending_load_submissions.clear()
 
@@ -711,10 +690,10 @@ class TieringOffloadingManager(OffloadingManager):
 
         for tier_idx in request_level_tiers:
             tier = self.secondary_tiers[tier_idx]
-            if not self._should_store_to_tier(tier, len(ready_keys)):
+            transfer_job = self.create_store_job(ready_keys, req_context, tier_idx)
+            if transfer_job is None:
                 continue
-            job_metadata = self.create_store_job(ready_keys, req_context, tier_idx)
-            tier.submit_store(job_metadata)
+            tier.submit_store(transfer_job)
 
     def _flush_pending_cascades(self) -> None:
         """Retry request-level cascades parked on an in-flight primary write.
@@ -767,10 +746,10 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier_idx, tier in enumerate(self.secondary_tiers):
-                if not self._should_store_to_tier(tier, len(keys)):
+                transfer_job = self.create_store_job(keys, req_context, tier_idx)
+                if transfer_job is None:
                     continue
-                job_metadata = self.create_store_job(keys, req_context, tier_idx)
-                tier.submit_store(job_metadata)
+                tier.submit_store(transfer_job)
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
@@ -785,8 +764,11 @@ class TieringOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         tier_idx: int = 0,
-    ) -> TransferJob:
+    ) -> TransferJob | None:
         """Pin chunks in the primary tier and create a tracked store job.
+
+        The admission policy runs before any primary-tier pinning or job-ID
+        allocation, so a rejected store has no side effects.
 
         Calls prepare_read() to increment ref_cnt (protecting chunks
         from eviction during the async transfer), allocates a job ID,
@@ -794,19 +776,26 @@ class TieringOffloadingManager(OffloadingManager):
 
         The caller is responsible for the actual data transfer and
         reporting completion via get_finished_jobs().
+
+        Returns:
+            The TransferJob, or None if the admission policy rejected it.
+
         """
+        if not self._admission_policy.should_admit(keys, tier_idx, False):
+            return None
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
-        job_metadata = TransferJob(
+        transfer_job = TransferJob(
             job_id=job_id,
             keys=keys,
             chunk_ids=primary_chunks_spec.chunk_ids,
             is_promotion=False,
             req_context=req_context,
         )
-        self._register_job(job_metadata, tier_idx)
-        return job_metadata
+        job_metadata = self._register_job(transfer_job, tier_idx)
+        self._admission_policy.on_admitted(job_metadata)
+        return transfer_job
 
     @override
     def on_new_request(
@@ -977,9 +966,7 @@ class TieringOffloadingManager(OffloadingManager):
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
 
-        for tier in self.secondary_tiers:
-            if tier.bp_detector is not None:
-                tier.bp_detector.reset()
+        self._admission_policy.reset()
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
@@ -988,7 +975,13 @@ class TieringOffloadingManager(OffloadingManager):
         if stats is not None and stats.is_empty():
             stats = None
 
-        self._metrics.record_backpressure(self.secondary_tiers)
+        policy_stats = self._admission_policy.get_stats()
+        if policy_stats is not None:
+            if stats is None:
+                stats = policy_stats
+            else:
+                stats.aggregate(policy_stats)
+
         metrics_stats = self._metrics.take_stats()
         if metrics_stats is not None:
             if stats is None:

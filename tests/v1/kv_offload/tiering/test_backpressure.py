@@ -23,6 +23,7 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.admission import BackpressureAdmissionPolicy
 from vllm.v1.kv_offload.tiering.backpressure import (
     DropAccountingPolicy,
     DropStorePolicy,
@@ -238,7 +239,21 @@ class TestBackpressure:
         self.manager = TieringOffloadingManager(
             primary_tier=self.primary,
             secondary_tiers=[self.tier],
+            admission_policy=BackpressureAdmissionPolicy([self.tier]),
         )
+
+    def _force_store_job(self, keys, ctx=_CTX):
+        """Submit a store job bypassing admission.
+
+        Feeds completions to the detector EMA while the policy rejects
+        cascades under pressure.
+        """
+        with patch.object(
+            self.manager._admission_policy, "should_admit", return_value=True
+        ):
+            job = self.manager.create_store_job(keys, ctx)
+        assert job is not None
+        return job
 
     def _start_request(self, ctx=_CTX):
         if ctx.req_id not in self.manager._req_state:
@@ -338,7 +353,7 @@ class TestBackpressure:
             self._store_blocks(keys)
             # Pressure is on, so the cascade was skipped. Force-submit
             # a store job manually to get a completion to feed the EMA.
-            job_meta = self.manager.create_store_job(keys, _CTX)
+            job_meta = self._force_store_job(keys)
             job_meta.submit_time = time.monotonic() - 0.001
             self.tier.submit_store(job_meta)
             self.tier.release_jobs()
@@ -379,7 +394,7 @@ class TestBackpressure:
         for k in keys2:
             self.primary.prepare_store([k], _CTX)
             self.primary.complete_store([k], _CTX)
-        job_meta = self.manager.create_store_job(keys2, _CTX)
+        job_meta = self._force_store_job(keys2)
         job_meta.submit_time = time.monotonic() - mid_latency_s(len(keys2))
         self.tier.submit_store(job_meta)
         self.tier.release_jobs()
