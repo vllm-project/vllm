@@ -617,6 +617,12 @@ steps:
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_ll_bf16_gemm.py
+  - csrc/libtorch_stable/litetopk_decode.cu
+  - csrc/libtorch_stable/litetopk_decode/
+  - vllm/model_executor/layers/litetopk_decode.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/utils/deep_gemm.py
+  - tests/v1/attention/test_litetopk_decode.py
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
@@ -632,6 +638,7 @@ steps:
           pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
           pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
           pytest -v -s tests/kernels/test_top_k_per_row.py
+          pytest -v -s tests/v1/attention/test_litetopk_decode.py
           pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
           pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
           pytest -v -s tests/kernels/moe/test_nvfp4_moe.py

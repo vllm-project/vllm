@@ -609,6 +609,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUDA_ARCHS "${MINIMAX_M3_FUSED_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${MINIMAX_M3_FUSED_SRC}")
 
+    cuda_archs_loose_intersection(LITETOPK_DECODE_ARCHS
+      "10.0a;10.3a" "${CUDA_ARCHS}")
+    if(LITETOPK_DECODE_ARCHS)
+      list(APPEND VLLM_STABLE_EXT_SRC "csrc/libtorch_stable/litetopk_decode.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/libtorch_stable/litetopk_decode.cu"
+        CUDA_ARCHS "${LITETOPK_DECODE_ARCHS}")
+    endif()
+
     if(COOPERATIVE_TOPK_ARCHS)
       list(APPEND VLLM_STABLE_EXT_SRC
         "csrc/libtorch_stable/cooperative_topk.cu")
@@ -1233,6 +1242,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    if(LITETOPK_DECODE_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_LITETOPK_DECODE=1)
+    endif()
     if(COOPERATIVE_TOPK_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_COOPERATIVE_TOPK=1)

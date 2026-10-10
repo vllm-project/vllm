@@ -24,6 +24,13 @@ from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     get_indexer_topk,
 )
+from vllm.model_executor.layers.litetopk_decode import (
+    get_litetopk_workspace,
+    has_litetopk_decode,
+    litetopk_bf16_scores,
+    litetopk_select,
+    supports_litetopk_decode,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -346,6 +353,7 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    enable_litetopk_decode: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -363,6 +371,8 @@ def sparse_attn_indexer(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        if enable_litetopk_decode and topk_backend == "auto" and has_litetopk_decode():
+            get_litetopk_workspace(topk_indices_buffer.shape[0])
         # Reserve workspace for indexer during profiling run
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
@@ -710,6 +720,27 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        lite_histogram = None
+        if (
+            enable_litetopk_decode
+            and topk_backend == "auto"
+            and not use_pcp
+            and dcp_world_size == 1
+            and not needs_padded_path
+            and (candidate_blocks is None or candidate_write)
+            and supports_litetopk_decode(
+                padded_q_quant_cast,
+                padded_q_scale,
+                weights,
+                kv_cache.shape[1],
+                topk_tokens,
+                decode_metadata.write_max_decode_len or next_n,
+            )
+        ):
+            histogram, lite_workspace = get_litetopk_workspace(
+                topk_indices_buffer.shape[0]
+            )
+            lite_histogram = histogram[:num_padded_tokens]
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
@@ -725,6 +756,19 @@ def sparse_attn_indexer(
                 decode_metadata.schedule_metadata,
                 max_model_len,
             )
+        elif lite_histogram is not None and use_fp4_cache:
+            logits = litetopk_bf16_scores(
+                (padded_q_quant_cast, padded_q_scale),
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.indices,
+                max_model_len,
+                decode_metadata.write_max_decode_len or next_n,
+                lite_histogram,
+                schedule=decode_metadata.litetopk_bf16_schedule,
+            )
         else:
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
@@ -736,6 +780,7 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 clean_logits=False,
                 indices=decode_metadata.indices,
+                histogram=lite_histogram,
             )
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -770,14 +815,19 @@ def sparse_attn_indexer(
 
         # The backend comes from the layer (config is only readable at model
         # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
+        if lite_histogram is not None:
+            litetopk_select(
+                logits, seq_lens, lite_histogram, topk_indices, lite_workspace
+            )
+        else:
+            get_indexer_topk(topk_backend)(
+                logits,
+                seq_lens,
+                next_n,
+                topk_indices,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
 
         if decode_metadata.global_seq_lens is not None:
             _merge_dcp_topk_global(
@@ -831,6 +881,7 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
+    enable_litetopk_decode: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -898,6 +949,7 @@ class SparseAttnIndexer(CustomOp):
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        self.enable_litetopk_decode = vllm_config.kernel_config.enable_litetopk_decode
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
@@ -1010,6 +1062,7 @@ class SparseAttnIndexer(CustomOp):
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,
             topk_backend=self.topk_backend,
+            enable_litetopk_decode=self.enable_litetopk_decode,
         )
 
     def forward_xpu(

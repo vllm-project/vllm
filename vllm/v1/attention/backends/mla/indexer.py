@@ -10,6 +10,11 @@ import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.litetopk_decode import (
+    get_litetopk_bf16_metadata,
+    has_litetopk_bf16,
+    has_litetopk_decode,
+)
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -672,6 +677,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    litetopk_bf16_schedule: torch.Tensor | None = None
 
 
 @dataclass
@@ -1037,6 +1043,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.scheduler_metadata_buffer = torch.empty(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
+        self.litetopk_bf16_schedule_buffer: torch.Tensor | None = None
+        kernel_config = self.vllm_config.kernel_config
+        if (
+            kernel_config.enable_litetopk_decode
+            and kernel_config.sparse_indexer_topk_backend == "auto"
+            and self.indexer_uses_fp4
+            and self.kv_cache_spec.num_states == 128
+            and self.dcp_world_size == 1
+            and not self.use_pcp
+            and has_litetopk_decode()
+            and has_litetopk_bf16()
+        ):
+            self.litetopk_bf16_schedule_buffer = torch.empty_like(
+                self.scheduler_metadata_buffer
+            )
 
         # Each compressed state must live on a single rank, so the DCP
         # interleave has to cover whole states.
@@ -1678,12 +1699,30 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
                 schedule_metadata[:] = metadata
 
+            litetopk_bf16_schedule = None
+            if (
+                self.litetopk_bf16_schedule_buffer is not None
+                and seq_lens.shape[1] == 1
+                and not requires_padding
+                and 1 <= max_decode_len <= 6
+            ):
+                # One paired split-384 schedule per metadata group/forward.
+                # Stable storage is refreshed before replay, like the generic one.
+                metadata = get_litetopk_bf16_metadata(
+                    seq_lens, decode_indices, max_decode_len
+                )
+                litetopk_bf16_schedule = self.litetopk_bf16_schedule_buffer[
+                    : metadata.shape[0]
+                ]
+                litetopk_bf16_schedule.copy_(metadata)
+
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=schedule_metadata,
+                litetopk_bf16_schedule=litetopk_bf16_schedule,
                 indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
@@ -1759,6 +1798,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             assert schedule_metadata.shape == decode.schedule_metadata.shape
             decode.schedule_metadata.copy_(schedule_metadata)
+        if decode.litetopk_bf16_schedule is not None:
+            decode.litetopk_bf16_schedule.copy_(
+                get_litetopk_bf16_metadata(
+                    decode.seq_lens, decode.indices, decode.write_max_decode_len or 1
+                )
+            )
 
 
 def build_prefill_chunk_metadata(
