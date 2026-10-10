@@ -355,19 +355,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
-                    # The scheduler removes the name explicitly after the
-                    # worker-ordering check below; construction itself must
-                    # not unlink before that check runs.
+                    barrier=(
+                        _shared_region_barrier
+                        if self.config.parallel.per_rank_engine
+                        else None
+                    ),
                     unlink_owner=False,
                 )
                 self._scheduler_mmap = scheduler_mmap
-                # In the normal executor there is one scheduler, and its
-                # synchronous worker initialization has already mapped the
-                # region. With torchrun, every rank also has its own scheduler;
-                # wait until all of those scheduler mappings exist before any
-                # rank removes the pathname.
-                if self.config.parallel.per_rank_engine:
-                    _shared_region_barrier()
                 scheduler_mmap.unlink()
 
                 # Create primary tier (CPU-based)
