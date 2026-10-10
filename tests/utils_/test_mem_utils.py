@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing as mp
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm_test_utils.monitor import monitor
 
+from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 
 from ..utils import create_new_process_for_each_test
@@ -148,3 +151,121 @@ def test_memory_snapshot_uses_cuda_on_discrete_gpu():
         assert snapshot.free_memory == mock_cuda_free
         assert snapshot.total_memory == mock_cuda_total
         mock_psutil.virtual_memory.assert_not_called()
+
+
+def _mock_measurements(mock_platform, mock_accelerator, free_values, process_values):
+    """Feed one (free memory, process memory) pair per MemorySnapshot.measure()."""
+    total = 80 * 1024**3
+    mock_accelerator.get_memory_info.side_effect = [(f, total) for f in free_values]
+    mock_accelerator.memory_stats.return_value = {
+        "allocated_bytes.all.peak": 0,
+        "allocated_bytes.all.current": 0,
+    }
+    mock_accelerator.memory_reserved.return_value = 0
+    mock_accelerator.current_device = lambda: "cuda:0"
+    mock_platform.is_integrated_gpu.return_value = False
+    mock_platform.get_process_memory_usage.side_effect = list(process_values)
+
+
+def test_memory_profiling_uses_process_scoped_consumption():
+    """Another process allocating during load/profile must not be charged
+    to this instance when per-process usage is available."""
+    gib = 1024**3
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("torch.accelerator") as mock_accelerator,
+    ):
+        # baseline -> before_profile -> after_profile:
+        # this process grows 1 GiB then 1 GiB more; another process takes
+        # 2 GiB in the same window, so the device-wide delta is 4 GiB.
+        _mock_measurements(
+            mock_platform,
+            mock_accelerator,
+            free_values=[70 * gib, 69 * gib, 66 * gib],
+            process_values=[1 * gib, 2 * gib, 3 * gib],
+        )
+        baseline = MemorySnapshot(device="cuda:0")
+        with memory_profiling(baseline_snapshot=baseline) as result:
+            pass
+
+    assert baseline.process_memory == 1 * gib
+    assert result.process_scoped
+    assert result.total_consumed == 2 * gib
+    assert result.non_kv_cache_memory == 2 * gib
+
+
+def test_memory_profiling_falls_back_to_device_delta_without_process_usage():
+    gib = 1024**3
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("torch.accelerator") as mock_accelerator,
+    ):
+        _mock_measurements(
+            mock_platform,
+            mock_accelerator,
+            free_values=[70 * gib, 69 * gib, 66 * gib],
+            process_values=[None, None, None],
+        )
+        baseline = MemorySnapshot(device="cuda:0")
+        with memory_profiling(baseline_snapshot=baseline) as result:
+            pass
+
+    assert baseline.process_memory is None
+    assert not result.process_scoped
+    assert result.total_consumed == 4 * gib
+
+
+def test_memory_snapshot_subtraction_keeps_process_memory():
+    a = MemorySnapshot(device="cuda:0", auto_measure=False)
+    b = MemorySnapshot(device="cuda:0", auto_measure=False)
+    a.process_memory, b.process_memory = 5, 2
+    assert (a - b).process_memory == 3
+    b.process_memory = None
+    assert (a - b).process_memory is None
+
+
+def _hold_device_memory(num_bytes: int, ready, release):
+    import torch
+
+    buf = torch.empty(num_bytes, dtype=torch.uint8, device="cuda")
+    torch.cuda.synchronize()
+    ready.set()
+    release.wait()
+    del buf
+
+
+@create_new_process_for_each_test()
+def test_memory_profiling_ignores_other_process_allocations():
+    """End-to-end on a real device: a second process allocates 512 MiB while
+    this one is profiling; total_consumed must only reflect our own 256 MiB."""
+    _warmup = torch.zeros(1, device="cuda")
+    del _warmup
+    torch.accelerator.empty_cache()
+    if current_platform.get_process_memory_usage(torch.cuda.current_device()) is None:
+        pytest.skip("platform cannot report per-process device memory usage")
+
+    baseline_snapshot = MemorySnapshot()
+    weights = torch.randn(64, 1024, 1024, device="cuda", dtype=torch.float32)
+    weights_memory = 64 * 1024 * 1024 * 4  # 256 MiB
+
+    ctx = mp.get_context("spawn")
+    ready, release = ctx.Event(), ctx.Event()
+    other = ctx.Process(
+        target=_hold_device_memory, args=(512 * 1024 * 1024, ready, release)
+    )
+    other.start()
+    try:
+        with memory_profiling(
+            baseline_snapshot=baseline_snapshot, weights_memory=weights_memory
+        ) as result:
+            assert ready.wait(timeout=120), "helper process did not allocate"
+    finally:
+        release.set()
+        other.join(timeout=60)
+
+    assert result.process_scoped
+    ratio = result.total_consumed / weights_memory
+    assert abs(ratio - 1) <= 0.05, (
+        f"total_consumed={result.total_consumed}, expected~{weights_memory}"
+    )
+    del weights
