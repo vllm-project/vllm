@@ -123,6 +123,9 @@ class GDNAttentionMetadata:
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
+    # ~prefill_has_initial_state as [num_prefills, 1, 1, 1], to zero the
+    # gathered [num_prefills, HV, V, K] initial states in one masked_fill_.
+    prefill_no_initial_state_mask: torch.Tensor | None = None
     aiter_prefill_metadata: object | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
@@ -513,6 +516,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        prefill_no_initial_state_mask: torch.Tensor | None = None
         aiter_prefill_metadata: object | None = None
         if num_prefills > 0:
             # In a mixed non-spec batch, decodes are peeled off to the recurrent
@@ -569,6 +573,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
+            prefill_no_initial_state_mask = ~prefill_has_initial_state.view(-1, 1, 1, 1)
         else:
             has_initial_state = None
 
@@ -683,6 +688,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            prefill_no_initial_state_mask=prefill_no_initial_state_mask,
             aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,

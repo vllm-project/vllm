@@ -227,6 +227,7 @@ def test_forward_core_split_matches_unified(
         prefill_query_start_loc=meta_split.non_spec_query_start_loc,
         prefill_state_indices=meta_split.non_spec_state_indices_tensor,
         prefill_has_initial_state=meta_split.has_initial_state,
+        prefill_no_initial_state_mask=~meta_split.has_initial_state.view(-1, 1, 1, 1),
     )
 
     # Size the state pools from the indices the builder actually produced.
