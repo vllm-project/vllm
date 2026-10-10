@@ -526,6 +526,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
     const int kv_lora_rank,                    //
     const int pe_dim,                          //
     const int block_size,                      //
+    const bool has_rope_tail,                  //
     const float* scale                         //
 ) {
   const int64_t token_idx = blockIdx.x;
@@ -542,15 +543,15 @@ __global__ void concat_and_cache_ds_mla_kernel(
   // For the NoPE part, each tile of 128 elements is handled by half of one warp
   // (16 threads). There are 4 total tiles, so 2 warps (64 threads).
   // Lanes 0 and 16 of each warp write the scale values for that warp's tiles.
-  // The RoPE part (last 64 elements) is handled by another 1 warp (32 threads).
+  // The optional RoPE tail is handled by another 1 warp (32 threads).
   // So in total, we use 3 warps (96 threads) per block.
 
-  // Cast kv_cache to 16_bit for RoPE values
-  scalar_t* kv_cache_16bit =
-      reinterpret_cast<scalar_t*>(&kv_cache[dst_idx_start]);
-
-  // Zero the reserved RoPE tail for NoPE rows.
   if (threadIdx.x >= 64) {
+    if (!has_rope_tail) {
+      return;
+    }
+    scalar_t* kv_cache_16bit =
+        reinterpret_cast<scalar_t*>(&kv_cache[dst_idx_start]);
     // Each thread handles two elements of RoPE
     const int8_t pe_idx_start = (threadIdx.x - 64) * 2;
     // RoPE values start after the packed 8-bit NoPE values and the
@@ -912,7 +913,7 @@ void reshape_and_cache_flash(
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
           slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
-          reinterpret_cast<const float*>(scale.data_ptr()));
+          has_rope_tail, reinterpret_cast<const float*>(scale.data_ptr()));
 
 void concat_and_cache_mla(
     torch::stable::Tensor& kv_c,      // [num_tokens, kv_lora_rank]
@@ -935,6 +936,8 @@ void concat_and_cache_mla(
   int kv_lora_rank = kv_c.size(1);
   int pe_dim = k_pe.size(1);
   int block_size = kv_cache.size(1);
+  const int64_t row_bytes = kv_cache.size(2) * kv_cache.element_size();
+  const bool has_rope_tail = row_bytes == 656;
 
   const bool is_nvfp4_ds_mla = kv_cache_dtype == "nvfp4_ds_mla";
   if (kv_cache_dtype == "fp8_ds_mla") {
@@ -942,8 +945,9 @@ void concat_and_cache_mla(
                     "kv_lora_rank must be 512 for fp8_ds_mla");
     STD_TORCH_CHECK(pe_dim == 64 || pe_dim == 0,
                     "pe_dim must be 64 or 0 for fp8_ds_mla");
-    STD_TORCH_CHECK(kv_cache.size(2) == 656 / kv_cache.element_size(),
-                    "kv_cache.size(2) must be 656 bytes for fp8_ds_mla");
+    STD_TORCH_CHECK(has_rope_tail || (pe_dim == 0 && row_bytes == 528),
+                    "fp8_ds_mla requires 656-byte rows, or 528-byte rows with "
+                    "pe_dim == 0");
     STD_TORCH_CHECK(kv_c.element_size() == 2,
                     "kv_c.element_size() must be 2 for fp8_ds_mla");
     STD_TORCH_CHECK(k_pe.element_size() == 2,
@@ -981,8 +985,8 @@ void concat_and_cache_mla(
     // For the NoPE part, each tile of 128 elements is handled by half of one
     // warp (16 threads). There are 4 total tiles, so 2 warps (64 threads).
     // Lanes 0 and 16 of each warp write the scale values for that warp's tiles.
-    // The RoPE part (last 64 elements) is handled by another 1 warp (32
-    // threads). So in total, we use 3 warps (96 threads) per block.
+    // The optional RoPE tail is handled by another 1 warp (32 threads).
+    // So in total, we use 3 warps (96 threads) per block.
     dim3 block(96);
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_DS_MLA);
@@ -1805,6 +1809,8 @@ void cp_gather_and_upconvert_fp8_kv_cache(
   STD_TORCH_CHECK(dst.scalar_type() == torch::headeronly::ScalarType::BFloat16,
                   "dst must be bfloat16");
   STD_TORCH_CHECK(head_dim == 576, "head_dim must be 576 for MLA");
+  STD_TORCH_CHECK(src_cache.size(2) * src_cache.element_size() >= 656,
+                  "src_cache rows must contain at least 656 bytes for MLA");
 
   int64_t block_table_stride = block_table.stride(0);
   int64_t cache_block_stride = src_cache.stride(0);
