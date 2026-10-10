@@ -1205,6 +1205,84 @@ def test_get_c128_boundary(starts, query_start_loc, expected):
     assert _get_c128_boundary(metadata) is expected
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@torch.inference_mode()
+def test_c128_skip_is_not_baked_into_cuda_graph(monkeypatch):
+    """A graph captured on a batch with no C128 boundary must still launch the
+    compressor on replay; only eager steps may skip it."""
+    from vllm.config import CUDAGraphMode
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v4 import compressor as compressor_mod
+    from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v4.nvidia.ops import sparse_attn_compress_cutedsl
+
+    launches = torch.zeros(1, dtype=torch.int32, device="cuda")
+    monkeypatch.setattr(
+        compressor_mod, "_SAVE_PARTIAL_STATES_KERNEL", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        sparse_attn_compress_cutedsl,
+        "_SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL",
+        lambda **kw: launches.add_(1),
+    )
+
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.head_dim, compressor.rope_head_dim = 512, 64
+    compressor.compress_ratio, compressor.coff, compressor.overlap = 128, 1, False
+    compressor.use_fp4_cache = False
+    compressor._use_two_stage_fused_compressor = False
+    compressor._quant_block = 64
+    compressor._token_stride = 576
+    compressor._scale_dim = 8
+    compressor.rms_norm_eps = 1e-6
+    compressor.ape = torch.zeros(128, 512, device="cuda")
+    compressor.norm = SimpleNamespace(weight=torch.ones(512, device="cuda"))
+    compressor.state_cache = SimpleNamespace(
+        prefix="state", kv_cache=torch.zeros(2, 8, 1024, device="cuda")
+    )
+    compressor.k_cache_prefix = "main"
+    kv_cache = torch.zeros(1, 64, 584, dtype=torch.uint8, device="cuda")
+    compressor._static_forward_context = {"main": SimpleNamespace(kv_cache=kv_cache)}
+
+    num_tokens = 4
+    slots = torch.arange(num_tokens, device="cuda")
+    metadata = {
+        "state": SimpleNamespace(
+            slot_mapping=slots,
+            block_table=torch.zeros(num_tokens, 1, dtype=torch.int32, device="cuda"),
+            block_size=8,
+            token_to_req_indices=torch.arange(
+                num_tokens, dtype=torch.int32, device="cuda"
+            ),
+            c128_boundary=False,
+        ),
+        "main": SimpleNamespace(slot_mapping=slots),
+    }
+    kv_score = torch.zeros(num_tokens, 1024, device="cuda")
+    positions = torch.arange(num_tokens, device="cuda")
+    rotary = SimpleNamespace(cos_sin_cache=torch.zeros(1, 64, device="cuda"))
+    context = ForwardContext(
+        {}, metadata, {}, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+    )
+
+    def run():
+        with override_forward_context(context):
+            compressor(kv_score, positions, rotary)
+
+    run()
+    torch.cuda.synchronize()
+    assert launches.item() == 0, "eager step with no boundary should skip"
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    launches.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert launches.item() == 1, "captured graph must not bake in the skip"
+
+
 # ── Test A: DeepseekV4 Attention path ──────────────────────────────────────────────
 
 
