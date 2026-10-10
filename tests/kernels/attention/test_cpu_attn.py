@@ -10,7 +10,7 @@ import torch
 
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 from vllm.v1.attention.backends.zentorch_sdpa import (
@@ -1359,6 +1359,63 @@ def test_varlen_with_paged_kv_dynamic_causal(
         isa=isa,
         kv_cache_dtype=kv_cache_dtype,
         dynamic_causal=dynamic_causal,
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    ("seq_lens", "num_heads", "head_size", "num_blocks"),
+    [
+        pytest.param(
+            [(5, 513), (1, 193), (4, 1025)],
+            (32, 4),
+            128,
+            64,
+            id="mixed_5_1_4",
+        ),
+        pytest.param([(4, 8192)], (8, 1), 128, 256, id="q4_singleton"),
+        pytest.param(
+            [(16, 8192)],
+            (32, 8),
+            128,
+            128,
+            id="q16_singleton_split_reduction",
+        ),
+        pytest.param([(16, 8192)], (16, 1), 256, 256, id="q16_single_kv"),
+        pytest.param(
+            [(14, 8192)], (16, 1), 256, 256, id="q14_underfilled_span_balance"
+        ),
+        pytest.param(
+            [(17, 8192)] * 4,
+            (32, 8),
+            128,
+            128,
+            id="whole_adaptive_tile_after_partition_credit",
+        ),
+    ],
+)
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+@set_default_torch_num_threads(32)
+def test_amx_spec_decode_gqa_correctness(
+    kv_cache_dtype: str,
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    num_blocks: int,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=32,
+        soft_cap=None,
+        num_blocks=num_blocks,
+        use_alibi=True,
+        use_sink=True,
+        isa="amx",
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 

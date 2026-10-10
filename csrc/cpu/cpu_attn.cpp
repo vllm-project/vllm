@@ -76,7 +76,6 @@ torch::Tensor get_scheduler_metadata(
 
   input.sliding_window_size = window_size;
   input.causal = causal;
-  input.isa = isa;
   input.enable_kv_split = enable_kv_split;
   input.dynamic_causal = dynamic_causal.has_value()
                              ? dynamic_causal->data_ptr<int32_t>()
@@ -86,6 +85,7 @@ torch::Tensor get_scheduler_metadata(
       static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype));
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
     CPU_ATTN_DISPATCH(head_dim, isa, kv_cache_idx, [&]() {
+      input.isa = attn_impl::ISAType;
       input.elem_size = sizeof(attn_impl::kv_cache_t);
       input.q_buffer_elem_size = sizeof(attn_impl::q_buffer_t);
       input.logits_buffer_elem_size = sizeof(attn_impl::logits_buffer_t);
