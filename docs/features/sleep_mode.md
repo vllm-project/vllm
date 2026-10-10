@@ -188,6 +188,14 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 !!! note
     These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.
 
+## Custom model loaders
+
+A custom `BaseModelLoader` can override three optional methods. All are inert by default, so existing loaders are unaffected. See the docstrings on `BaseModelLoader` for the exact contract.
+
+`on_sleep(level)` is called before `Worker.sleep(level)` frees GPU memory the loader made resident, and `on_wake_up(tags)` after `Worker.wake_up(tags)` restores it. Override them to pause and resume external state that depends on that memory staying valid — for example, a loader serving weights to other processes over RDMA directly out of GPU memory. Both are no-ops by default.
+
+`reload_weights_inplace(vllm_config, model_config, model)` lets a loader own the `reload_weights()` step of the level-2 flow above. By default it returns `False` and the runner falls back to `get_all_weights()` + `model.load_weights()`, which requires the loader to expose weights as an iterator of tensors. A loader that writes final weights into the model itself should override it, perform the reload, and return `True`.
+
 ## Limitation
 
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.

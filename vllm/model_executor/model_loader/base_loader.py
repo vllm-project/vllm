@@ -45,6 +45,40 @@ class BaseModelLoader(ABC):
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
+    def on_sleep(self, level: int) -> None:  # noqa: B027
+        """Called before ``Worker.sleep(level)`` frees GPU memory this
+        loader made resident.
+
+        No-op by default. Override to release or pause any external state
+        that depends on that memory remaining valid before it becomes
+        invalid.
+        """
+
+    def on_wake_up(self, tags: list[str] | None) -> None:  # noqa: B027
+        """Called after ``Worker.wake_up(tags)`` restores GPU memory.
+
+        No-op by default. Override to resume whatever ``on_sleep`` paused.
+        ``tags`` is the same argument ``wake_up`` was called with. Note that
+        weight content is not necessarily valid yet at this point -- a sleep
+        that discarded it is followed by a ``reload_weights()`` call, which
+        reaches this loader through :meth:`reload_weights_inplace`.
+        """
+
+    def reload_weights_inplace(
+        self,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        model: nn.Module,
+    ) -> bool:
+        """Refresh ``model``'s weights in place from this loader's source.
+
+        Used by ``reload_weights()`` when no weights are provided. Returns
+        ``False`` by default, falling back to ``get_all_weights()`` +
+        ``model.load_weights()``. Override and return ``True`` for loaders
+        that write final weights into the model themselves.
+        """
+        return False
+
     def create_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
