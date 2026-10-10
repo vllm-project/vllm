@@ -367,6 +367,54 @@ def fused_qk_norm_rope(
     )
 
 
+def fused_qk_norm_rope_kvcache(
+    qkv: torch.Tensor,
+    q_out: torch.Tensor,
+    k_out: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    position_ids: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    forced_token_heads_per_warp: int = -1,
+) -> None:
+    """fused_qk_norm_rope with the flash-layout KV-cache write folded in.
+
+    qkv is read-only; the normalised/rotated Q and K are written to q_out
+    [num_tokens, num_heads_q, head_dim] and k_out [num_tokens, num_heads_k,
+    head_dim], and K/V are scattered into key_cache/value_cache
+    ([num_blocks, block_size, num_kv_heads, head_dim], head_dim contiguous)
+    at slot_mapping. Only kv_cache_dtype="auto" is supported.
+    """
+    torch.ops._C.fused_qk_norm_rope_kvcache(
+        qkv,
+        q_out,
+        k_out,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        is_neox,
+        position_ids,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        forced_token_heads_per_warp,
+    )
+
+
 def apply_repetition_penalties_torch(
     logits: torch.Tensor,
     prompt_mask: torch.Tensor,

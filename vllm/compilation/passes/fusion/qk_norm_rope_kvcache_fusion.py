@@ -832,7 +832,7 @@ def _discover_mrope_configs(
 
 
 class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
-    """Fuse QK-norm + RoPE/MRoPE + KV cache update into an AITER HIP kernel.
+    """Fuse QK-norm + RoPE/MRoPE + KV cache update into one kernel.
 
     Supersedes both QKNormRoPEFusionPass and RopeKVCacheFusionPass for
     attention layers that support the combined operation, eliminating two
@@ -864,6 +864,34 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             return
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
+        quant_query_options = [False, True] if current_platform.is_rocm() else [False]
+
+        # On CUDA, an opaque LayerName is a wildcard. One registered pattern
+        # must not match an unsupported layer or a different Q/K/V geometry.
+        if current_platform.is_cuda() and _USE_LAYERNAME:
+            layers = list(attn_layers.values())
+            if any(
+                not layer.impl.fused_qk_norm_rope_kvcache_supported()
+                or layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS
+                or layer.head_size_v != layer.head_size
+                for layer in layers
+            ):
+                logger.warning_once(
+                    "QK Norm+RoPE+KVCache fusion not enabled: an attention layer "
+                    "does not support the CUDA fused kernel."
+                )
+                return
+            geometries = {
+                (layer.num_heads, layer.num_kv_heads, layer.head_size, layer.head_size_v)
+                for layer in layers
+            }
+            if len(geometries) > 1:
+                logger.warning_once(
+                    "QK Norm+RoPE+KVCache fusion not enabled: attention layers "
+                    "have different geometries %s.",
+                    sorted(geometries),
+                )
+                return
 
         for _, layer in attn_layers.items():
             supports_rope = layer.impl.fused_qk_norm_rope_kvcache_supported()
@@ -896,7 +924,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             if supports_rope:
                 for epsilon in [1e-5, 1e-6]:
                     for neox in [True, False]:
-                        for quant_q in [False, True]:
+                        for quant_q in quant_query_options:
                             QkNormRopeKvCachePattern(
                                 layer=layer,
                                 eps=epsilon,
@@ -934,7 +962,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                     neox,
                                 )
                                 continue
-                            for quant_q in [False, True]:
+                            for quant_q in quant_query_options:
                                 QkNormMRopeKvCachePattern(
                                     layer=layer,
                                     eps=epsilon,
@@ -959,7 +987,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         self.matched_count = self.patterns.apply(graph)
         logger.info(
             "QK-Norm+RoPE/MRoPE+KVCache fusion: replaced %s pattern(s) "
-            "with an AITER fused attention-prologue kernel",
+            "with a fused attention-prologue kernel",
             self.matched_count,
         )
 
