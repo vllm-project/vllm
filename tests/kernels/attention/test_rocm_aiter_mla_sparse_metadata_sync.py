@@ -114,7 +114,7 @@ def _patch_build_deps(monkeypatch, events=None):
     on CPU."""
 
     def fake_generate_sparse_seqlen_triton(
-        query_lens, seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
+        seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
     ):
         return torch.zeros(num_tokens, dtype=torch.int32, device="cpu")
 
@@ -165,6 +165,25 @@ def test_build_populates_mixed_split_fields(monkeypatch):
     assert md.num_decode_tokens == 1
     assert md.prefill_max_seq_len == 0
     assert md.prefill is None
+
+
+def test_build_fills_paged_kv_indptr_tail(monkeypatch):
+    """Rows past num_tokens must read as empty: the tail repeats the total."""
+    builder = _make_builder()
+    _patch_build_deps(monkeypatch)
+    monkeypatch.setattr(
+        sparse_mod,
+        "generate_sparse_seqlen_triton",
+        lambda *args, **kwargs: torch.tensor([3, 5], dtype=torch.int32),
+    )
+    builder.paged_kv_indptr[1:].fill_(-1)
+
+    md = builder.build(
+        common_prefix_len=0, common_attn_metadata=_make_common_metadata()
+    )
+
+    assert md.paged_kv_indptr.tolist() == [0, 3, 8]
+    assert builder.paged_kv_indptr.tolist() == [0, 3, 8, 8, 8, 8, 8, 8, 8]
 
 
 def test_sink_build_skips_persistent_metadata(monkeypatch):
