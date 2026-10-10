@@ -538,7 +538,7 @@ class TestMockObjTierFailures:
         tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
         primary_kv_view = memoryview(tensor.numpy())
         mmap_region = MagicMock()
-        mmap_region.create_kv_memoryview.return_value = primary_kv_view
+        mmap_region.get_view.return_value = primary_kv_view
         primary_tier = CPUPrimaryTierOffloadingManager(
             num_chunks=num_blocks, mmap_region=mmap_region
         )

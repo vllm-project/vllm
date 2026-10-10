@@ -63,7 +63,7 @@ def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
     """Create a mock SharedOffloadRegion for testing."""
     mock = MagicMock()
     view = memoryview(torch.zeros((num_chunks, row_bytes), dtype=torch.int8).numpy())
-    mock.create_kv_memoryview.return_value = view
+    mock.get_view.return_value = view
     return mock
 
 
@@ -189,7 +189,7 @@ def test_tiering_manager_aggregates_secondary_stats():
     )
     secondary_tier = MetricsSecondaryTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_region.create_kv_memoryview(),
+        primary_kv_view=mock_region.get_view(),
         tier_type="test_metrics",
     )
     secondary_stats = OffloadingConnectorStats()
@@ -289,7 +289,7 @@ class TestTieringOffloadingManager:
             num_chunks=5, mmap_region=mock_region
         )
 
-        mock_view = mock_region.create_kv_memoryview()
+        mock_view = mock_region.get_view()
 
         # Create secondary tiers with the primary view
         self.secondary_tier1 = ExampleSecondaryTierManager(

@@ -5,7 +5,8 @@ import errno
 import mmap
 import os
 import time
-from collections.abc import Callable
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import torch
@@ -68,7 +69,7 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
-class SharedOffloadRegion:
+class SharedOffloadRegion(ABC):
     """Single mmap-backed memory region shared across all workers for a
     vLLM instance.  Workers coordinate via the filesystem: the first worker
     to open the file with O_EXCL becomes the creator and calls ftruncate;
@@ -90,16 +91,11 @@ class SharedOffloadRegion:
         self,
         engine_id: str,
         num_chunks: int,
-        rank: int | None,
         kv_bytes_per_chunk: int,
-        cpu_page_size: int,
         barrier: Callable[[], None] | None = None,
         *,
         creator_memory_check: Callable[[int], None] | None = None,
-        populate_only_on_creator: bool = False,
     ) -> None:
-        if populate_only_on_creator and barrier is None:
-            raise ValueError("Creator-only population requires a barrier.")
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -109,12 +105,9 @@ class SharedOffloadRegion:
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
-        self.rank = rank
-        if rank is not None:
-            # byte offset to this worker's first slot within each chunk row
-            self._worker_offset = rank * cpu_page_size
-            # exclusive upper bound for this worker's area within each row
-            self._worker_area_end = (rank + 1) * cpu_page_size
+        self._views: list[torch.Tensor] = []
+        self.is_pinned = False
+        self.pinned_addresses: list[int] = []
         try:
             try:
                 self.fd: int | None = os.open(
@@ -152,9 +145,10 @@ class SharedOffloadRegion:
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
 
-            if populate_only_on_creator and self._creator:
-                populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+            # HiSparse needs creator-only population before the mapping
+            # barrier. Other region types leave population to their explicit
+            # populate() method after construction.
+            self._populate_before_mapping_barrier()
         except Exception:
             if self._creator:
                 with contextlib.suppress(FileNotFoundError):
@@ -202,144 +196,42 @@ class SharedOffloadRegion:
                 logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
-        self._canonical_offset = 0
-        self.is_pinned: bool = False
-        self.pinned_addresses: list[int] = []
 
-        if populate_only_on_creator:
-            return
+    def _populate_before_mapping_barrier(self) -> None:
+        """Hook for region types that populate before the mapping barrier."""
+        return None
 
+    @abstractmethod
+    def populate(self) -> None:
+        """Pre-fault this region according to its layout."""
+
+    @abstractmethod
+    def pin(self) -> None:
+        """Register this region's host memory for GPU access."""
+
+    def _populate_ranges(
+        self, ranges: Iterable[tuple[int, int]], description: str
+    ) -> None:
+        """Populate the supplied byte ranges with one selected madvise path."""
+        assert self.mmap_obj is not None
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-
-        if rank is not None:
-            # Populate only this worker's pages (one slot per chunk row).
-            worker_offset = rank * cpu_page_size
-            _t0 = time.perf_counter()
-            page_size = self.page_size
-            for chunk in range(num_chunks):
-                raw_offset = chunk * self._row_stride + worker_offset
-                aligned_offset = (raw_offset // page_size) * page_size
-                end = raw_offset + cpu_page_size
-                aligned_length = end - aligned_offset
-                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
-            logger.debug(
-                "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
-                num_chunks,
-                time.perf_counter() - _t0,
-            )
-        else:
-            # No rank — populate the entire shared region in one call.
-            _t0 = time.perf_counter()
-            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
-            logger.debug(
-                "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
-            )
+        _t0 = time.perf_counter()
+        count = 0
+        for offset, length in ranges:
+            populate_write_fn(self.mmap_obj, offset, length)
+            count += 1
+        logger.debug(
+            "MADV_POPULATE_WRITE %s: %d range(s) in %.3f s",
+            description,
+            count,
+            time.perf_counter() - _t0,
+        )
 
     @property
     def base_tensor(self) -> torch.Tensor:
         if self._base is None:
             raise RuntimeError("Shared offload region has been released.")
         return self._base
-
-    def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
-        """Allocate a strided int8 view for this worker, one canonical tensor.
-
-        Must be called once per canonical tensor. The full mmap layout is:
-
-            worker0_chunk0 | worker1_chunk0 | ... | worker{M-1}_chunk0
-            worker0_chunk1 | worker1_chunk1 | ... | worker{M-1}_chunk1
-            ...
-
-        Each worker_chunk cell is cpu_page_size bytes and holds all canonical
-        tensors for that worker and chunk concatenated:
-            [ tensor0_data | tensor1_data | ... | tensor{L-1}_data ]
-
-        Consecutive rows are separated by row_stride = cpu_page_size * M.
-
-        Returns an int8 tensor of shape (num_chunks, tensor_page_size) with stride
-        (row_stride, 1).  Using int8 keeps stride == bytes, so swap_blocks
-        address arithmetic works without any dtype conversion.
-
-        Args:
-            tensor_page_size: Bytes per chunk for this tensor.
-
-        """
-        assert self.rank is not None
-        new_offset = self._worker_offset + tensor_page_size
-        assert new_offset <= self._worker_area_end, (
-            f"Worker offset {new_offset} exceeds worker area end "
-            f"{self._worker_area_end} (overflowed by "
-            f"{new_offset - self._worker_area_end} bytes)"
-        )
-        worker_layer_view = torch.as_strided(
-            self._base,
-            size=(self.num_chunks, tensor_page_size),
-            stride=(self._row_stride, 1),
-            storage_offset=self._worker_offset,
-        )
-        self._worker_offset = new_offset
-        self._views.append(worker_layer_view)
-        return worker_layer_view
-
-    def create_next_canonical_view(self, tensor_page_size: int) -> torch.Tensor:
-        """Allocate a strided int8 view shared by all workers for one
-        canonical tensor (canonical layout).
-
-        Must be called once per canonical tensor, instead of
-        create_next_worker_view. The full mmap layout is:
-
-            |<-------- canonical area ------->|<-------- unused ------->|
-            |  all workers share this area    |                         |
-            |                                 |                         |
-            | [ canonical_t0 | canonical_t1 ] |                         |
-            | [ canonical_t0 | canonical_t1 ] |                         |
-            | [ canonical_t0 | canonical_t1 ] |                         |
-            ^                ^
-            _canonical_offset=0, then advances by each tensor's size
-
-        Each canonical_t{i} cell is that tensor's canonical page for the
-        chunk. Canonical areas are carved consecutively from the start of
-        each chunk row; consecutive rows are separated by row_stride. Every
-        worker gets the identical byte ranges and writes only its disjoint
-        bytes within them, as described by its canonical mappings — unlike
-        create_next_worker_view, which gives each worker a private
-        cpu_page_size slot per row.
-
-        The trailing unused bytes exist only when the canonical pages sum to
-        less than row_stride: page-alignment padding of the row, or
-        deduplication of KV replicated across workers (e.g. the MLA latent),
-        where one canonical copy replaces world_size worker copies.
-
-        Args:
-            tensor_page_size: Canonical bytes per chunk for this tensor.
-
-        """
-        new_offset = self._canonical_offset + tensor_page_size
-        assert new_offset <= self._row_stride
-        view = torch.as_strided(
-            self._base,
-            size=(self.num_chunks, tensor_page_size),
-            stride=(self._row_stride, 1),
-            storage_offset=self._canonical_offset,
-        )
-        self._canonical_offset = new_offset
-        self._views.append(view)
-        return view
-
-    def create_kv_memoryview(self) -> memoryview:
-        """Return a zero-copy memoryview over the entire KV buffer.
-
-        Shape: (num_chunks, row_stride_bytes). Secondary tiers address
-        chunk *b* as ``view[b]``.
-        """
-        kv_tensor = self._base.view(self.num_chunks, self._row_stride)
-        np_arr = kv_tensor.numpy()
-        assert np_arr.ctypes.data == self._base.data_ptr(), (
-            "view()/numpy() created a copy instead of sharing the mmap buffer; "
-            "secondary tiers require zero-copy access to primary KV data"
-        )
-        return memoryview(np_arr)
 
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
@@ -377,3 +269,266 @@ class SharedOffloadRegion:
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
                 )
             self._creator = False
+
+
+class TensorViewRegion(SharedOffloadRegion, ABC):
+    """Shared region whose logical views are tensor-sized slices."""
+
+    @abstractmethod
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
+        """Return the next tensor view in this region's layout."""
+
+
+class MemoryViewRegion(SharedOffloadRegion, ABC):
+    """Shared region exposed as one complete row-major memoryview."""
+
+    @abstractmethod
+    def get_view(self) -> memoryview:
+        """Return the complete zero-copy memoryview."""
+
+
+class DirectRankRegion(TensorViewRegion):
+    """Shared region with one private strided slot per rank."""
+
+    def __init__(
+        self,
+        engine_id: str,
+        num_chunks: int,
+        rank: int,
+        kv_bytes_per_chunk: int,
+        cpu_page_size: int,
+        barrier: Callable[[], None] | None = None,
+        *,
+        creator_memory_check: Callable[[int], None] | None = None,
+    ) -> None:
+        self._cpu_page_size = cpu_page_size
+        self._worker_offset = rank * cpu_page_size
+        self._worker_area_end = (rank + 1) * cpu_page_size
+        super().__init__(
+            engine_id=engine_id,
+            num_chunks=num_chunks,
+            kv_bytes_per_chunk=kv_bytes_per_chunk,
+            barrier=barrier,
+            creator_memory_check=creator_memory_check,
+        )
+        self._rank = rank
+
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
+        new_offset = self._worker_offset + tensor_page_size
+        assert new_offset <= self._worker_area_end, (
+            f"Worker offset {new_offset} exceeds worker area end "
+            f"{self._worker_area_end} (overflowed by "
+            f"{new_offset - self._worker_area_end} bytes)"
+        )
+        view = torch.as_strided(
+            self.base_tensor,
+            size=(self.num_chunks, tensor_page_size),
+            stride=(self._row_stride, 1),
+            storage_offset=self._worker_offset,
+        )
+        self._worker_offset = new_offset
+        self._views.append(view)
+        return view
+
+    def populate(self) -> None:
+        page_size = self.page_size
+        ranges = []
+        for chunk in range(self.num_chunks):
+            raw_offset = chunk * self._row_stride + self._rank * self._cpu_page_size
+            aligned_offset = (raw_offset // page_size) * page_size
+            end = raw_offset + self._cpu_page_size
+            ranges.append((aligned_offset, end - aligned_offset))
+        self._populate_ranges(ranges, "rank slot")
+
+    def pin(self) -> None:
+        from vllm.v1.kv_offload.cpu.gpu_worker import pin_mmap_region
+
+        pin_mmap_region(self)
+
+
+class ReplicatedRegion(TensorViewRegion):
+    """Shared region containing one worker-visible replicated copy."""
+
+    def __init__(
+        self,
+        engine_id: str,
+        num_chunks: int,
+        kv_bytes_per_chunk: int,
+        cpu_page_size: int,
+        barrier: Callable[[], None] | None = None,
+        *,
+        creator_memory_check: Callable[[int], None] | None = None,
+    ) -> None:
+        self._cpu_page_size = cpu_page_size
+        self._worker_offset = 0
+        self._worker_area_end = cpu_page_size
+        super().__init__(
+            engine_id=engine_id,
+            num_chunks=num_chunks,
+            kv_bytes_per_chunk=kv_bytes_per_chunk,
+            barrier=barrier,
+            creator_memory_check=creator_memory_check,
+        )
+
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
+        new_offset = self._worker_offset + tensor_page_size
+        assert new_offset <= self._worker_area_end, (
+            f"Replicated offset {new_offset} exceeds worker area end "
+            f"{self._worker_area_end} (overflowed by "
+            f"{new_offset - self._worker_area_end} bytes)"
+        )
+        view = torch.as_strided(
+            self.base_tensor,
+            size=(self.num_chunks, tensor_page_size),
+            stride=(self._row_stride, 1),
+            storage_offset=self._worker_offset,
+        )
+        self._worker_offset = new_offset
+        self._views.append(view)
+        return view
+
+    def populate(self) -> None:
+        page_size = self.page_size
+        ranges = []
+        for chunk in range(self.num_chunks):
+            raw_offset = chunk * self._row_stride
+            aligned_offset = (raw_offset // page_size) * page_size
+            end = raw_offset + self._cpu_page_size
+            ranges.append((aligned_offset, end - aligned_offset))
+        self._populate_ranges(ranges, "replicated slot")
+
+    def pin(self) -> None:
+        from vllm.v1.kv_offload.cpu.gpu_worker import pin_mmap_region
+
+        pin_mmap_region(self)
+
+
+class GlobalRegion(MemoryViewRegion):
+    """Shared region exposed as a complete row-major CPU memoryview."""
+
+    def get_view(self) -> memoryview:
+        kv_tensor = self.base_tensor.view(self.num_chunks, self._row_stride)
+        np_arr = kv_tensor.numpy()
+        assert np_arr.ctypes.data == self.base_tensor.data_ptr(), (
+            "view()/numpy() created a copy instead of sharing the mmap buffer; "
+            "secondary tiers require zero-copy access to primary KV data"
+        )
+        return memoryview(np_arr)
+
+    def populate(self) -> None:
+        self._populate_ranges(((0, self.total_size_bytes),), "entire region")
+
+    def pin(self) -> None:
+        # Scheduler-side CPU access does not use CUDA host registration.
+        return
+
+
+class CanonicalRegion(TensorViewRegion):
+    """Shared region exposing canonical tensor views."""
+
+    def __init__(
+        self,
+        engine_id: str,
+        num_chunks: int,
+        rank: int,
+        kv_bytes_per_chunk: int,
+        cpu_page_size: int,
+        barrier: Callable[[], None] | None = None,
+        *,
+        creator_memory_check: Callable[[int], None] | None = None,
+    ) -> None:
+        self._cpu_page_size = cpu_page_size
+        self._canonical_offset = 0
+        super().__init__(
+            engine_id=engine_id,
+            num_chunks=num_chunks,
+            kv_bytes_per_chunk=kv_bytes_per_chunk,
+            barrier=barrier,
+            creator_memory_check=creator_memory_check,
+        )
+        self._rank = rank
+
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
+        new_offset = self._canonical_offset + tensor_page_size
+        assert new_offset <= self._row_stride
+        view = torch.as_strided(
+            self.base_tensor,
+            size=(self.num_chunks, tensor_page_size),
+            stride=(self._row_stride, 1),
+            storage_offset=self._canonical_offset,
+        )
+        self._canonical_offset = new_offset
+        self._views.append(view)
+        return view
+
+    def populate(self) -> None:
+        page_size = self.page_size
+        ranges = []
+        for chunk in range(self.num_chunks):
+            raw_offset = chunk * self._row_stride + self._rank * self._cpu_page_size
+            aligned_offset = (raw_offset // page_size) * page_size
+            end = raw_offset + self._cpu_page_size
+            ranges.append((aligned_offset, end - aligned_offset))
+        self._populate_ranges(ranges, "canonical rank slot")
+
+    def pin(self) -> None:
+        from vllm.v1.kv_offload.cpu.gpu_worker import pin_mmap_region
+
+        pin_mmap_region(self)
+
+
+class HiSparseRegion(TensorViewRegion):
+    """Shared HiSparse host pool with creator-only population and custom pinning."""
+
+    def __init__(
+        self,
+        engine_id: str,
+        num_chunks: int,
+        kv_bytes_per_chunk: int,
+        cpu_page_size: int,
+        barrier: Callable[[], None],
+        registration_ranges: tuple[tuple[int, int], ...],
+        *,
+        creator_memory_check: Callable[[int], None] | None = None,
+    ) -> None:
+        self._registration_ranges = registration_ranges
+        self._canonical_offset = 0
+        super().__init__(
+            engine_id=engine_id,
+            num_chunks=num_chunks,
+            kv_bytes_per_chunk=kv_bytes_per_chunk,
+            barrier=barrier,
+            creator_memory_check=creator_memory_check,
+        )
+
+    def _populate_before_mapping_barrier(self) -> None:
+        if self._creator:
+            self._populate_ranges(
+                ((0, self.total_size_bytes),), "HiSparse creator region"
+            )
+
+    def get_view(self, tensor_page_size: int) -> torch.Tensor:
+        new_offset = self._canonical_offset + tensor_page_size
+        assert new_offset <= self._row_stride
+        view = torch.as_strided(
+            self.base_tensor,
+            size=(self.num_chunks, tensor_page_size),
+            stride=(self._row_stride, 1),
+            storage_offset=self._canonical_offset,
+        )
+        self._canonical_offset = new_offset
+        self._views.append(view)
+        return view
+
+    def populate(self) -> None:
+        # Creator-only population already happened before the mapping barrier.
+        return
+
+    def pin(self) -> None:
+        from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+
+        for start, end in self._registration_ranges:
+            tensor = self.base_tensor[start:end]
+            pin_tensor(tensor)
+            self.pinned_addresses.append(tensor.data_ptr())
+            self.is_pinned = True

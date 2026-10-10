@@ -229,7 +229,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
         worker_calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(tiering_spec_module, "ReplicatedRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
     monkeypatch.setattr(
         tiering_spec_module.torch.accelerator, "current_device_index", lambda: 5
@@ -238,7 +238,6 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
 
-    assert region_calls[0]["rank"] == 0
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
@@ -260,7 +259,7 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
         region_calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(tiering_spec_module, "DirectRankRegion", fake_region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())
     monkeypatch.setattr(
         tiering_spec_module.torch.accelerator,
@@ -384,7 +383,7 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
 
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: False)
-    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "DirectRankRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
     monkeypatch.setattr(
         cpu_spec_module.torch.accelerator, "current_device_index", lambda: 5
@@ -422,7 +421,7 @@ def test_cpu_spec_create_worker_uses_tensor_path_without_shared_region(
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: rocm)
     monkeypatch.setattr(cpu_spec_module.current_platform, "is_rocm", lambda: rocm)
-    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "DirectRankRegion", fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
 
     spec.create_worker(MagicMock())
@@ -493,7 +492,8 @@ def test_cpu_spec_create_worker_rank_assignment(
         region_calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    target_name = "ReplicatedRegion" if replicated_layout else "DirectRankRegion"
+    monkeypatch.setattr(cpu_spec_module, target_name, fake_region_ctor)
     monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
     monkeypatch.setattr(
         cpu_spec_module.torch.accelerator, "current_device_index", lambda: device_index
@@ -501,7 +501,10 @@ def test_cpu_spec_create_worker_rank_assignment(
 
     spec.create_worker(MagicMock())
 
-    assert region_calls[0]["rank"] == expected_rank
+    if replicated_layout:
+        assert "rank" not in region_calls[0]
+    else:
+        assert region_calls[0]["rank"] == expected_rank
 
 
 def test_offloading_spec_has_replicated_layout_default():

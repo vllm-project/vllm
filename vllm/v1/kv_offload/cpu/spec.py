@@ -21,7 +21,12 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    DirectRankRegion,
+    ReplicatedRegion,
+    SharedOffloadRegion,
+    TensorViewRegion,
+)
 
 
 def _all_workers_barrier() -> None:
@@ -167,26 +172,31 @@ class CPUOffloadingSpec(OffloadingSpec):
         ) or current_platform.is_xpu()
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        mmap_region: SharedOffloadRegion | None = None
-        # num_chunks == 0 would size the region to zero bytes, which cannot be
-        # mmap'd; fall back to the tensor path (empty tensors) as before.
-        if self._uses_shared_region() and self.num_chunks > 0:
-            # Replicated layout puts all ranks on slot 0 (single MLA copy);
-            # otherwise each rank takes its own slot by physical device index.
-            if self.replicated_layout:
-                rank = 0
-            else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
-            mmap_region = SharedOffloadRegion(
-                engine_id=self.config.engine_id,
-                num_chunks=self.num_chunks,
-                rank=rank,
-                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-                cpu_page_size=self.cpu_page_size_per_worker,
-                barrier=_all_workers_barrier,
-            )
+        mmap_region: TensorViewRegion | None = None
         try:
+            # num_chunks == 0 would size the region to zero bytes, which cannot
+            # be mmap'd; fall back to the tensor path (empty tensors) as before.
+            if self._uses_shared_region() and self.num_chunks > 0:
+                if self.replicated_layout:
+                    mmap_region = ReplicatedRegion(
+                        engine_id=self.config.engine_id,
+                        num_chunks=self.num_chunks,
+                        kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                        cpu_page_size=self.cpu_page_size_per_worker,
+                        barrier=_all_workers_barrier,
+                    )
+                else:
+                    world_size = self.config.parallel.world_size
+                    rank = torch.accelerator.current_device_index() % world_size
+                    mmap_region = DirectRankRegion(
+                        engine_id=self.config.engine_id,
+                        num_chunks=self.num_chunks,
+                        rank=rank,
+                        kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                        cpu_page_size=self.cpu_page_size_per_worker,
+                        barrier=_all_workers_barrier,
+                    )
+                mmap_region.populate()
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,

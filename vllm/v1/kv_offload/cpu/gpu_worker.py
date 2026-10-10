@@ -27,7 +27,10 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
 )
 from vllm.v1.kv_offload.cpu.host_register import host_register, host_unregister
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    SharedOffloadRegion,
+    TensorViewRegion,
+)
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
@@ -200,7 +203,6 @@ MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register row-aligned chunks, rolling back on failure."""
-    rank = region.rank
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
     # Chunks end on block-row boundaries, which are page aligned, so neither the
@@ -219,9 +221,8 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
             addresses.append(address)
             continue
         logger.warning(
-            "host_register failed for rank=%d at %.2f of %.2f GB; "
+            "host_register failed for mmap region at %.2f of %.2f GB; "
             "the offload region stays pageable",
-            rank,
             offset / 1e9,
             total_size / 1e9,
         )
@@ -232,8 +233,7 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
     region.pinned_addresses.extend(addresses)
     region.is_pinned = True
     logger.debug(
-        "Host-registered mmap region rank=%d %.2f GB in %d chunk(s)",
-        rank,
+        "Host-registered mmap region %.2f GB in %d chunk(s)",
         total_size / 1e9,
         len(addresses),
     )
@@ -774,7 +774,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         kv_caches: CanonicalKVCaches,
         blocks_per_chunk: int,
         num_cpu_chunks: int,
-        mmap_region: SharedOffloadRegion | None = None,
+        mmap_region: TensorViewRegion | None = None,
         canonical_layout: bool = False,
     ):
         assert not canonical_layout or mmap_region is not None
@@ -785,7 +785,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region)
+            mmap_region.pin()
         host_memory_is_pinned = pin_memory and (
             mmap_region is None or mmap_region.is_pinned
         )
@@ -807,11 +807,11 @@ class CPUOffloadingWorker(OffloadingWorker):
 
             if canonical_bytes_per_block is not None:
                 assert mmap_region is not None
-                cpu_tensor = mmap_region.create_next_canonical_view(
+                cpu_tensor = mmap_region.get_view(
                     canonical_bytes_per_block[t_idx] * blocks_per_chunk
                 )
             elif mmap_region is not None:
-                cpu_tensor = mmap_region.create_next_worker_view(cpu_page_size_bytes)
+                cpu_tensor = mmap_region.get_view(cpu_page_size_bytes)
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(

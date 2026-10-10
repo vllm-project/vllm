@@ -242,7 +242,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     tp_group = MagicMock()
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
-    class FakeSharedOffloadRegion:
+    class FakeHiSparseRegion:
         BLOCK_SIZE_ALIGNMENT = page
 
         def __init__(self, **kwargs):
@@ -254,7 +254,17 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             self.view_sizes = []
             self.offset = 0
 
-        def create_next_canonical_view(self, size):
+        def populate(self):
+            pass
+
+        def pin(self):
+            for start, end in self.kwargs["registration_ranges"]:
+                tensor = self.base_tensor[start:end]
+                hisparse_runtime_module.pin_tensor(tensor)
+                self.pinned_addresses.append(tensor.data_ptr())
+                self.is_pinned = True
+
+        def get_view(self, size):
             self.view_sizes.append(size)
             view = torch.as_strided(
                 self.base_tensor,
@@ -268,9 +278,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         def cleanup(self):
             pass
 
-    monkeypatch.setattr(
-        hisparse_runtime_module, "SharedOffloadRegion", FakeSharedOffloadRegion
-    )
+    monkeypatch.setattr(hisparse_runtime_module, "HiSparseRegion", FakeHiSparseRegion)
     registration_ranges = MagicMock(return_value=((0, page), (page, 4 * page)))
     monkeypatch.setattr(
         hisparse_runtime_module,
@@ -305,12 +313,11 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert region.kwargs == {
         "engine_id": "hisparse_instance_dp3",
         "num_chunks": 1,
-        "rank": 0,
         "kv_bytes_per_chunk": 4 * page,
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
+        "registration_ranges": ((0, page), (page, 4 * page)),
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_only_on_creator": True,
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -331,9 +338,16 @@ def test_shared_host_pool_tracks_successful_registrations(
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
-    monkeypatch.setattr(
-        hisparse_runtime_module, "SharedOffloadRegion", lambda **kw: region
-    )
+
+    def pin_region():
+        for start, end in ((0, page), (page, 3 * page)):
+            tensor = region.base_tensor[start:end]
+            hisparse_runtime_module.pin_tensor(tensor)
+            region.pinned_addresses.append(tensor.data_ptr())
+            region.is_pinned = True
+
+    region.pin.side_effect = pin_region
+    monkeypatch.setattr(hisparse_runtime_module, "HiSparseRegion", lambda **kw: region)
     monkeypatch.setattr(
         hisparse_runtime_module,
         "_hisparse_registration_ranges",

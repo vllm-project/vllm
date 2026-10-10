@@ -25,7 +25,10 @@ from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d, current_stream
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    HiSparseRegion,
+    SharedOffloadRegion,
+)
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 
 logger = init_logger(__name__)
@@ -367,30 +370,25 @@ def allocate_hisparse_host_pools(
             None,
         )
 
-    region = SharedOffloadRegion(
+    registration_ranges = _hisparse_registration_ranges(
+        tensor_sizes, num_blocks, host_block_stride
+    )
+    region = HiSparseRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
             f"dp{vllm_config.parallel_config.data_parallel_index}"
         ),
         num_chunks=1,
-        rank=0,
         kv_bytes_per_chunk=num_blocks * host_block_stride,
         cpu_page_size=sum(tensor_sizes),
         barrier=get_tp_group().barrier,
+        registration_ranges=registration_ranges,
         creator_memory_check=check_hisparse_host_memory,
-        populate_only_on_creator=True,
     )
     try:
-        for start, end in _hisparse_registration_ranges(
-            tensor_sizes, num_blocks, host_block_stride
-        ):
-            tensor = region.base_tensor[start:end]
-            pin_tensor(tensor)
-            region.pinned_addresses.append(tensor.data_ptr())
-            region.is_pinned = True
-        pools = [
-            region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
-        ]
+        region.populate()
+        region.pin()
+        pools = [region.get_view(size).view(-1) for size in tensor_sizes]
     except Exception:
         region.cleanup()
         raise

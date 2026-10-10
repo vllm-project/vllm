@@ -53,7 +53,7 @@ _MOCK_OFFLOADING_SPEC = MagicMock()
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
     mock = MagicMock()
     view = memoryview(torch.zeros((num_blocks, row_bytes), dtype=torch.int8).numpy())
-    mock.create_kv_memoryview.return_value = view
+    mock.get_view.return_value = view
     return mock
 
 
@@ -225,7 +225,7 @@ class TestBackpressure:
         self.primary = CPUPrimaryTierOffloadingManager(
             num_chunks=20, mmap_region=mock_region
         )
-        mock_view = mock_region.create_kv_memoryview()
+        mock_view = mock_region.get_view()
         self.tier = DelayedSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
