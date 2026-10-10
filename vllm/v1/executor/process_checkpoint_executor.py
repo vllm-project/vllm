@@ -101,9 +101,13 @@ class ProcessCheckpointExecutor(MultiprocExecutor):
                 # handling hits a confirmed 580 UMD defect (in our
                 # freeze/restore matrix the failure surfaces at restore;
                 # NVIDIA reports it fixed in 595 and above, see
-                # ai-dynamo/snapshot#510). These restrictions can be revisited
-                # once UMD >= 595 is validated with this executor's full
-                # sleep-then-checkpoint flow.
+                # ai-dynamo/snapshot#510). We then validated this executor's
+                # full sleep-then-checkpoint flow on UMD 610.57.04 with the
+                # restrictions lifted: freeze hangs at the Checkpoint call
+                # while a worker holds live multicast groups (with and
+                # without NCCL communicator suspend), so the restrictions
+                # remain required regardless of UMD version until freeze-time
+                # multicast teardown exists (see the PR discussion).
                 if os.environ.get("NCCL_DISABLE_MEM_MANAGER", "0") != "0":
                     raise ValueError("NCCL checkpoint requires the memory manager")
                 required.update(
