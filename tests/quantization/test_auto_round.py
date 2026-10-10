@@ -193,7 +193,7 @@ class DummyFusedMoE:
 
 
 def make_config(**overrides) -> INCConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "weight_bits": 4,
         "group_size": 128,
         "sym": True,
@@ -208,7 +208,7 @@ def make_config(**overrides) -> INCConfig:
 
 
 def make_layer_config(**overrides) -> INCLayerConfig:
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "bits": 4,
         "group_size": 128,
         "sym": True,
@@ -1669,7 +1669,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
-    layer.moe_config = None  # UnquantizedFusedMoEMethod accepts moe_config
+    layer.moe_config = None
 
     class DummyUnquantizedFusedMoEMethod:
         def __init__(self, moe_config) -> None:
@@ -2094,7 +2094,7 @@ def _with_w4a8_kernel(monkeypatch) -> None:
 
 def _dispatch(layer_config=None):
     return INCWna16Scheme().get_linear_method(
-        object(), object(), "layer", layer_config or make_layer_config()
+        make_config(), object(), "layer", layer_config or make_layer_config()
     )
 
 
