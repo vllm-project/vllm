@@ -1121,6 +1121,10 @@ class ParallelConfig:
         # Lazy import to avoid circular import
         from vllm.v1.executor import Executor
 
+        # Enable batch invariance settings if requested
+        if envs.VLLM_BATCH_INVARIANT:
+            self.disable_custom_all_reduce = True
+
         if (
             self.distributed_executor_backend is not None
             and not isinstance(self.distributed_executor_backend, str)

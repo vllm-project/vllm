@@ -30,7 +30,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
 #ifndef USE_ROCM
-
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
   // But since they are set back to zero once the kernel is finished we can
@@ -595,7 +594,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Activation ops
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
+      "y_q, Tensor! y_s, bool use_ue8m0, float clamp_limit=0.0) -> ()");
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
 
   // Activation function used in SwiGLU.
