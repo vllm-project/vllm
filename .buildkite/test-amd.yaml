@@ -5631,6 +5631,21 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
 
+- label: ":amd: (MI355) UMBP KV Connector Integration"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - tests/v1/kv_connector/umbp_integration
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s tests/v1/kv_connector/umbp_integration
+
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
