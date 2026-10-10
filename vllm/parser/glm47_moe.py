@@ -178,6 +178,10 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            (ParserState.TOOL_NAME, "TOOL_START"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_END, EventType.TOOL_CALL_START),
+            ),
             (ParserState.TOOL_NAME, "ARG_KEY_START"): Transition(
                 ParserState.TOOL_ARGS,
                 (EventType.ARG_VALUE_CHUNK,),
