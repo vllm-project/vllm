@@ -8,7 +8,9 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
+    fused_sigmoid_gating_delta_rule_update,
 )
+from vllm.third_party.flash_linear_attention.ops.kda import fused_recurrent_kda_fwd
 
 DEVICE = current_platform.device_type
 
@@ -160,3 +162,99 @@ def test_packed_decode_supports_large_batch_head_grid():
     )
 
     assert torch.count_nonzero(out).item() == 0
+
+
+@pytest.mark.parametrize("path", ["recurrent", "sigmoid_gating", "kda"])
+def test_recurrent_decode_supports_large_batch_head_grid(path: str):
+    """B * HV = 65536 programs exceeds the CUDA grid Y/Z limit of 65535.
+
+    The packed decode kernel splits its grid at this size, so it serves as
+    the reference for the unpacked launchers, which must also launch and
+    index every (sequence, head) pair correctly.
+    """
+    torch.manual_seed(0)
+    B, HV, K, V = 1024, 64, 16, 16
+    # fused_recurrent_kda_fwd allocates its output like k, so it needs H == HV.
+    H = HV if path == "kda" else 8
+    device = torch.device(DEVICE)
+    dtype = torch.float32
+    scale = K**-0.5
+
+    mixed_qkv = torch.randn((B, 2 * H * K + HV * V), device=device, dtype=dtype)
+    a = torch.randn((B, HV), device=device, dtype=dtype)
+    b = torch.randn((B, HV), device=device, dtype=dtype)
+    A_log = torch.randn((HV,), device=device, dtype=dtype)
+    dt_bias = torch.randn((HV,), device=device, dtype=dtype)
+    ssm_state_indices = torch.randperm(B, device=device, dtype=torch.int32) + 1
+    state0 = torch.randn((B + 1, HV, V, K), device=device, dtype=dtype)
+
+    state_ref = state0.clone()
+    out_ref = torch.empty((B, 1, HV, V), device=device, dtype=dtype)
+    fused_recurrent_gated_delta_rule_packed_decode(
+        mixed_qkv=mixed_qkv,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=scale,
+        initial_state=state_ref,
+        out=out_ref,
+        ssm_state_indices=ssm_state_indices,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    q, k, v = torch.split(mixed_qkv, [H * K, H * K, HV * V], dim=-1)
+    q = q.reshape(B, 1, H, K).contiguous()
+    k = k.reshape(B, 1, H, K).contiguous()
+    v = v.reshape(B, 1, HV, V).contiguous()
+    x = a + dt_bias
+    g = (-torch.exp(A_log) * torch.where(x <= 20.0, torch.log1p(x.exp()), x)).view(
+        B, 1, HV
+    )
+    beta = torch.sigmoid(b).view(B, 1, HV)
+
+    state = state0.clone()
+    if path == "recurrent":
+        out, _ = fused_recurrent_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=state,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+    elif path == "sigmoid_gating":
+        out, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            scale=scale,
+            initial_state=state,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+    else:
+        # A per-channel gate that is constant over K reduces KDA to GDN.
+        out, _ = fused_recurrent_kda_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g.unsqueeze(-1).expand(B, 1, HV, K).contiguous(),
+            beta=beta,
+            scale=scale,
+            initial_state=state,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    torch.testing.assert_close(
+        out.reshape(out_ref.shape), out_ref, rtol=1e-4, atol=1e-4
+    )
+    torch.testing.assert_close(state, state_ref, rtol=1e-4, atol=1e-4)
