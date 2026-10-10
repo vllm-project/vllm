@@ -628,6 +628,15 @@ def patch_rope_parameters(config: PreTrainedConfig) -> None:
     names = ["partial_rotary_factor", "rotary_pct", "rotary_emb_fraction"]
     partial_rotary_factor = getattr_iter(config, names, None, warn=True)
 
+    # Nomic's remote config predates rope_parameters. Preserve an explicit
+    # RoPE override, including disabling scaling with rope_type="default".
+    if (
+        config.model_type == "nomic_bert"
+        and not getattr(config, "rope_parameters", None)
+        and (factor := getattr(config, "rotary_scaling_factor", None))
+    ):
+        config.rope_parameters = {"rope_type": "dynamic", "factor": float(factor)}
+
     if rope_theta is not None or getattr(config, "rope_parameters", None):
         # Patch these fields in case they used non-standard names
         if rope_theta is not None:

@@ -796,6 +796,13 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             "max_trained_positions": max_trained_positions,
             **(config.rope_parameters or {}),
         }
+        if (
+            rope_parameters.get("rope_type") == "dynamic"
+            and "factor" in rope_parameters
+        ):
+            # Encoder requests contain the whole document, so scaling must
+            # follow each document's length, not the server's max_model_len.
+            rope_parameters["apply_per_sequence"] = True
 
         config.rotary_kwargs = {
             "head_size": head_dim,
