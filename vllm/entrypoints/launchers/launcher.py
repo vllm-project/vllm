@@ -23,6 +23,7 @@ from vllm.entrypoints.common.startup import (
     log_version_and_model,
 )
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
+from vllm.entrypoints.warmup import load_warmup_config
 from vllm.logger import init_logger
 from vllm.tracing import instrument
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
@@ -361,6 +362,28 @@ def create_server_unix_socket(path: str) -> socket.socket:
     return sock
 
 
+def validate_api_server_args(args):
+    valid_tool_parses = ToolParserManager.list_registered()
+    if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
+        raise KeyError(
+            f"invalid tool call parser: {args.tool_call_parser} "
+            f"(chose from {{ {','.join(valid_tool_parses)} }})"
+        )
+
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
+    if (
+        reasoning_parser := args.structured_outputs_config.reasoning_parser
+    ) and reasoning_parser not in valid_reasoning_parsers:
+        raise KeyError(
+            f"invalid reasoning parser: {reasoning_parser} "
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+        )
+
+    # Parse --warmup-config before the engine starts so that a bad path or
+    # malformed config fails fast. The parsed config replaces the raw value
+    # and is passed through `args` to every API server worker.
+    if getattr(args, "warmup_config", None) is not None:
+        args.warmup_config = load_warmup_config(args.warmup_config)
 @instrument(span_name="API server setup")
 def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
