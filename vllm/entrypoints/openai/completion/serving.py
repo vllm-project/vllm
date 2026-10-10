@@ -289,7 +289,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
-        previous_text_lens = [0] * num_choices * num_prompts
+        next_text_offsets = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
@@ -386,13 +386,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
                             logprob_token_ids=request.logprob_token_ids,
-                            initial_text_offset=previous_text_lens[i],
+                            initial_text_offset=next_text_offsets[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
+                        # Advance by the tokens just reported, not by delta_text:
+                        # text held back for stop strings lags the tokens.
+                        if logprobs.tokens:
+                            next_text_offsets[i] = logprobs.text_offset[-1] + len(
+                                logprobs.tokens[-1]
+                            )
                     else:
                         logprobs = None
 
-                    previous_text_lens[i] += len(delta_text)
                     previous_num_tokens[i] += len(output.token_ids)
                     stop_reason = output.stop_reason
 

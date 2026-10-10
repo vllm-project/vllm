@@ -362,12 +362,22 @@ class Qwen3VLVideoBackend(VideoBackend):
     _MAX_FPS: ClassVar[int] = 30
 
     @classmethod
+    def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
+        # vLLM reports an unknown source fps as 0. HF's Qwen3VLVideoProcessor
+        # assumes a 24 fps source then, and keeps it in the metadata for the
+        # frame timestamps.
+        if source.original_fps > 0:
+            return source
+        return VideoSourceMetadata(source.total_frames_num, 24.0, source.duration)
+
+    @classmethod
     def compute_frames_index_to_sample(
         cls,
         source: VideoSourceMetadata,
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
+        source = cls._prepare_source(source)
         total_frames_num = source.total_frames_num
         original_fps = source.original_fps
         fps = min(target.fps, cls._MAX_FPS)
