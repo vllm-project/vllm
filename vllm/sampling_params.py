@@ -89,9 +89,14 @@ ThinkingTokenBudget = Annotated[
 
 
 class SamplingType(IntEnum):
+    """How the next token is picked from the model's output distribution."""
+
     GREEDY = 0
+    """Always pick the token with the highest probability."""
     RANDOM = 1
+    """Sample from the probability distribution."""
     RANDOM_SEED = 2
+    """Sample from the probability distribution using a per-request seed."""
 
 
 # maybe make msgspec?
@@ -203,12 +208,14 @@ class RepetitionDetectionParams:
 
 
 class RequestOutputKind(Enum):
-    # Return entire output so far in every RequestOutput
+    """How much of the output each `RequestOutput` carries."""
+
     CUMULATIVE = 0
-    # Return only deltas in each RequestOutput
+    """Return the entire output so far in every `RequestOutput`."""
     DELTA = 1
-    # Do not return intermediate RequestOutput
+    """Return only what is new since the last `RequestOutput`."""
     FINAL_ONLY = 2
+    """Do not return intermediate `RequestOutput`s, only the final one."""
 
 
 def _exceeds_json_nesting(spec: str | dict[str, Any], limit: int) -> bool:
