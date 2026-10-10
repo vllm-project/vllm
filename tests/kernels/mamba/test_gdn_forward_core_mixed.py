@@ -3,13 +3,15 @@
 """Parity tests for the host-side tensor plumbing of the GDN mixed step.
 
 ``GatedDeltaNet._forward_core`` gathers, zeroes and scatters the prefill SSM
-states around ``chunk_gated_delta_rule``. These tests run the real
-``_forward_core`` on batches built by the real ``GDNAttentionMetadataBuilder``
-and require bit-identical outputs and states against the reference op sequence.
+states around ``chunk_gated_delta_rule``, and splits a batch with spec decodes
+into spec and non-spec tokens. These tests run the real ``_forward_core`` on
+batches built by the real ``GDNAttentionMetadataBuilder`` and require
+bit-identical outputs and states against the reference op sequence.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import types
 from unittest.mock import patch
 
@@ -239,3 +241,28 @@ def test_prefill_state_gather_and_scatter_match_indexing(batch_name: str) -> Non
     expected_pool = pool_before.clone()
     expected_pool[prefill_state_indices] = final_state.to(expected_pool.dtype)
     torch.testing.assert_close(ssm_state, expected_pool, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_spec_token_slices_match_gathers() -> None:
+    """Spec-first batches slice the spec and non-spec tokens; the result is
+    bit-identical to the index_select / index_copy_ path."""
+    torch.manual_seed(0)
+    seq_lens, query_lens, draft_tokens = BATCHES["spec-decodes-then-prefills"]
+    vllm_config = _make_vllm_config()
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    metadata = _build_metadata(vllm_config, batch, draft_tokens)
+    assert metadata.spec_tokens_first
+    gather_metadata = dataclasses.replace(metadata, spec_tokens_first=False)
+
+    num_tokens = batch.compute_num_tokens()
+    kv_cache, weights, mixed_qkvz, b, a = _make_inputs(metadata, num_tokens)
+    results = []
+    for step_metadata in (metadata, gather_metadata):
+        step_kv_cache = tuple(state.clone() for state in kv_cache)
+        layer = _build_layer(vllm_config, step_kv_cache, weights)
+        out = _run_forward_core(layer, step_metadata, mixed_qkvz, b, a, num_tokens)
+        results.append((out, *step_kv_cache))
+
+    for sliced, gathered in zip(*results):
+        torch.testing.assert_close(sliced, gathered, atol=0, rtol=0)
