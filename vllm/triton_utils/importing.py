@@ -3,11 +3,10 @@
 
 import os
 import types
-from importlib.metadata import version
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform, vllm_version_matches_substr
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
@@ -33,6 +32,20 @@ if HAS_TRITON:
             for name, x in backends.items()
             if name != "cpu" and x.driver and x.driver.is_active()
         ]
+
+        # Check Triton CPU
+        if vllm_version_matches_substr("cpu"):
+            if "cpu" in backends:
+                HAS_TRITON = True
+                # Suppress following warnings on CPU-only platforms
+                if len(active_drivers) == 0:
+                    active_drivers.append(backends["cpu"].driver)
+            else:
+                logger.warning(
+                    "Triton is installed, but doesn't include CPU backend. "
+                    "Disabling Triton."
+                )
+                HAS_TRITON = False
 
         # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
         # or HIP_VISIBLE_DEVICES might be temporarily empty (e.g., Ray sets it to ""
@@ -63,17 +76,6 @@ if HAS_TRITON:
                 len(active_drivers),
             )
             HAS_TRITON = False
-
-        # Check Triton CPU
-        if "cpu" in version("vllm"):
-            if "cpu" in backends:
-                HAS_TRITON = True
-            else:
-                logger.warning(
-                    "Triton is installed, but doesn't include CPU backend. "
-                    "Disabling Triton."
-                )
-                HAS_TRITON = False
     except ImportError:
         # This can occur if Triton is partially installed or triton.backends
         # is missing.
@@ -121,10 +123,12 @@ class TritonPlaceholder(types.ModuleType):
 class TritonLanguagePlaceholder(types.ModuleType):
     def __init__(self):
         super().__init__("triton.language")
-        self.constexpr = None
+        self.constexpr = lambda value: value
         self.dtype = None
         self.int64 = None
         self.int32 = None
+        self.uint8 = None
+        self.pointer_type = lambda element_ty: None
         self.tensor = None
         self.exp = None
         self.exp2 = None

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-P2PSession — bidirectional session combining client + server roles.
+"""P2PSession — bidirectional session combining client + server roles.
 
 A single P2PSession per remote peer handles BOTH directions of the P2P
 protocol on one ControlConnection: it can request blocks from the peer

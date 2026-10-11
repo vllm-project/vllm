@@ -7,6 +7,7 @@ use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 const INTERNLM2_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "InternLM2",
     start_marker: "<|action_start|><|plugin|>",
+    framed_start_marker: None,
     end_marker: "<|action_end|>",
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: None,

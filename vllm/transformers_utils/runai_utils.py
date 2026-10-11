@@ -25,14 +25,14 @@ except ImportError:
 
 
 def list_safetensors(path: str = "") -> list[str]:
-    """
-    List full file names from object path and filter by allow pattern.
+    """List full file names from object path and filter by allow pattern.
 
     Args:
         path: The object storage path to list from.
 
     Returns:
         list[str]: List of full object storage paths allowed by the pattern
+
     """
     return runai_list_safetensors(path)
 
@@ -42,8 +42,7 @@ def is_runai_obj_uri(model_or_path: str) -> bool:
 
 
 class ObjectStorageModel:
-    """
-    A class representing an ObjectStorage model mirrored into a
+    """A class representing an ObjectStorage model mirrored into a
     temporary directory.
 
     Attributes:
@@ -51,6 +50,7 @@ class ObjectStorageModel:
 
     Methods:
         pull_files(): Pull model from object storage to the temporary directory.
+
     """
 
     def __init__(self, url: str) -> None:
@@ -86,8 +86,7 @@ class ObjectStorageModel:
         allow_pattern: list[str] | None = None,
         ignore_pattern: list[str] | None = None,
     ) -> None:
-        """
-        Pull files from object storage into the temporary directory.
+        """Pull files from object storage into the temporary directory.
 
         Args:
             model_path: The object storage path of the model.

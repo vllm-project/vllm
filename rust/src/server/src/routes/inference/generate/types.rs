@@ -7,9 +7,11 @@ use llm_multimodal::MediaContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
+use crate::routes::openai::utils::types::{Normalizable, StreamOptions, Usage};
 
 /// Sampling parameters for the token-in/token-out generate API.
 ///
@@ -46,6 +48,14 @@ pub struct GenerateRequest {
     pub ec_transfer_params: Option<HashMap<String, Value>>,
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
+    pub return_token_ids: Option<bool>,
+    /// Whether reasoning has ended before the first generated token, as
+    /// resolved by `/render`. `true` applies structured outputs from the first
+    /// token; `None` lets the engine check the prompt with its reasoning parser.
+    pub reasoning_ended: Option<bool>,
+    /// Set by `/render` so the engine-side reasoning parser agrees with the
+    /// frontend on flags such as `enable_thinking`.
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     #[serde(flatten)]
     pub other: Map<String, Value>,
 }
@@ -59,9 +69,10 @@ impl Normalizable for GenerateRequest {}
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseChoice {
     pub index: u32,
-    pub logprobs: Option<ChatLogProbs>,
+    pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
+    pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponseStreamChoice` class.
@@ -69,9 +80,10 @@ pub(super) struct GenerateResponseChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponseStreamChoice {
     pub index: u32,
-    pub logprobs: Option<ChatLogProbs>,
+    pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
+    pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 /// Mirrors the Python vLLM `GenerateStreamResponse` class.
@@ -81,6 +93,9 @@ pub(super) struct GenerateStreamResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseStreamChoice>,
     pub usage: Option<Usage>,
+    pub prompt_token_ids: Option<Vec<u32>>,
+    pub mm_placeholders: Option<MultiModalPlaceholders>,
+    pub metrics: Option<PerRequestMetrics<StreamingSpeculativeDecodingMetrics>>,
 }
 
 /// Mirrors the Python vLLM `GenerateResponse` class.
@@ -89,8 +104,131 @@ pub(super) struct GenerateResponse {
     pub request_id: String,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    /// Base64 `.npy` float32 array, as Python `numpy2base64` encodes it.
+    pub prompt_token_id_logprobs: Option<String>,
+    pub prompt_token_ids: Option<Vec<u32>>,
+    pub mm_placeholders: Option<MultiModalPlaceholders>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
+    pub metrics: Option<PerRequestMetrics<SpeculativeDecodingMetrics>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(super) struct PerRequestMetrics<T> {
+    pub speculative_decoding: T,
+}
+
+/// Mirrors the Python vLLM `SpeculativeDecodingMetrics` class.
+///
+/// Derived from the raw engine accumulator the same way as Python
+/// `RequestSpecDecodeMetrics.to_dict`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(super) struct SpeculativeDecodingMetrics {
+    pub mean_acceptance_length: f64,
+    pub draft_acceptance_rate: f64,
+    pub acceptance_histogram: Vec<u64>,
+    pub num_spec_steps: u64,
+    pub num_accepted_draft_tokens: u64,
+    pub num_draft_tokens: u64,
+    pub num_spec_tokens: u64,
+    pub per_step_accepted: Option<Vec<u64>>,
+    pub per_step_drafted: Option<Vec<u64>>,
+}
+
+impl From<RequestSpecDecodeMetrics> for SpeculativeDecodingMetrics {
+    fn from(raw: RequestSpecDecodeMetrics) -> Self {
+        let num_spec_steps: u64 = raw.histogram.iter().sum();
+        let num_accepted_draft_tokens: u64 =
+            (0u64..).zip(&raw.histogram).map(|(accepted, count)| accepted * count).sum();
+        let ratio = |num: u64, den: u64| {
+            if den == 0 {
+                0.0
+            } else {
+                num as f64 / den as f64
+            }
+        };
+        let detailed = !raw.per_step_accepted.is_empty();
+        Self {
+            mean_acceptance_length: if num_spec_steps == 0 {
+                1.0
+            } else {
+                1.0 + ratio(num_accepted_draft_tokens, num_spec_steps)
+            },
+            draft_acceptance_rate: ratio(num_accepted_draft_tokens, raw.num_draft_tokens),
+            acceptance_histogram: raw.histogram,
+            num_spec_steps,
+            num_accepted_draft_tokens,
+            num_draft_tokens: raw.num_draft_tokens,
+            num_spec_tokens: raw.num_spec_tokens,
+            per_step_accepted: detailed.then_some(raw.per_step_accepted),
+            per_step_drafted: detailed.then_some(raw.per_step_drafted),
+        }
+    }
+}
+
+/// Streaming form omits detailed fields when summary metrics are requested.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(super) struct StreamingSpeculativeDecodingMetrics {
+    pub mean_acceptance_length: f64,
+    pub draft_acceptance_rate: f64,
+    pub acceptance_histogram: Vec<u64>,
+    pub num_spec_steps: u64,
+    pub num_accepted_draft_tokens: u64,
+    pub num_draft_tokens: u64,
+    pub num_spec_tokens: u64,
+    pub per_step_accepted: Option<Vec<u64>>,
+    pub per_step_drafted: Option<Vec<u64>>,
+}
+
+impl From<SpeculativeDecodingMetrics> for StreamingSpeculativeDecodingMetrics {
+    fn from(metrics: SpeculativeDecodingMetrics) -> Self {
+        Self {
+            mean_acceptance_length: metrics.mean_acceptance_length,
+            draft_acceptance_rate: metrics.draft_acceptance_rate,
+            acceptance_histogram: metrics.acceptance_histogram,
+            num_spec_steps: metrics.num_spec_steps,
+            num_accepted_draft_tokens: metrics.num_accepted_draft_tokens,
+            num_draft_tokens: metrics.num_draft_tokens,
+            num_spec_tokens: metrics.num_spec_tokens,
+            per_step_accepted: metrics.per_step_accepted,
+            per_step_drafted: metrics.per_step_drafted,
+        }
+    }
+}
+
+pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct PlaceholderRangeInfo {
+    pub offset: usize,
+    pub length: usize,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one
+/// choice, carrying integer token ids rather than the OpenAI string token.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProbs {
+    pub content: Option<Vec<GenerateLogProbsContent>>,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProbsContent` class: the sampled token
+/// at one position plus its top-k candidates, in the engine's order: the
+/// sampled token first, then the remaining candidates in rank order.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProbsContent {
+    pub token_id: u32,
+    pub logprob: f32,
+    pub rank: Option<u32>,
+    pub top_logprobs: Vec<GenerateLogProb>,
+}
+
+/// Mirrors the Python vLLM `GenerateLogProb` class: one candidate token.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct GenerateLogProb {
+    pub token_id: u32,
+    pub logprob: f32,
+    pub rank: Option<u32>,
 }
 
 /// Mirrors the Python vLLM `Logprob` class used in prompt-logprobs payloads.

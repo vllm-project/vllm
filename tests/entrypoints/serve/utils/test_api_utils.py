@@ -5,7 +5,7 @@ from argparse import Namespace
 
 import pytest
 
-from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
@@ -120,17 +120,24 @@ class TestRedactSensitiveArgs:
     API_KEY = "sk-test-secret-12345"
 
     def test_redact_replaces_sensitive_values_only(self):
-        args = {"api_key": self.API_KEY, "hf_token": "hf_secret", "other": "visible"}
+        args = {
+            "api_key": self.API_KEY,
+            "hf_token": "hf_secret",
+            "watermark_config": {"algorithm": "gumbel", "key": 42},
+            "other": "visible",
+        }
         redacted = redact_sensitive_args(args)
         assert redacted == {
             "api_key": "***",
             "hf_token": "***",
+            "watermark_config": "***",
             "other": "visible",
         }
         # original dict must not be mutated
         assert args == {
             "api_key": self.API_KEY,
             "hf_token": "hf_secret",
+            "watermark_config": {"algorithm": "gumbel", "key": 42},
             "other": "visible",
         }
 

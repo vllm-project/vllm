@@ -63,9 +63,15 @@ def resolve_revision(
     requested revision that also carries the commit hash, so downstream error
     messages stay readable and offline loads reuse the cached `refs/` entry.
 
+    A commit hash only means something for the repo it was resolved against, so
+    a repo that is not `repo_id` needs its own call. Passing a revision resolved
+    for another repo back in is safe: the revision initially requested is
+    resolved again, against `repo_id` this time.
+
     Returns:
         The resolved revision, or `revision` unchanged if it cannot be resolved
         (local path, ModelScope, or any Hub error).
+
     """
     if Path(repo_id).exists() or envs.VLLM_USE_MODELSCOPE:
         return revision
@@ -106,6 +112,7 @@ def with_retry(
         retry_delay: Seconds to wait after the first failure, doubled each time.
         fatal_errors: Exceptions that are a definitive answer rather than a
             transient failure. These are raised immediately, without logging.
+
     """
     for attempt in range(max_retries):
         try:
@@ -353,8 +360,7 @@ def get_hf_file_bytes(
 def try_get_local_file(
     model: str | Path, file_name: str, revision: str | None = "main"
 ) -> Path | Any | None:
-    """
-    Try to get a local file from the HuggingFace repository.
+    """Try to get a local file from the HuggingFace repository.
 
     The possible return values are:
 
@@ -385,20 +391,19 @@ def try_get_local_file(
 def get_hf_file_to_dict(
     file_name: str, model: str | Path, revision: str | None = "main"
 ):
-    """
-    Downloads a file from the Hugging Face Hub and returns
+    """Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
 
-    Parameters:
-    - file_name (str): The name of the file to download.
-    - model (str): The name of the model on the Hugging Face Hub.
-    - revision (str): The specific version of the model.
+    Args:
+        file_name (str): The name of the file to download.
+        model (str): The name of the model on the Hugging Face Hub.
+        revision (str): The specific version of the model.
 
     Returns:
     - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
-    """
 
+    """
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:

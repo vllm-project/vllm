@@ -5,8 +5,7 @@ from fastapi import Request
 from starlette.responses import JSONResponse
 
 from vllm.entrypoints.launchers.launcher import terminate_if_errored
-from vllm.entrypoints.openai.engine.protocol import GenerationError
-from vllm.exceptions import VLLMError
+from vllm.exceptions import GenerationError, VLLMError
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
@@ -29,8 +28,7 @@ async def vllm_error_handler(req: Request, exc: VLLMError):
 async def engine_error_handler(
     req: Request, exc: EngineDeadError | EngineGenerateError
 ):
-    """
-    VLLM V1 AsyncLLM catches exceptions and returns
+    """VLLM V1 AsyncLLM catches exceptions and returns
     only two types: EngineGenerateError and EngineDeadError.
 
     EngineGenerateError is raised by the per request generate()
@@ -52,7 +50,6 @@ async def engine_error_handler(
     will not automatically shut down. Instead, we use the watchdog
     background task for check for errored state.
     """
-
     if req.app.state.args.log_error_stack:
         logger.exception(
             "Engine Exception caught. Request id: %s",
@@ -73,8 +70,8 @@ async def generation_error_handler(req: Request, exc: GenerationError):
     """Handle GenerationError without logging stack traces.
 
     GenerationError is a known, expected error (e.g. KV cache load failure)
-    that should be returned to the client as a 500 response without polluting
-    server logs with stack traces.
+    that should be returned to the client without polluting server logs with
+    stack traces.
     """
     err = create_error_response(exc)
     return JSONResponse(err.model_dump(), status_code=err.error.code)

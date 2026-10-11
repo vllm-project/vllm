@@ -4,12 +4,12 @@ import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 import huggingface_hub
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
@@ -45,6 +45,7 @@ _VLLM_TOKENIZERS = {
     "cohere": ("hf", "CachedHfTokenizer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
+    "deepseek_v41": ("deepseek_v41", "DeepseekV41Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "kimi_k3": ("hf", "CachedHfTokenizer"),
@@ -72,8 +73,6 @@ class _TokenizerRegistry:
             )
 
         self.tokenizers[tokenizer_mode] = (module, class_name)
-
-        return None
 
     def load_tokenizer_cls(self, tokenizer_mode: str) -> type[TokenizerLike]:
         if tokenizer_mode not in self.tokenizers:
@@ -138,23 +137,19 @@ def resolve_tokenizer_args(
         else:
             assert_never(runner_type)
 
-    if tokenizer_mode == "slow":
-        if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
-
-        tokenizer_mode = "hf"
-        kwargs["use_fast"] = False
-
     # Try to use official Mistral tokenizer if possible
     if (
         tokenizer_mode == "auto"
         and is_mistral_model_repo(
-            model_name_or_path=str(tokenizer_name), revision=revision
+            model_name_or_path=str(tokenizer_name),
+            revision=revision,
+            token=kwargs.get("token"),
         )
         and any_pattern_in_repo_files(
             model_name_or_path=str(tokenizer_name),
             allow_patterns=["tekken.json", "tokenizer.model.v*"],
             revision=revision,
+            token=kwargs.get("token"),
         )
     ):
         tokenizer_mode = "mistral"
@@ -162,6 +157,13 @@ def resolve_tokenizer_args(
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
+
+    if tokenizer_mode == "hf":
+        if kwargs.pop("mistral_format", False):
+            raise ValueError(
+                "mistral_format=True is not supported with tokenizer_mode='hf'"
+            )
+        kwargs["mistral_format"] = False
 
     return tokenizer_mode, tokenizer_name, args, kwargs
 
@@ -230,6 +232,7 @@ def get_tokenizer(
             trust_remote_code=trust_remote_code,
             revision=revision,
             config_format=config_format,
+            token=kwargs.get("token"),
         )
 
     # Some models have an incorrect tokenizer_class on the hub.

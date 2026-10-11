@@ -31,6 +31,7 @@ def _make_offloading_config(
     extra_config: dict[str, Any],
     *,
     world_size: int = 1,
+    rank: int = 0,
     worker_kv_bytes_per_block: int = PAGE_SIZE,
 ) -> OffloadingConfig:
     return OffloadingConfig(
@@ -38,6 +39,7 @@ def _make_offloading_config(
             OffloadingGroupConfig(
                 tokens_per_block=BLOCK_SIZE,
                 layer_names=("layer",),
+                group_id=0,
             ),
         ),
         worker_kv_bytes_per_block=worker_kv_bytes_per_block,
@@ -50,7 +52,7 @@ def _make_offloading_config(
             blocks_per_chunk=1,
         ),
         parallel=OffloadingParallelConfig(
-            rank=0,
+            rank=rank,
             world_size=world_size,
             tp_size=world_size,
             pp_size=1,
@@ -69,20 +71,20 @@ def _recording_shared_region(created: list[Any]) -> type:
         def __init__(
             self,
             engine_id: str,
-            num_blocks: int,
+            num_chunks: int,
             rank: int | None,
-            kv_bytes_per_block: int,
+            kv_bytes_per_chunk: int,
             cpu_page_size: int,
             memory_config: Any = None,
         ) -> None:
             self.engine_id = engine_id
-            self.num_blocks = num_blocks
+            self.num_chunks = num_chunks
             self.rank = rank
-            self.kv_bytes_per_block = kv_bytes_per_block
+            self.kv_bytes_per_chunk = kv_bytes_per_chunk
             self.cpu_page_size = cpu_page_size
             self.memory_config = memory_config
             self.mmap_path = memory_config.mmap_path(engine_id)
-            self.kv_view = memoryview(bytearray(num_blocks * kv_bytes_per_block))
+            self.kv_view = memoryview(bytearray(num_chunks * kv_bytes_per_chunk))
             created.append(self)
 
         def create_kv_memoryview(self) -> memoryview:
@@ -100,7 +102,7 @@ def test_cpu_offloading_spec_default_keeps_torch_backend() -> None:
 
     assert spec.cpu_memory_config.backend == CPUOffloadMemoryBackend.DEFAULT
     assert spec.cpu_memory_config.effective_backend == CPUOffloadMemoryBackend.SHM
-    assert spec.num_blocks == 4
+    assert spec.num_chunks == 4
 
 
 @pytest.mark.parametrize("backend", ["shm", "hugetlbfs"])
@@ -125,7 +127,7 @@ def test_tiering_offloading_spec_default_keeps_shared_shm_backend() -> None:
 
     assert spec.cpu_memory_config.backend == CPUOffloadMemoryBackend.DEFAULT
     assert spec.cpu_memory_config.effective_backend == CPUOffloadMemoryBackend.SHM
-    assert spec.num_blocks == 4
+    assert spec.num_chunks == 4
 
 
 def test_tiering_spec_threads_memory_config_to_scheduler_and_worker(
@@ -164,11 +166,6 @@ def test_tiering_spec_threads_memory_config_to_scheduler_and_worker(
         "create_secondary_tier",
         staticmethod(create_secondary_tier),
     )
-    monkeypatch.setattr(
-        tiering_spec_module.torch.accelerator,
-        "current_device_index",
-        lambda: 1,
-    )
 
     extra_config = {
         "cpu_bytes_to_use": 8 * PAGE_SIZE,
@@ -177,7 +174,9 @@ def test_tiering_spec_threads_memory_config_to_scheduler_and_worker(
         "cpu_memory_path": str(tmp_path),
         "secondary_tiers": [{"type": "fake"}],
     }
-    spec = TieringOffloadingSpec(_make_offloading_config(extra_config, world_size=2))
+    spec = TieringOffloadingSpec(
+        _make_offloading_config(extra_config, world_size=2, rank=1)
+    )
 
     spec.get_manager()
     worker = spec.create_worker(MagicMock())
@@ -194,7 +193,7 @@ def test_tiering_spec_threads_memory_config_to_scheduler_and_worker(
     assert secondary_views == [scheduler_region.kv_view]
 
 
-def test_tiering_num_blocks_uses_logical_cpu_bytes_not_hugepage_padding(
+def test_tiering_num_chunks_uses_logical_cpu_bytes_not_hugepage_padding(
     tmp_path,
 ) -> None:
     extra_config = {
@@ -205,7 +204,7 @@ def test_tiering_num_blocks_uses_logical_cpu_bytes_not_hugepage_padding(
     }
     spec = TieringOffloadingSpec(_make_offloading_config(extra_config))
 
-    logical_size = spec.num_blocks * spec.kv_bytes_per_chunk
-    assert spec.num_blocks == 1
+    logical_size = spec.num_chunks * spec.kv_bytes_per_chunk
+    assert spec.num_chunks == 1
     assert logical_size == PAGE_SIZE
     assert spec.cpu_memory_config.mapped_size(logical_size) == HUGEPAGE_2MB

@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
 from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
 )
+from vllm.logger import init_logger
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -66,8 +66,7 @@ class CPUOffloadMemoryConfig:
         )
         if backend == CPUOffloadMemoryBackend.HUGETLBFS and path is None:
             raise ValueError(
-                "cpu_memory_path is required when "
-                "cpu_memory_backend='hugetlbfs'"
+                "cpu_memory_path is required when cpu_memory_backend='hugetlbfs'"
             )
         return cls(
             backend=backend,
@@ -105,8 +104,7 @@ def _parse_backend(value: Any) -> CPUOffloadMemoryBackend:
     except ValueError as exc:
         supported = ", ".join(backend.value for backend in CPUOffloadMemoryBackend)
         raise ValueError(
-            f"Invalid cpu_memory_backend {value!r}; supported values are: "
-            f"{supported}"
+            f"Invalid cpu_memory_backend {value!r}; supported values are: {supported}"
         ) from exc
 
 
@@ -136,9 +134,7 @@ def _validate_directory(directory: str) -> None:
         raise ValueError(f"cpu_memory_path {directory!r} must be writable")
 
 
-def _validate_hugetlbfs_directory(
-    directory: str, expected_page_size: int
-) -> None:
+def _validate_hugetlbfs_directory(directory: str, expected_page_size: int) -> None:
     real_path = os.path.realpath(directory)
     if _path_is_under(real_path, DEFAULT_SHM_PATH):
         raise ValueError(
@@ -244,6 +240,10 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
     while True:
         if os.fstat(fd).st_size >= expected_size:
             return
+        if os.fstat(fd).st_nlink == 0:
+            raise RuntimeError(
+                "Shared offload region creator failed during initialization."
+            )
         if time.monotonic() > deadline:
             raise TimeoutError(
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
@@ -255,6 +255,7 @@ def create_shared_memory_allocation(
     instance_id: str,
     logical_size_bytes: int,
     memory_config: CPUOffloadMemoryConfig,
+    creator_memory_check: Callable[[int], None] | None = None,
 ) -> SharedMemoryAllocation:
     memory_config.validate()
     path = memory_config.mmap_path(instance_id)
@@ -265,7 +266,7 @@ def create_shared_memory_allocation(
         fd = os.open(path, os.O_RDWR)
         try:
             _wait_for_file_size(fd, mapped_size_bytes)
-        except TimeoutError:
+        except Exception:
             os.close(fd)
             raise
         logger.info("Opened existing mmap file %s", path)
@@ -283,14 +284,20 @@ def create_shared_memory_allocation(
         ) from exc
 
     try:
+        if creator_memory_check is not None:
+            creator_memory_check(logical_size_bytes)
         if memory_config.effective_backend == CPUOffloadMemoryBackend.SHM:
             check_shm_free_space(
-                mapped_size_bytes, memory_config.path or DEFAULT_SHM_PATH
+                mapped_size_bytes,
+                memory_config.path or DEFAULT_SHM_PATH,
+                allocation_name="CPU KV offload shared region",
             )
         os.ftruncate(fd, mapped_size_bytes)
-    except (RuntimeError, OSError) as exc:
+    except Exception as exc:
         os.unlink(path)
         os.close(fd)
+        if not isinstance(exc, (RuntimeError, OSError)):
+            raise
         raise OSError(
             f"Failed to size offload mmap file {path!r} to "
             f"{mapped_size_bytes} bytes for "
