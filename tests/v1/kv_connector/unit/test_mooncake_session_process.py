@@ -128,7 +128,7 @@ def producer_session(make_service):
             send_state=state,
         )
         service._producer_sessions[(b"peer", "t", "d")] = session
-        return service, state, CompressionChunkPull("t", "d", 0, 0, 1, 2, 3, "n")
+        return service, state, CompressionChunkPull("t", "d", 0, 1, 2, 3, "n")
 
     return factory
 
@@ -155,7 +155,7 @@ def test_paired_helpers_complete_requests_and_release_processes():
             jobs.append(job)
         if isinstance(job, ipc.OpenProducerJob):
             assert job.local_block_ids == [[1, 2, 3, 4]]
-            assert job.remote_block_ids == [[11, 12]]
+            assert job.metadata.req_blocks[job.d_req_id][1] == [[11, 12]]
             return ipc.JobDone(
                 job.job_id,
                 logical_block_count=2,
@@ -394,7 +394,7 @@ async def test_decode_failure_propagates_before_or_after_last_chunk(
             await router.send_multipart(
                 [
                     identity,
-                    _ENC.encode(CompressionChunkReady(request.chunk_id, 16, 16, 0)),
+                    _ENC.encode(CompressionChunkReady(request.chunk_id, 16, 16)),
                 ]
             )
 
@@ -680,7 +680,7 @@ async def test_consumer_cancellation_aborts_before_reusing_slot(
         queued = (
             CompressionSessionOpened(1, 1)
             if during_open
-            else CompressionChunkReady(0, 0, 0, 0)
+            else CompressionChunkReady(0, 0, 0)
         )
         await router.send_multipart([identity, _ENC.encode(queued)])
         if not acknowledged:

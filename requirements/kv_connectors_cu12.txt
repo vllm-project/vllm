@@ -3,4 +3,3 @@ lmcache == 0.4.4
 cupy-cuda12x != 14.1.0
 nixl == 1.5.0
 mooncake-transfer-engine >= 0.3.12
-nvidia-nvcomp-cu12 == 5.3.0.16

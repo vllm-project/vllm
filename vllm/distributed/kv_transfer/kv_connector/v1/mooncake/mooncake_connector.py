@@ -75,9 +75,9 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
-from .compression.config import MooncakeCompressionConfig
-from .compression.layout import KVPart
+from .compression.adapter import get_compression_config, load_backend
 from .compression.protocol import (
+    KVPart,
     MooncakeXferMetadata,
     ReqId,
     TransferId,
@@ -108,6 +108,15 @@ _BOOTSTRAP_MAX_ATTEMPTS: Final[int] = 3
 _MAX_PEER_LAYOUTS: Final[int] = 1024
 _RAW_TRANSFER_MAX_DESCRIPTORS = 1024
 _RAW_TRANSFER_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _align_transfer_blocks(local_group, remote_group, is_mamba):
+    if is_mamba:
+        local_group = [block for block in local_group if block != NULL_BLOCK_ID]
+        remote_group = [block for block in remote_group if block != NULL_BLOCK_ID]
+    if len(local_group) > len(remote_group):
+        local_group = local_group[-len(remote_group) :] if remote_group else []
+    return local_group, remote_group
 
 
 def _compression_total_chunks(
@@ -180,7 +189,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
-    from .compression.manager import MooncakeCompressionManager
 
 # Follow NIXL (`nixl/base_worker.py`): HMA packed pages can put more than one
 # KV group on a single allocation. group_index=-1 flattens every group's block
@@ -971,7 +979,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         vllm_config: VllmConfig,
         kv_cache_specs: dict[str, Any],
     ) -> KVConnectorWorkerMemoryPlan:
-        from .compression.memory import build_memory_plan
+        from .compression.adapter import build_memory_plan
 
         plan = build_memory_plan(vllm_config, kv_cache_specs)
         if plan is None:
@@ -1407,18 +1415,18 @@ class MooncakeConnectorWorker:
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.reqs_need_send: dict[TransferId, SendBlockMeta] = {}
 
-        compression_config = MooncakeCompressionConfig.from_extra_config(
+        compression_config = get_compression_config(
             kv_transfer_config.kv_connector_extra_config
         )
-        if compression_config.available and kv_transfer_config.kv_role == "kv_both":
+        if compression_config is not None and kv_transfer_config.kv_role == "kv_both":
             raise ValueError(
                 "Mooncake compression does not support kv_both yet; use raw "
                 "transport or separate producer/consumer workers."
             )
-        self._compression_configured = compression_config.available
+        self._compression_configured = compression_config is not None
         # The out-of-process session helper owns the ZMQ listener/receiver
         # loops when enabled; the engine process only executes short jobs.
-        if compression_config.available:
+        if compression_config is not None:
             validate_session_process_mode()
         self._session_process: SessionProcess | None = None
         self.sender_loop: asyncio.AbstractEventLoop | None = None
@@ -1508,7 +1516,7 @@ class MooncakeConnectorWorker:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
-        self.compression: MooncakeCompressionManager | None = None
+        self.compression: Any = None
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
         self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
@@ -3038,15 +3046,12 @@ class MooncakeConnectorWorker:
     ) -> None:
         if memory_plan is None or memory_plan.connector_data is None:
             return
-        from .compression.manager import MooncakeCompressionManager
 
         plan = memory_plan.connector_data
-        self.compression = MooncakeCompressionManager(
+        self.compression = load_backend().CompressionRuntime(
             plan=plan,
             kv_cache_layout=self.kv_cache_layout,
             blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            tp_size=self.tp_size,
-            pp_size=self.pp_size,
             device=torch.device("cuda", self.device_id),
         )
         # KV cache tensors are registered by ``initialize_kv_cache`` before
@@ -3159,13 +3164,9 @@ class MooncakeConnectorWorker:
                 self.kv_cache_config.transfer_groups[group_index].kv_cache_spec,
                 MambaSpec,
             )
-            if is_mamba:
-                local_group = [value for value in local_group if value != NULL_BLOCK_ID]
-                remote_group = [
-                    value for value in remote_group if value != NULL_BLOCK_ID
-                ]
-            if len(local_group) > len(remote_group):
-                local_group = local_group[-len(remote_group) :] if remote_group else []
+            local_group, remote_group = _align_transfer_blocks(
+                local_group, remote_group, is_mamba
+            )
             local_result.append(list(local_group))
             remote_result.append(list(remote_group))
         return local_result, remote_result
@@ -3259,21 +3260,9 @@ class MooncakeConnectorWorker:
                     group_specs[group_index].kv_cache_spec,
                     MambaSpec,
                 )
-                if is_mamba_group:
-                    # Mamba/GDN prefix caching can use null blocks only as
-                    # align-mode placeholders. They do not carry transferable
-                    # state, so skip them on both producer and consumer sides.
-                    local_group = [
-                        block_id
-                        for block_id in local_group
-                        if block_id != NULL_BLOCK_ID
-                    ]
-                    remote_group = [
-                        block_id
-                        for block_id in remote_group
-                        if block_id != NULL_BLOCK_ID
-                    ]
-
+                local_group, remote_group = _align_transfer_blocks(
+                    local_group, remote_group, is_mamba_group
+                )
                 n_local = len(local_group)
                 n_remote = len(remote_group)
                 if n_local < n_remote:
@@ -3287,9 +3276,6 @@ class MooncakeConnectorWorker:
                     )
                     has_block_error = True
                     break
-                elif n_local > n_remote:
-                    # Partial prefix cache hit: just read uncomputed blocks.
-                    local_group = local_group[-n_remote:] if n_remote > 0 else []
                 local_block_ids_by_group.append(local_group)
                 remote_block_ids_by_group.append(remote_group)
 
@@ -3419,13 +3405,15 @@ class MooncakeConnectorWorker:
 
     def _session_job_open_producer(self, job: OpenProducerJob) -> JobDone:
         assert self.compression is not None
-        if job.remote_tp_size != self.tp_size or job.remote_pp_size != self.pp_size:
+        metadata = job.metadata
+        if (
+            metadata.remote_tp_size != self.tp_size
+            or metadata.remote_pp_size != self.pp_size
+        ):
             raise ValueError(
-                "Compressed Mooncake transport requires matching TP/PP topology; "
-                f"local TP/PP={self.tp_size}/{self.pp_size}, "
-                f"remote={job.remote_tp_size}/{job.remote_pp_size}."
+                "Compressed Mooncake transport requires matching TP/PP topology"
             )
-        execution = self.compression.default_execution
+        raw = not self.compression.config.pipeline
         send_meta = SendBlockMeta(
             p_req_id="",
             transfer_id=job.transfer_id,
@@ -3438,38 +3426,22 @@ class MooncakeConnectorWorker:
             num_tokens=job.num_tokens,
         )
         local_ids, remote_ids = self._match_compression_blocks(
-            send_meta, job.remote_block_ids
+            send_meta, metadata.req_blocks[job.d_req_id][1]
         )
-        if execution.raw:
+        if raw:
             valid_tokens_by_group: dict[int, int] = {}
         else:
             assert send_meta.num_tokens is not None
             valid_tokens_by_group = suffix_token_counts(
                 send_meta.num_tokens, remote_ids, self._compression_block_sizes()
             )
-        metadata = MooncakeXferMetadata(
-            remote_hostname=job.remote_hostname,
-            remote_port=job.remote_port,
-            remote_tp_size=job.remote_tp_size,
-            remote_tp_rank=job.remote_tp_rank,
-            req_blocks={job.d_req_id: (job.transfer_id, job.remote_block_ids)},
-            kv_caches_base_addr=job.kv_caches_base_addr,
-            block_lens=job.block_lens,
-            kv_block_lens=job.kv_block_lens,
-            registered_layer_names=job.registered_layer_names,
-            registered_layer_indices=job.registered_layer_indices,
-            registered_group_indices=job.registered_group_indices,
-            registered_shared_group_ids=job.registered_shared_group_ids,
-            registered_row_offsets=job.registered_row_offsets,
-            remote_pp_size=job.remote_pp_size,
-        )
         local_regions, remote_regions, align_err = self._prepare_transfer_regions(
             metadata
         )
         if align_err is not None:
             raise ValueError(align_err)
         fa_groups = self.compression.fa_group_indices
-        if not execution.raw:
+        if not raw:
             for region in local_regions:
                 groups = set(region.shared_group_ids or (region.group_index,))
                 if groups & fa_groups and not groups <= fa_groups:
@@ -3480,7 +3452,7 @@ class MooncakeConnectorWorker:
         raw_pairs = [
             (local, remote)
             for local, remote in zip(local_regions, remote_regions)
-            if execution.raw
+            if raw
             or not set(local.shared_group_ids or (local.group_index,)) <= fa_groups
         ]
         (
@@ -3498,11 +3470,11 @@ class MooncakeConnectorWorker:
         if err_reqs:
             raise RuntimeError(err_msg or "Raw GDN transfer planning failed.")
         if src_ptrs:
-            remote_session = f"{job.remote_hostname}:{job.remote_port}"
+            remote_session = f"{metadata.remote_hostname}:{metadata.remote_port}"
             result = self._send_blocks(remote_session, src_ptrs, dst_ptrs, lengths)
             if result != 0:
                 raise RuntimeError(f"Mooncake raw transfer returned {result}.")
-        if execution.raw:
+        if raw:
             logical_count = 0
         else:
             logical_count = len(
@@ -3512,7 +3484,7 @@ class MooncakeConnectorWorker:
             _compression_total_chunks(
                 logical_count, self.compression.config.logical_blocks_per_chunk
             )
-            if not execution.raw
+            if not raw
             else 0
         )
         return JobDone(
@@ -3525,16 +3497,14 @@ class MooncakeConnectorWorker:
 
     def _session_job_encode_chunk(self, job: EncodeChunkJob) -> JobDone:
         assert self.compression is not None
-        execution = self.compression.default_execution
         kv_part = cast(KVPart, job.chunk_id % 2)
         encoded = self.compression.encode(
             job.slot_id,
             job.local_block_ids,
             kv_part,
-            execution,
             valid_tokens_by_group=job.valid_tokens_by_group,
         )
-        aux_bytes = execution.aux_bytes(kv_part, job.valid_tokens_by_group)
+        aux_bytes = self.compression.aux_bytes(kv_part, job.valid_tokens_by_group)
         slot = self.compression.slots[job.slot_id]
         codec_bytes = self._send_compressed_blocks(
             encoded,
@@ -3550,12 +3520,10 @@ class MooncakeConnectorWorker:
             job_id=job.job_id,
             u8_bytes=encoded.u8_bytes,
             codec_bytes=codec_bytes,
-            aux_bytes=aux_bytes,
         )
 
     def _session_job_decode_chunk(self, job: DecodeChunkJob) -> JobDone:
         assert self.compression is not None
-        execution = self.compression.default_execution
         kv_part = cast(KVPart, job.chunk_id % 2)
         event = self.compression.decode(
             job.slot_id,
@@ -3563,7 +3531,6 @@ class MooncakeConnectorWorker:
             kv_part,
             job.codec_bytes,
             job.u8_bytes,
-            execution,
             valid_tokens_by_group=job.valid_tokens_by_group,
         )
         event.synchronize()

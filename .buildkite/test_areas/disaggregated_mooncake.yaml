@@ -19,7 +19,7 @@ steps:
     - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
     - tests/v1/kv_connector/mooncake_integration/
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - INSTALL_MOONCAKE_COMPRESSION=1 bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
     - MOONCAKE_COMPRESSION_CONFIG='{"enable-compression-pipeline":true,"pipeline":["codec"],"logical_blocks_per_chunk":8}' PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=1 bash v1/kv_connector/mooncake_integration/run_accuracy_test.sh --attention-backend FLASH_ATTN
   mirror:

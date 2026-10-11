@@ -19,6 +19,8 @@ import os
 
 import msgspec
 
+from .compression.protocol import MooncakeXferMetadata
+
 SESSION_PROCESS_ENV = "KVSERVE_SESSION_PROCESS"
 
 
@@ -148,22 +150,9 @@ class OpenProducerJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     transfer_id: str
     d_req_id: str
     nonce: str
-    remote_hostname: str
-    remote_port: int
-    remote_tp_size: int
-    remote_tp_rank: int
-    remote_pp_size: int
+    metadata: MooncakeXferMetadata
     local_block_ids: list[list[int]]
-    remote_block_ids: list[list[int]]
     num_tokens: int | None
-    kv_caches_base_addr: list[int]
-    block_lens: list[int]
-    kv_block_lens: list[int]
-    registered_layer_names: list[str]
-    registered_layer_indices: list[int]
-    registered_group_indices: list[int]
-    registered_shared_group_ids: list[list[int]] = msgspec.field(default_factory=list)
-    registered_row_offsets: list[int] = msgspec.field(default_factory=list)
 
 
 class EncodeChunkJob(msgspec.Struct, tag=True):  # type: ignore[call-arg]
@@ -208,7 +197,6 @@ class JobDone(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     valid_tokens_by_group: dict[int, int] = msgspec.field(default_factory=dict)
     u8_bytes: int = 0
     codec_bytes: int = 0
-    aux_bytes: int = 0
 
 
 HelperJob = OpenProducerJob | EncodeChunkJob | DecodeChunkJob | DrainSlotsJob

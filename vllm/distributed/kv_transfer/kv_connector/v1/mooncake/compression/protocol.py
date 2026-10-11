@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import msgspec
 
+KVPart = Literal[0, 1]
 ReqId = str
 TransferId = str
 
@@ -58,7 +61,6 @@ class CompressionChunkPull(  # type: ignore[call-arg]
     transfer_id: TransferId
     d_req_id: ReqId
     chunk_id: int
-    slot_id: int
     payload_addr: int
     aux_addr: int
     tail_addr: int
@@ -71,7 +73,6 @@ class CompressionChunkReady(  # type: ignore[call-arg]
     chunk_id: int
     data_bytes: int
     payload_bytes: int
-    aux_bytes: int
     error: str | None = None
 
     @property
