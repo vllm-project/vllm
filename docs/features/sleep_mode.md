@@ -89,6 +89,18 @@ The trainer must omit these parameters from updates, and reload/post-processing
 must preserve their values and storage (including avoiding replacement with meta
 tensors). This option does not filter updates.
 
+For frozen Engram tables omitted by the trainer, select the target table weights
+and scales. For example, DeepSeek V4.1 uses these runtime parameter names:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 vllm serve deepseek-ai/DeepSeek-V4.1-Flash --enable-sleep-mode \
+    --sleep-preserve-parameter-names '*.engram.embed_tokens.weight*'
+```
+
+CPU-offloaded tables remain on CPU without an extra backup copy. Engram's
+[inference-time CPU offload](engram.md#cpu-offload) is configured separately;
+this option preserves the frozen tables across level-2 sleep and weight updates.
+
 To retain a frozen drafter while updating only target weights, use `draft.*`:
 
 ```bash
@@ -101,6 +113,7 @@ vLLM selects all draft-private parameters internally; you do not need to list
 them individually. Use `draft.<name>` to select specific draft parameters.
 Parameters shared with the target are excluded from the draft selection, so
 target updates remain authoritative. An empty `draft.*` selection is valid.
+The Engram and draft patterns can be supplied together.
 
 #### Release only KV cache memory
 
