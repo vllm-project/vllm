@@ -58,7 +58,7 @@ class GPUWatermarkSampler(Sampler):
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
-        use_flashinfer: bool,
+        use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         enabled = self.watermarking.np[idx_mapping_np] & (
             self.sampling_states.temperature.np[idx_mapping_np] != 0
@@ -71,7 +71,7 @@ class GPUWatermarkSampler(Sampler):
                 pos,
                 top_k,
                 top_p,
-                use_flashinfer,
+                use_fused_sampler,
             )
 
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
@@ -119,8 +119,9 @@ class GPUWatermarkSampler(Sampler):
         self,
         expanded_idx_mapping: torch.Tensor,
         contexts: torch.Tensor,
+        expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return repeated_context_mask(
+        repeated = repeated_context_mask(
             self.req_states.all_token_ids.gpu,
             expanded_idx_mapping,
             self.req_states.prompt_len.gpu,
@@ -128,8 +129,16 @@ class GPUWatermarkSampler(Sampler):
             contexts,
             self.deduplicate_contexts_max_history,
             include_prompt=self.deduplicate_contexts == "all",
-            skip_partial_context=self.deduplicate_contexts == "all",
+            skip_partial_context=(
+                self.deduplicate_contexts == "all" and expanded_local_pos is None
+            ),
+            history_offsets=expanded_local_pos,
+            local_positions=expanded_local_pos,
+            num_speculative_steps=(
+                self.num_speculative_tokens if expanded_local_pos is not None else 0
+            ),
         )
+        return repeated
 
     def _get_contexts(
         self,

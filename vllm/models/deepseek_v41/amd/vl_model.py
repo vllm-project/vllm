@@ -26,6 +26,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -44,15 +45,12 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from ..common.mm_preprocess import (
-    IMAGE,
-    IMAGE_END,
-    IMAGE_NEW_LINE,
     IMAGE_PLACEHOLDER,
-    IMAGE_START,
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
 )
+from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from .model import (
     DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
@@ -81,20 +79,22 @@ class DeepseekV4VLImagePixelInputs(TensorSchema):
     types: Annotated[torch.Tensor, TensorShape("ns", dynamic_dims={"ns"})]
 
 
+_VL_PREFIX_MAPPING: dict[str, str | None] = {
+    "layers.": "language_model.model.layers.",
+    "embed.": "language_model.model.embed.",
+    "norm.": "language_model.model.norm.",
+    "hc_head": "language_model.model.hc_head",
+    "mtp.": "language_model.model.mtp.",
+}
+
+
 def _make_deepseek_v4_vl_weights_mapper(
     expert_dtype: str, linear_scale_name: str
 ) -> WeightsMapper:
     """Text-checkpoint mapping rules re-rooted under ``language_model.``."""
     base = _make_deepseek_v4_weights_mapper(expert_dtype, linear_scale_name)
-    orig_to_new_prefix: dict[str, str | None] = {
-        "layers.": "language_model.model.layers.",
-        "embed.": "language_model.model.embed.",
-        "norm.": "language_model.model.norm.",
-        "hc_head": "language_model.model.hc_head",
-        "mtp.": "language_model.model.mtp.",
-    }
     return WeightsMapper(
-        orig_to_new_prefix=orig_to_new_prefix,
+        orig_to_new_prefix=dict(_VL_PREFIX_MAPPING),
         orig_to_new_regex=base.orig_to_new_regex,
         orig_to_new_suffix={
             "head.weight": "language_model.lm_head.weight",
@@ -115,14 +115,39 @@ def _make_deepseek_v4_vl_weights_mapper(
     info=DeepseekV4VLProcessingInfo,
     dummy_inputs=DeepseekV4VLDummyInputsBuilder,
 )
-class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3):
+class DeepseekV41ForCausalLM(
+    nn.Module,
+    DeepseekV4VLEncoderCudaGraphMixin,
+    SupportsMultiModal,
+    SupportsEncoderCudaGraph,
+    SupportsPP,
+    SupportsEagle3,
+):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
     ``SupportsEagle3`` (aux hidden-state plumbing for MTP/DSpark drafters)
     delegates through ``language_model`` via the protocol defaults.
+    ``SupportsEncoderCudaGraph`` (ViT CUDA graph capture/replay) is
+    implemented by ``DeepseekV4VLEncoderCudaGraphMixin``.
     """
 
     supports_encoder_tp_data = True
+
+    # Both of these are read off the *class* by
+    # ``configure_quant_config``/``SupportsQuant``, before ``__init__`` runs,
+    # to translate a quantization config's checkpoint-style module names into
+    # runtime prefixes. ``__init__`` later overwrites the instance
+    # ``hf_to_vllm_mapper`` with the full weight-loading mapper; only the
+    # prefix rules matter here. Without the class attributes, per-layer specs
+    # naming ``layers.N.attn.wq_a`` never match this wrapper's
+    # ``language_model.model.layers.N.attn.wq_a`` and silently fall back to
+    # the global spec.
+    packed_modules_mapping = DeepseekV41LLMForCausalLM.packed_modules_mapping
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix=dict(_VL_PREFIX_MAPPING),
+        orig_to_new_substr={".shared_experts.w2": ".shared_experts.down_proj"},
+    )
 
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
@@ -195,29 +220,6 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
             types=kwargs.pop("types"),
             resolve_bindings={"p": self.config.vision_patch_size},
         )
-
-    def _encode_image(
-        self,
-        patches: torch.Tensor,
-        n_vit_h: int,
-        n_vit_w: int,
-    ) -> torch.Tensor:
-        # Aligner rows in reading order, one per IMAGE slot.
-        return self.aligner(self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w)
-
-    def _build_image_span(
-        self, image_embeds: torch.Tensor, types: torch.Tensor
-    ) -> torch.Tensor:
-        """Full image span: aligner rows at IMAGE slots, the learned
-        delimiter vectors at IMAGE_START/IMAGE_NEW_LINE/IMAGE_END."""
-        types = types.to(image_embeds.device)
-        span = image_embeds.new_empty(types.numel(), image_embeds.shape[-1])
-        dtype = image_embeds.dtype
-        span[types == IMAGE_START] = self.image_start.to(dtype)
-        span[types == IMAGE_END] = self.image_end.to(dtype)
-        span[types == IMAGE_NEW_LINE] = self.image_newline.to(dtype)
-        span[types == IMAGE] = image_embeds
-        return span
 
     def _process_image_input(
         self,

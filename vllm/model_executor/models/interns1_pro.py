@@ -30,7 +30,7 @@ from typing import Any, ClassVar
 
 import torch
 from torch import nn
-from transformers import AutoProcessor, PretrainedConfig
+from transformers import AutoProcessor, PreTrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -43,12 +43,13 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+    GateLinear,
 )
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -181,10 +182,9 @@ class InternS1ProMoeSparseMoeBlock(nn.Module):
             custom_routing_function=self._custom_routing_function,
         )
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             prefix=f"{prefix}.gate",
         )
 
@@ -564,7 +564,7 @@ class InternS1ProForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3VLForConditionalGeneration, self).__init__()
-        config: PretrainedConfig = vllm_config.model_config.hf_config
+        config: PreTrainedConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
@@ -576,6 +576,7 @@ class InternS1ProForConditionalGeneration(
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

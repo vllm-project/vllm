@@ -72,14 +72,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Aborted cleanup requests have already been removed from the scheduler.
             if meta.awaiting_kvs or any(meta.local_block_ids):
                 self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
             self._read_blocks_for_req(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
@@ -144,6 +136,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        if engine_id in self._invalid_remote_engines:
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
+            return
+        if engine_id not in self._remote_agents:
+            # Also re-handshakes queued requests that outlived invalid-peer cleanup.
+            self._background_nixl_handshake(req_id, engine_id, meta)
+            return
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
@@ -191,7 +192,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     "Different NIXL cache-group layouts are only supported for "
                     "pure MLA models"
                 )
-            assert len(plan.all_source_ranks) == 1
             if self.block_size != remote_info.remote_block_size:
                 raise NotImplementedError(
                     "Region-mapped NIXL transfers require matching physical block sizes"
@@ -213,7 +213,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 and meta.local_num_computed_blocks
                 and all(group >= 0 for group in local_region_groups)
                 and all(group >= 0 for group in remote_region_groups)
-                and not dcp_active
             ):
                 transfer_groups = self.kv_cache_config.transfer_group_ids
                 num_computed_blocks = [
@@ -224,32 +223,34 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 num_remote_blocks = cdiv(
                     meta.remote.num_tokens, remote_info.remote_block_size
                 )
-            elif (
-                remote_info.remote_physical_blocks_per_logical
+            elif any(local_by_region) and (
+                dcp_active
+                or remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             ):
                 raise NotImplementedError(
-                    "Region-mapped pulls with different logical block sizes require "
-                    "remote_num_tokens, per-group prefix counts, unshared regions "
-                    "and DCP=1"
+                    "Region-mapped pulls with DCP or different logical block sizes "
+                    "require remote_num_tokens, per-group prefix counts "
+                    "and unshared regions"
                 )
-            matched_local, matched_remote = self._apply_prefix_caching_by_region(
-                local_by_region,
-                remote_by_region,
-                num_computed_blocks=num_computed_blocks,
-                num_remote_blocks=num_remote_blocks,
-            )
-            meta.region_blocks_to_zero = [
-                list(blocks[len(matched) :])
-                for blocks, matched in zip(local_by_region, matched_local, strict=True)
-            ]
             read_specs = [
                 ReadSpec(
-                    remote_rank=plan.all_source_ranks[0],
-                    local_block_ids=matched_local,
-                    remote_block_ids=matched_remote,
+                    rank,
+                    *self._apply_prefix_caching_by_region(
+                        local_by_region,
+                        remote_by_region,
+                        num_computed_blocks=num_computed_blocks,
+                        num_remote_blocks=num_remote_blocks,
+                        remote_rank=rank,
+                        remote_dcp_size=remote_info.remote_dcp_size,
+                    ),
                     block_ids_by_region=True,
                 )
+                for rank in plan.all_source_ranks
+            ]
+            meta.region_blocks_to_zero = [
+                list(blocks[sum(len(spec.local_block_ids[r]) for spec in read_specs) :])
+                for r, blocks in enumerate(local_by_region)
             ]
         else:
             remote_logical_block_ids = meta.remote.block_ids
@@ -592,7 +593,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        assert local_dram_handle is not None
+        if self._skip_dram_xfer:
+            # TP rank 0 reads the DRAM (shared host pool) part for every
+            # local rank; keep only the device part. Register the request
+            # even if nothing is left, so it still completes and notifies.
+            keep = ~is_dram
+            local_ids = local_ids[keep]
+            remote_ids = remote_ids[keep]
+            is_dram = is_dram[keep]
+            self._recving_transfers.setdefault(request_id, [])
+        assert local_dram_handle is not None or not is_dram.any()
         reads = (
             (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),
@@ -653,6 +663,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
+                    self.xfer_stats.record_notification_after_expiry()
                     logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "

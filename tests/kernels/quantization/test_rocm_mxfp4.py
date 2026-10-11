@@ -50,16 +50,7 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    # aiter 0.1.20 Triton preshuffled fp4 GEMM OOBs (GPU memory access fault ->
-    # SIGABRT, crashing the process) for (M=32, N=8192, K=8192) on gfx950, despite
-    # advertising the (N, K) as tuned. A hard GPU fault can't be xfail'd, so skip it
-    # until the aiter kernel is fixed (ROCm/aiter#4867).
-    pytest.param(
-        (32, 8192, 8192),
-        marks=pytest.mark.skip(
-            reason="aiter 0.1.20 preshuffled fp4 GEMM OOB (M32,N8192,K8192, gfx950)"
-        ),
-    ),
+    (32, 8192, 16384),
 ]
 
 
@@ -430,7 +421,8 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     M, K, N = shape
 
     assert M <= 64
-    assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+    # The predicate takes K as packed bytes, matching `weight.shape[1]`.
+    assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K // 2)
 
     A = torch.randn(M, K, dtype=torch.bfloat16)
     B = torch.randn(N, K, dtype=torch.bfloat16)
@@ -622,11 +614,13 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     out = gemm_afp4wfp4(A_fp4, B_fp4, A_scale, B_scale)
 
     assert out.shape == (M, N)
+    assert out.dtype == torch.bfloat16
     assert not torch.any(torch.isnan(out))
 
+    # Accumulate in FP32, then match the GEMM's BF16 output rounding.
     A_dq = quant_dequant_mxfp4(A)
     B_dq = quant_dequant_mxfp4(B)
-    ref = torch.matmul(A_dq.float(), B_dq.t().float())
+    ref = torch.matmul(A_dq.float(), B_dq.t().float()).to(torch.bfloat16).float()
 
     _print_close_stats(
         f"skinny_gemm M={M} N={N} K={K}",

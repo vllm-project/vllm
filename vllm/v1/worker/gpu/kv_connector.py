@@ -24,20 +24,24 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
-    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        input_batch: "InputBatch | None" = None,
+        attn_metadata: dict[str, Any] | None = None,
+    ) -> None:
         pass
 
     def finish_forward(self) -> None:
         pass
 
-    def post_forward(
-        self, finished_req_ids: set[str], wait_for_save: bool = True
-    ) -> KVConnectorOutput | None:
+    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
         return None
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
@@ -63,7 +67,12 @@ class ActiveKVConnector(KVConnector):
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
 
-    def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
+    def pre_forward(
+        self,
+        scheduler_output: "SchedulerOutput",
+        input_batch: "InputBatch | None" = None,
+        attn_metadata: dict[str, Any] | None = None,
+    ) -> None:
         if self._disabled:
             return
 
@@ -71,13 +80,35 @@ class ActiveKVConnector(KVConnector):
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
-        self._pending_load_kwargs = kwargs
+        self._pending_load_kwargs = self._build_load_kwargs(
+            scheduler_output, input_batch, attn_metadata
+        )
 
         if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
             self._start_load_kv()
         # Otherwise start the async load after forward to keep submission
         # off the critical path.
+
+    @staticmethod
+    def _build_load_kwargs(
+        scheduler_output: "SchedulerOutput",
+        input_batch: "InputBatch | None",
+        attn_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Keyword args for the connector's start_load_kv()."""
+        if input_batch is None:
+            # No forward this step.
+            return {}
+        load_kwargs: dict[str, Any] = dict(
+            scheduler_output=scheduler_output,
+            request_state_indices=input_batch.idx_mapping,
+            request_ids=input_batch.req_ids,
+            num_tokens=input_batch.num_tokens,
+        )
+        if attn_metadata is not None:
+            load_kwargs["attn_metadata"] = attn_metadata
+        return load_kwargs
 
     def _start_load_kv(self) -> None:
         load_kwargs = self._pending_load_kwargs
@@ -97,9 +128,7 @@ class ActiveKVConnector(KVConnector):
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()
 
-    def post_forward(
-        self, finished_req_ids: set[str], wait_for_save: bool = True
-    ) -> KVConnectorOutput | None:
+    def post_forward(self, finished_req_ids: set[str]) -> KVConnectorOutput | None:
         if self._disabled:
             return None
 
@@ -107,8 +136,7 @@ class ActiveKVConnector(KVConnector):
             self._start_load_kv()
 
         output = KVConnectorOutput()
-        if wait_for_save:
-            self.kv_connector.wait_for_save()
+        self.kv_connector.wait_for_save()
         transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
         output.finished_sending = transfer_results.finished_sending or None
         output.finished_recving = transfer_results.finished_recving or None
@@ -129,7 +157,7 @@ class ActiveKVConnector(KVConnector):
         self.pre_forward(scheduler_output)
         self.finish_forward()
         finished_req_ids = scheduler_output.finished_req_ids
-        kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
+        kv_connector_output = self.post_forward(finished_req_ids)
         return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     def set_disabled(self, disabled: bool) -> None:

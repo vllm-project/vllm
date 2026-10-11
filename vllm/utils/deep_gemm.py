@@ -29,10 +29,11 @@ _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
     "qwen3_5_moe_text",
 }
 
-# KV page sizes (in cache entries) supported by the paged-MQA logits kernels
-# (fp8_fp4_paged_mqa_logits / get_paged_mqa_logits_metadata). Larger storage
-# blocks must be virtually split into one of these page sizes.
-PAGED_MQA_PAGE_SIZES = (32, 64)
+
+def get_paged_mqa_page_sizes() -> tuple[int, ...]:
+    """KV page sizes (in cache entries) the paged-MQA logits kernels take (only
+    64 on SM120); larger storage blocks are split into one of these."""
+    return (64,) if current_platform.is_device_capability_family(120) else (32, 64)
 
 
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
@@ -112,7 +113,7 @@ def is_deep_gemm_supported() -> bool:
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.support_deep_gemm()
-    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
+    return is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
 
 
 @functools.cache

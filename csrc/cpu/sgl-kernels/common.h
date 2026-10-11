@@ -280,26 +280,10 @@ inline int get_thread_num() {
 // balance payload across each thread
 template <typename T>
 inline void balance211(T n, T nth, T ith, T& n_start, T& n_end) {
-#if 0
-    // onednn partition pattern
-    T& n_my = n_end;
-    if (nth <= 1 || n == 0) {
-        n_start = 0;
-        n_my = n;
-    } else {
-        T n1 = div_up(n, nth);
-        T n2 = n1 - 1;
-        T T1 = n - n2 * nth;
-        n_my = ith < T1 ? n1 : n2;
-        n_start = ith <= T1 ? ith*n1 : T1 * n1 + (ith - T1) * n2;
-    }
-    n_end += n_start;
-#else
   // pytorch aten partition pattern
   T n_my = div_up(n, nth);
   n_start = ith * n_my;
   n_end = std::min(n_start + n_my, n);
-#endif
 }
 
 template <typename func_t>
@@ -548,10 +532,17 @@ void zero_buffer(T* data, int64_t size) {
 #endif
 
 #if defined(__x86_64__)
+// CPU_CAPABILITY_AVX10_2 is defined by cmake only when the compiler accepts
+// -mavx10.2; without it the builtin below is not merely absent but a hard
+// error, so the AVX512 paths have to stand in.
 bool avx10_2_available() {
+#ifdef CPU_CAPABILITY_AVX10_2
   // __builtin_cpu_supports returns the masked feature bit rather than 0/1.
   static const bool available = __builtin_cpu_supports("avx10.2");
   return available;
+#else
+  return false;
+#endif
 }
 #endif
 

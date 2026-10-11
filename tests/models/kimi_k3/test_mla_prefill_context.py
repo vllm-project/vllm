@@ -13,8 +13,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.model_executor.layers.attention.mla_attention as mla_attention
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
+    MLACommonImpl,
     MLACommonPrefillMetadata,
     build_mla_chunked_context_metadata,
 )
@@ -317,3 +319,115 @@ def test_fused_context_rejects_an_unquantized_query() -> None:
     )
     with pytest.raises(AssertionError, match="new-token epilogue"):
         layer._compute_prefill_context(q, SimpleNamespace(prefill=prefill))
+
+
+# --------------------------------------------------------------------------
+# Decode context parallelism: the generic impl keeps its loop (allgather +
+# reorg) and only the per-chunk K/V pack is handed to the layer's fused kernel.
+# --------------------------------------------------------------------------
+_DCP = 2
+_DCP_TOKENS = 48
+
+
+def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
+    """Drive ``MLACommonImpl._context_parallel_compute_prefill_context`` on one
+    chunk with the collective pieces (gather, allgather, reorg) stubbed out."""
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    kv_b_proj = _KVBProj(device, weight_dtype=torch.bfloat16)
+    workspace = torch.randn(
+        (_DCP_TOKENS * (_DCP + 1), _ENTRY), dtype=torch.bfloat16, device=device
+    )
+    impl = SimpleNamespace(
+        kv_cache_dtype="auto",
+        kv_lora_rank=_KV_LORA_RANK,
+        qk_rope_head_dim=_QK_ROPE,
+        qk_nope_head_dim=_QK_NOPE,
+        v_head_dim=_V_HEAD_DIM,
+        num_heads=_NUM_HEADS,
+        kv_b_proj=kv_b_proj,
+        _use_flashinfer_concat_mla_k=False,
+    )
+    impl._concat_k_nope_k_pe = MLACommonImpl._concat_k_nope_k_pe.__get__(impl)
+
+    monkeypatch.setattr(mla_attention.ops, "cp_gather_cache", lambda **_: None)
+    monkeypatch.setattr(mla_attention, "_get_kv_b_proj_input_dtype", lambda *_: None)
+    monkeypatch.setattr(
+        mla_attention,
+        "reorg_kvcache",
+        lambda kv_c, k_pe, **_: (kv_c[:_DCP_TOKENS].squeeze(1), k_pe[:_DCP_TOKENS]),
+    )
+    chunk = SimpleNamespace(
+        index=0,
+        padded_local_seq_lens=[_DCP_TOKENS],
+        local_context_lens_allranks=[[_DCP_TOKENS // _DCP] * _DCP],
+        padded_local_cu_seq_lens=torch.tensor([0, _DCP_TOKENS], device=device),
+        padded_local_token_to_seq=torch.zeros(
+            _DCP_TOKENS, dtype=torch.int32, device=device
+        ),
+        local_starts=[0],
+        num_local_context_tokens=_DCP_TOKENS,
+        request_slice=slice(0, 1),
+        num_requests=1,
+        starts=torch.tensor([0], device=device),
+        num_context_tokens=_DCP_TOKENS,
+        max_seq_len=_DCP_TOKENS,
+        token_slice=slice(0, 4),
+    )
+    backend = _RecordingPrefillBackend()
+    attn_metadata = SimpleNamespace(
+        prefill=SimpleNamespace(
+            prefill_backend=backend,
+            chunked_context=SimpleNamespace(
+                workspace=workspace,
+                chunks=[chunk],
+                empty_token_slices=False,
+                dcp_manager=SimpleNamespace(kv_gather=lambda dst, src: None),
+            ),
+            q_data_type=q_data_type,
+            block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
+        )
+    )
+    q = torch.randn(
+        (4, _NUM_HEADS, _QK_NOPE + _QK_ROPE), dtype=torch.bfloat16, device=device
+    )
+    out, lse = MLACommonImpl._context_parallel_compute_prefill_context(
+        impl,
+        q,
+        torch.empty(0, device=device),
+        attn_metadata,
+        k_scale=torch.ones(1, device=device),
+        dcp_world_size=_DCP,
+        fused_mla_kv_concat_fn=fused_mla_kv_concat_fn,
+    )
+    return backend, out, lse
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@torch.inference_mode()
+def test_dcp_context_fused_pack_matches_generic_tail(
+    monkeypatch, kv_cache_dtype: str
+) -> None:
+    """Under DCP the layer's fused K/V pack must feed the prefill backend exactly
+    what the generic impl's cast + split + concat tail feeds it."""
+    q_data_type = (
+        current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else torch.bfloat16
+    )
+    layer = SimpleNamespace(qk_nope_head_dim=_QK_NOPE, v_head_dim=_V_HEAD_DIM)
+    fused_fn = MultiHeadLatentAttention._fused_mla_kv_concat.__get__(layer)
+
+    backend_ref, ref_out, ref_lse = _run_dcp_context_loop(
+        monkeypatch, q_data_type=q_data_type, fused_mla_kv_concat_fn=None
+    )
+    backend_fused, fused_out, fused_lse = _run_dcp_context_loop(
+        monkeypatch, q_data_type=q_data_type, fused_mla_kv_concat_fn=fused_fn
+    )
+    assert len(backend_ref.calls) == len(backend_fused.calls) == 1
+    for name, fused_t, ref_t in zip(
+        ("q", "k", "v"), backend_fused.calls[0], backend_ref.calls[0], strict=True
+    ):
+        torch.testing.assert_close(
+            fused_t, ref_t, atol=0, rtol=0, msg=lambda m, n=name: f"{n} differs: {m}"
+        )
+    torch.testing.assert_close(fused_out, ref_out, atol=0, rtol=0)
+    torch.testing.assert_close(fused_lse, ref_lse, atol=0, rtol=0)

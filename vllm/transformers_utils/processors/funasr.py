@@ -164,56 +164,6 @@ class WavFrontend(nn.Module):
             feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
         return feats_pad, feats_lens
 
-    def forward_fbank(
-        self, input: torch.Tensor, input_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = input.size(0)
-        feats = []
-        feats_lens = []
-        for i in range(batch_size):
-            waveform_length = input_lengths[i]
-            waveform = input[i][:waveform_length]
-            waveform = waveform * (1 << 15)
-            waveform = waveform.unsqueeze(0)
-            mat = kaldi.fbank(
-                waveform,
-                num_mel_bins=self.n_mels,
-                frame_length=self.frame_length,
-                frame_shift=self.frame_shift,
-                dither=self.dither,
-                energy_floor=0.0,
-                window_type=self.window,
-                sample_frequency=self.fs,
-            )
-
-            feat_length = mat.size(0)
-            feats.append(mat)
-            feats_lens.append(feat_length)
-
-        feats_lens = torch.as_tensor(feats_lens)
-        feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
-        return feats_pad, feats_lens
-
-    def forward_lfr_cmvn(
-        self, input: torch.Tensor, input_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = input.size(0)
-        feats = []
-        feats_lens = []
-        for i in range(batch_size):
-            mat = input[i, : input_lengths[i], :]
-            if self.lfr_m != 1 or self.lfr_n != 1:
-                mat = apply_lfr(mat, self.lfr_m, self.lfr_n)
-            if self.cmvn is not None:
-                mat = apply_cmvn(mat, self.cmvn)
-            feat_length = mat.size(0)
-            feats.append(mat)
-            feats_lens.append(feat_length)
-
-        feats_lens = torch.as_tensor(feats_lens)
-        feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
-        return feats_pad, feats_lens
-
 
 class FunASRFeatureExtractor(SequenceFeatureExtractor):
     r"""Constructs a FunASR feature extractor.

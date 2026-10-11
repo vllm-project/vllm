@@ -56,6 +56,22 @@ def test_metadata_preserves_repeated_item_positions():
     }
 
 
+def test_audio_metadata_survives_processor_cache_hit():
+    resolver = Mock()
+    resolver.fields_for.return_value = {"audio_num_tokens"}
+    feature = MultiModalFeatureSpec(
+        data=None,
+        modality="audio",
+        identifier="audio",
+        mm_position=PlaceholderRange(
+            offset=0, length=4, is_embed=torch.tensor([False, True, True, False])
+        ),
+    )
+    assert collect_ec_item_metadata([feature], resolver) == {
+        "audio": {"metadata": {"audio_num_tokens": [2]}, "item_indices": [0]}
+    }
+
+
 @pytest.fixture
 def temp_storage(tmp_path):
     """Fixture providing temporary storage path."""
