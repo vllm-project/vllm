@@ -5,11 +5,12 @@
 A decode step's backbone layer -- the attention seam, the attention, its TP
 all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
 FlyDSL launches (``mono``, this directory) on the layer's loaded
-weights, the TP reductions inside the kernels. A layer runs whole when it has
-the standard seam and no compressor or indexer of its own (compress ratio 1 or
-2) over ``fp8_ds_mla`` records. Any other backbone layer (the first, the Engram
-layers, the compressor / indexer layers) keeps vLLM's attention seam and
-attention and runs the rest as one launch, the FFN launch, from wo_b's
+weights, the TP reductions inside the kernels. Every backbone layer of the
+checkpoint runs whole (compress ratio 0, 1 or 2 over ``fp8_ds_mla`` records):
+the first layer and the Engram layers hand K1 a settled residual, and an index
+source runs vLLM's compressor and indexer between the two launches. A layer
+outside that (an MXFP8 KV cache, another indexer) keeps vLLM's attention seam
+and attention and runs the rest as one launch, the FFN launch, from wo_b's
 unreduced output. A step takes the kernels when it is decode only, at most
 ``MAX_ROWS`` rows (eager or a FULL CUDA graph: the model is not torch.compiled);
 a whole layer also needs causal SWA windows. Anything else runs the layer as
@@ -372,7 +373,7 @@ class MonoDecodeLayer:
         if first:
             residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
             pre_mix = runner.first_pre_mix(x.shape[0])
-            post_mix = res_mix = pre_mix
+            post_mix = res_mix = pre_mix  # unread without the fold
             fold = False
         elif layer.engram is not None and engram_hashes is not None:
             residual = layer.mhc_post(x, residual, post_mix, res_mix)

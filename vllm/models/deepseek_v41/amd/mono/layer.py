@@ -681,8 +681,8 @@ def build_mono_k2(key: MonoBuild):
             c["tl"], c["tl_points"] = tl, mb_back.BACK_POINTS
         mb_back.epoch_begin(c, epoch, ep)
         if const_expr(key.index):
-            # the key table, from the top-k vLLM's indexer selected after K1:
-            # on the last CTAs, the split's first task on each token waits on it
+            # the key table, from the top-k vLLM's indexer selected after K1,
+            # on the last CTAs: each split task waits on its token's
             ckt = {
                 "S": s,
                 "tid": c["tid"],
