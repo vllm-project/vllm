@@ -31,6 +31,7 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.uno_lora import UnoLoRAState
 from vllm.v1.worker.gpu.spec_decode.uno_prepare import prepare_uno_inputs_fused
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -161,6 +162,29 @@ class UnoSpeculator(DraftModelSpeculator):
         # "using eager execution" line was always emitted by startup warmup and
         # a later fallback in serving could never announce itself.
         self.num_warmup_proposals = 0
+
+    def set_lora_manager(self, lora_manager: Any) -> None:
+        """Install the Uno adapter mapping around each draft pass.
+
+        The target pass keeps the runner's own request mapping: every draft
+        install clears the manager's mapping cache, so the next target step
+        rebuilds its mapping.
+        """
+        self.uno_lora_state = UnoLoRAState(lora_manager, self.lora_request)
+        self.uno_lora_state.ensure_adapter()
+        active_shape = (0, 0)
+
+        def set_draft_mapping(shape: tuple[int, int] | None) -> None:
+            nonlocal active_shape
+            if shape is None:
+                num_reqs, num_model_tokens = active_shape
+                self.uno_lora_state.install_base(num_model_tokens, num_reqs * self.k)
+                return
+            active_shape = shape
+            num_reqs, num_model_tokens = shape
+            self.uno_lora_state.install_draft(num_model_tokens, num_reqs, self.k)
+
+        self.set_lora_hook(set_draft_mapping)
 
     def set_lora_hook(self, hook: Callable[[tuple[int, int] | None], None]) -> None:
         self._lora_hook = hook

@@ -320,21 +320,20 @@ def _uno_execution_state(worker) -> dict:
         "draft_graph_replays": proposer.num_graph_replays,
         "draft_graphs": len(proposer.cudagraph_manager.graphs),
         "draft_eager_proposals": proposer.num_eager_proposals,
-        "lora_plan_hits": runner.uno_lora_state.plan_cache.hits,
-        "lora_plan_misses": runner.uno_lora_state.plan_cache.misses,
-        "lora_plan_bypasses": runner.uno_lora_state.plan_cache.bypasses,
+        "lora_plan_hits": proposer.uno_lora_state.plan_cache.hits,
+        "lora_plan_misses": proposer.uno_lora_state.plan_cache.misses,
+        "lora_plan_bypasses": proposer.uno_lora_state.plan_cache.bypasses,
     }
 
 
 def _disable_uno_adapter_for_control(worker) -> None:
     """Use identical noise and sampling, with base weights on every draft row."""
-    runner = worker.model_runner
-    proposer = runner.speculator
+    proposer = worker.model_runner.speculator
 
     def base_only(shape):
         if shape is not None:
             _num_reqs, num_tokens = shape
-            runner.uno_lora_state.install_base(num_tokens, num_tokens)
+            proposer.uno_lora_state.install_base(num_tokens, num_tokens)
 
     proposer.set_lora_hook(base_only)
 

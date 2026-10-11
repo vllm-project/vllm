@@ -477,6 +477,62 @@ def test_state_uses_manager_for_one_time_adapter_lifecycle():
     assert manager._last_slot_layout is None
 
 
+def test_speculator_lora_hook_routes_only_the_draft_pass():
+    """The runner hands Uno its LoRA manager; only draft rows see the adapter.
+
+    After the draft pass the wrapper is all-base again and the manager's
+    mapping cache is cleared, so the runner's next target step installs its
+    own request mapping instead of reusing a stale one.
+    """
+    from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID, UnoSpeculator
+
+    wrapper = FakePunicaWrapper()
+
+    class Manager:
+        lora_index_to_id = [None, None]
+        lora_slots = 2
+        vocab_size = 16
+        _last_mapping = object()
+
+        def __init__(self):
+            self.adapters = set()
+
+        def _get_punica_wrapper(self, _):
+            return wrapper
+
+        def list_adapters(self):
+            return self.adapters
+
+        def add_adapter(self, request):
+            self.adapters.add(request.lora_int_id)
+
+        def activate_adapter(self, adapter_id):
+            self.lora_index_to_id[0] = adapter_id
+
+    manager = Manager()
+    proposer = object.__new__(UnoSpeculator)
+    proposer.k = 4
+    proposer.lora_request = SimpleNamespace(lora_int_id=UNO_LORA_ID)
+    proposer._lora_hook = None
+
+    worker = SimpleNamespace(
+        _adapter_manager=manager,
+        list_adapters=manager.list_adapters,
+        add_adapter=manager.add_adapter,
+    )
+    proposer.set_lora_manager(worker)
+    assert manager.adapters == {UNO_LORA_ID}
+
+    with proposer._draft_lora(2, 8):
+        draft_rows = wrapper._token_lora_indices[: wrapper.indices_len[0]]
+        assert draft_rows.tolist() == [-1, 0, 0, 0] * 2
+        assert manager._last_mapping is None
+    base_rows = wrapper._token_lora_indices[: wrapper.indices_len[0]]
+    assert base_rows.numel() == 8
+    assert (base_rows == -1).all()
+    assert manager._last_mapping is None
+
+
 def _poison_gpu_wrapper(wrapper):
     """Destroy prepared values while keeping every native allocation intact."""
     for name in (
