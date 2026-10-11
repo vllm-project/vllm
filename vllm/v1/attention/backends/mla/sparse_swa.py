@@ -157,6 +157,10 @@ class DeepseekSparseSWABackend(AttentionBackend):
     def get_name() -> str:
         return "DEEPSEEK_SPARSE_SWA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return current_platform.is_cuda()
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
