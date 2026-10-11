@@ -124,7 +124,7 @@ the immutable source archive as a normal wheel in the active vLLM environment.
 uv pip install 'kvserve_v1[runtime,runtime-cu13] @ https://github.com/hpdps-group/KVServe/archive/7482d69a07165022812af0643991655b0f97011b.tar.gz'
 ```
 
-See KVServe's [runtime API and compatibility guide](https://github.com/hpdps-group/KVServe/blob/7482d69a07165022812af0643991655b0f97011b/docs/compression-runtime.md)
+See KVServe's [runtime API and compatibility guide](https://github.com/hpdps-group/KVServe/blob/4cccf59a5b862d86093c0c40a916b68436518a86/docs/compression-runtime.md)
 for buffer/event ownership and backend requirements. Both endpoints must use the
 same wire-profile version; this runtime uses version 2 and rejects the older
 vendored implementation's profile. Disabled compression imports no KVServe code.
