@@ -54,10 +54,6 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     StopParam,
@@ -72,6 +68,10 @@ from vllm.renderers import (
     TokenizeParams,
     map_reasoning_effort,
     merge_kwargs,
+)
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
 )
 from vllm.sampling_params import (
     RequestOutputKind,
@@ -264,6 +264,7 @@ class ResponsesRequest(OpenAIBaseModel):
     top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
+    min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True
@@ -332,6 +333,17 @@ class ResponsesRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."
+        ),
+    )
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
         ),
     )
     cache_salt: str | None = Field(
@@ -452,6 +464,7 @@ class ResponsesRequest(OpenAIBaseModel):
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
+        "min_p": 0.0,
     }
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -502,6 +515,10 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
             )
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
 
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
@@ -527,6 +544,7 @@ class ResponsesRequest(OpenAIBaseModel):
             watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,

@@ -19,11 +19,6 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    has_non_text_content,
-)
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaMessage,
@@ -49,6 +44,11 @@ from vllm.renderers import (
     TokenizeParams,
     map_reasoning_effort,
     merge_kwargs,
+)
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    has_non_text_content,
 )
 from vllm.sampling_params import (
     BeamSearchParams,
@@ -459,6 +459,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "prompt string produced by chat templating. In streaming mode it "
             "is sent only on the first chunk. This is useful for inspecting "
             "exactly what was fed into the model."
+        ),
+    )
+
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
         ),
     )
 

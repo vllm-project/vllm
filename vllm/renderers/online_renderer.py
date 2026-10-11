@@ -12,12 +12,6 @@ from openai_harmony import Message as OpenAIMessage
 from openai_harmony import ToolNamespaceConfig
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-    has_non_text_content,
-)
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -64,6 +58,12 @@ from vllm.renderers import (
     TokenizeParams,
     map_reasoning_effort,
     merge_kwargs,
+)
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    ConversationMessage,
+    has_non_text_content,
 )
 from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
