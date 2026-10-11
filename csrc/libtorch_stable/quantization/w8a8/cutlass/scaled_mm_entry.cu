@@ -198,29 +198,20 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
 
 namespace {
 
-bool has_packed_leading_dimension(const torch::stable::Tensor& tensor,
-                                  int leading_dim, int extent_dim) {
-  return tensor.size(leading_dim) <= 1 ||
-         tensor.stride(leading_dim) == tensor.size(extent_dim);
-}
-
-void check_c3x_scaled_mm_operand(const torch::stable::Tensor& tensor,
-                                 const char* name, int leading_dim,
-                                 int extent_dim) {
-  STD_TORCH_CHECK(has_packed_leading_dimension(tensor, leading_dim, extent_dim),
-                  "CUTLASS 3.x scaled_mm requires packed operands; ", name,
-                  " is not packed");
-  STD_TORCH_CHECK(reinterpret_cast<std::uintptr_t>(tensor.data_ptr()) % 16 == 0,
-                  "CUTLASS 3.x scaled_mm requires 16-byte-aligned pointers; ",
-                  name, " is misaligned");
-}
-
 void check_c3x_scaled_mm_operands(const torch::stable::Tensor& c,
                                   const torch::stable::Tensor& a,
                                   const torch::stable::Tensor& b) {
-  check_c3x_scaled_mm_operand(a, "A", 0, 1);
-  check_c3x_scaled_mm_operand(b, "B", 1, 0);
-  check_c3x_scaled_mm_operand(c, "output", 0, 1);
+  auto check = [](const torch::stable::Tensor& t, const char* name, int dim) {
+    STD_TORCH_CHECK(t.size(dim) <= 1 || t.stride(dim) == t.size(1 - dim),
+                    "CUTLASS 3.x scaled_mm requires packed operands; ", name,
+                    " is not packed");
+    STD_TORCH_CHECK(reinterpret_cast<std::uintptr_t>(t.data_ptr()) % 16 == 0,
+                    "CUTLASS 3.x scaled_mm requires 16-byte-aligned pointers; ",
+                    name, " is misaligned");
+  };
+  check(a, "A", 0);
+  check(b, "B", 1);
+  check(c, "output", 0);
 }
 
 }  // namespace
