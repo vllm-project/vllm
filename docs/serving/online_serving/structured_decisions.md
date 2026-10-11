@@ -151,7 +151,10 @@ vllm serve Cloudflare/clef-omni
 - There are no labels, so `label_mass` is 1 and `confidence` is the chosen
   option's probability. `usage.input_tokens` counts the prompt once, and
   `output_tokens` is 0.
-- Images, audio and video are not supported on this endpoint yet.
+- `images`, `audio` and `videos` are read as the reference does: placed
+  before the state, videos sampled at 2 fps, and a video's soundtrack heard
+  with it when every video has one. Audio clips cannot be sent together with
+  videos that have soundtracks.
 
 ## Request fields
 
@@ -162,6 +165,7 @@ vllm serve Cloudflare/clef-omni
 | `instructions` | optional context placed ahead of the questions |
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../../usage/security.md#cache-salting) applied to every question |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Omni](#clef-omni)) |
 
 A question with any field other than `type`, `instructions` and `criteria` is
 rejected with a 400.

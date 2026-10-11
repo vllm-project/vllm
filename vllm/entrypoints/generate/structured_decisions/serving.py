@@ -72,6 +72,18 @@ class ServingStructuredDecisions(BaseServing):
         self.strategy = strategy
         self.limits = strategy.limits()
 
+    def _media(self, request: StructuredDecisionRequest) -> dict[str, list[str]]:
+        urls = {
+            "image": request.images,
+            "audio": request.audio,
+            "video": request.videos,
+        }
+        media = {modality: items for modality, items in urls.items() if items}
+        if unsupported := media.keys() - self.strategy.modalities:
+            names = ", ".join(sorted(unsupported))
+            raise StructuredDecisionError(f"this model does not take {names} inputs")
+        return media
+
     async def create_decision(
         self,
         request: StructuredDecisionRequest,
@@ -87,6 +99,7 @@ class ServingStructuredDecisions(BaseServing):
         request_id = f"decision-{base_id}"
         try:
             questions = parse_questions(request, self.limits)
+            media = self._media(request)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             engine_client.check_admission(len(questions))
             trace_headers = (
@@ -104,6 +117,7 @@ class ServingStructuredDecisions(BaseServing):
                 priority=request.priority,
                 cache_salt=request.cache_salt,
                 trace_headers=trace_headers,
+                media=media,
             )
         except StructuredDecisionError as e:
             return self.create_error_response(e)

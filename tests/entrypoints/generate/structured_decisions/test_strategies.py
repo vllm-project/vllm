@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pybase64 as base64
 import pytest
 import torch
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -42,7 +45,9 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.exception_handling.register import (
     init_exception_handler,
 )
+from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
+from vllm.multimodal.media import MediaConnector
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -434,3 +439,63 @@ def test_joint_schema_truncates_the_state(joint_schema):
     strategy.max_length = 100
     with pytest.raises(StructuredDecisionError, match="questions take"):
         strategy.encode(questions, "word")
+
+
+@pytest.mark.asyncio
+async def test_media_needs_a_model_that_takes_it(serving_and_engine):
+    serving, engine = serving_and_engine
+    request = StructuredDecisionRequest(
+        **JOINT_SCHEMA_REQUEST, images=["data:image/png;base64,AAAA"]
+    )
+    response = await serving.create_decision(request)
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert "does not take image inputs" in response.error.message
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypatch):
+    serving, engine, tokenizer = joint_schema
+    strategy = serving.strategy
+    strategy.__dict__["_connector"] = MediaConnector()
+    image_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    rendered: dict[str, Any] = {}
+
+    async def process_for_engine_async(prompt, arrival_time):
+        rendered.update(prompt)
+        # The image's placeholder expands to three tokens.
+        ids = [
+            token
+            for pad in prompt["prompt_token_ids"]
+            for token in ([pad] * 3 if pad == image_pad else [pad])
+        ]
+        return mm_input(ids, {}, {}, {}, cache_salt=prompt.get("cache_salt"))
+
+    renderer = strategy.context.online_renderer.renderer
+    monkeypatch.setattr(renderer, "process_for_engine_async", process_for_engine_async)
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buffer, format="PNG")
+    image = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    response = await serving.create_decision(
+        StructuredDecisionRequest(**JOINT_SCHEMA_REQUEST, images=[image])
+    )
+    assert isinstance(response, StructuredDecisionResponse)
+
+    placeholder = tokenizer.encode(
+        "<|vision_start|><|image_pad|><|vision_end|>\n", add_special_tokens=False
+    )
+    assert rendered["prompt_token_ids"] == strategy.prefix + placeholder
+    assert rendered["multi_modal_data"]["image"][0].size == (8, 8)
+    assert rendered["mm_processor_kwargs"] == {
+        "images_kwargs": {"size": strategy.IMAGE_SIZE}
+    }
+    prompt = engine.encode.call_args.args[0]
+    assert prompt["type"] == "multimodal"
+    ids = prompt["prompt_token_ids"]
+    expanded = len(strategy.prefix) + len(placeholder) + 2
+    assert ids[:expanded].count(image_pad) == 3
+    state_and_questions = JOINT_SCHEMA_PROMPT.split("STATE:\n", 1)[1]
+    assert tokenizer.decode(ids[expanded:]) == state_and_questions
+    assert response.answers["team"]["choice"] == "billing"
+    assert response.usage.input_tokens == len(ids)
