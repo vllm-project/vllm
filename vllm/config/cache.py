@@ -212,7 +212,7 @@ class CacheConfig:
     and mamba_cache_mode 'none'. In align mode flushes are most efficient when
     mamba_block_size is a multiple of replayssm_buffer_len, but this is not
     required."""
-    use_kda_recoverssm: bool = field(default=False, init=False)
+    use_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
     # Will be set after profiling.

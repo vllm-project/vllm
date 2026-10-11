@@ -122,7 +122,7 @@ def _make_builder(
     )
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.use_replayssm = use_recoverssm
-    vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
+    vllm_config.cache_config.use_recoverssm = use_recoverssm
     vllm_config.cache_config.prefix_match_unit = prefix_match_unit
     hash_block_size = hash_block_size or prefix_match_unit or mamba_block_size
     vllm_config.cache_config.hash_block_size = hash_block_size
@@ -169,7 +169,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         cache_config=SimpleNamespace(
             mamba_cache_dtype="auto",
             mamba_ssm_cache_dtype="auto",
-            use_kda_recoverssm=True,
+            use_recoverssm=True,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         speculative_config=SimpleNamespace(num_speculative_tokens=2),
@@ -202,7 +202,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         ),
         cache_config=SimpleNamespace(
             mamba_cache_mode="align",
-            use_kda_recoverssm=True,
+            use_recoverssm=True,
             prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
