@@ -19,6 +19,7 @@ from vllm.outputs import (
     RequestError,
     RequestOutput,
     SamplingMask,
+    WeightVersionSpan,
 )
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
@@ -190,6 +191,8 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        # (weight version, first output-token index) for each span.
+        self.weight_version_starts: list[tuple[str, int]] = []
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -471,7 +474,24 @@ class RequestState:
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
             spec_decode_metrics=self.spec_decode_metrics if finished else None,
+            weight_versions=self._weight_version_spans() if finished else None,
         )
+
+    def track_weight_version(self, weight_version: str) -> None:
+        """Start a span when the weight version changes."""
+        assert self.detokenizer is not None
+        starts = self.weight_version_starts
+        if not starts or starts[-1][0] != weight_version:
+            starts.append((weight_version, self.detokenizer.num_output_tokens()))
+
+    def _weight_version_spans(self) -> list[WeightVersionSpan] | None:
+        assert self.detokenizer is not None
+        num_tokens = self.detokenizer.num_output_tokens()
+        starts = self.weight_version_starts
+        if not starts and num_tokens:
+            return None  # No label was reported for these tokens.
+        ends = [start for _, start in starts[1:]] + [num_tokens]
+        return [WeightVersionSpan(v, s, e) for (v, s), e in zip(starts, ends)]
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
@@ -659,6 +679,7 @@ class OutputProcessor:
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
         iteration_stats: IterationStats | None = None,
+        weight_version: str | None = None,
     ) -> OutputProcessorOutput:
         """Process the EngineCoreOutputs:
         1) Compute stats for logging
@@ -736,6 +757,8 @@ class OutputProcessor:
             if pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
+                if new_token_ids and weight_version is not None:
+                    req_state.track_weight_version(weight_version)
                 # 2) Detokenize the token ids into text and perform stop checks.
                 num_prev_tokens = req_state.detokenizer.num_output_tokens()
                 stop_string = req_state.detokenizer.update(
