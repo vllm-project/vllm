@@ -13,6 +13,7 @@ from torch import nn
 import vllm.envs as envs
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
+    row_stride_ok,
     shape_dynamic_skinny_gemm,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -78,7 +79,7 @@ QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = 
     (4224, 2560): {
         1: SkinnyGemmConfig(1, 128, 2, k_unroll=6, vector_width=2, static_k=2560),
         2: SkinnyGemmConfig(2, 128, 2, k_unroll=3, vector_width=2, static_k=2560),
-        4: SkinnyGemmConfig(4, 64, 4, k_unroll=2, vector_width=4),
+        4: SkinnyGemmConfig(4, 64, 4, k_unroll=1, vector_width=8),
     },
     # GDN and QSA output projections, TP=4.
     (2560, 1536): {
@@ -167,7 +168,7 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
 }
 
 
-# DGX Spark (GB10) plans, TP=1 unless noted.
+# DGX Spark (GB10) plans for TP=1 and TP=2 local shapes.
 QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # Shared-expert gate.
     (1, 2560): {
@@ -176,6 +177,14 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         4: SkinnyGemmConfig(4, 128, 1, vector_width=2, static_k=2560),
         8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
         16: SkinnyGemmConfig(16, 128, 1, vector_width=4, static_k=2560),
+    },
+    # GDN fused B/A projection, TP=2.
+    (48, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 2, k_unroll=4, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        16: SkinnyGemmConfig(16, 128, 1, k_unroll=2, vector_width=4, static_k=2560),
     },
     # GDN fused B/A projection.
     (96, 2560): {
@@ -217,6 +226,12 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         8: SkinnyGemmConfig(8, 32, 1, k_unroll=4, vector_width=4, static_k=640),
         16: SkinnyGemmConfig(16, 32, 1, k_unroll=2, vector_width=4, static_k=640),
     },
+    # GDN and QSA output projections, TP=2.
+    (2560, 3072): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=3072),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, static_k=3072),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=2, static_k=3072),
+    },
     # GDN and QSA output projections.
     (2560, 6144): {
         1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=6144),
@@ -224,6 +239,18 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         4: SkinnyGemmConfig(4, 64, 1, k_unroll=4, vector_width=4, static_k=6144),
         8: SkinnyGemmConfig(8, 128, 1, vector_width=2, static_k=6144),
         16: SkinnyGemmConfig(16, 32, 1, static_k=6144),
+    },
+    # QSA fused QKV/gate projection, TP=2.
+    (6656, 2560): {
+        1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # GDN fused QKVZ projection, TP=2.
+    (8192, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4, vector_width=4, static_k=2560),
     },
     # HC up projection.
     (10240, 320): {
@@ -247,6 +274,11 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         4: SkinnyGemmConfig(4, 32, 1, k_unroll=2, vector_width=2, static_k=2560),
         8: SkinnyGemmConfig(8, 64, 1, vector_width=2, static_k=2560),
         16: SkinnyGemmConfig(16, 32, 1, k_unroll=2, vector_width=2, static_k=2560),
+    },
+    # LM head, TP=2.
+    (124160, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2),
     },
     # LM head.
     (248320, 2560): {
@@ -273,10 +305,13 @@ def _is_packed_row_major(tensor: torch.Tensor) -> bool:
     return tensor.dim() == 2 and tensor.stride() == (tensor.shape[1], 1)
 
 
-def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
+def _runtime_ok(
+    x: torch.Tensor, weight: torch.Tensor, config: SkinnyGemmConfig
+) -> bool:
     return (
         not envs.VLLM_BATCH_INVARIANT
-        and _is_packed_row_major(x)
+        and x.dim() == 2
+        and row_stride_ok(x, config)
         and _is_packed_row_major(weight)
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
@@ -317,7 +352,7 @@ def _qwen4_exp_low_latency_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.
     config = None if plan is None else plan.get(x.shape[0])
     if (
         config is not None
-        and _runtime_ok(x, weight)
+        and _runtime_ok(x, weight, config)
         and shape_dynamic_skinny_gemm.is_available()
     ):
         return shape_dynamic_skinny_gemm(x, weight, config)
