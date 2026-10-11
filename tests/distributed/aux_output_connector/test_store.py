@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import subprocess
+import sys
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -15,6 +18,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
+    AuxStepOutput,
     PackedBlockHashes,
 )
 from vllm.distributed.aux_output_connector.routed_experts import (
@@ -32,8 +36,11 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -1797,6 +1804,77 @@ def test_prompt_end_offset_through_worker_and_scheduler(chunk_size, max_tokens):
         worker.close()
 
 
+@pytest.mark.parametrize("num_requests", [1, 2])
+def test_worker_packs_step_rows_into_one_array(num_requests):
+    """One step's rows travel as one array; finished rows survive msgpack."""
+    worker = _make_worker(2)
+    num_rows = 3 if num_requests == 1 else 5
+    logical = np.arange(num_rows * 3 * 2, dtype=_DTYPE).reshape(num_rows, *_SHAPE)
+    metadata = _metadata(
+        0,
+        [
+            _request_metadata("first", 0, 3, 0, []),
+            _request_metadata("second", 0, 2, 0, []),
+        ][:num_requests],
+        {},
+    )
+    try:
+        output = _process_output(
+            worker,
+            metadata,
+            logical,
+            ["first", "second"][:num_requests],
+            np.zeros(num_requests, np.int32),
+        )
+    finally:
+        worker.close()
+
+    assert isinstance(output, AuxStepOutput)
+    np.testing.assert_array_equal(output.rows, logical)
+
+    for request_id, (lo, hi) in (("first", (0, 3)), ("second", (3, 5)))[:num_requests]:
+        assert output[request_id].token_start == 0
+        np.testing.assert_array_equal(output[request_id].rows, logical[lo:hi])
+
+    request = _scheduler_request("first", [], num_tokens=4)
+    request.finished = True
+    routed_experts = _make_connector().take_output(request, output)
+    encoded = MsgpackEncoder().encode(
+        EngineCoreOutputs(
+            outputs=[EngineCoreOutput("first", [0], routed_experts=routed_experts)]
+        )
+    )
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded).outputs[0]
+    assert decoded.routed_experts.dtype == _DTYPE
+    np.testing.assert_array_equal(decoded.routed_experts, logical[:3])
+
+
+def test_worker_packs_only_accepted_rows():
+    """Rejected rows are omitted from both the payload and per-request spans."""
+    worker = _make_worker(2)
+    logical = np.arange(5 * 3 * 2, dtype=_DTYPE).reshape(5, *_SHAPE)
+    metadata = _metadata(
+        0,
+        [
+            _request_metadata("first", 0, 3, 0, []),
+            _request_metadata("second", 0, 2, 0, []),
+        ],
+        {},
+    )
+    try:
+        output = _process_output(
+            worker, metadata, logical, ["first", "second"], np.array([1, 0])
+        )
+        np.testing.assert_array_equal(
+            output.rows, np.concatenate((logical[:2], logical[3:]))
+        )
+        assert output.spans == {"first": (0, 0, 2), "second": (0, 2, 4)}
+        np.testing.assert_array_equal(output["first"].rows, logical[:2])
+        np.testing.assert_array_equal(output["second"].rows, logical[3:])
+    finally:
+        worker.close()
+
+
 def test_scheduler_connector_sends_each_block_hash_once():
     connector = _make_connector()
     request = _scheduler_request("request", [b"a" * 32, b"b" * 32], num_tokens=12)
@@ -1865,3 +1943,68 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+
+def test_routed_expert_message_packing_preserves_missing_and_empty_rows():
+    """Rust's inline/OOB fixtures must match the production Python encoder."""
+    rows = np.arange(6, dtype=np.uint8).reshape(3, 1, 2)
+    outputs = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput(
+                f"req-{i}",
+                [7, 8],
+                finish_reason=FinishReason.LENGTH,
+                routed_experts=chunk,
+            )
+            for i, chunk in enumerate((rows[:1], None, rows[:0], rows[1:]))
+        ],
+        timestamp=1.0,
+        weight_version="v7",
+    )
+    outputs.pack_routed_experts()
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "rust/src/engine-core-client/src/tests/python_compat.py"
+    )
+    expected = subprocess.check_output([sys.executable, str(fixture)], text=True)
+    for threshold, line in zip((256, 1), expected.splitlines()[-2:], strict=True):
+        encoded = MsgpackEncoder(size_threshold=threshold).encode(outputs)
+        assert [bytes(frame).hex() for frame in encoded] == line.split()
+        decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+        assert decoded.weight_version == "v7"
+        assert decoded.outputs[1].routed_experts is None
+        np.testing.assert_array_equal(decoded.outputs[0].routed_experts, rows[:1])
+        np.testing.assert_array_equal(decoded.outputs[2].routed_experts, rows[:0])
+        np.testing.assert_array_equal(decoded.outputs[3].routed_experts, rows[1:])
+
+
+def test_large_aux_snapshot_survives_worker_shm_slot_reuse():
+    """Output sending may still need a step after dequeue releases its SHM slot."""
+    writer = MessageQueue(1, 1, max_chunk_bytes=4 * 1024 * 1024, max_chunks=1)
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        rows = np.ones((4096, 52, 6), dtype=np.uint8)
+        writer.enqueue(
+            AuxStepOutput(
+                rows,
+                {"request": (0, 0, 1)},
+                {"prefix": AuxRequestOutput(0, rows.copy())},
+            )
+        )
+        output = reader.dequeue(timeout=1)
+        writer.enqueue(
+            AuxStepOutput(
+                np.full_like(rows, 2),
+                {"request": (0, 0, 1)},
+                {"prefix": AuxRequestOutput(0, np.full_like(rows, 2))},
+            )
+        )
+        reader.dequeue(timeout=1)
+        np.testing.assert_array_equal(output["request"].rows, rows[:1])
+        np.testing.assert_array_equal(output["prefix"].rows, rows)
+        del output
+    finally:
+        writer.shutdown()
+        reader.shutdown()

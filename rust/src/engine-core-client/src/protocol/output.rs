@@ -11,6 +11,7 @@ use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use serde_with::serde_as;
+use thiserror_ext::AsReport;
 
 use super::serde_utils::AllowTrailingFields;
 use super::utility::UtilityOutput;
@@ -18,7 +19,7 @@ use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
-use crate::protocol::tensor::WireNdArray;
+use crate::protocol::tensor::{ShapeExt, WireNdArray};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
 /// The stop reason associated with a finished output.
@@ -233,6 +234,72 @@ struct WireEngineCoreOutputs {
     /// `set_weight_version` utility; `"default"` until set.
     #[serde(default)]
     weight_version: Option<String>,
+    /// One ndarray and per-output row counts; -1 preserves a missing payload.
+    #[serde(default)]
+    routed_experts: Option<(WireNdArray, Vec<i64>)>,
+}
+
+impl WireEngineCoreOutputs {
+    fn resolve_routed_experts(&mut self, frames: &[Bytes]) -> Result<()> {
+        let Some((mut rows, lengths)) = self.routed_experts.take() else {
+            return Ok(());
+        };
+        if lengths.len() != self.outputs.len() {
+            return Err(ext_value_decode!("routed_experts: output count mismatch"));
+        }
+        rows.resolve_aux_frame(frames)
+            .map_err(|message| ext_value_decode!("routed_experts: {message}"))?;
+        let data = rows
+            .data
+            .into_raw_view()
+            .map_err(|_| ext_value_decode!("routed_experts: unresolved frame"))?;
+        let (&num_rows, shape_per_row) = rows
+            .shape
+            .split_first()
+            .ok_or_else(|| ext_value_decode!("routed_experts: missing row dimension"))?;
+        let row_bytes = shape_per_row
+            .checked_numel()
+            .and_then(|size| size.checked_mul(rows.dtype.scalar.element_size()))
+            .ok_or_else(|| ext_value_decode!("routed_experts: row size overflow"))?;
+        if num_rows.checked_mul(row_bytes) != Some(data.len()) {
+            return Err(ext_value_decode!(
+                "routed_experts: array byte length mismatch"
+            ));
+        }
+        let mut cursor = 0usize;
+        for (output, length) in self.outputs.iter_mut().zip(lengths) {
+            if length == -1 {
+                continue;
+            }
+            let length = usize::try_from(length)
+                .map_err(|_| ext_value_decode!("routed_experts: invalid row count"))?;
+            let end = cursor
+                .checked_add(length)
+                .filter(|&end| end <= num_rows)
+                .ok_or_else(|| ext_value_decode!("routed_experts: rows out of range"))?;
+            if output.routed_experts.is_some() {
+                return Err(ext_value_decode!(
+                    "routed_experts: both batch and request payloads"
+                ));
+            }
+            let mut shape = rows.shape.clone();
+            shape[0] = length;
+            let slice = WireNdArray::from_raw_bytes(
+                rows.dtype,
+                shape,
+                data.slice(cursor * row_bytes..end * row_bytes),
+            );
+            output.routed_experts =
+                Some(Box::new(rmpv::ext::to_value(slice).map_err(|error| {
+                    ext_value_decode!("routed_experts: {}", error.as_report())
+                })?));
+            cursor = end;
+        }
+        if cursor != num_rows {
+            return Err(ext_value_decode!("routed_experts: unused rows"));
+        }
+        Ok(())
+    }
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -316,6 +383,11 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
     type Error = Error;
 
     fn try_from(value: WireEngineCoreOutputs) -> Result<Self> {
+        if value.routed_experts.is_some() {
+            return Err(ext_value_decode!(
+                "routed_experts: use decode_engine_core_outputs"
+            ));
+        }
         let has_request_payload = !value.outputs.is_empty()
             || value.scheduler_stats.is_some()
             || value.finished_requests.is_some();
@@ -422,7 +494,9 @@ impl<'de> Deserialize<'de> for EngineCoreOutputs {
 pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
     let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
-    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
+    let mut wire: WireEngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
+    wire.resolve_routed_experts(frames)?;
+    let mut outputs: EngineCoreOutputs = wire.try_into()?;
     outputs.resolve_in_place(frames)?;
     Ok(outputs)
 }
@@ -434,6 +508,21 @@ mod tests {
     use super::*;
     use crate::protocol::output::EngineCoreOutput;
     use crate::protocol::{decode_msgpack, encode_msgpack};
+
+    #[test]
+    fn batched_routed_experts_cannot_be_silently_ignored_by_plain_deserialize() {
+        use crate::protocol::dtype::TensorDtype;
+
+        let wire = WireEngineCoreOutputs {
+            outputs: vec![EngineCoreOutput::default()],
+            routed_experts: Some((
+                WireNdArray::from_raw(TensorDtype::U8, vec![1, 1, 1], vec![42]),
+                vec![1],
+            )),
+            ..Default::default()
+        };
+        assert!(decode_msgpack::<EngineCoreOutputs>(&encode_msgpack(&wire).unwrap()).is_err());
+    }
 
     #[test]
     fn engine_core_outputs_roundtrip_finished_fields() {
