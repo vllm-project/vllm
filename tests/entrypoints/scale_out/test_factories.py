@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 from argparse import Namespace
 
 import pytest
@@ -65,11 +66,32 @@ def test_disabled_scale_out_routes_explain_opt_in_without_parsing(path, authoriz
         assert client.post("/unknown", headers=headers).status_code == 404
 
 
-def test_disabled_scale_out_routes_are_logged(caplog):
-    with caplog.at_level("WARNING", logger="vllm.entrypoints.scale_out.factories"):
+def test_disabled_scale_out_routes_are_logged_at_info(caplog):
+    with caplog.at_level("INFO", logger="vllm.entrypoints.scale_out.factories"):
         registered_paths(("generate",))
 
-    assert any("--enable-scale-out" in record.message for record in caplog.records)
+    assert [
+        record.levelno
+        for record in caplog.records
+        if "--enable-scale-out" in record.message
+    ] == [logging.INFO]
+
+
+@pytest.mark.parametrize("tokens_only", [False, True])
+def test_enabled_generate_routes_use_native_request_validation(tokens_only):
+    app = FastAPI()
+    app.state.args = Namespace(
+        tokens_only=tokens_only, enable_scale_out=not tokens_only
+    )
+    register_scale_out_api_routers(app, ("generate",))
+    response = TestClient(app).post(
+        GENERATE_PATH,
+        content="not JSON",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "json_invalid"
 
 
 def test_scale_out_routes_can_be_enabled_for_generate_server():

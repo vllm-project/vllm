@@ -30,7 +30,7 @@ use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::middleware;
@@ -124,7 +124,7 @@ fn build_router_with_options(
     if scale_out_endpoints_enabled {
         router = router.route("/inference/v1/generate", post(inference::generate));
     } else {
-        warn!("{SCALE_OUT_DISABLED_MESSAGE}");
+        info!("{SCALE_OUT_DISABLED_MESSAGE}");
         router = router.route("/inference/v1/generate", post(disabled_scale_out));
     }
 

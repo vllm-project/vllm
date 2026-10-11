@@ -86,7 +86,7 @@ def register_scale_out_api_routers(
             "Scale-out endpoints are disabled. Restart vllm serve with "
             "--enable-scale-out to enable them."
         )
-        logger.warning(message)
+        logger.info(message)
 
         async def disabled_scale_out() -> JSONResponse:
             error = create_error_response(

@@ -758,7 +758,7 @@ async fn scale_out_generate_route_follows_api_server_options() {
         .await
         .expect("call app");
 
-    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -770,10 +770,7 @@ async fn scale_out_generate_route_is_disabled_by_default() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut app = build_router_with_scale_out_endpoints(
-        Arc::new(AppState::new(vec!["model".to_string()], chat)),
-        false,
-    );
+    let mut app = build_router(Arc::new(AppState::new(vec!["model".to_string()], chat)));
 
     let response = app
         .call(
@@ -825,7 +822,7 @@ async fn scale_out_generate_route_can_be_enabled() {
         .await
         .expect("call app");
 
-    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 /// Build a dev-mode router backed by a mock engine using a custom ready
