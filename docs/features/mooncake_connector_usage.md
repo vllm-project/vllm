@@ -67,6 +67,11 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - Default: 480
     - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
 
+Compression and `raw_aggregate` use a session helper process per TP rank. The
+legacy `KVSERVE_SESSION_PROCESS=0` backend has been removed; unset this variable
+to use the helper. Selecting the removed backend raises an error at worker
+startup. Native raw Mooncake transport does not use this setting.
+
 ## KV Transfer Config
 
 ### KV Role Options
@@ -88,3 +93,68 @@ Refer to these example scripts in the vLLM repository:
 
 - [run_mooncake_connector.sh](../../examples/disaggregated/mooncake_connector/run_mooncake_connector.sh)
 - [mooncake_connector_proxy.py](../../examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py)
+
+## Optional KV compression
+
+Both P and D must run the compression-enabled connector and the same fixed
+profile. Disabled compression uses the native Mooncake path and needs no
+compression dependencies.
+
+The current implementation supports BF16 FullAttention KV caches, including
+FullAttention regions of hybrid models. Other regions use raw transfer.
+Compressed P/D requires identical TP and PP sizes and a common logical
+block size across FullAttention groups. `kv_both`, MLA, and FP16/FP8
+compressed KV are unsupported and fail explicitly. No adaptive selection or
+Mooncake Store compression is implemented here.
+The compression pipeline requires the connector's `LBHNC` (`HND`) layout;
+`LBNHC` (`NHD`) is unsupported and rejected before pipeline initialization.
+
+Install only the dependencies used by the chosen stages. The Python Hadamard
+stage uses `humming-kernels`; ANS uses NVIDIA's nvCOMP Python bindings. A tested
+RTX 5090 environment used PyTorch 2.13.0+cu132, `humming-kernels==0.1.12`,
+`nvidia-nvcomp-cu12==5.3.0.16`, and
+`mooncake-transfer-engine-cuda13==0.3.13.post1`:
+
+```bash
+uv pip install humming-kernels==0.1.12 nvidia-nvcomp-cu12==5.3.0.16
+```
+
+The fixed-profile configuration below must be used on both workers, retaining
+`kv_role=kv_producer` on P and `kv_role=kv_consumer` on D:
+
+```json
+{
+  "kv_connector": "MooncakeConnector",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {
+    "compression": {
+      "enable-compression-pipeline": true,
+      "split_type": "layer",
+      "pipeline": ["transformer", "quantizer", "codec"],
+      "slot_count": 2,
+      "logical_blocks_per_chunk": 64
+    }
+  }
+}
+```
+
+`logical_blocks_per_chunk` trades codec/IPC overhead against workspace size
+and the quantization range. Its current default is 1; the example explicitly
+uses 64. `slot_count` controls reusable in-flight buffers. Connector GPU memory
+is reserved before automatic KV-cache sizing. With explicit
+`kv_cache_memory_bytes`, that value continues to specify KV-cache bytes only;
+the connector pool requires additional memory.
+
+Head profiles use `split_type=head` and `score_path` pointing to a finite
+layer-by-global-KV-head score matrix. Both workers need identical profile
+contents. Channel, token, and tensor quantization axes are supported by Python.
+The optional CUDA backend (`KVSERVE_COMPRESSION_BACKEND=cpp`) supports one
+FullAttention group and channel/token axes. It needs a matching CUDA toolkit,
+C++ compiler, and Ninja, and compiles during cache binding before requests.
+It preserves the wire profile of compatible Python configurations.
+
+The supported stage order is `transformer`, `quantizer`, `codec`; stages may
+be omitted. ANS is lossless coding, while quantization is lossy. Setting
+`enable-compression-pipeline=false` restores native raw transfer. The separate
+`raw_aggregate` transport gathers and scatters raw KV without transformation,
+quantization, or ANS; it uses the same helper and slot lifecycle.

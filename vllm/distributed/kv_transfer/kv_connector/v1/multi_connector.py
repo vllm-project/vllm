@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    KVConnectorWorkerMemoryPlan,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
@@ -138,6 +139,33 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
       get_num_new_matched_tokens(), based on the order in the config.
     - Save to all connectors.
     """
+
+    @classmethod
+    def build_worker_memory_plan(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_specs: dict[str, Any],
+    ) -> KVConnectorWorkerMemoryPlan:
+        """Plan and retain each child's connector-owned allocation.
+
+        The outer worker sees one memory-plan hook, while the children own
+        different pools.  Keep the plans in configuration order so identical
+        connector classes remain distinguishable during initialization.
+        """
+        child_plans: list[KVConnectorWorkerMemoryPlan | None] = []
+        reserved_bytes = 0
+        for connector_cls, child_config in cls._get_connector_classes_and_configs(
+            vllm_config
+        ):
+            child_plan = connector_cls.build_worker_memory_plan(
+                child_config, kv_cache_specs
+            )
+            child_plans.append(child_plan)
+            reserved_bytes += child_plan.reserved_bytes
+        return KVConnectorWorkerMemoryPlan(
+            reserved_bytes=reserved_bytes,
+            connector_data=tuple(child_plans),
+        )
 
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
@@ -268,6 +296,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def restore_kv_caches(self) -> None:
         for c in self._connectors:
             c.restore_kv_caches()
+
+    def initialize_worker_memory(
+        self, memory_plan: KVConnectorWorkerMemoryPlan | None
+    ) -> None:
+        if memory_plan is None or memory_plan.connector_data is None:
+            return
+        child_plans = memory_plan.connector_data
+        if not isinstance(child_plans, tuple) or len(child_plans) != len(
+            self._connectors
+        ):
+            raise RuntimeError("MultiConnector child memory plans are inconsistent.")
+        for connector, child_plan in zip(self._connectors, child_plans):
+            if child_plan is not None:
+                connector.initialize_worker_memory(child_plan)
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:

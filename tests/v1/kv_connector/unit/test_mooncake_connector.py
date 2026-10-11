@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import errno
+import queue
 import socket
 import threading
 import time
@@ -1379,7 +1380,7 @@ async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
                     assert response.status == MooncakeXferResponseStatus.FINISH
                     assert response.ok_reqs == ["d-req"]
                     assert ("transfer" in worker.reqs_need_send) == (pp_rank == 0)
-                    assert worker.finished_sending_reqs == (
+                    assert (worker.get_finished()[0] or set()) == (
                         set() if pp_rank == 0 else {"p-req"}
                     )
                 send.assert_called_once_with("consumer:1234", [0x1100], [0x2200], [256])
@@ -1482,7 +1483,7 @@ async def test_kv_producer(monkeypatch):
 
             # Verify internal state cleanup
             assert transfer_id not in prefill_worker.reqs_need_send
-            assert "p-req-1" in prefill_worker.finished_sending_reqs
+            assert "p-req-1" in prefill_worker.get_finished()[0]
 
             # More cases:
             # Consumer only needs 1 block (less than P)
@@ -1575,7 +1576,9 @@ def test_pull_completion_requires_local_blocks(
 ):
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.shutdown = MagicMock()
-    worker.finished_recving_reqs = set()
+    worker._finished_recving = queue.SimpleQueue()
+    worker._finished_sending = queue.SimpleQueue()
+    worker.tp_rank = 0
     pull_meta = PullReqMeta(
         d_req_id="d-req-1",
         transfer_id="xfer-req-1",
@@ -1592,7 +1595,7 @@ def test_pull_completion_requires_local_blocks(
     worker.process_pulling_result(response, {"d-req-1": pull_meta})
 
     assert pull_meta.pull_tasks_count == 0
-    assert worker.finished_recving_reqs == expected_finished
+    assert (worker.get_finished()[1] or set()) == expected_finished
 
 
 @pytest.mark.asyncio
@@ -1808,7 +1811,7 @@ async def test_kv_consumuer(monkeypatch):
         assert sent_meta.registered_layer_indices == [0]
 
         # Verify internal state is updated correctly.
-        assert "d-req-1" in decode_worker.finished_recving_reqs
+        assert "d-req-1" in decode_worker.get_finished()[1]
 
         # Clean up
         decode_worker.shutdown()
@@ -1844,12 +1847,25 @@ async def test_worker_get_finished_timeout(monkeypatch):
             expire_time=time.perf_counter() + 100,
         )
 
-        finished_reqs = await prefill_worker.fetch_finished_sending_reqs()
+        prefill_worker.reqs_need_send["tx-inflight"] = SendBlockMeta(
+            p_req_id="p-req-inflight",
+            transfer_id="tx-inflight",
+            local_block_ids=[[5]],
+            ready=MagicMock(),
+            expire_time=time.perf_counter() - 100,
+            sending=1,
+        )
+
+        prefill_worker._sweep_expired_sends()
+        finished_reqs, _ = prefill_worker.get_finished()
 
         assert "p-req-expired" in finished_reqs
         assert "p-req-active" not in finished_reqs
         assert "tx-expired" not in prefill_worker.reqs_need_send
         assert "tx-active" in prefill_worker.reqs_need_send
+        assert "p-req-inflight" not in finished_reqs
+        assert "tx-inflight" in prefill_worker.reqs_need_send
+        prefill_worker.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -2894,10 +2910,6 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                 flat_remote = [b for g in remote_block_ids for b in g]
                 num_blocks = len(flat_local)
 
-                assert len(src_ptrs) == num_blocks
-                assert len(dst_ptrs) == num_blocks
-                assert len(lengths) == num_blocks
-
                 if d_tp_size <= P_TP_SIZE:
                     tp_ratio = P_TP_SIZE // d_tp_size
                     expected_src_off = 0
@@ -2909,16 +2921,25 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     expected_dst_off = 0
                     expected_xfer_len = remote_block_len
 
-                local_region_base = 0x1000
-                remote_region_base = 0x2000
-                for blk_idx, (lblk, rblk) in enumerate(zip(flat_local, flat_remote)):
-                    assert src_ptrs[blk_idx] == (
-                        local_region_base + lblk * local_block_len + expected_src_off
-                    )
-                    assert dst_ptrs[blk_idx] == (
-                        remote_region_base + rblk * remote_block_len + expected_dst_off
-                    )
-                    assert lengths[blk_idx] == expected_xfer_len
+                expected_src = [
+                    0x1000 + block * local_block_len + expected_src_off
+                    for block in flat_local
+                ]
+                expected_dst = [
+                    0x2000 + block * remote_block_len + expected_dst_off
+                    for block in flat_remote
+                ]
+                expected_lengths = [expected_xfer_len] * num_blocks
+                # Matching TP can send contiguous whole pages as one descriptor.
+                if d_tp_size == P_TP_SIZE:
+                    expected_src = expected_src[:1]
+                    expected_dst = expected_dst[:1]
+                    expected_lengths = [expected_xfer_len * num_blocks]
+                assert (src_ptrs, dst_ptrs, lengths) == (
+                    expected_src,
+                    expected_dst,
+                    expected_lengths,
+                )
 
                 # Verify successful response sent back to consumer
                 mock_socket.send_multipart.assert_called_once()
@@ -2929,7 +2950,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         # After serving all D ranks, the request should be complete
         assert transfer_id not in prefill_worker.reqs_need_send
-        assert "p-req-h1" in prefill_worker.finished_sending_reqs
+        assert "p-req-h1" in prefill_worker.get_finished()[0]
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
@@ -2959,3 +2980,186 @@ def test_sleep_unregisters_and_restores_kv_caches():
         worker.restore_kv_caches()
         worker.restore_kv_caches()
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
+
+
+@pytest.mark.parametrize(
+    "extra_config",
+    [
+        {"compression": {"enable-compression-pipeline": True}},
+        {"raw_aggregate": True},
+    ],
+)
+def test_compression_rejects_kv_both_before_slot_allocation(extra_config):
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_both")
+    config.kv_transfer_config.kv_connector_extra_config = extra_config
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        pytest.raises(ValueError, match="does not support kv_both"),
+    ):
+        MooncakeConnector(config, KVConnectorRole.WORKER, _make_test_kv_cache_config())
+
+
+@pytest.mark.parametrize(
+    "extra_config",
+    [{"compression": {"enable-compression-pipeline": True}}, {"raw_aggregate": True}],
+)
+def test_compression_rejects_retired_inprocess_backend(monkeypatch, extra_config):
+    monkeypatch.setenv("KVSERVE_SESSION_PROCESS", "0")
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    config.kv_transfer_config.kv_connector_extra_config = extra_config
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        pytest.raises(ValueError, match="no longer supported"),
+    ):
+        MooncakeConnectorWorker(config, "test-engine", _make_test_kv_cache_config())
+
+
+def test_raw_worker_ignores_retired_compression_backend(monkeypatch):
+    monkeypatch.setenv("KVSERVE_SESSION_PROCESS", "0")
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_both")
+    with set_current_vllm_config(config), patch_worker_dependencies():
+        worker = MooncakeConnectorWorker(
+            config, "test-engine", _make_test_kv_cache_config()
+        )
+        try:
+            assert not worker._compression_configured
+            assert worker.sender_loop is not None
+            assert worker.receiver_loop is not None
+        finally:
+            worker.shutdown()
+
+
+def test_compression_cannot_fall_through_to_raw_before_memory_init():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker._compression_configured = True
+    worker._session_process = None
+    with pytest.raises(AssertionError, match="must be initialized"):
+        worker.start_load_kv(MooncakeConnectorMetadata())
+
+
+def test_unsafe_helper_shutdown_retains_registered_memory():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker._session_process = MagicMock()
+    worker._session_process.shutdown.side_effect = RuntimeError("writes pending")
+    worker.compression = MagicMock()
+    worker.async_zmq_ctx = MagicMock()
+    worker.shutdown()
+    worker.compression.shutdown.assert_not_called()
+    worker.async_zmq_ctx.term.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_proxy_prefill_failure_closes_decode_stream():
+    from examples.disaggregated.mooncake_connector.mooncake_connector_proxy import (
+        _stream_with_prefill,
+    )
+
+    decode_started = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def prefill():
+        await decode_started.wait()
+        raise RuntimeError("prefill failed")
+
+    async def decode():
+        try:
+            decode_started.set()
+            await asyncio.Event().wait()
+            yield b"unreachable"
+        finally:
+            closed.set()
+
+    stream = _stream_with_prefill(prefill(), decode())
+    with pytest.raises(RuntimeError, match="prefill failed"):
+        await asyncio.wait_for(anext(stream), timeout=1)
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_proxy_preserves_overlap_and_cleans_up_on_disconnect():
+    from examples.disaggregated.mooncake_connector.mooncake_connector_proxy import (
+        _stream_with_prefill,
+    )
+
+    prefill_started = asyncio.Event()
+    prefill_closed = asyncio.Event()
+    decode_closed = asyncio.Event()
+
+    async def prefill():
+        try:
+            prefill_started.set()
+            await asyncio.Event().wait()
+        finally:
+            prefill_closed.set()
+
+    async def decode():
+        try:
+            await prefill_started.wait()
+            yield b"first chunk"
+        finally:
+            decode_closed.set()
+
+    stream = _stream_with_prefill(prefill(), decode())
+    assert await asyncio.wait_for(anext(stream), timeout=1) == b"first chunk"
+    assert not prefill_closed.is_set()
+    await stream.aclose()
+    assert prefill_closed.is_set()
+    assert decode_closed.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_decode", [False, True])
+async def test_proxy_completes_both_sides_or_propagates_decode_error(fail_decode):
+    from examples.disaggregated.mooncake_connector.mooncake_connector_proxy import (
+        _stream_with_prefill,
+    )
+
+    prefill_done = asyncio.Event()
+
+    async def prefill():
+        prefill_done.set()
+
+    async def decode():
+        await prefill_done.wait()
+        if fail_decode:
+            raise RuntimeError("decode failed")
+        yield b"complete"
+
+    stream = _stream_with_prefill(prefill(), decode())
+    if fail_decode:
+        with pytest.raises(RuntimeError, match="decode failed"):
+            await asyncio.wait_for(anext(stream), timeout=1)
+    else:
+        assert [chunk async for chunk in stream] == [b"complete"]
+    assert prefill_done.is_set()
+
+
+def test_transfer_engine_init_restores_worker_device(monkeypatch):
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
+        mooncake_connector as module,
+    )
+
+    selected = [3]
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: selected[0])
+    monkeypatch.setattr(
+        module.current_platform,
+        "set_device",
+        lambda device: selected.__setitem__(0, device.index),
+    )
+
+    def initialize(*args):
+        selected[0] = 0
+        return 0
+
+    monkeypatch.setattr(FakeMooncakeWrapper, "initialize", initialize)
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_consumer")
+    with set_current_vllm_config(config), patch_worker_dependencies():
+        worker = MooncakeConnectorWorker(
+            config, "test-engine", _make_test_kv_cache_config()
+        )
+        try:
+            assert worker.device_id == selected[0] == 3
+        finally:
+            worker.shutdown()
