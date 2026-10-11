@@ -3,10 +3,10 @@
 The `/v1/systemone` endpoint answers a set of typed questions about a state and
 returns a probability for every allowed answer.
 
-The endpoint is available by default on generation models. Models without a
-supported read strategy return 501. Supported architectures require
-`--logprobs-mode raw_logprobs` or `processed_logprobs`, since `label_mass` needs
-log probabilities.
+The endpoint is available by default on generation models and on
+[Clef-Omni](#clef-omni). Models without a supported read strategy return 501.
+Supported generation models require `--logprobs-mode raw_logprobs` or
+`processed_logprobs`, since `label_mass` needs log probabilities.
 
 ## How it works
 
@@ -129,6 +129,29 @@ the request lists them, a `noul` labels its options `yes` and `no`, and a
 | questions per request | 64 |
 | options per `choice` | 26 |
 | levels per `score` | 10 |
+
+## Clef-Omni
+
+[Clef-Omni](https://huggingface.co/Cloudflare/clef-omni) is a decision model:
+a joint schema head on the Qwen3-Omni thinker scores every option of every
+question in one forward pass. vLLM serves it as a pooling model.
+
+```bash
+vllm serve Cloudflare/clef-omni
+```
+
+- A request is one read. The prompt is the one the checkpoint's
+  `joint_schema_model.py` builds: the state, then every question with its
+  options. A JSON state is written as compact JSON with sorted keys.
+- A state too long for the model is truncated to fit, as the reference does.
+  A request whose questions alone exceed 64,000 tokens, or `max_model_len`,
+  returns 400.
+- `instructions` returns 400, since the prompt is fixed. `chat_template_kwargs`
+  has no effect.
+- There are no labels, so `label_mass` is 1 and `confidence` is the chosen
+  option's probability. `usage.input_tokens` counts the prompt once, and
+  `output_tokens` is 0.
+- Images, audio and video are not supported on this endpoint yet.
 
 ## Request fields
 

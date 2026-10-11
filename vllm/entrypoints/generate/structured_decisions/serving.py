@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
@@ -19,13 +19,13 @@ from .protocol import (
     StructuredDecisionResponse,
 )
 from .question_types import Question, StructuredDecisionError, build_question
-from .strategies import DecisionLimits, ReadStrategy
+from .strategies import DecisionLimits, ReadContext, ReadStrategy, select_read_strategy
+
+if TYPE_CHECKING:
+    from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
+    from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
-
-
-def state_text(state: Any) -> str:
-    return state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
 
 
 def parse_questions(
@@ -97,7 +97,7 @@ class ServingStructuredDecisions(BaseServing):
             reads = await self.strategy.read(
                 questions,
                 request.instructions,
-                state_text(request.state),
+                self.strategy.render_state(request.state),
                 request_id=request_id,
                 chat_template_kwargs=request.chat_template_kwargs,
                 lora_request=lora_request,
@@ -127,3 +127,32 @@ class ServingStructuredDecisions(BaseServing):
             ),
             diagnostics=diagnostics,
         )
+
+
+def init_structured_decisions(
+    engine_client: EngineClient,
+    models: OpenAIServingModels,
+    online_renderer: "OnlineRenderer",
+    *,
+    chat_template: str | None,
+    chat_template_content_format: "ChatTemplateContentFormatOption",
+    default_chat_template_kwargs: dict[str, Any],
+    request_logger: RequestLogger | None,
+) -> ServingStructuredDecisions | None:
+    """The /v1/systemone handler, or None if the model has no read strategy."""
+    try:
+        strategy_cls = select_read_strategy(engine_client.model_config)
+        strategy = strategy_cls(
+            ReadContext(
+                engine_client=engine_client,
+                online_renderer=online_renderer,
+                chat_template=chat_template,
+                chat_template_content_format=chat_template_content_format,
+                default_chat_template_kwargs=default_chat_template_kwargs,
+            )
+        )
+    except ValueError as e:
+        # Info, since every model without a read strategy lands here.
+        logger.info("/v1/systemone is disabled: %s", e)
+        return None
+    return ServingStructuredDecisions(models, strategy, request_logger=request_logger)

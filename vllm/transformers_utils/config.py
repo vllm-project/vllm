@@ -897,6 +897,19 @@ def get_config(
             "hf_quant_config.json", model, revision
         )
 
+    # Clef-Omni keeps Qwen3-Omni's config and adds a joint schema head.
+    if config.architectures == [
+        "Qwen3OmniMoeForConditionalGeneration"
+    ] and file_or_path_exists(model, "joint_head_config.json", revision):
+        config.update(
+            {
+                "architectures": ["ClefOmniForJointSchema"],
+                "joint_head_config": get_hf_file_to_dict(
+                    "joint_head_config.json", model, revision
+                ),
+            }
+        )
+
     if quantization_config is not None:
         config.quantization_config = quantization_config
         # auto-enable DeepGEMM UE8M0 if model config requests it

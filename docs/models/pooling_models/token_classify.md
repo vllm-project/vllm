@@ -64,7 +64,12 @@ If your model is not in the above list, we will try to automatically convert the
 
 | Architecture                                  | Models              | Inputs            | Example HF Models                          | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | --------------------------------------------- | ------------------- | ----------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------ |
+| `ClefOmniForJointSchema`                      | Clef-Omni           | T                 | `Cloudflare/clef-omni` (see note)          |                                |                                            |
 | `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup> | `Qwen/Qwen3-ForcedAligner-0.6B` (see note) |                                | ✅︎                                         |
+
+!!! note
+    Clef-Omni answers typed questions through the
+    [structured decisions API](../../serving/online_serving/structured_decisions.md#clef-omni).
 
 !!! note
     Forced alignment usage requires `--hf-overrides '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'`.
