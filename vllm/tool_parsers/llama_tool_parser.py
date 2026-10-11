@@ -78,6 +78,7 @@ class Llama3JsonToolParser(LlamaJsonParserToolAdapter):  # type: ignore[valid-ty
         all. An empty object says exactly what "no parameters" says and
         keeps the named-choice path deterministic.
         """
+        request = super().adjust_request(request)
         name = _named_choice_tool_name(request)
         if name is not None:
             for tool in request.tools or ():

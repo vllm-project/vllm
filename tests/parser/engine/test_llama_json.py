@@ -1390,6 +1390,17 @@ class TestRequiredAndNamedToolChoice:
     NATIVE = '{"name": "get_weather", "parameters": {"city": "SF"}}'
     NAMED = {"type": "function", "function": {"name": "get_weather"}}
 
+    def test_adjust_request_preserves_engine_token_decoding(
+        self, lenient_parser_cls, mock_tokenizer
+    ):
+        parser = lenient_parser_cls(mock_tokenizer)
+        request = self._request("auto")
+
+        assert request.skip_special_tokens is True
+        adjusted = parser.adjust_request(request)
+
+        assert adjusted.skip_special_tokens is False
+
     def test_flag_holds_without_strict_enforcement(self, monkeypatch):
         """The regression guard for this whole class.
 
