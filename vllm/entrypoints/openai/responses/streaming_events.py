@@ -62,7 +62,6 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 from openai_harmony import Message as HarmonyMessage
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -70,8 +69,6 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import (
-    ResponseReasoningPartAddedEvent,
-    ResponseReasoningPartDoneEvent,
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.utils import (
@@ -80,6 +77,7 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.outputs import CompletionOutput
 from vllm.parser.harmony import Segment
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.utils import random_uuid
 
 TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
@@ -204,7 +202,7 @@ def emit_reasoning_delta_events(
     events: list[StreamingResponsesResponse] = []
     if not state.sent_output_item_added:
         state.sent_output_item_added = True
-        state.current_item_id = f"msg_{random_uuid()}"
+        state.current_item_id = f"rs_{random_uuid()}"
         events.append(
             ResponseOutputItemAddedEvent(
                 type="response.output_item.added",
@@ -220,16 +218,13 @@ def emit_reasoning_delta_events(
         )
         state.current_content_index += 1
         events.append(
-            ResponseReasoningPartAddedEvent(
-                type="response.reasoning_part.added",
+            ResponseContentPartAddedEvent(
+                type="response.content_part.added",
                 sequence_number=-1,
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
                 content_index=state.current_content_index,
-                part=ResponseReasoningTextContent(
-                    text="",
-                    type="reasoning_text",
-                ),
+                part={"text": "", "type": "reasoning_text"},
             )
         )
     events.append(
@@ -457,13 +452,13 @@ def emit_reasoning_done_events(
         )
     )
     events.append(
-        ResponseReasoningPartDoneEvent(
-            type="response.reasoning_part.done",
+        ResponseContentPartDoneEvent(
+            type="response.content_part.done",
             sequence_number=-1,
             item_id=state.current_item_id,
             output_index=state.current_output_index,
             content_index=state.current_content_index,
-            part=content,
+            part=content.model_dump(),
         )
     )
     events.append(
@@ -969,16 +964,13 @@ def emit_simple_reasoning_open(
                 status="in_progress",
             ),
         ),
-        ResponseReasoningPartAddedEvent(
-            type="response.reasoning_part.added",
+        ResponseContentPartAddedEvent(
+            type="response.content_part.added",
             sequence_number=-1,
             output_index=state.output_index,
             item_id=state.current_item_id,
             content_index=state.content_index,
-            part=ResponseReasoningTextContent(
-                text="",
-                type="reasoning_text",
-            ),
+            part={"text": "", "type": "reasoning_text"},
         ),
     ]
 
@@ -1016,13 +1008,13 @@ def emit_simple_reasoning_done(
             content_index=state.content_index,
             text=state.accumulated_text,
         ),
-        ResponseReasoningPartDoneEvent(
-            type="response.reasoning_part.done",
+        ResponseContentPartDoneEvent(
+            type="response.content_part.done",
             sequence_number=-1,
             item_id=state.current_item_id,
             output_index=state.output_index,
             content_index=state.content_index,
-            part=part,
+            part=part.model_dump(),
         ),
         ResponseOutputItemDoneEvent(
             type="response.output_item.done",

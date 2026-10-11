@@ -23,6 +23,10 @@ fn http_request_duration_highr_histogram() -> Histogram {
     Histogram::new(HTTP_REQUEST_DURATION_HIGHR_BUCKETS.iter().copied())
 }
 
+fn weight_operation_duration_histogram() -> Histogram {
+    Histogram::new([0.01, 0.1, 1.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0])
+}
+
 fn sleep_mode_operation_duration_histogram() -> Histogram {
     Histogram::new([0.01, 0.1, 1.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0])
 }
@@ -41,6 +45,11 @@ pub struct HttpHandlerLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct WeightOperationLabels {
+    pub operation: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct SleepModeOperationLabels {
     pub operation: &'static str,
 }
@@ -48,6 +57,9 @@ pub struct SleepModeOperationLabels {
 pub(crate) type HttpRequestCounterFamily = Family<HttpRequestLabels, U64Counter>;
 pub(crate) type HttpHandlerHistogramFamily =
     Family<HttpHandlerLabels, Histogram, fn() -> Histogram>;
+pub(crate) type WeightOperationHistogramFamily =
+    Family<WeightOperationLabels, Histogram, fn() -> Histogram>;
+pub(crate) type WeightOperationGaugeFamily = Family<WeightOperationLabels, U64Gauge>;
 pub(crate) type SleepModeOperationHistogramFamily =
     Family<SleepModeOperationLabels, Histogram, fn() -> Histogram>;
 pub(crate) type SleepModeOperationGaugeFamily = Family<SleepModeOperationLabels, U64Gauge>;
@@ -57,6 +69,8 @@ pub struct ApiServerMetrics {
     pub http_requests: HttpRequestCounterFamily,
     pub http_request_duration_seconds: HttpHandlerHistogramFamily,
     pub http_request_duration_highr_seconds: Histogram,
+    pub weight_operation_duration_seconds: WeightOperationHistogramFamily,
+    pub weight_operations_in_flight: WeightOperationGaugeFamily,
     pub sleep_mode_operation_duration_seconds: SleepModeOperationHistogramFamily,
     pub sleep_mode_operations_in_flight: SleepModeOperationGaugeFamily,
 }
@@ -87,6 +101,21 @@ impl ApiServerMetrics {
             http_request_duration_highr_seconds.clone(),
         );
 
+        let weight_operation_duration_seconds =
+            Family::new_with_constructor(weight_operation_duration_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:rl_weight_update_operation_duration_seconds",
+            "Duration of one weight-transfer operation.",
+            weight_operation_duration_seconds.clone(),
+        );
+
+        let weight_operations_in_flight = WeightOperationGaugeFamily::default();
+        registry.register(
+            "vllm:rl_weight_update_operations_in_flight",
+            "Weight-transfer operations currently awaited.",
+            weight_operations_in_flight.clone(),
+        );
+
         let sleep_mode_operation_duration_seconds = Family::new_with_constructor(
             sleep_mode_operation_duration_histogram as fn() -> Histogram,
         );
@@ -107,8 +136,22 @@ impl ApiServerMetrics {
             http_requests,
             http_request_duration_seconds,
             http_request_duration_highr_seconds,
+            weight_operation_duration_seconds,
+            weight_operations_in_flight,
             sleep_mode_operation_duration_seconds,
             sleep_mode_operations_in_flight,
+        }
+    }
+
+    /// Track one weight-transfer operation until the returned guard is dropped.
+    pub fn record_weight_operation(&self, operation: &'static str) -> WeightOperationRecorder {
+        let labels = WeightOperationLabels { operation };
+        let in_flight = self.weight_operations_in_flight.get_or_create_owned(&labels);
+        in_flight.inc();
+        WeightOperationRecorder {
+            started_at: Instant::now(),
+            duration: self.weight_operation_duration_seconds.get_or_create_owned(&labels),
+            in_flight,
         }
     }
 
@@ -125,6 +168,19 @@ impl ApiServerMetrics {
             duration: self.sleep_mode_operation_duration_seconds.get_or_create_owned(&labels),
             in_flight,
         }
+    }
+}
+
+pub struct WeightOperationRecorder {
+    started_at: Instant,
+    duration: Histogram,
+    in_flight: U64Gauge,
+}
+
+impl Drop for WeightOperationRecorder {
+    fn drop(&mut self) {
+        self.in_flight.dec();
+        self.duration.observe(self.started_at.elapsed().as_secs_f64());
     }
 }
 
@@ -193,5 +249,26 @@ mod tests {
                 "vllm:sleep_mode_operation_duration_seconds_count{{operation=\"{operation}\"}} 3"
             )));
         }
+    }
+
+    #[test]
+    fn weight_operation_recorder_tracks_in_flight_and_duration() {
+        let mut registry = Registry::default();
+        let metrics = ApiServerMetrics::register(&mut registry);
+
+        let recorder = metrics.record_weight_operation("update");
+        assert!(
+            rendered_metrics(&registry)
+                .contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 1")
+        );
+        drop(recorder);
+
+        let after = rendered_metrics(&registry);
+        assert!(
+            after.contains("vllm:rl_weight_update_operations_in_flight{operation=\"update\"} 0")
+        );
+        assert!(after.contains(
+            "vllm:rl_weight_update_operation_duration_seconds_count{operation=\"update\"} 1"
+        ));
     }
 }
