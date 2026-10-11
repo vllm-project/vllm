@@ -57,6 +57,13 @@ class TestDefaultExtraVars:
         result = get_env_vars_to_copy()
         assert "PYTHONHASHSEED" in result
 
+    def test_flashinfer_multi_wave_kv_split_vars_in_result(self):
+        """The vLLM flag (registered) and a driver-set FlashInfer value
+        (explicit extra var) both reach the workers."""
+        result = get_env_vars_to_copy()
+        assert "VLLM_FLASHINFER_MULTI_WAVE_KV_SPLIT" in result
+        assert "FLASHINFER_TRTLLM_GEN_MULTI_WAVE_KV_SPLIT" in result
+
 
 # ---------------------------------------------------------------------------
 # User-supplied extensions
