@@ -10,6 +10,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -30,6 +33,8 @@ from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
     Glm5NextMoE,
+    _fused_shared_expert_name,
+    _num_fused_shared_experts,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
@@ -40,7 +45,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_text_config
         self.config = config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -114,7 +119,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
 class Glm5NextMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
@@ -211,12 +216,15 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.model.layers.values(), Glm5NextMoE, "mtp_block.mlp"
+        )
 
     def set_moe_parameters(self):
         self.num_moe_layers = self.config.num_nextn_predict_layers
@@ -298,12 +306,15 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
+        num_fused_shared = _num_fused_shared_experts(
+            self.config.n_shared_experts, self.is_fused_shared_expert_enabled
+        )
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -313,7 +324,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; the FP8-to-BF16 path pads them for the model.
         kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
+        if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -328,6 +339,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
+            if self.is_fused_shared_expert_enabled:
+                name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             if _try_load_fp8_indexer_wk(
                 name,

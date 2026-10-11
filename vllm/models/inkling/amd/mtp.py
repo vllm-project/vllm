@@ -323,7 +323,11 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
             logits = logits[..., : self.logits_processor.org_vocab_size]
         return logits
 
-    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
         """Greedy draft tokens via rank-local argmax + tiny (value, index)
         reduction — no full-vocab logits all-gather. The muP divisor is a
         positive scalar, so the argmax is invariant and the scaling is

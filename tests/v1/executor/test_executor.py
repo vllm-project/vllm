@@ -126,7 +126,7 @@ def test_custom_executor_type_checking():
             model=MODEL,
             gpu_memory_utilization=0.2,
             max_model_len=8192,
-            distributed_executor_backend=Mock,  # type: ignore[arg-type]
+            distributed_executor_backend=Mock,
         )
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
@@ -134,7 +134,7 @@ def test_custom_executor_type_checking():
             model=MODEL,
             gpu_memory_utilization=0.2,
             max_model_len=8192,
-            distributed_executor_backend=Mock,  # type: ignore[arg-type]
+            distributed_executor_backend=Mock,
         )
         AsyncLLM.from_engine_args(engine_args)
 
