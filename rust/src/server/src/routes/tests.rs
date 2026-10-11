@@ -758,7 +758,7 @@ async fn scale_out_generate_route_follows_api_server_options() {
         .await
         .expect("call app");
 
-    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -770,10 +770,7 @@ async fn scale_out_generate_route_is_disabled_by_default() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut app = build_router_with_scale_out_endpoints(
-        Arc::new(AppState::new(vec!["model".to_string()], chat)),
-        false,
-    );
+    let mut app = build_router(Arc::new(AppState::new(vec!["model".to_string()], chat)));
 
     let response = app
         .call(
@@ -781,13 +778,22 @@ async fn scale_out_generate_route_is_disabled_by_default() {
                 .method("POST")
                 .uri("/inference/v1/generate")
                 .header("content-type", "application/json")
-                .body(Body::from("{}"))
+                .body(Body::from("not JSON"))
                 .expect("build request"),
         )
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(error["error"]["type"], "PermissionDeniedError");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("--enable-scale-out")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -816,7 +822,7 @@ async fn scale_out_generate_route_can_be_enabled() {
         .await
         .expect("call app");
 
-    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 /// Build a dev-mode router backed by a mock engine using a custom ready
@@ -1784,7 +1790,7 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cors_default_simple_request_allows_any_origin() {
+async fn cors_default_simple_request_omits_allow_origin() {
     let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
     let response = app
         .call(
@@ -1799,18 +1805,39 @@ async fn cors_default_simple_request_allows_any_origin() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        header_value(&response, "access-control-allow-origin"),
-        Some("*")
-    );
-    // Wildcard origins without credentials emit no `Vary` (Starlette parity).
-    assert_eq!(header_value(&response, "vary"), None);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn cors_default_preflight_returns_explicit_methods_and_max_age() {
+async fn cors_default_preflight_omits_allow_origin() {
     let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "content-type")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_wildcard_preflight_returns_explicit_methods_and_max_age() {
+    let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
     let response = app
         .call(
             Request::builder()
@@ -1917,6 +1944,7 @@ async fn cors_explicit_origin_disallowed_omits_allow_origin() {
 #[serial]
 async fn cors_wildcard_with_credentials_reflects_origin_without_panic() {
     let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
         allow_credentials: true,
         ..CorsConfig::default()
     };
@@ -1971,8 +1999,12 @@ async fn cors_unauthorized_response_has_no_cors_headers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn cors_preflight_bypasses_auth_and_returns_cors_headers() {
+    let cors = CorsConfig {
+        allow_origins: vec!["*".to_string()],
+        ..CorsConfig::default()
+    };
     let (mut app, _engine_task) =
-        test_app_with_cors_and_keys(CorsConfig::default(), vec!["secret".to_string()]).await;
+        test_app_with_cors_and_keys(cors, vec!["secret".to_string()]).await;
     let response = app
         .call(
             Request::builder()
@@ -6676,6 +6708,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
         ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/shutdown_weight_transfer_engine"),
         ("POST", "/start_weight_update"),
         ("POST", "/start_draft_weight_update"),
         ("POST", "/update_weights"),
@@ -6707,7 +6740,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
             let mut calls = Vec::new();
-            for _ in 0..10 {
+            for _ in 0..11 {
                 let utility = recv_engine_message(dealer).await;
                 assert_eq!(utility[0].as_ref(), &[0x03]);
                 let payload = decode_value(&utility[1]).expect("decode utility");
@@ -6737,6 +6770,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
                     "collective_rpc [\"finish_weight_update\",null,[],{}]",
                     "set_weight_version [\"step-2\"]",
                     "get_weight_version []",
+                    "collective_rpc [\"shutdown_weight_transfer_engine\",null,[],{}]",
                 ]
             "#]].assert_debug_eq(&calls);
         })
@@ -6785,6 +6819,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             Some(json!({"new_version": "step-2"})),
         ),
         ("GET", "/weight_info", None),
+        ("POST", "/shutdown_weight_transfer_engine", None),
     ] {
         let mut request = Request::builder().method(method).uri(path);
         let body = match body {
@@ -6806,7 +6841,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
     }
     engine_task.await.expect("mock engine task");
     let metrics_after = METRICS.render().unwrap();
-    for operation in ["update", "finish"] {
+    for (operation, count) in [("update", 2.0), ("finish", 2.0), ("shutdown", 1.0)] {
         assert_eq!(
             metric_delta(
                 &metrics_before,
@@ -6814,7 +6849,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
                 "vllm:rl_weight_update_operation_duration_seconds_count",
                 Some(&format!("operation=\"{operation}\"")),
             ),
-            2.0
+            count
         );
         assert_eq!(
             metric_value(
@@ -6836,6 +6871,7 @@ async fn weight_transfer_routes_support_the_http_training_lifecycle() {
             "{\"message\":\"Weight update finished\"}",
             "{\"success\":true,\"new_version\":\"step-2\"}",
             "{\"weight_version\":\"step-2\"}",
+            "{\"message\":\"Weight transfer shut down\"}",
         ]
     "#]]
     .assert_debug_eq(&responses);

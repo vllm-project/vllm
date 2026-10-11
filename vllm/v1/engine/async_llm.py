@@ -855,7 +855,10 @@ class AsyncLLM(EngineClient):
                         outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
@@ -1314,6 +1317,10 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
         )
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        await self.collective_rpc("shutdown_weight_transfer_engine")
 
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
