@@ -13,7 +13,7 @@ import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.v1.worker.gpu_model_runner import _get_parameter_for_reload
+from vllm.model_executor.model_loader.reload.inplace import get_parameter_for_reload
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -95,7 +95,7 @@ def test_reload_parameter_lookup_preserves_lora_module_names():
     assert set(named_parameters) == {"proj.base_layer.qweight"}
     assert named_parameters["proj.base_layer.qweight"] is qweight
     assert model.get_parameter("proj.base_layer.qweight") is qweight
-    assert _get_parameter_for_reload(model, "proj.qweight") is qweight
+    assert get_parameter_for_reload(model, "proj.qweight") is qweight
 
 
 def test_start_update_finish_delegates_to_engine():
