@@ -20,7 +20,7 @@ Every TP rank must take the same path at every layer (the kernels wait on each
 other's pushes): the conditions read only metadata every rank holds alike.
 """
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -113,6 +113,35 @@ def _unsupported_moe(layer: "DeepseekV4DecoderLayer", vllm_config) -> str | None
     return None
 
 
+def _select(
+    layer: "DeepseekV4DecoderLayer",
+    positions: torch.Tensor,
+    normed: torch.Tensor,
+    qr: torch.Tensor,
+) -> None:
+    """An index source's compressor and top-k selection, from K1's normed input
+    and bf16 qr: ``_forward_csa2_full`` / ``_forward_csa2_reindex`` and the
+    indexer op, serial."""
+    attn = layer.attn
+    comp, indexer = attn.compressor, attn.indexer
+    assert indexer is not None
+    if comp is not None:
+        kv_score = torch.mm(
+            normed, comp.fused_wkv_wgate.weight.T, out_dtype=torch.float32
+        )
+        latent = comp(kv_score, positions)
+        comp.insert_cache(latent, positions, attn.rotary_emb)
+        indexer._produce_k(latent, positions, attn.indexer_rotary_emb)
+    weights, _ = indexer.weights_proj(normed)
+    q, q_scale, weights = indexer.forward_q(
+        qr, None, weights, positions, attn.indexer_rotary_emb
+    )
+    assert weights is not None
+    indexer.indexer_op(
+        normed, (q, q_scale) if q_scale is not None else q, None, weights
+    )
+
+
 class MonoDecodeLayer:
     """One decoder layer's mono path (``create``: None when the layer is not
     eligible): the whole layer (``__call__``) or, with ``ffn_only``, the FFN
@@ -174,12 +203,17 @@ class MonoDecodeLayer:
         if why is not None:
             logger.info_once("DSv4.1 mono decode off for some layers: %s", why)
             return None
-        # the whole layer: the kernels' attention takes the standard layers only
-        if layer.engram is not None:
-            why = "Engram"
-        elif attn.compressor is not None or attn.indexer is not None:
-            why = "a compressor / indexer"
-        elif attn.compress_ratio not in (1, 2):
+        # the whole layer: the kernels' attention takes the standard layers; an
+        # index source's compressor and indexer run between its two launches
+        from vllm.models.deepseek_v41.amd.rocm import DeepseekV41RocmMxfp4Indexer
+
+        if attn.compressor is not None and attn.indexer is None:
+            why = "a compressor without an indexer"
+        elif attn.indexer is not None and not isinstance(
+            attn.indexer, DeepseekV41RocmMxfp4Indexer
+        ):
+            why = f"a {type(attn.indexer).__name__}"
+        elif attn.compress_ratio not in (0, 1, 2):
             why = f"compress ratio {attn.compress_ratio}"
         elif attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
             why = f"a {attn.kv_cache_dtype} KV cache"
@@ -297,20 +331,23 @@ class MonoDecodeLayer:
         post_mix: torch.Tensor | None,
         res_mix: torch.Tensor | None,
         pre_mix: torch.Tensor | None,
+        engram_hashes: torch.Tensor | None = None,
+        engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...] | None:
         """The layer's outputs (x, residual, post_mix, res_mix, pre_mix) by the
         mono kernels, or None when this step takes the original path (always for
         an ``ffn_only`` layer)."""
         if self.ffn_only:
             return None
-        if residual is None or x.dim() != 2:
-            return self._skip("first layer")
+        first = residual is None
+        if first and x.dim() != 2:
+            return self._skip("first layer of a pipeline stage")
         why, swa, comp = self._decode_step(layer, x.shape[0])
         attn = layer.attn
-        tensors = (x, residual, post_mix, res_mix, pre_mix)
+        tensors = (x,) if first else (x, residual, post_mix, res_mix, pre_mix)
         if why is None:
             # the kernels' attention: causal SWA windows, the compressed cache
-            if comp is None:
+            if comp is None and attn.compress_ratio:
                 why = "layer metadata missing"
             elif swa.decode_swa_width != SWA_WIDTH:
                 why = f"SWA width {swa.decode_swa_width}"
@@ -324,12 +361,37 @@ class MonoDecodeLayer:
                 why = "non-contiguous layer inputs"
         if why is not None:
             return self._skip(why)
-        assert swa is not None and comp is not None
+        assert swa is not None
         runner = _mono_runner(x.device)
         logger.info_once(
             "DSv4.1 mono decode layer active (decode steps of <= %d rows)", MAX_ROWS
         )
-        out = runner.forward(
+        # K1's seam folds the owed post into the residual, except where the
+        # residual arrives settled: the embedding, or after the Engram write
+        fold = True
+        if first:
+            residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
+            pre_mix = runner.first_pre_mix(x.shape[0])
+            post_mix = res_mix = pre_mix
+            fold = False
+        elif layer.engram is not None and engram_hashes is not None:
+            residual = layer.mhc_post(x, residual, post_mix, res_mix)
+            hashes = engram_hashes[:, layer.engram.layer_hash_index]
+            residual = layer.engram(residual, hashes, engram_mask)
+            fold = False
+        kw: dict[str, Any] = {}
+        if attn.indexer is not None:
+            kw["select"] = lambda normed, qr: _select(layer, positions, normed, qr)
+        if attn.compress_ratio:
+            assert comp is not None
+            kw.update(
+                topk_indices=attn.topk_indices_buffer,
+                comp_cache=_record_view(
+                    attn._compressed_kv_cache(), comp.block_size // attn.compress_ratio
+                ),
+                comp_block_table=comp.block_table,
+            )
+        return runner.forward(
             self.weights(layer),
             x,
             residual,
@@ -342,13 +404,9 @@ class MonoDecodeLayer:
             swa.decode_swa_indices,
             swa.decode_swa_lens,
             swa.token_to_req_indices,
-            topk_indices=attn.topk_indices_buffer,
-            comp_cache=_record_view(
-                attn._compressed_kv_cache(), comp.block_size // attn.compress_ratio
-            ),
-            comp_block_table=comp.block_table,
+            fold=fold,
+            **kw,
         )
-        return out
 
     def ffn(
         self,
