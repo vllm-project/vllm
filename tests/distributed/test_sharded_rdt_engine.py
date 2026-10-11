@@ -374,6 +374,150 @@ class TestPoolReinitialization:
         ) == old_pool_values
         assert engine._num_consumers_override == 3
 
+    def test_failed_preregistration_restores_active_init(self, monkeypatch):
+        engine = _engine(stages_in_flight=2, ring_depth=2, streams=2)
+        self._activate(engine)
+        engine.parallel_config = SimpleNamespace(enable_eplb=False)
+        engine._slot_cv = object()
+        engine._num_consumers_override = 3
+        engine._name_to_plan = {"old": [object()]}
+        engine._name_meta = {"old": ("bfloat16", [4])}
+        engine._live_names = {"old"}
+        engine._lane_cursors[:] = [4, 5]
+        old_target = object()
+        engine._targets_cache[("old", 0)] = old_target
+        old_buffer_values = []
+        for slot in engine._dest_buffers:
+            value = object()
+            slot[torch.uint8] = value
+            old_buffer_values.append(value)
+
+        reference_names = (
+            "_router",
+            "_name_to_plan",
+            "_name_meta",
+            "_live_names",
+            "_cached_plan",
+            "_dest_buffers",
+            "_lane_cursors",
+            "_targets_cache",
+            "_slot_read_done",
+            "_slot_queued",
+            "_slot_done",
+            "_slot_cv",
+        )
+        old_references = {name: getattr(engine, name) for name in reference_names}
+        old_dest_slots = list(engine._dest_buffers)
+        old_baked_values = (
+            dict(engine._name_to_plan),
+            dict(engine._name_meta),
+            set(engine._live_names),
+        )
+        old_pool_values = (
+            engine._pool_geometry,
+            engine._staging_device,
+            engine._stages_in_flight,
+            engine._ring_depth,
+            engine._lanes,
+            engine._buffer_presize,
+        )
+        old_worker_values = (
+            list(engine._slot_read_done),
+            list(engine._slot_queued),
+            list(engine._slot_done),
+        )
+        candidate_router = object()
+        candidate_plan = _plan(streams=2)
+        candidate_buffer = object()
+
+        def resolve_producers(_info):
+            engine._router = candidate_router
+
+        def bake(_info):
+            engine._name_to_plan["candidate"] = [object()]
+            engine._name_meta = {"candidate": ("float32", [8])}
+            engine._live_names = {"candidate"}
+
+        def preregister():
+            assert engine._cached_plan is candidate_plan
+            for slot in engine._dest_buffers:
+                slot.clear()
+                slot[torch.uint8] = candidate_buffer
+            engine._dest_buffers.append({torch.uint8: candidate_buffer})
+            engine._lane_cursors[:] = [8, 9]
+            engine._lane_cursors = [10]
+            engine._targets_cache[("candidate", 0)] = object()
+            engine._targets_cache = {("replacement", 0): object()}
+            engine._slot_read_done.clear()
+            engine._slot_queued[:] = [11]
+            engine._slot_done[:] = [12]
+            engine._slot_read_done = [object()]
+            engine._slot_queued = [13]
+            engine._slot_done = [14]
+            engine._slot_cv = object()
+            engine._pool_geometry = ("host", 1, 7)
+            engine._staging_device = "host"
+            engine._stages_in_flight = 1
+            engine._ring_depth = 7
+            engine._lanes = 1
+            engine._buffer_presize = 123
+            raise RuntimeError("candidate preregistration failed")
+
+        monkeypatch.setattr(engine_module, "check_ray_rdt_version", lambda _mode: None)
+        monkeypatch.setattr(engine, "_resolve_producers", resolve_producers)
+        monkeypatch.setattr(engine, "_bake", bake)
+        monkeypatch.setattr(engine, "_build_static_plan", lambda _info: candidate_plan)
+        monkeypatch.setattr(engine, "_preregister_at_init", preregister)
+        monkeypatch.setattr(
+            engine,
+            "_ensure_proc_worker",
+            lambda: pytest.fail("failed preregistration started a worker"),
+        )
+
+        info = ShardedRDTWeightTransferInitInfo(
+            stages_in_flight=5,
+            num_rdt_buffers=2,
+            buffer_presize_gb=0.5,
+            num_consumers=9,
+        )
+        with pytest.raises(RuntimeError, match="candidate preregistration failed"):
+            engine.init_transfer_engine(info)
+
+        assert all(
+            getattr(engine, name) is reference
+            for name, reference in old_references.items()
+        )
+        assert len(engine._dest_buffers) == len(old_dest_slots)
+        assert all(
+            actual is expected
+            for actual, expected in zip(engine._dest_buffers, old_dest_slots)
+        )
+        assert all(
+            slot == {torch.uint8: value}
+            for slot, value in zip(engine._dest_buffers, old_buffer_values)
+        )
+        assert (
+            engine._name_to_plan,
+            engine._name_meta,
+            engine._live_names,
+        ) == old_baked_values
+        assert (
+            engine._pool_geometry,
+            engine._staging_device,
+            engine._stages_in_flight,
+            engine._ring_depth,
+            engine._lanes,
+            engine._buffer_presize,
+        ) == old_pool_values
+        assert engine._lane_cursors == [4, 5]
+        assert engine._targets_cache == {("old", 0): old_target}
+        assert (
+            engine._slot_read_done,
+            engine._slot_queued,
+            engine._slot_done,
+        ) == old_worker_values
+        assert engine._num_consumers_override == 3
+
     def test_exact_geometry_reuses_every_pool_reference(self):
         engine = _engine(stages_in_flight=2, ring_depth=2, streams=2)
         self._activate(engine)
