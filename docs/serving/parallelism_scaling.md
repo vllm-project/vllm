@@ -56,6 +56,25 @@ vllm serve gpt2 \
      --pipeline-parallel-size 2
 ```
 
+!!! warning "Performance tip: Pipeline Parallelism in Docker / Single-Node Containers (`GLOO_SOCKET_IFNAME=lo`)"
+    When running pipeline parallelism (PP) within a single container (such as Docker) or a single node where all ranks share the same network namespace, PyTorch's `gloo` backend is used for the CPU control plane (e.g. `isend_object` for per-step pipeline scheduling metadata and speculative-decode coordination).
+
+    By default, Gloo resolves the container hostname to the Docker bridge IP (e.g. `172.17.0.2`) rather than loopback (`lo`). This causes control messages to traverse the virtual ethernet bridge network stack, introducing up to hundreds of milliseconds of latency per send (~500ms). As context length increases (carrying larger block tables and metadata), this manifests as severe decode throughput collapse while GPU compute sits idle.
+
+    While vLLM defaults `GLOO_SOCKET_IFNAME=lo` automatically for single-node multiprocessing deployments, if you launch containers or use custom launcher environments, ensure `GLOO_SOCKET_IFNAME=lo` is set when launching Docker:
+
+    ```bash
+    docker run -e GLOO_SOCKET_IFNAME=lo ...
+    ```
+
+    Or exported in the container environment before starting vLLM:
+
+    ```bash
+    export GLOO_SOCKET_IFNAME=lo
+    ```
+
+    *Note:* For multi-node deployments across separate hosts, `GLOO_SOCKET_IFNAME` must point to your actual network interface (e.g., `eth0`), never `lo`.
+
 ## Multi-node deployment
 
 If a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. Ensure that every node provides an identical execution environment, including the model path and Python packages. Using container images is recommended because they provide a convenient way to keep environments consistent and to hide host heterogeneity.

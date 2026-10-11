@@ -14,3 +14,11 @@ The error message `Error: No available node types can fulfill resource request` 
 
 Debugging a distributed system can be challenging due to the large scale and complexity. Ray provides a suite of tools to help monitor, debug, and optimize Ray applications and clusters. For more information about Ray observability, visit the [official Ray observability docs](https://docs.ray.io/en/latest/ray-observability/index.html). For more information about debugging Ray applications, visit the [Ray Debugging Guide](https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/index.html). For information about troubleshooting Kubernetes clusters, see the
 [official KubeRay troubleshooting guide](https://docs.ray.io/en/latest/serve/advanced-guides/multi-node-gpu-troubleshooting.html).
+
+## High latency or decode collapse in Docker with Pipeline Parallelism (PP)
+
+When running pipeline-parallel inference (`pipeline_parallel_size > 1`) inside a Docker container, you may observe severe decode throughput degradation on long contexts while GPU utilization remains low (e.g. 10–20%).
+
+- **Symptom:** Profiling reveals high latency on `user_annotation gloo:send` (up to ~500ms per send during decode steps).
+- **Cause:** PyTorch's `gloo` CPU control plane resolves the container hostname to the Docker bridge IP (e.g. `172.17.0.2`) instead of the loopback interface (`lo`). Control messages (which grow with context length due to KV block table metadata) traverse the Docker bridge network stack instead of communicating over loopback.
+- **Solution:** Set `GLOO_SOCKET_IFNAME=lo` inside the container or pass `-e GLOO_SOCKET_IFNAME=lo` to `docker run`. For multi-node deployments across separate hosts, ensure `GLOO_SOCKET_IFNAME` is set to the physical network interface (e.g., `eth0`) rather than `lo`.

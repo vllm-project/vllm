@@ -73,7 +73,7 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 The vLLM instance cannot get the correct IP address if you have a complicated network config. You can find a log such as `DEBUG 06-10 21:32:17 parallel_state.py:88] world_size=8 rank=0 local_rank=0 distributed_init_method=tcp://xxx.xxx.xxx.xxx:54641 backend=nccl` and the IP address should be the correct one.
 If it's not, override the IP address using the environment variable `export VLLM_HOST_IP=<your_ip_address>`.
 
-You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` and `export GLOO_SOCKET_IFNAME=<your_network_interface>` to specify the network interface for the IP address.
+You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` and `export GLOO_SOCKET_IFNAME=<your_network_interface>` to specify the network interface for the IP address. For single-container Docker deployments using Pipeline Parallelism (PP), see [High latency or decode collapse with Pipeline Parallelism (PP) in Docker](#high-latency-or-decode-collapse-with-pipeline-parallelism-pp-in-docker) for details on setting `GLOO_SOCKET_IFNAME=lo`.
 
 ## Error near `self.graph.replay()`
 
@@ -368,6 +368,33 @@ export CUDA_HOME=/usr/local/cuda
 export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
 export PATH="${CUDA_HOME}/bin:$PATH"
 ```
+
+## High latency or decode collapse with Pipeline Parallelism (PP) in Docker
+
+When running pipeline-parallel models (`--pipeline-parallel-size > 1`) within a single Docker container, you may experience severe throughput collapse during decode—especially as context length increases—even though GPU utilization is low (silicon idle) and CPU utilization is near zero.
+
+### Root cause
+
+vLLM uses a CPU-side `cpu:gloo` process group for pipeline-parallel coordination, sending per-step scheduler metadata and block tables between stages via non-blocking `isend_object`. In a Docker container using bridge networking, PyTorch's Gloo backend resolves the container hostname to its bridge IP (such as `172.17.0.2`) rather than `127.0.0.1` (`lo`).
+
+Consequently, every control send traverses the Docker virtual bridge network stack, incurring ~500ms of latency per send. Because payload sizes increase with context length (due to block table indices), this overhead presents as a context-dependent decode collapse that mimics a compute or memory bottleneck.
+
+### Fix
+
+Set the `GLOO_SOCKET_IFNAME` environment variable to `lo` so that Gloo binds to the loopback interface:
+
+```bash
+docker run -e GLOO_SOCKET_IFNAME=lo ...
+```
+
+Or within the container:
+
+```bash
+export GLOO_SOCKET_IFNAME=lo
+```
+
+!!! note
+    Do not set `GLOO_SOCKET_IFNAME=lo` on multi-node deployments across different physical hosts, as loopback is node-local. For multi-node setups, set `GLOO_SOCKET_IFNAME` to the appropriate physical network interface (e.g., `eth0`).
 
 ## Known Issues
 
