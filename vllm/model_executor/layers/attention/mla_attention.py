@@ -358,8 +358,8 @@ def _detect_output_quant_key(
 
 def _canonicalize_sparse_mla_kv_cache_dtype(
     attn_backend: type[AttentionBackend],
-    kv_cache_dtype: CacheDType,
-) -> CacheDType:
+    kv_cache_dtype: CacheDType | str,
+) -> CacheDType | str:
     backend_name = attn_backend.get_name()
     if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
         # The NVFP4 DS-MLA format is used as-is; any other quantized dtype
@@ -486,7 +486,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         if cache_config is not None:
-            kv_cache_dtype: CacheDType = cache_config.cache_dtype
+            kv_cache_dtype: CacheDType | str = cache_config.cache_dtype
         else:
             kv_cache_dtype = "auto"
         self.quant_config = quant_config
