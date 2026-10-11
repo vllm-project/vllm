@@ -7,7 +7,6 @@
       "enabled": true,
       "base_url": "http://192.168.0.50:3000/v1",
       "api_key_env": "ZAI_API_KEY",
-      "api_key": "b28622c27a2e801d093f4c1b5979cb5eb3a44f4d69cb094c7366716904d917a6",
       "model_id": "frognano-4b",
       "vision": false,
       "thinking": false,
@@ -47,7 +46,7 @@
       ],
       "env": {
         "OPEN_TERMINAL_URL": "http://open-terminal-myia:8000",
-        "OPEN_TERMINAL_API_KEY": "e0da86ac14e72da4e1e2c2ca9b15b45d80af1180312b53d42023f6f44b15e8ba"
+        "OPEN_TERMINAL_API_KEY": "REDACTED — inject via deployment env (owner: open-terminal-myia host), never commit"
       }
     },
     {

@@ -53,7 +53,7 @@ MISSION = (
 async def run(label, **kw):
     t = time.time()
     try:
-        r = await call_agent(MISSION, agent="swift-orchestrator", include_steps=True, timeout=420, **kw)
+        r = await call_agent(MISSION, agent="swift-delegator", include_steps=True, timeout=420, **kw)
         out = r if isinstance(r, str) else json.dumps(r, ensure_ascii=False)
     except Exception as exc:  # noqa: BLE001 - le banc doit rapporter, pas mourir
         out = f"EXC {type(exc).__name__}: {exc}"
