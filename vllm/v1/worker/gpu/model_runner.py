@@ -62,7 +62,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -163,11 +162,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.uno import (
-    UnoSamplerWarmup,
-    UnoSpeculator,
-    enumerate_uno_served_launches,
-)
+from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
 from vllm.v1.worker.gpu.spec_decode.uno_lora import UnoLoRAState
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
@@ -985,118 +980,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
-    @staticmethod
-    def _sampler_row_counts(num_reqs: int, num_rows: int) -> np.ndarray:
-        """Distribute a real sampler row count across active request slots."""
-        assert 0 < num_reqs <= num_rows
-        row_counts = np.full(num_reqs, num_rows // num_reqs, dtype=np.int32)
-        num_extra = num_rows % num_reqs
-        if num_extra:
-            row_counts[-num_extra:] += 1
-        return row_counts
-
     @torch.inference_mode()
-    def _dummy_sampler_run(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        num_reqs: int | None = None,
-        native_verification: bool = False,
-    ) -> None:
-        """Run the production sampler over a dummy row layout.
-
-        The ordinary profile path has one sampler row per request. Serving can
-        also produce verification and chunked/mixed layouts whose row count is
-        not divisible by the request count, so this builds the same uneven
-        expanded-index layout the real sampler consumes.
-        """
-        num_rows = hidden_states.shape[0]
-        if num_reqs is None:
-            num_reqs = num_rows
-        assert 0 < num_reqs <= num_rows
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
-            num_reqs, num_rows, self.input_buffers
+            num_reqs, num_reqs, self.input_buffers
         )
-
-        if num_rows != num_reqs:
-            row_counts = self._sampler_row_counts(num_reqs, num_rows)
-            row_count_tensor = torch.from_numpy(row_counts).to(self.device)
-            row_ids = torch.arange(num_reqs, dtype=torch.int64, device=self.device)
-            dummy_input_batch.expanded_idx_mapping = torch.repeat_interleave(
-                row_ids, row_count_tensor
-            )
-            dummy_input_batch.cu_num_logits = torch.cat(
-                (
-                    torch.zeros(1, dtype=torch.int32, device=self.device),
-                    torch.cumsum(row_count_tensor, dim=0, dtype=torch.int32),
-                )
-            )
-            dummy_input_batch.cu_num_logits_np = np.concatenate(
-                (np.zeros(1, dtype=np.int32), np.cumsum(row_counts, dtype=np.int32))
-            )
-            starts = torch.repeat_interleave(
-                dummy_input_batch.cu_num_logits[:-1], row_count_tensor
-            )
-            dummy_input_batch.expanded_local_pos = (
-                torch.arange(num_rows, dtype=torch.int32, device=self.device) - starts
-            )
-            dummy_input_batch.logits_indices = torch.arange(
-                num_rows, dtype=torch.int64, device=self.device
-            )
-            if native_verification:
-                dummy_input_batch.num_draft_tokens = num_rows - num_reqs
-                dummy_input_batch.num_draft_tokens_per_req = row_counts - 1
 
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
         assert self.sampler is not None
-        if native_verification:
-            assert self.rejection_sampler is not None
-            assert num_rows > num_reqs
-            assert isinstance(self.speculator, UnoSpeculator)
-            assert self.speculator.draft_logits is not None
-            self.rejection_sampler(
-                logits, dummy_input_batch, self.speculator.draft_logits
-            )
-        else:
-            self.sampler(logits, dummy_input_batch)
-
-    @torch.inference_mode()
-    def _warm_up_uno_sampler(
-        self,
-        sample_hidden_states: torch.Tensor,
-        *,
-        warmup: UnoSamplerWarmup,
-    ) -> str:
-        """Warm one real Uno sampler branch through the production ``Sampler``.
-
-        The plan comes from ``enumerate_uno_served_launches`` rather than a
-        hand-maintained ``num_reqs * K`` table. Temporarily install each flag
-        combination and restore all persistent request state before serving
-        starts. The sampler's own FlashInfer decision remains intact: startup
-        must exercise the same branch the served request will take.
-        """
-        assert self.sampler is not None
-        num_reqs = warmup.num_reqs
-        num_rows = warmup.num_rows
-        assert sample_hidden_states.shape[0] == num_reqs
-
-        from vllm.v1.worker.gpu.warmup import uno_sampler_warmup_state
-
-        with uno_sampler_warmup_state(self.sampler, warmup.mode, num_reqs):
-            row_count_tensor = torch.from_numpy(
-                self._sampler_row_counts(num_reqs, num_rows)
-            ).to(self.device)
-            native_verification = warmup.sampler_branch == "native_verification"
-            kwargs = {"native_verification": True} if native_verification else {}
-            self._dummy_sampler_run(
-                sample_hidden_states.repeat_interleave(row_count_tensor, dim=0),
-                num_reqs=num_reqs,
-                **kwargs,
-            )
-        return warmup.sampler_branch
+        self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -1154,92 +1050,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
-
-    def _warm_up_draft_kernels(self) -> None:
-        """Compile the speculator's own kernel shapes before serving starts.
-
-        Graph capture does not exercise a drafter's input preparation, so a
-        drafter whose kernels specialise per request count meets each of those
-        shapes for the first time on a real request and compiles it there. The
-        dummy runs below are the same mechanism adaptive verification already
-        uses for its piecewise shapes. Uno's production launch enumerator
-        supplies every bounded prepare and sampler call; other drafters remain
-        untouched.
-        """
-        if not isinstance(self.speculator, UnoSpeculator):
-            return
-        plan = enumerate_uno_served_launches(
-            max_num_reqs=self.max_num_reqs,
-            k=self.speculator.k,
-            max_num_tokens=self.max_num_tokens,
-            max_model_len=self.max_model_len,
-            num_sm=num_compute_units(self.device.index),
-            use_flashinfer=bool(
-                self.sampler is not None and self.sampler.use_flashinfer
-            ),
-            logprobs_mode=self.model_config.logprobs_mode,
-            max_num_logprobs=(
-                self.vocab_size
-                if self.model_config.max_logprobs < 0
-                else min(self.model_config.max_logprobs, self.vocab_size)
-            ),
-        )
-        if not plan.prepare_request_counts:
-            return
-        warmups_by_request_count: dict[int, list[UnoSamplerWarmup]] = {}
-        for warmup in plan.sampler_warmups:
-            warmups_by_request_count.setdefault(warmup.num_reqs, []).append(warmup)
-        # This runs before the worker's ordinary seed reset, but sampler
-        # implementations are allowed to use a global generator. Preserve it
-        # anyway so warmup never becomes observable if that implementation
-        # changes. Import locally to avoid the warmup -> model_runner import
-        # cycle at module initialization.
-        from vllm.v1.worker.gpu.warmup import preserve_rng_state
-
-        executed_prepare_shapes = 0
-        executed_sampler_calls = 0
-        executed_sampler_keys: set[tuple[object, ...]] = set()
-        executed_sampler_branches: dict[str, str] = {}
-        executed_sampler_kernels: dict[str, set[str]] = {}
-        try:
-            with preserve_rng_state(self.device):
-                for num_tokens in plan.prepare_request_counts:
-                    _, sample_hidden_states = self._dummy_run(num_tokens)
-                    executed_prepare_shapes += 1
-                    if sample_hidden_states is not None:
-                        for warmup in warmups_by_request_count.get(num_tokens, []):
-                            branch = self._warm_up_uno_sampler(
-                                sample_hidden_states, warmup=warmup
-                            )
-                            executed_sampler_calls += 1
-                            executed_sampler_keys.update(warmup.kernel_keys)
-                            mode_name = warmup.mode.name
-                            if branch == "native_verification":
-                                mode_name = f"verification/{mode_name}"
-                            executed_sampler_branches[mode_name] = branch
-                            kernels = executed_sampler_kernels.setdefault(
-                                mode_name, set()
-                            )
-                            if branch == "flashinfer":
-                                kernels.add("flashinfer_sample")
-                            else:
-                                kernels.update(
-                                    str(key[0]) for key in warmup.kernel_keys
-                                )
-        finally:
-            # Dummy proposals increment Uno's noise step. Startup must not
-            # make the first served proposal begin at a later step.
-            self.speculator._step = 0
-        self.speculator.report_draft_warmup(
-            executed_prepare_shapes,
-            executed_sampler_calls,
-            len(executed_sampler_keys),
-            executed_sampler_branches,
-            {
-                mode: tuple(sorted(kernels))
-                for mode, kernels in executed_sampler_kernels.items()
-            },
-        )
 
     @torch.inference_mode()
     def _run_speculator_proposal(
@@ -1365,7 +1175,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
-                            self._warm_up_draft_kernels()
                     if self.adaptive_verification is not None:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
