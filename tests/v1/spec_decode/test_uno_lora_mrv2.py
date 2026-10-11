@@ -533,6 +533,65 @@ def test_speculator_lora_hook_routes_only_the_draft_pass():
     assert manager._last_mapping is None
 
 
+def test_speculator_refuses_user_adapters_after_binding():
+    """--lora-modules, runtime loading and request LoRA all go through add_adapter.
+
+    Once Uno owns the manager, loading any adapter but Uno's is refused with
+    the user-facing message; Uno's adapter and adapters registered beforehand
+    (warmup's dummy LoRAs) still load.
+    """
+    from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID, UnoSpeculator
+
+    loaded: list[int] = []
+    registered = {7}
+    worker = SimpleNamespace(
+        list_adapters=lambda: set(registered) | set(loaded),
+        add_adapter=lambda request: loaded.append(request.lora_int_id) or True,
+    )
+    proposer = object.__new__(UnoSpeculator)
+    proposer.lora_request = SimpleNamespace(lora_int_id=UNO_LORA_ID)
+
+    proposer._refuse_user_adapters(worker)
+
+    with pytest.raises(ValueError, match="does not support user LoRA adapters"):
+        worker.add_adapter(SimpleNamespace(lora_int_id=42))
+    assert worker.add_adapter(SimpleNamespace(lora_int_id=UNO_LORA_ID))
+    assert worker.add_adapter(SimpleNamespace(lora_int_id=7))
+    assert loaded == [UNO_LORA_ID, 7]
+
+
+def test_set_lora_manager_installs_the_user_adapter_refusal():
+    """The runner's hook is what installs the refusal, before Uno's own load."""
+    from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID, UnoSpeculator
+
+    wrapper = FakePunicaWrapper()
+    adapters: set[int] = set()
+    manager = SimpleNamespace(
+        lora_index_to_id=[None, None],
+        lora_slots=2,
+        vocab_size=16,
+        _get_punica_wrapper=lambda _: wrapper,
+        list_adapters=lambda: adapters,
+        add_adapter=lambda request: adapters.add(request.lora_int_id),
+        activate_adapter=lambda adapter_id: None,
+    )
+    worker = SimpleNamespace(
+        _adapter_manager=manager,
+        list_adapters=lambda: adapters,
+        add_adapter=lambda request: adapters.add(request.lora_int_id) or True,
+    )
+    proposer = object.__new__(UnoSpeculator)
+    proposer.k = 4
+    proposer.lora_request = SimpleNamespace(lora_int_id=UNO_LORA_ID)
+    proposer._lora_hook = None
+
+    proposer.set_lora_manager(worker)
+
+    assert adapters == {UNO_LORA_ID}
+    with pytest.raises(ValueError, match="does not support user LoRA adapters"):
+        worker.add_adapter(SimpleNamespace(lora_int_id=42))
+
+
 def _poison_gpu_wrapper(wrapper):
     """Destroy prepared values while keeping every native allocation intact."""
     for name in (

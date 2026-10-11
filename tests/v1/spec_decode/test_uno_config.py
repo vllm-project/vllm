@@ -238,6 +238,23 @@ def test_uno_rejects_unsupported_serving_options(
         validate_uno_config(config)
 
 
+def test_uno_refuses_user_lora_serving(uno_config_factory, monkeypatch):
+    """--enable-lora serves only Uno's adapter; user LoRA serving is refused."""
+    config = _serving_config(uno_config_factory())
+    validate_uno_config(config)
+
+    monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "1")
+    with pytest.raises(ValueError, match="does not support user LoRA adapters"):
+        validate_uno_config(config)
+    monkeypatch.delenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING")
+
+    config.lora_config = SimpleNamespace(
+        max_loras=2, default_mm_loras={"audio": "user-adapter"}
+    )
+    with pytest.raises(ValueError, match="does not support user LoRA adapters"):
+        validate_uno_config(config)
+
+
 def _make_vllm_uno_config(uno_config_factory):
     return VllmConfig(
         device_config=DeviceConfig(device="cpu"),

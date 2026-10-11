@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
@@ -37,6 +38,11 @@ from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 UNO_LORA_ID = 1_000_003
+UNO_USER_LORA_ERROR = (
+    "Uno does not support user LoRA adapters yet: --enable-lora serves only "
+    "Uno's own adapter, so --lora-modules, runtime LoRA loading, default "
+    "multimodal LoRAs and request-specific LoRA requests are refused"
+)
 
 
 def validate_uno_config(vllm_config: VllmConfig) -> None:
@@ -98,6 +104,8 @@ def validate_uno_config(vllm_config: VllmConfig) -> None:
         raise ValueError(
             "Uno requires max_loras >= 2 for shared-adapter warmup and graph capture"
         )
+    if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING or lora_config.default_mm_loras:
+        raise ValueError(UNO_USER_LORA_ERROR)
     if (
         vllm_config.kv_transfer_config is not None
         or vllm_config.cache_config.kv_offloading_size is not None
@@ -251,6 +259,7 @@ class UnoSpeculator(DraftModelSpeculator):
         install clears the manager's mapping cache, so the next target step
         rebuilds its mapping.
         """
+        self._refuse_user_adapters(lora_manager)
         self.uno_lora_state = UnoLoRAState(lora_manager, self.lora_request)
         self.uno_lora_state.ensure_adapter()
         active_shape = (0, 0)
@@ -266,6 +275,24 @@ class UnoSpeculator(DraftModelSpeculator):
             self.uno_lora_state.install_draft(num_model_tokens, num_reqs, self.k)
 
         self.set_lora_hook(set_draft_mapping)
+
+    def _refuse_user_adapters(self, lora_manager: Any) -> None:
+        """Let only Uno's adapter be loaded through the worker LoRA manager.
+
+        --lora-modules, runtime loading and request-specific LoRA all load
+        their adapter through ``add_adapter``. Warmup's dummy adapters are
+        registered beforehand through ``add_dummy_lora`` and stay allowed.
+        """
+        add_adapter = lora_manager.add_adapter
+        uno_id = self.lora_request.lora_int_id
+
+        def add_uno_adapter_only(lora_request: Any) -> bool:
+            lora_id = lora_request.lora_int_id
+            if lora_id != uno_id and lora_id not in lora_manager.list_adapters():
+                raise ValueError(UNO_USER_LORA_ERROR)
+            return add_adapter(lora_request)
+
+        lora_manager.add_adapter = add_uno_adapter_only
 
     def set_lora_hook(self, hook: Callable[[tuple[int, int] | None], None]) -> None:
         self._lora_hook = hook
