@@ -107,7 +107,9 @@ class Step3p5MTPProposer(EagleProposer):
             if block_table is None:
                 continue
             n_blocks = block_table.shape[1]
-            bn = (new_positions_1d // block_size).clamp(max=n_blocks - 1).to(torch.long)
+            bn = new_positions_1d // block_size
+            bn.clamp_(max=n_blocks - 1)
+            bn = bn.to(torch.long)
             block_ids = block_table[:batch_size].gather(1, bn.unsqueeze(1)).squeeze(1)
             sm = block_ids * block_size + (new_positions_1d % block_size)
             sm.masked_fill_(exceeds, PADDING_SLOT_ID)
@@ -142,7 +144,7 @@ class Step3p5MTPProposer(EagleProposer):
                     cm.slot_mapping = sm
             else:
                 cm = common_attn_metadata
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+            attn_metadata = attn_group.build_metadata_for_drafting(
                 common_attn_metadata=cm,
                 draft_index=draft_index,
             )
@@ -153,7 +155,6 @@ class Step3p5MTPProposer(EagleProposer):
 
     def _maybe_share_lm_head(self, target_language_model: torch.nn.Module) -> None:
         """Step3.5 MTP uses the lm_head stored in each MTP layer."""
-
         # The base MTP path shares target lm_head into shared_head.head.
         # Step3.5 checkpoints carry per-MTP-layer shared_head weights.
         return
@@ -243,11 +244,7 @@ class Step3p5MTPProposer(EagleProposer):
         self.draft_attn_groups = list(attention_groups.values())
         if self.draft_attn_groups:
             self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-            self.block_size = (
-                self.draft_attn_groups[0]
-                .get_metadata_builder()
-                .kv_cache_spec.block_size
-            )
+            self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
         else:
             self.kv_cache_gid = 0
             self.block_size = kv_cache_config.kv_cache_groups[
@@ -273,6 +270,7 @@ class Step3p5MTPProposer(EagleProposer):
 
     def propose(
         self,
+        num_speculative_tokens: int,
         target_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
@@ -286,6 +284,7 @@ class Step3p5MTPProposer(EagleProposer):
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
@@ -382,8 +381,6 @@ class Step3p5MTPProposer(EagleProposer):
 
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."

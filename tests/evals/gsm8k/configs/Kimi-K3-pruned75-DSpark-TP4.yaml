@@ -1,0 +1,26 @@
+model_name: "mgoin/Kimi-K3-pruned75"
+accuracy_threshold: 0.33
+min_acceptance_length: 4.8
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1800
+server_args: >-
+  --trust-remote-code
+  --gpu-memory-utilization 0.90
+  --tensor-parallel-size 4
+  --load-format fastsafetensors
+  --no-enable-flashinfer-autotune
+  --max-model-len 1048576
+  --max-num-batched-tokens 16384
+  --max-num-seqs 128
+  --kv-cache-dtype fp8
+  --attention-config '{"use_prefill_query_quantization":true,"mla_prefill_backend":"flashinfer"}'
+  --enable-prefix-caching
+  --enable-auto-tool-choice
+  --tool-call-parser kimi_k3
+  --reasoning-parser kimi_k3
+  --speculative-config '{"method":"dspark",
+  "model":"RedHatAI/Kimi-K3-speculator.dspark",
+  "attention_backend":"FLASH_ATTN","num_speculative_tokens":8,
+  "draft_sample_method":"probabilistic",
+  "rejection_sample_method":"block"}'

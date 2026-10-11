@@ -13,8 +13,8 @@ Register a lazy module mapping.
 Example:
     ReasoningParserManager.register_lazy_module(
         name="qwen3",
-        module_path="vllm.reasoning.qwen3_reasoning_parser",
-        class_name="Qwen3ReasoningParser",
+        module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
+        class_name="Qwen3ParserReasoningAdapter",
     )
 """
 
@@ -29,8 +29,12 @@ _REASONING_PARSERS_TO_REGISTER = {
         "DeepSeekV3ReasoningParser",
     ),
     "deepseek_v4": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningParser",
+        "deepseek_v4_engine_reasoning_parser",
+        "DeepSeekV4ParserReasoningAdapter",
+    ),
+    "deepseek_v41": (
+        "deepseek_v41_engine_reasoning_parser",
+        "DeepSeekV41ParserReasoningAdapter",
     ),
     "poolside_v1": (
         "poolside_v1_reasoning_parser",
@@ -49,12 +53,20 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Ernie45ReasoningParser",
     ),
     "gemma4": (
-        "gemma4_reasoning_parser",
-        "Gemma4ReasoningParser",
+        "gemma4_engine_reasoning_parser",
+        "Gemma4ParserReasoningAdapter",
     ),
     "glm45": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningWithThinkingParser",
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "glm47": (
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "ling3": (
+        "ling3_reasoning_parser",
+        "Ling3ParserReasoningAdapter",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
@@ -63,6 +75,14 @@ _REASONING_PARSERS_TO_REGISTER = {
     "granite": (
         "granite_reasoning_parser",
         "GraniteReasoningParser",
+    ),
+    "granite_thinking_parser": (
+        "granite_thinking_engine_reasoning_parser",
+        "GraniteThinkingParserReasoningAdapter",
+    ),
+    "hf": (
+        "response_template_reasoning_parser",
+        "ResponseTemplateReasoningParser",
     ),
     "holo2": (
         "deepseek_v3_reasoning_parser",
@@ -76,13 +96,25 @@ _REASONING_PARSERS_TO_REGISTER = {
         "hy_v3_reasoning_parser",
         "HYV3ReasoningParser",
     ),
+    "hy_v4": (
+        "hy_v4_reasoning_parser",
+        "HYV4ReasoningParser",
+    ),
     "kimi_k2": (
         "kimi_k2_reasoning_parser",
         "KimiK2ReasoningParser",
     ),
+    "kimi_k3": (
+        "kimi_k3_reasoning_parser",
+        "KimiK3ReasoningParser",
+    ),
+    "k2_horizon": (
+        "k2_horizon_reasoning_parser",
+        "K2HorizonReasoningParser",
+    ),
     "mimo": (
-        "qwen3_reasoning_parser",
-        "Qwen3ReasoningParser",
+        "mimo_engine_reasoning_parser",
+        "MiMoParserReasoningAdapter",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
@@ -92,33 +124,49 @@ _REASONING_PARSERS_TO_REGISTER = {
         "minimax_m2_reasoning_parser",
         "MiniMaxM2AppendThinkReasoningParser",
     ),
+    "minimax_m3": (
+        "minimax_m3_reasoning_parser",
+        "MiniMaxM3ReasoningParser",
+    ),
     "mistral": (
         "mistral_reasoning_parser",
-        "MistralReasoningParser",
+        "MistralParserReasoningAdapter",
     ),
     "nemotron_v3": (
-        "nemotron_v3_reasoning_parser",
-        "NemotronV3ReasoningParser",
+        "nemotron_v3_engine_reasoning_parser",
+        "NemotronV3ParserReasoningAdapter",
     ),
     "olmo3": (
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
     ),
+    "plamo3": (
+        "plamo3_engine_reasoning_parser",
+        "Plamo3ParserReasoningAdapter",
+    ),
+    "muse_glimmer": (
+        "muse_glimmer_reasoning_parser",
+        "MuseGlimmerReasoningParser",
+    ),
     "qwen3": (
-        "qwen3_reasoning_parser",
-        "Qwen3ReasoningParser",
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
     ),
     "seed_oss": (
-        "seedoss_reasoning_parser",
-        "SeedOSSReasoningParser",
+        "seed_oss_engine_reasoning_parser",
+        "SeedOssParserReasoningAdapter",
     ),
     "step3": (
         "step3_reasoning_parser",
         "Step3ReasoningParser",
     ),
     "step3p5": (
-        "step3p5_reasoning_parser",
-        "Step3p5ReasoningParser",
+        "step3p5_engine_reasoning_parser",
+        "Step3p5ParserReasoningAdapter",
+    ),
+    "inkling": (
+        "inkling_reasoning_parser",
+        "InklingParserReasoningAdapter",
     ),
 }
 

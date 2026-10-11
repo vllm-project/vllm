@@ -34,13 +34,38 @@ direct_register_aiter_op = functools.partial(
 AITER_SUPPORTED = is_aiter_found()
 """Most kernels in this file are supported if AITER is installed."""
 
+
+def flatten_to_2d_is_free(x: Tensor) -> bool:
+    """Whether ``x.reshape(-1, x.shape[-1])`` is a view with unit-stride rows.
+
+    The AITER norm kernels only take dense 2D inputs, so the wrappers below
+    flatten the leading dims with ``Tensor.reshape``, which silently falls back
+    to ``contiguous()`` when the flattened shape is not expressible with the
+    existing strides, adding a whole-tensor device copy that costs more than
+    the kernel saves. A strided last dim flattens without a copy but not into a
+    dense buffer, so it is rejected too.
+    """
+    if x.dim() <= 2:
+        return True
+    if x.stride(-1) != 1:
+        return False
+    expected_stride = x.size(-1)
+    for i in range(x.dim() - 2, -1, -1):
+        if x.size(i) != 1 and x.stride(i) != expected_stride:
+            return False
+        expected_stride *= x.size(i)
+    return True
+
+
 rms_no_var_16bit_only = (
     lambda x, weight, epsilon, variance_size=None: variance_size is None
     and x.dtype in (torch.float16, torch.bfloat16)
     and (weight is None or weight.dtype == x.dtype)
+    and flatten_to_2d_is_free(x)
 )
 """AITER rms_norm only supports float16 and bfloat16 acts, no var_size override,
-and requires weight dtype to match x dtype."""
+requires weight dtype to match x dtype, and requires flattening the activation
+to 2D to be free."""
 
 
 @ir.ops.rms_norm.register_impl(
@@ -75,15 +100,17 @@ def _rms_norm_fake(x: Tensor, weight: Tensor, variance_epsilon: float) -> Tensor
 direct_register_aiter_op(
     op_name="rms_norm", op_func=_rms_norm_impl, fake_impl=_rms_norm_fake
 )
-
 rms_add_no_var_16bit_only = (
     lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
     and x.dtype in (torch.float16, torch.bfloat16)
     and (weight is None or weight.dtype == x.dtype)
+    and flatten_to_2d_is_free(x)
+    and flatten_to_2d_is_free(x_residual)
 )
 """
 AITER fused_add_rms_norm only supports 16-bit activations and no var_size override.
-Requires weight dtype to match x dtype.
+Requires weight dtype to match x dtype, and flattening both the activation and the
+residual to 2D to be free.
 """
 
 
@@ -112,6 +139,12 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter import rmsnorm2d_fwd_with_add
 
+    x_shape = x.shape
+    residual_shape = residual.shape
+    hidden_size = x.shape[-1]
+    x = x.reshape(-1, hidden_size)
+    residual = residual.reshape(-1, hidden_size)
+
     # TODO can out = x and residual_out = residual to save memory?
     #  Need to check if the kernel supports in-place residual output
     #  (if yes set mutates_args and inplace)
@@ -125,7 +158,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
         weight,
         variance_epsilon,
     )
-    return out, residual_out
+    return out.reshape(x_shape), residual_out.reshape(residual_shape)
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(

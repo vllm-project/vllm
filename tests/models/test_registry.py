@@ -20,6 +20,7 @@ from vllm.model_executor.models.registry import (
     _SPECULATIVE_DECODING_MODELS,
     _TEXT_GENERATION_MODELS,
     ModelRegistry,
+    _LazyRegisteredModel,
 )
 from vllm.platforms import current_platform
 
@@ -37,7 +38,7 @@ def test_registry_imports(model_arch):
         check_version_reason="vllm",
     )
 
-    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+    if model_arch == "Terratorch":
         import importlib.util
 
         if importlib.util.find_spec("terratorch") is None:
@@ -46,6 +47,28 @@ def test_registry_imports(model_arch):
                 "temporarily skipped while PyPI has `lightning` quarantined "
                 "(see #41376)"
             )
+
+    # DSpark draft model is supported on CUDA and ROCm; stubbed to None on XPU.
+    if model_arch == "DSparkDraftModel" and not (
+        current_platform.is_cuda() or current_platform.is_rocm()
+    ):
+        pytest.skip("DSparkDraftModel is only supported on CUDA and ROCm")
+
+    if model_arch in ("Dots3NoteForCausalLM", "Dots3NoteMTPModel") and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("Dots3 NOTE is only supported on CUDA")
+
+    if model_arch in ("HYV4ForCausalLM", "HYV4MTPModel") and not (
+        current_platform.is_cuda() or current_platform.is_rocm()
+    ):
+        pytest.skip("HY V4 is only supported on CUDA and ROCm")
+
+    if (
+        model_arch == "DeepseekV4ForConditionalGeneration"
+        and not current_platform.is_cuda_alike()
+    ):
+        pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
@@ -65,66 +88,129 @@ def test_registry_imports(model_arch):
         assert supports_multimodal(model_cls)
 
 
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
-    "model_arch,is_mm,init_cuda,score_type",
+    "model_arch,is_mm,score_type",
     [
-        ("LlamaForCausalLM", False, False, "bi-encoder"),
-        ("LlavaForConditionalGeneration", True, True, "bi-encoder"),
-        ("BertForSequenceClassification", False, False, "cross-encoder"),
-        ("RobertaForSequenceClassification", False, False, "cross-encoder"),
-        ("XLMRobertaForSequenceClassification", False, False, "cross-encoder"),
-        ("GteNewModel", False, False, "bi-encoder"),
-        ("GteNewForSequenceClassification", False, False, "cross-encoder"),
-        ("HF_ColBERT", False, False, "late-interaction"),
+        ("LlamaForCausalLM", False, "bi-encoder"),
+        ("LlavaForConditionalGeneration", True, "bi-encoder"),
+        ("DeepseekV41ForCausalLM", True, "bi-encoder"),
+        ("BertForSequenceClassification", False, "cross-encoder"),
+        ("RobertaForSequenceClassification", False, "cross-encoder"),
+        ("XLMRobertaForSequenceClassification", False, "cross-encoder"),
+        ("GteNewModel", False, "bi-encoder"),
+        ("GteNewForSequenceClassification", False, "cross-encoder"),
+        ("HF_ColBERT", False, "late-interaction"),
     ],
 )
-def test_registry_model_property(model_arch, is_mm, init_cuda, score_type):
+def test_registry_model_property(model_arch, is_mm, score_type):
     model_info = ModelRegistry._try_inspect_model_cls(model_arch)
     assert model_info is not None
 
     assert model_info.supports_multimodal is is_mm
     assert model_info.score_type == score_type
 
-    if init_cuda and current_platform.is_cuda_alike():
-        assert not torch.cuda.is_initialized()
 
-        ModelRegistry._try_load_model_cls(model_arch)
-        if not torch.cuda.is_initialized():
-            warnings.warn(
-                "This model no longer initializes CUDA on import. "
-                "Please test using a different one.",
-                stacklevel=2,
-            )
-
-
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
-    "model_arch,is_pp,init_cuda",
+    "model_arch,is_pp",
     [
         # TODO(woosuk): Re-enable this once the MLP Speculator is supported
         # in V1.
-        # ("MLPSpeculatorPreTrainedModel", False, False),
-        ("DeepseekV2ForCausalLM", True, False),
-        ("Qwen2VLForConditionalGeneration", True, True),
+        # ("MLPSpeculatorPreTrainedModel", False),
+        ("DeepseekV2ForCausalLM", True),
+        ("Qwen2VLForConditionalGeneration", True),
     ],
 )
-def test_registry_is_pp(model_arch, is_pp, init_cuda):
+def test_registry_is_pp(model_arch, is_pp):
     model_info = ModelRegistry._try_inspect_model_cls(model_arch)
     assert model_info is not None
 
     assert model_info.supports_pp is is_pp
 
-    if init_cuda and current_platform.is_cuda_alike():
-        assert not torch.cuda.is_initialized()
 
-        ModelRegistry._try_load_model_cls(model_arch)
-        if not torch.cuda.is_initialized():
-            warnings.warn(
-                "This model no longer initializes CUDA on import. "
-                "Please test using a different one.",
-                stacklevel=2,
-            )
+@create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    "model_arch",
+    ["LlavaForConditionalGeneration", "Qwen2VLForConditionalGeneration"],
+)
+def test_registry_inspect_does_not_init_cuda(model_arch):
+    """Inspecting a model must not import it: these architectures initialize
+    CUDA at import time, so the inspection path has to stay out-of-process."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires a CUDA-like platform")
+
+    assert ModelRegistry._try_inspect_model_cls(model_arch) is not None
+    assert not torch.cuda.is_initialized()
+
+    ModelRegistry._try_load_model_cls(model_arch)
+    if not torch.cuda.is_initialized():
+        warnings.warn(
+            "This model no longer initializes CUDA on import. "
+            "Please test using a different one.",
+            stacklevel=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "model_arch,supported",
+    [
+        # ReplaySSM is opt-in per model.
+        ("NemotronHForCausalLM", True),
+        ("KimiLinearForCausalLM", not current_platform.is_rocm()),
+        ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
+        ("Mamba2ForCausalLM", False),
+        ("Zamba2ForCausalLM", False),
+    ],
+)
+def test_registry_supports_replayssm(model_arch, supported):
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
+    assert model_info.supports_replayssm is supported
+
+
+def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
+    package_dir = tmp_path / "model_package"
+    package_dir.mkdir()
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("from .model import Model\n", encoding="utf-8")
+    model_file = package_dir / "model.py"
+    model_file.write_text("class Model: pass\n", encoding="utf-8")
+
+    first_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
+
+    model_file.write_text("class Model:\n    supports_pp = True\n", encoding="utf-8")
+    second_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
+
+    assert first_hash != second_hash
+
+
+def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
+    cached_model_info = object()
+    loaded_hashes = []
+
+    def fake_load_cache(self, module_hash):
+        loaded_hashes.append(module_hash)
+        return cached_model_info
+
+    monkeypatch.setattr(
+        _LazyRegisteredModel,
+        "_load_modelinfo_from_cache",
+        fake_load_cache,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.registry._run_in_subprocess",
+        lambda _: pytest.fail("Package-backed model should use the cache path"),
+    )
+
+    registered_model = _LazyRegisteredModel(
+        module_name="vllm.model_executor.models.transformers",
+        class_name="TransformersForCausalLM",
+    )
+
+    result = registered_model.inspect_model_cls()
+
+    assert result is cached_model_info
+    assert len(loaded_hashes) == 1
+    assert loaded_hashes[0]
 
 
 def test_hf_registry_coverage():

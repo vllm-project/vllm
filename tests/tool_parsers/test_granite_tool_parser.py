@@ -2,13 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
-from tests.tool_parsers.utils import run_tool_extraction
+from tests.tool_parsers.utils import (
+    run_tool_extraction,
+    run_tool_extraction_streaming,
+    split_string_into_token_deltas,
+)
+from vllm.tokenizers import get_tokenizer
+from vllm.tool_parsers.granite_engine_tool_parser import GraniteEngineToolParser
 
 
 class TestGraniteToolParser(ToolParserTests):
@@ -68,23 +76,6 @@ I'll get that information.""",
             single_tool_call_expected_content=None,
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "get_time"],
-            # xfail markers
-            xfail_streaming={
-                "test_malformed_input": (
-                    "Streaming mode incorrectly creates tool call from malformed JSON"
-                ),
-                "test_surrounding_text": (
-                    "Parser doesn't handle surrounding text correctly in streaming"
-                ),
-                "test_streaming_reconstruction": (
-                    "Streaming mode doesn't strip <|tool_call|> marker from content"
-                ),
-            },
-            xfail_nonstreaming={
-                "test_surrounding_text": (
-                    "Parser doesn't handle surrounding text correctly in non-streaming"
-                ),
-            },
         )
 
     # Granite-Specific Tests
@@ -116,3 +107,38 @@ I'll get that information.""",
             f"Expected 1 tool call from string format, got {len(tool_calls)}"
         )
         assert tool_calls[0].function.name == "get_weather"
+
+
+# granite emits arguments before name and its own tokenizer (not gpt2) is used
+# here so the token boundaries match production; get_tokenizer only fetches the
+# small tokenizer files, not the model weights.
+@pytest.fixture(scope="module")
+def granite_tokenizer():
+    return get_tokenizer(tokenizer_name="ibm-granite/granite-3.1-8b-instruct")
+
+
+@pytest.mark.parametrize("chunk_size", [2, 3, 4, 5])
+def test_streaming_parallel_calls_batched_deltas(granite_tokenizer, chunk_size):
+    """A batched delta (multiple tokens) spanning the boundary between two
+    parallel calls must not drop the first call's name. granite streams
+    arguments before name, so the name only completes as the next call appears.
+    """
+    parser = GraniteEngineToolParser(granite_tokenizer)
+    model_output = (
+        '<|tool_call|> [{"arguments": {"city": "Tokyo"}, "name": "get_weather"}, '
+        '{"arguments": {"timezone": "Asia/Tokyo"}, "name": "get_time"}]'
+    )
+    token_deltas = split_string_into_token_deltas(granite_tokenizer, model_output)
+    batched = [
+        "".join(token_deltas[i : i + chunk_size])
+        for i in range(0, len(token_deltas), chunk_size)
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, batched, assert_one_tool_per_delta=False
+    )
+    names = [tc.function.name for tc in reconstructor.tool_calls]
+    assert names == ["get_weather", "get_time"]
+    # trailing args of the final call are flushed by the serving layer
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Tokyo"
+    }

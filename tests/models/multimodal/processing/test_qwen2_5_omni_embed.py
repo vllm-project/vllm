@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for Qwen2.5-Omni embed_input_ids to verify embeddings are
+"""Unit tests for Qwen2.5-Omni embed_input_ids to verify embeddings are
 correctly assigned to audio/image/video token positions.
 
 Regression test for: https://github.com/vllm-project/vllm/issues/34506
@@ -19,12 +18,17 @@ from vllm.model_executor.models.qwen2_5_omni_thinker import (
     check_interleaved_audio_video,
     merge_interleaved_embeddings,
 )
+from vllm.multimodal.utils import set_mm_embedding_modality
 
 # Fake token IDs
 AUDIO_TOKEN_ID = 1001
 IMAGE_TOKEN_ID = 1002
 VIDEO_TOKEN_ID = 1003
 TEXT_TOKEN_ID = 0
+
+
+def _mm_embed(shape: tuple[int, ...], value: float, modality: str) -> torch.Tensor:
+    return set_mm_embedding_modality(torch.full(shape, value), modality)
 
 
 # ---------------------------------------------------------------------------
@@ -35,8 +39,7 @@ TEXT_TOKEN_ID = 0
 def make_token_seq(
     audio_n: int, image_n: int, video_n: int, text_prefix: int = 3, text_sep: int = 2
 ):
-    """
-    Build a flat token sequence:
+    """Build a flat token sequence:
       [text_prefix] [AUDIO * audio_n] [text_sep] [IMAGE * image_n]
       [text_sep] [VIDEO * video_n] [text_sep]
     Returns (input_ids tensor, is_multimodal mask, positions dict).
@@ -62,9 +65,8 @@ def make_token_seq(
 def make_interleaved_seq(
     video_chunks: list[int], audio_chunks: list[int], text_prefix: int = 2
 ):
-    """
-    Build an interleaved sequence like use_audio_in_video:
-      [text] [V*v0] [A*a0] [V*v1] [A*a1] ...
+    """Build an interleaved sequence like use_audio_in_video:
+    [text] [V*v0] [A*a0] [V*v1] [A*a1] ...
     """
     tokens = [TEXT_TOKEN_ID] * text_prefix
     for v, a in zip(video_chunks, audio_chunks):
@@ -116,9 +118,26 @@ class TestCheckInterleavedAudioVideo:
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
-    def test_batched_non_interleaved_no_false_positive(self):
+    def test_multi_video_with_boundary_tokens(self):
+        """Two interleaved videos separated by boundary tokens → still True.
+
+        use_audio_in_video expands each video into a local V/A span bounded by
+        non-pad tokens. A global density check would fail across those gaps.
         """
-        Regression test for https://github.com/vllm-project/vllm/issues/35394.
+        # [text][V A V A][text boundary][V A V A]
+        first_ids, _ = make_interleaved_seq([2, 2], [2, 2], text_prefix=1)
+        second_ids, _ = make_interleaved_seq([2, 2], [2, 2], text_prefix=0)
+        boundary = torch.tensor([TEXT_TOKEN_ID, TEXT_TOKEN_ID])
+        input_ids = torch.cat([first_ids, boundary, second_ids])
+        is_multimodal = (input_ids == VIDEO_TOKEN_ID) | (input_ids == AUDIO_TOKEN_ID)
+        is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
+        is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
+        assert check_interleaved_audio_video(
+            is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
+        )
+
+    def test_batched_non_interleaved_no_false_positive(self):
+        """Regression test for https://github.com/vllm-project/vllm/issues/35394.
 
         5 identical non-interleaved mixed-modality requests batched together:
         each has [audio][image][video] in separate blocks with text between them.
@@ -149,8 +168,7 @@ class TestCheckInterleavedAudioVideo:
 
 
 def make_mock_model(hidden: int = 8):
-    """
-    Return a minimal mock of Qwen2_5OmniThinkerForConditionalGeneration
+    """Return a minimal mock of Qwen2_5OmniThinkerForConditionalGeneration
     that has enough structure to run embed_input_ids.
     """
     from vllm.model_executor.models.qwen2_5_omni_thinker import (
@@ -213,8 +231,7 @@ def make_mock_model(hidden: int = 8):
 def build_mm_embeds(
     audio_n, image_n, video_n, hidden, audio_val=10.0, image_val=20.0, video_val=30.0
 ):
-    """
-    Build multimodal_embeddings list in position order (audio, image, video).
+    """Build multimodal_embeddings list in position order (audio, image, video).
     Each embedding is filled with a distinct constant so we can verify placement.
     """
     embs = []
@@ -229,8 +246,7 @@ def build_mm_embeds(
 
 class TestEmbedInputIds:
     def _run(self, audio_n, image_n, video_n, hidden=8):
-        """
-        Run embed_input_ids for a non-interleaved mixed-modality sequence.
+        """Run embed_input_ids for a non-interleaved mixed-modality sequence.
         Returns (result_embeds, input_ids, is_multimodal).
         """
         input_ids, is_multimodal = make_token_seq(audio_n, image_n, video_n)
@@ -265,8 +281,7 @@ class TestEmbedInputIds:
         )
 
     def test_mixed_modalities_audio_goes_to_audio_pos(self):
-        """
-        Regression test for GitHub issue #34506:
+        """Regression test for GitHub issue #34506:
         With audio + image + video (non-interleaved), audio positions must
         receive audio embeddings (not image or video embeddings).
         """
@@ -306,8 +321,7 @@ class TestEmbedInputIds:
         )
 
     def test_interleaved_use_audio_in_video(self):
-        """
-        Interleaved (use_audio_in_video): video chunks interleaved with audio.
+        """Interleaved (use_audio_in_video): video chunks interleaved with audio.
         Video embeddings must go to video positions, audio to audio positions.
         """
         hidden = 8
@@ -323,13 +337,16 @@ class TestEmbedInputIds:
         # mm_embeds come in [video, audio] order (video feature first in
         # mm_features when positions are the same for use_audio_in_video)
         mm_embeds = [
-            torch.full((video_n, hidden), video_val),
-            torch.full((audio_n, hidden), audio_val),
+            _mm_embed((video_n, hidden), video_val, "video"),
+            _mm_embed((audio_n, hidden), audio_val, "audio"),
         ]
 
         model, _ = make_mock_model(hidden)
+        # Modalities are attached on the embedding tensors (as in encoder gather).
         result = model.embed_input_ids(
-            input_ids, mm_embeds, is_multimodal=is_multimodal
+            input_ids,
+            mm_embeds,
+            is_multimodal=is_multimodal,
         )
 
         video_pos = (input_ids == VIDEO_TOKEN_ID).nonzero(as_tuple=True)[0]
@@ -362,8 +379,8 @@ class TestMergeInterleavedEmbeddings:
 
         inputs_embeds = torch.zeros(len(input_ids), hidden)
         mm_embeds = [
-            torch.full((num_video, hidden), 30.0),
-            torch.full((num_audio, hidden), 10.0),
+            _mm_embed((num_video, hidden), 30.0, "video"),
+            _mm_embed((num_audio, hidden), 10.0, "audio"),
         ]
 
         result = merge_interleaved_embeddings(
@@ -372,14 +389,68 @@ class TestMergeInterleavedEmbeddings:
             is_video,
             is_audio,
             is_multimodal,
-            num_video,
-            num_audio,
         )
 
         video_pos = is_video.nonzero(as_tuple=True)[0]
         audio_pos = is_audio.nonzero(as_tuple=True)[0]
         assert result[video_pos].allclose(torch.full((num_video, hidden), 30.0))
         assert result[audio_pos].allclose(torch.full((num_audio, hidden), 10.0))
+
+    def test_image_and_video_mixed(self):
+        """Image embeddings must not be misclassified as video."""
+        hidden = 4
+        # [text][I I][V A V A]
+        tokens = (
+            [TEXT_TOKEN_ID] * 2
+            + [IMAGE_TOKEN_ID] * 2
+            + [VIDEO_TOKEN_ID, AUDIO_TOKEN_ID, VIDEO_TOKEN_ID, AUDIO_TOKEN_ID]
+        )
+        input_ids = torch.tensor(tokens)
+        is_multimodal = (
+            (input_ids == IMAGE_TOKEN_ID)
+            | (input_ids == VIDEO_TOKEN_ID)
+            | (input_ids == AUDIO_TOKEN_ID)
+        )
+        is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
+        is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
+        is_image = is_multimodal & (input_ids == IMAGE_TOKEN_ID)
+
+        inputs_embeds = torch.zeros(len(input_ids), hidden)
+        mm_embeds = [
+            _mm_embed((2, hidden), 20.0, "image"),
+            _mm_embed((2, hidden), 30.0, "video"),
+            _mm_embed((2, hidden), 10.0, "audio"),
+        ]
+        result = merge_interleaved_embeddings(
+            inputs_embeds,
+            mm_embeds,
+            is_video,
+            is_audio,
+            is_multimodal,
+        )
+        assert result[is_image.nonzero(as_tuple=True)[0]].allclose(
+            torch.full((2, hidden), 20.0)
+        )
+        assert result[is_video.nonzero(as_tuple=True)[0]].allclose(
+            torch.full((2, hidden), 30.0)
+        )
+        assert result[is_audio.nonzero(as_tuple=True)[0]].allclose(
+            torch.full((2, hidden), 10.0)
+        )
+
+    def test_missing_modality_raises(self):
+        hidden = 2
+        input_ids, is_multimodal = make_interleaved_seq([2], [2])
+        is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
+        is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
+        with pytest.raises(ValueError, match="Missing modality"):
+            merge_interleaved_embeddings(
+                torch.zeros(len(input_ids), hidden),
+                [torch.zeros(2, hidden), torch.zeros(2, hidden)],
+                is_video,
+                is_audio,
+                is_multimodal,
+            )
 
 
 if __name__ == "__main__":

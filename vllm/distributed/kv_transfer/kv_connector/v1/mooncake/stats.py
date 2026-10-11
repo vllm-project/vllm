@@ -126,16 +126,16 @@ class MooncakeKVConnectorStats(KVConnectorStats):
         avg_mb = total_mb / n
         total_time_seconds = xfer_time.sum()
         throughput_mb_s = (
-            total_mb / total_time_seconds if total_time_seconds > 0 else 0.0
+            (total_mb / total_time_seconds).item() if total_time_seconds > 0 else 0.0
         )
 
         return {
             "Num successful transfers": n,
-            "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
+            "Avg xfer time (ms)": round(xfer_time.mean().item() * 1e3, 3),
             "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
-            "Avg MB per transfer": round(avg_mb, 3),
+            "Avg MB per transfer": round(avg_mb.item(), 3),
             "Throughput (MB/s)": round(throughput_mb_s, 3),
-            "Avg number of descriptors": round(descs.mean(), 1),
+            "Avg number of descriptors": round(descs.mean().item(), 1),
             "Num failed transfers": num_failed_transfers,
             "Num failed recvs": num_failed_recvs,
             "Num KV expired reqs": num_kv_expired_reqs,

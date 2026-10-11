@@ -1,0 +1,15 @@
+[
+  {
+    "role": "user",
+    "content": "What is 2 + 2?"
+  },
+  {
+    "role": "assistant",
+    "reasoning_content": "This should be dropped.",
+    "content": "4"
+  },
+  {
+    "role": "user",
+    "content": "What is 3 + 5?"
+  }
+]

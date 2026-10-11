@@ -9,13 +9,19 @@ from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8DynamicTokenSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import (
+    FP8BlockParams,
     Fp8BlockScaledMMLinearKernel,
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
@@ -65,8 +71,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        `AiterInt8ScaledMMLinearKernel` implements a fused version of
+        """`AiterInt8ScaledMMLinearKernel` implements a fused version of
             `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
@@ -144,6 +149,12 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         except Exception:
             return False, "requires aiter library to be installed."
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        # Does not call get_output_padding() - torch fallbacks
+        # resolve padding from compilation_config, which is unset in
+        # profile_run. This kernel does not pad activations.
+        return kFp8DynamicTokenSym
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -237,6 +248,11 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        # Same per-token FP8 consume path as
+        # AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.
+        return kFp8DynamicTokenSym
+
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         is_ptpc = (
@@ -314,6 +330,9 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             compute_capability
         )
 
+    def input_quant_key(self) -> QuantKey | None:
+        return kFp8DynamicTokenSym
+
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         is_ptpc = (
@@ -370,17 +389,37 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         super().__init__(config)
         n, k = config.weight_shape
 
-        self.use_triton = (
-            not current_platform.is_fp8_fnuz()
-            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        _on_gfx1250 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1250
+
+            _on_gfx1250 = on_gfx1250()
+
+        self.use_triton = not current_platform.is_fp8_fnuz() and (
+            rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
 
     @classmethod
     def is_supported(cls, compute_capability=None):
+        if (
+            rocm_aiter_ops.is_linear_enabled()
+            or rocm_aiter_ops.is_rdna_linear_enabled()
+        ):
+            return True, None
         return (
-            rocm_aiter_ops.is_linear_enabled(),
-            "Only supported on ROCm platform \
-                with aiter package installed.",
+            False,
+            "Only supported on ROCm platform with aiter package installed.",
         )
 
     @classmethod
@@ -396,6 +435,17 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+
+        # RDNA4 (gfx12) only has the aiter Triton blockscale backend, which
+        # needs a per-(N,K) tune. Reject untuned shapes so the dispatcher falls
+        # through to the generic backend.
+        if rocm_aiter_ops.is_rdna_linear_enabled():
+            n, k = config.weight_shape
+            if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
+                return (
+                    False,
+                    f"(N={n}, K={k}) is not in the aiter Triton blockscale tuned list.",
+                )
         return True, None
 
     def apply_block_scaled_mm(
@@ -406,19 +456,12 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         if As.dtype != Bs.dtype:
-            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-                _upcast_e8m0_to_fp32,
-            )
-
             if As.dtype == torch.float8_e8m0fnu:
                 As = _upcast_e8m0_to_fp32(As).contiguous()
             else:
                 As = As.to(torch.float32)
 
-            if Bs.dtype == torch.float8_e8m0fnu:
-                Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
-            else:
-                Bs = Bs.to(torch.float32)
+            Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
         if self.use_triton:

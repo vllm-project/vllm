@@ -25,11 +25,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.module
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,
 )
+from vllm.platforms import current_platform
 
 
 class CompressedTensorsLinearTransformMethod(LinearMethodBase):
-    """
-    Wraps `CompressedTensorsLinearMethod` or `UnquantizedLinearMethod` and adds
+    """Wraps `CompressedTensorsLinearMethod` or `UnquantizedLinearMethod` and adds
     input and output transforms to either side of the original apply method
     """
 
@@ -48,11 +48,12 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 
         assert input_tfms or output_tfms
 
-        if is_qutlass_fp4_scheme(quant_scheme, input_tfms):
+        if is_qutlass_fp4_scheme(
+            quant_scheme, input_tfms
+        ) and current_platform.has_device_capability(100):
             return QutlassNvFP4LinearMethod(quant_method, input_tfms, output_tfms)
 
         # hadacore or dense gemm is selected by Transform module
-
         return cls(quant_method, input_tfms, output_tfms)
 
     def __init__(
@@ -238,8 +239,7 @@ def get_schemes_args(
 def get_layer_partition_names(
     layer_name: str, packed_modules_mapping: dict[str, list[str]]
 ) -> list[str]:
-    """
-    Get all partition names associated with this layer.
+    """Get all partition names associated with this layer.
     Names are returned in order of their partition indices.
 
     ```python
@@ -249,7 +249,9 @@ def get_layer_partition_names(
         "gate_proj",
         "up_proj",
     ]
-    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]"""
+    assert get_layer_partition_names("mlp.down_proj", mapping) == ["down_proj"]
+    ```
+    """
     for fused_suffix, part_suffixes in packed_modules_mapping.items():
         if layer_name.endswith(fused_suffix):
             return [

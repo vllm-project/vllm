@@ -61,13 +61,12 @@ class Sm100ChunkOKernel:
             stride=(64, 0, (1, self.BT * 64), self.BT * dim),
         )
         slayout = cute.make_composed_layout(swizzle_128B, 0, slayout)
-        atom, tma_tensor = cpasync.make_tiled_tma_atom(
+        return cpasync.make_tiled_tma_atom(
             op,
             cute.logical_divide(tensor, (None, None, 64)),
             slayout,
             cta_tiler=(self.BT, 1, dim),
         )
-        return atom, tma_tensor, slayout
 
     @cute.jit
     def _make_h_tma_args(
@@ -79,17 +78,22 @@ class Sm100ChunkOKernel:
         num_elems = 128 // (tensor.element_type.width // 8)
         swizzle_128B = cute.make_swizzle(3, 4, 3)
         slayout = cute.make_layout(
-            (1, self.V_dim, (num_elems, self.K_dim // num_elems), stages),
-            stride=(0, num_elems, (1, self.V_dim * num_elems), self.V_dim * self.K_dim),
+            (1, 1, self.V_dim, (num_elems, self.K_dim // num_elems), stages),
+            stride=(
+                0,
+                0,
+                num_elems,
+                (1, self.V_dim * num_elems),
+                self.V_dim * self.K_dim,
+            ),
         )
         slayout = cute.make_composed_layout(swizzle_128B, 0, slayout)
-        atom, tma_tensor = cpasync.make_tiled_tma_atom(
+        return cpasync.make_tiled_tma_atom(
             op,
-            cute.logical_divide(tensor, (None, None, num_elems)),
+            cute.logical_divide(tensor, (None, None, None, num_elems)),
             slayout,
-            cta_tiler=(1, self.V_dim, self.K_dim),
+            cta_tiler=(1, 1, self.V_dim, self.K_dim),
         )
-        return atom, tma_tensor, slayout
 
     @cute.jit
     def __call__(
@@ -111,35 +115,35 @@ class Sm100ChunkOKernel:
         block = (self.num_warps * 32, 1, 1)
         tma_g2s = cpasync.CopyBulkTensorTileG2SOp()
         tma_s2g = cpasync.CopyBulkTensorTileS2GOp()
-        Q_args = self._make_bf16_tma_args(q, self.K_dim, tma_g2s, self.num_stages)
-        K_args = self._make_bf16_tma_args(k, self.K_dim, tma_g2s, self.num_stages)
-        V_args = self._make_bf16_tma_args(
+        Q_tma = self._make_bf16_tma_args(q, self.K_dim, tma_g2s, self.num_stages)
+        K_tma = self._make_bf16_tma_args(k, self.K_dim, tma_g2s, self.num_stages)
+        V_tma = self._make_bf16_tma_args(
             v_new_chunks, self.V_dim, tma_g2s, self.num_stages
         )
-        H_args = self._make_h_tma_args(h, tma_g2s, self.num_stages)
-        O_args = self._make_bf16_tma_args(o, self.V_dim, tma_s2g, 1)
+        H_tma = self._make_h_tma_args(h, tma_g2s, self.num_stages)
+        O_tma = self._make_bf16_tma_args(o, self.V_dim, tma_s2g, 1)
         self.kernel(
-            Q_args,
-            K_args,
-            V_args,
-            H_args,
-            O_args,
+            Q_tma,
+            K_tma,
+            V_tma,
+            H_tma,
+            O_tma,
             g_cu,
             o,
             cu_seqlens,
             chunk_indices,
             total_chunks,
             scale,
-        ).launch(grid=grid, block=block, stream=stream)
+        ).launch(grid=grid, block=block, min_blocks_per_mp=1, stream=stream)
 
     @cute.kernel
     def kernel(
         self,
-        Q_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
-        K_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
-        V_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
-        H_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
-        O_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
+        Q_tma: cpasync.TmaInfo,
+        K_tma: cpasync.TmaInfo,
+        V_tma: cpasync.TmaInfo,
+        H_tma: cpasync.TmaInfo,
+        O_tma: cpasync.TmaInfo,
         g_cu: cute.Tensor,
         o: cute.Tensor,
         cu_seqlens: cute.Tensor,
@@ -162,23 +166,17 @@ class Sm100ChunkOKernel:
         k_head_id = v_head_id // heads_per_qk
         num_global_chunks = total_chunks[0]
 
-        Q_tma_atom, tmaQ, sQ_layout = Q_args
-        K_tma_atom, tmaK, sK_layout = K_args
-        V_tma_atom, tmaV, sV_layout = V_args
-        H_tma_atom, tmaH, sH_layout = H_args
-        O_tma_atom, tmaO, sO_layout = O_args
-
         def allocate_tensor(smem, dtype, layout):
             return smem.allocate_tensor(
                 dtype, layout.outer, byte_alignment=128, swizzle=layout.inner
             )
 
         smem = cutlass.utils.SmemAllocator()
-        sQ = allocate_tensor(smem, BFloat16, sQ_layout)[None, 0, None, None]
-        sK = allocate_tensor(smem, BFloat16, sK_layout)[None, 0, None, None]
-        sV = allocate_tensor(smem, BFloat16, sV_layout)[None, 0, None, None]
-        sH = allocate_tensor(smem, BFloat16, sH_layout)[0, None, None, None]
-        sO = allocate_tensor(smem, BFloat16, sO_layout)[None, 0, None, 0]
+        sQ = allocate_tensor(smem, BFloat16, Q_tma.smem_layout)[None, 0, None, None]
+        sK = allocate_tensor(smem, BFloat16, K_tma.smem_layout)[None, 0, None, None]
+        sV = allocate_tensor(smem, BFloat16, V_tma.smem_layout)[None, 0, None, None]
+        sH = allocate_tensor(smem, BFloat16, H_tma.smem_layout)[0, 0, None, None, None]
+        sO = allocate_tensor(smem, BFloat16, O_tma.smem_layout)[None, 0, None, 0]
 
         s_g_cu = smem.allocate_array(Float32, BT)
         qk_full_mbar = smem.allocate_array(Int64, num_stages)
@@ -207,10 +205,10 @@ class Sm100ChunkOKernel:
                 cute.arch.mbarrier_init(epi_mbar, 128)
                 cute.arch.mbarrier_init_fence()
         elif warp_id == 9:
-            cpasync.prefetch_descriptor(Q_tma_atom)
-            cpasync.prefetch_descriptor(K_tma_atom)
-            cpasync.prefetch_descriptor(V_tma_atom)
-            cpasync.prefetch_descriptor(H_tma_atom)
+            cpasync.prefetch_descriptor(Q_tma.atom)
+            cpasync.prefetch_descriptor(K_tma.atom)
+            cpasync.prefetch_descriptor(V_tma.atom)
+            cpasync.prefetch_descriptor(H_tma.atom)
         cute.arch.sync_threads()
 
         if warp_id == 9:
@@ -225,12 +223,16 @@ class Sm100ChunkOKernel:
 
                 # copy Q and K
                 q_tile = cute.local_tile(
-                    cute.domain_offset((bos, 0), tmaQ[None, k_head_id, None]),
+                    cute.domain_offset(
+                        (bos, 0), Q_tma.tma_tensor[None, k_head_id, None]
+                    ),
                     tiler=(BT, K_dim),
                     coord=(chunk_id, 0),
                 )
                 k_tile = cute.local_tile(
-                    cute.domain_offset((bos, 0), tmaK[None, k_head_id, None]),
+                    cute.domain_offset(
+                        (bos, 0), K_tma.tma_tensor[None, k_head_id, None]
+                    ),
                     tiler=(BT, K_dim),
                     coord=(chunk_id, 0),
                 )
@@ -241,13 +243,13 @@ class Sm100ChunkOKernel:
                 with cute.arch.elect_one():
                     STAGE_SIZE = BT * (K_dim + K_dim) * 2
                     cute.arch.mbarrier_arrive_and_expect_tx(mbar, STAGE_SIZE)
-                simple_tma_copy(Q_tma_atom, q_tile, sQ[None, None, stage_id], mbar)
-                simple_tma_copy(K_tma_atom, k_tile, sK[None, None, stage_id], mbar)
+                simple_tma_copy(Q_tma.atom, q_tile, sQ[None, None, stage_id], mbar)
+                simple_tma_copy(K_tma.atom, k_tile, sK[None, None, stage_id], mbar)
 
                 # copy H and V
-                gH = tmaH[global_chunk_id * self.Hv + v_head_id, None, None]
+                gH = H_tma.tma_tensor[global_chunk_id, v_head_id, None, None]
                 gV = cute.local_tile(
-                    tmaV[None, v_head_id, None],
+                    V_tma.tma_tensor[None, v_head_id, None],
                     tiler=(BT, V_dim),
                     coord=(global_chunk_id, 0),
                 )
@@ -262,10 +264,10 @@ class Sm100ChunkOKernel:
                         mbar, H_STAGE_SIZE + V_STAGE_SIZE
                     )
                 simple_tma_copy(
-                    H_tma_atom, gH, sH[None, None, stage_id], mbar, EVICT_FIRST
+                    H_tma.atom, gH, sH[None, None, stage_id], mbar, EVICT_FIRST
                 )
                 simple_tma_copy(
-                    V_tma_atom, gV, sV[None, None, stage_id], mbar, EVICT_FIRST
+                    V_tma.atom, gV, sV[None, None, stage_id], mbar, EVICT_FIRST
                 )
 
                 stage_id = (stage_id + 1) % num_stages
@@ -302,40 +304,37 @@ class Sm100ChunkOKernel:
                 cute.arch.mbarrier_wait(qk_full_mbar + stage_id, tma_parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(K_dim // BT):
-                        for j in cutlass.range_constexpr(BT // 16):
-                            qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            _tcgen05.mma_f16(
-                                qk_tmem, qdesc, kdesc, qk_idesc, (i > 0) or (j > 0)
-                            )
-                    _tcgen05.commit(qk_mbar)
+                for i in cutlass.range_constexpr(K_dim // 64):
+                    for j in cutlass.range_constexpr(64 // 16):
+                        qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        _tcgen05.mma_f16(
+                            qk_tmem, qdesc, kdesc, qk_idesc, (i > 0) or (j > 0)
+                        )
+                _tcgen05.commit(qk_mbar)
 
                 ##### 2nd MMA: Q @ H.T #####
                 cute.arch.mbarrier_wait(hv_full_mbar + stage_id, tma_parity)
                 _tcgen05.fence_after_thread_sync()
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(K_dim // BT):
-                        for j in cutlass.range_constexpr(BT // 16):
-                            qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            hdesc = hdesc_base | ((i * V_dim * 128 + j * 32) >> 4)
-                            _tcgen05.mma_f16(
-                                qh_tmem, qdesc, hdesc, qh_idesc, (i > 0) or (j > 0)
-                            )
-                    _tcgen05.commit(qk_empty_mbar + stage_id)
+                for i in cutlass.range_constexpr(K_dim // 64):
+                    for j in cutlass.range_constexpr(64 // 16):
+                        qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        hdesc = hdesc_base | ((i * V_dim * 128 + j * 32) >> 4)
+                        _tcgen05.mma_f16(
+                            qh_tmem, qdesc, hdesc, qh_idesc, (i > 0) or (j > 0)
+                        )
+                _tcgen05.commit(qk_empty_mbar + stage_id)
 
                 ##### 3rd MMA: P @ V #####
                 # stalled by mask(QK)
                 cute.arch.mbarrier_wait(mask_mbar, mask_parity)
                 _tcgen05.fence_after_thread_sync()
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(BT // 16):
-                        vdesc = vdesc_base | ((i * 16 * 128) >> 4)
-                        _tcgen05.mma_ts_f16(
-                            out_tmem, p_tmem + i * 8, vdesc, pv_idesc, i > 0
-                        )
-                    _tcgen05.commit(pv_mma_mbar + stage_id)
+                for i in cutlass.range_constexpr(BT // 16):
+                    vdesc = vdesc_base | ((i * 16 * 128) >> 4)
+                    _tcgen05.mma_ts_f16(
+                        out_tmem, p_tmem + i * 8, vdesc, pv_idesc, i > 0
+                    )
+                _tcgen05.commit(pv_mma_mbar + stage_id)
 
                 stage_id = (stage_id + 1) % num_stages
                 if stage_id == 0:
@@ -499,11 +498,13 @@ class Sm100ChunkOKernel:
                     fence_before_tma_store()
                     if warp_id == 3:
                         gO = cute.local_tile(
-                            cute.domain_offset((bos, 0), tmaO[None, v_head_id, None]),
+                            cute.domain_offset(
+                                (bos, 0), O_tma.tma_tensor[None, v_head_id, None]
+                            ),
                             tiler=(BT, V_dim),
                             coord=(chunk_id, 0),
                         )
-                        simple_tma_copy(O_tma_atom, sO, gO)
+                        simple_tma_copy(O_tma.atom, sO, gO)
                         with cute.arch.elect_one():
                             cute.arch.cp_async_bulk_commit_group()
 
@@ -559,13 +560,14 @@ class Sm100ChunkOKernel:
         total_t = cute.sym_int()
         pad_t = cute.sym_int()
         total_chunks_n = cute.sym_int()
-        h_outer_n = cute.sym_int()
         cu_entries = cute.sym_int()
 
         q = make_fake_tensor(BFloat16, (total_t, H, K_dim), divisibility=16)
         k = make_fake_tensor(BFloat16, (total_t, H, K_dim), divisibility=16)
         v_new = make_fake_tensor(BFloat16, (pad_t, Hv, V_dim), divisibility=16)
-        h_flat = make_fake_tensor(BFloat16, (h_outer_n, V_dim, K_dim), divisibility=16)
+        h = make_fake_tensor(
+            BFloat16, (total_chunks_n, Hv, V_dim, K_dim), divisibility=16
+        )
         g_cu = make_fake_tensor(Float32, (total_t, Hv), divisibility=4)
         o = make_fake_tensor(BFloat16, (total_t, Hv, V_dim), divisibility=16)
         cu_seqlens = make_fake_tensor(Int32, (cu_entries,), divisibility=1)
@@ -586,7 +588,7 @@ class Sm100ChunkOKernel:
             q,
             k,
             v_new,
-            h_flat,
+            h,
             g_cu,
             o,
             cu_seqlens,
@@ -602,7 +604,7 @@ class Sm100ChunkOKernel:
 def o_cutedsl(
     q: torch.Tensor,
     k: torch.Tensor,
-    v_new_chunks: torch.Tensor,
+    v_new: torch.Tensor,
     h: torch.Tensor,
     g_cu: torch.Tensor,
     o: torch.Tensor,
@@ -618,8 +620,8 @@ def o_cutedsl(
     Sm100ChunkOKernel.compile(H, Hv, K_dim, V_dim)(
         q,
         k,
-        v_new_chunks.view(-1, Hv, V_dim),
-        h.view(-1, V_dim, K_dim),
+        v_new,
+        h,
         g_cu,
         o,
         cu_seqlens,
