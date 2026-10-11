@@ -29,6 +29,7 @@ from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 
 from .media import (
@@ -79,8 +80,8 @@ def state_text(state: Any) -> str:
 
 
 class ReadStrategy(ABC):
-    #: Whether reads need the logprobs of label tokens.
-    needs_logprobs: ClassVar[bool] = True
+    #: The engine task reads run as.
+    task: ClassVar[SupportedTask] = "generate"
     #: The modalities a request may attach media of.
     modalities: ClassVar[frozenset[str]] = frozenset()
 
@@ -374,7 +375,7 @@ class JointSchemaStrategy(ReadStrategy):
     options are known. The spans count from the end of the prompt, so they
     hold after the media placeholders, which come before the state, expand."""
 
-    needs_logprobs = False
+    task = "token_classify"
     modalities = frozenset({"image", "audio", "video"})
 
     SYSTEM_PROMPT = (
@@ -669,7 +670,9 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
 LOGPROBS_MODES = frozenset({"raw_logprobs", "processed_logprobs"})
 
 
-def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
+def select_read_strategy(
+    model_config: ModelConfig, supported_tasks: Sequence[SupportedTask]
+) -> type[ReadStrategy]:
     """Raise ValueError when the model cannot serve structured decisions."""
     strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
@@ -678,7 +681,12 @@ def select_read_strategy(model_config: ModelConfig) -> type[ReadStrategy]:
             f"{model_config.architecture}. Supported architectures: "
             f"{sorted(READ_STRATEGIES)}"
         )
-    if strategy.needs_logprobs and model_config.logprobs_mode not in LOGPROBS_MODES:
+    if strategy.task not in supported_tasks:
+        raise ValueError(
+            f"Structured decisions on {model_config.architecture} need the "
+            f"{strategy.task} task"
+        )
+    if strategy.task == "generate" and model_config.logprobs_mode not in LOGPROBS_MODES:
         raise ValueError(
             "Structured decisions need --logprobs-mode raw_logprobs or "
             f"processed_logprobs, not {model_config.logprobs_mode}"

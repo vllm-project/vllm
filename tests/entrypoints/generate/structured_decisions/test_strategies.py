@@ -68,20 +68,26 @@ def model(architecture: str, logprobs_mode: str = "raw_logprobs") -> Any:
 
 
 def test_strategy_selection():
-    qwen = "Qwen3ForCausalLM"
-    assert select_read_strategy(model(qwen)) is NextTokenStrategy
-    assert select_read_strategy(model(qwen, "processed_logprobs")) is NextTokenStrategy
+    qwen, generate = "Qwen3ForCausalLM", ("generate",)
+    assert select_read_strategy(model(qwen), generate) is NextTokenStrategy
     assert (
-        select_read_strategy(model("DiffusionGemmaForBlockDiffusion"))
+        select_read_strategy(model(qwen, "processed_logprobs"), generate)
+        is NextTokenStrategy
+    )
+    assert (
+        select_read_strategy(model("DiffusionGemmaForBlockDiffusion"), generate)
         is DiffusionGemmaCanvasStrategy
     )
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
-        select_read_strategy(model("LlamaForCausalLM"))
+        select_read_strategy(model("LlamaForCausalLM"), generate)
     with pytest.raises(ValueError, match="not raw_logits"):
-        select_read_strategy(model(qwen, "raw_logits"))
+        select_read_strategy(model(qwen, "raw_logits"), generate)
+    # A generative architecture served as a pooling model has no read strategy.
+    with pytest.raises(ValueError, match="need the generate task"):
+        select_read_strategy(model(qwen), ("embed",))
     # Clef-Omni scores options with its head, so it reads no logprobs.
     clef = model("ClefOmniForJointSchema", "raw_logits")
-    assert select_read_strategy(clef) is JointSchemaStrategy
+    assert select_read_strategy(clef, ("token_classify",)) is JointSchemaStrategy
 
 
 def test_route_is_registered_by_default():

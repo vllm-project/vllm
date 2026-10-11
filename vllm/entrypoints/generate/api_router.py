@@ -53,12 +53,6 @@ def register_generate_api_routers(app: FastAPI):
 
     register_generative_scoring_api_router(app)
 
-    from .structured_decisions.api_router import (
-        register_structured_decisions_api_router,
-    )
-
-    register_structured_decisions_api_router(app)
-
 
 async def init_generate_state(
     engine_client: "EngineClient",
@@ -227,20 +221,4 @@ async def init_generate_state(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
-    )
-
-    from .structured_decisions.serving import init_structured_decisions
-
-    state.serving_structured_decisions = (
-        init_structured_decisions(
-            engine_client,
-            state.openai_serving_models,
-            state.online_renderer,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            default_chat_template_kwargs=default_chat_template_kwargs,
-            request_logger=request_logger,
-        )
-        if "generate" in supported_tasks
-        else None
     )

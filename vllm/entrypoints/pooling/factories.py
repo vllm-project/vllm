@@ -35,15 +35,6 @@ else:
 logger = init_logger(__name__)
 
 
-def has_structured_decisions(model_config: ModelConfig) -> bool:
-    """Whether the pooling model serves /v1/systemone."""
-    from vllm.entrypoints.generate.structured_decisions.strategies import (
-        READ_STRATEGIES,
-    )
-
-    return model_config.architecture in READ_STRATEGIES
-
-
 def init_pooling_io_processors(
     supported_tasks: tuple[SupportedTask, ...],
     vllm_config: VllmConfig,
@@ -148,13 +139,6 @@ def register_pooling_api_routers(
 
         app.include_router(score_router)
 
-    if has_structured_decisions(model_config):
-        from vllm.entrypoints.generate.structured_decisions.api_router import (
-            register_structured_decisions_api_router,
-        )
-
-        register_structured_decisions_api_router(app)
-
 
 def init_pooling_state(
     engine_client: "EngineClient",
@@ -232,24 +216,6 @@ def init_pooling_state(
         if enable_scoring_api(supported_tasks, model_config)
         else None
     )
-
-    if has_structured_decisions(model_config):
-        from vllm.entrypoints.generate.structured_decisions.serving import (
-            init_structured_decisions,
-        )
-        from vllm.entrypoints.launchers.cli_args import (
-            resolve_default_chat_template_kwargs,
-        )
-
-        state.serving_structured_decisions = init_structured_decisions(
-            engine_client,
-            state.openai_serving_models,
-            state.online_renderer,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            default_chat_template_kwargs=resolve_default_chat_template_kwargs(args),
-            request_logger=request_logger,
-        )
 
 
 def get_pooling_invocation_types(

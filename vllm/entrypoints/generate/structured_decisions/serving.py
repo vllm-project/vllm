@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
@@ -19,11 +18,7 @@ from .protocol import (
     StructuredDecisionResponse,
 )
 from .question_types import Question, StructuredDecisionError, build_question
-from .strategies import DecisionLimits, ReadContext, ReadStrategy, select_read_strategy
-
-if TYPE_CHECKING:
-    from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
-    from vllm.renderers.online_renderer import OnlineRenderer
+from .strategies import DecisionLimits, ReadStrategy
 
 logger = init_logger(__name__)
 
@@ -141,32 +136,3 @@ class ServingStructuredDecisions(BaseServing):
             ),
             diagnostics=diagnostics,
         )
-
-
-def init_structured_decisions(
-    engine_client: EngineClient,
-    models: OpenAIServingModels,
-    online_renderer: "OnlineRenderer",
-    *,
-    chat_template: str | None,
-    chat_template_content_format: "ChatTemplateContentFormatOption",
-    default_chat_template_kwargs: dict[str, Any],
-    request_logger: RequestLogger | None,
-) -> ServingStructuredDecisions | None:
-    """The /v1/systemone handler, or None if the model has no read strategy."""
-    try:
-        strategy_cls = select_read_strategy(engine_client.model_config)
-        strategy = strategy_cls(
-            ReadContext(
-                engine_client=engine_client,
-                online_renderer=online_renderer,
-                chat_template=chat_template,
-                chat_template_content_format=chat_template_content_format,
-                default_chat_template_kwargs=default_chat_template_kwargs,
-            )
-        )
-    except ValueError as e:
-        # Info, since every model without a read strategy lands here.
-        logger.info("/v1/systemone is disabled: %s", e)
-        return None
-    return ServingStructuredDecisions(models, strategy, request_logger=request_logger)
