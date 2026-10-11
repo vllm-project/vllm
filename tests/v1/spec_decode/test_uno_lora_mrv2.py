@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU contracts for Uno's draft LoRA mapping through the public LoRA API."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID, UnoSpeculator
 from vllm.v1.worker.gpu.spec_decode.uno_lora import (
     base_prompt_mapping,
@@ -42,7 +41,7 @@ class _RecordingWorkerLoRAManager:
 def _bound_proposer(k: int = 4):
     proposer = object.__new__(UnoSpeculator)
     proposer.k = k
-    proposer.lora_request = SimpleNamespace(lora_int_id=UNO_LORA_ID)
+    proposer.lora_request = LoRARequest("uno", UNO_LORA_ID, "/uno/adapter")
     proposer._lora_hook = None
     manager = _RecordingWorkerLoRAManager()
     proposer.set_lora_manager(manager)
