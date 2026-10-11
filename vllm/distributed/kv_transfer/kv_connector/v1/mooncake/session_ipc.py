@@ -82,6 +82,10 @@ class HelperReady(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     side_channel_port: int = 0
 
 
+class HelperHeartbeat(msgspec.Struct, tag=True):  # type: ignore[call-arg]
+    pass
+
+
 class EngineStop(msgspec.Struct, tag=True):  # type: ignore[call-arg]
     pass
 
@@ -210,5 +214,11 @@ class JobDone(msgspec.Struct, tag=True):  # type: ignore[call-arg]
 HelperJob = OpenProducerJob | EncodeChunkJob | DecodeChunkJob | DrainSlotsJob
 EngineToHelper = ProducerMetadata | ConsumerMetadata | JobDone | EngineStop
 HelperToEngine = (
-    HelperJob | HelperReady | HelperFailed | Stopped | FinalEvent | RecvDone
+    HelperJob
+    | HelperReady
+    | HelperHeartbeat
+    | HelperFailed
+    | Stopped
+    | FinalEvent
+    | RecvDone
 )

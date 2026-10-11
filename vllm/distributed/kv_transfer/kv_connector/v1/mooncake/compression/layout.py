@@ -155,6 +155,18 @@ def build_compression_layout(
     for layer_name, spec in fa_specs:
         if isinstance(spec, MLAAttentionSpec):
             raise ValueError("Mooncake compression does not support MLA KV caches")
+        if (
+            spec.tokens_per_state != 1
+            or spec.num_head_slots is not None
+            or spec.state_content_bytes is not None
+            or spec.num_heads != spec.num_kv_heads
+            or spec.state_content_size_bytes
+            != (spec.head_size + spec.head_size_v) * spec.dtype.itemsize
+        ):
+            raise ValueError(
+                "Mooncake compression requires dense K/V heads and one state "
+                f"per token; layer {layer_name} has an unsupported cache geometry."
+            )
         if config.uses_transformer and any(
             size < 1 or size & (size - 1) for size in (spec.head_size, spec.head_size_v)
         ):

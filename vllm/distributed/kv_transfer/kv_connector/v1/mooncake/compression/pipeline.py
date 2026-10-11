@@ -94,6 +94,25 @@ class CompressionPipeline:
         return meta
 
     def bind_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        value_sizes = {part.layer_name: part.head_size for part in self.layout.parts(1)}
+        for part in self.layout.parts(0):
+            cache = kv_caches[part.layer_name]
+            expected = (
+                part.num_heads,
+                part.block_size // self.blocks_per_logical,
+                part.head_size + value_sizes[part.layer_name],
+            )
+            if (
+                cache.dtype is not part.dtype
+                or cache.ndim != 4
+                or tuple(cache.shape[1:]) != expected
+                or cache.stride(-1) != 1
+            ):
+                raise ValueError(
+                    f"Unsupported compression cache for {part.layer_name}: "
+                    f"expected [blocks, {expected}] with dense BF16 content, "
+                    f"got {tuple(cache.shape)} / {cache.dtype}."
+                )
         if (
             cpp_backend.enabled()
             and "aggregate" not in self.stages
@@ -258,13 +277,12 @@ class CompressionPipeline:
         CUDA tensor in the request path.
         """
         if threading.current_thread() is threading.main_thread():
-            from humming.ops import hadamard_transform
+            from humming.ops import process_input
 
-            hadamard_transform(
-                inputs,
-                block_size,
-                scale=1.0,
-                outputs=outputs,
+            process_input(
+                inputs.reshape(-1, block_size),
+                hadamard_block_size=block_size,
+                outputs=outputs.reshape(-1, block_size),
             )
             return
 

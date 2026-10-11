@@ -6,3 +6,4 @@ nixl == 1.5.0
 # CUDA 12 build. On the CUDA 13 image install-kv-connectors.sh swaps this for
 # the mooncake-transfer-engine-cuda13 variant of the same version.
 mooncake-transfer-engine >= 0.3.12
+nvidia-nvcomp-cu13 == 5.3.0.16

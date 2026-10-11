@@ -3,8 +3,11 @@
 """Session completion, credit and cancellation contracts."""
 
 import asyncio
+import contextlib
 import json
+import os
 import queue
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +18,7 @@ import zmq.asyncio
 from zmq.constants import SocketType
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import session_ipc as ipc
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import session_process
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.compression.protocol import (
     CompressionAbort,
     CompressionAbortAck,
@@ -516,7 +520,11 @@ async def test_late_job_completion_precedes_cuda_drain(make_service):
 
     service._to_engine = send
     with pytest.raises(asyncio.TimeoutError):
-        await service._submit(ipc.DrainSlotsJob(job_id=100, slot_ids=[0]))
+        await service._submit(
+            ipc.EncodeChunkJob(
+                100, "t", "d", "n", 0, 0, [[0]], {0: 16}, "peer", 1, 2, 3
+            )
+        )
     task = asyncio.create_task(service._drain_slots([0]))
     await asyncio.sleep(0)
     assert sent == [100]
@@ -525,6 +533,74 @@ async def test_late_job_completion_precedes_cuda_drain(make_service):
     await task
     assert drain_sent.is_set()
     assert not service._pending_jobs
+
+
+@pytest.mark.asyncio
+async def test_slot_drain_does_not_wait_for_other_request(make_service):
+    service = make_service()
+    service._loop = asyncio.get_running_loop()
+    other = service._loop.create_future()
+    job = ipc.EncodeChunkJob(100, "other", "d", "n", 0, 1, [[0]], {}, "peer", 1, 2, 3)
+    service._pending_jobs[100] = job, other
+    service._to_engine = lambda drain: service._on_engine_message(
+        ipc.JobDone(drain.job_id)
+    )
+    await service._drain_slots([0])
+    assert not other.done()
+    assert service._pending_jobs[100] == (job, other)
+
+
+@pytest.mark.parametrize("failure", ["helper_freeze", "stuck_job"])
+def test_helper_fault_has_bounded_shutdown_without_finishing_blocks(
+    monkeypatch, failure
+):
+    monkeypatch.setattr(session_process, "_HEARTBEAT_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(session_process, "_SHUTDOWN_TIMEOUT_S", 0.2)
+    process = SessionProcess(
+        lambda job: ipc.JobDone(job.job_id),
+        _make_init(False, True),
+        queue.SimpleQueue(),
+        queue.SimpleQueue(),
+        queue.SimpleQueue(),
+        _Stats(),
+        -1,
+    )
+    release = threading.Event()
+    entered = threading.Event()
+
+    def stuck_job():
+        entered.set()
+        release.wait()
+
+    try:
+        process.start()
+        if failure == "helper_freeze":
+            os.kill(process._process.pid, signal.SIGSTOP)
+            deadline = time.monotonic() + 3
+            while not process._failed.is_set() and time.monotonic() < deadline:
+                try:
+                    process.check_health()
+                except RuntimeError:
+                    break
+                time.sleep(0.01)
+            assert process._failed.is_set()
+        else:
+            process._jobs.add(process._pool.submit(stuck_job))
+            assert entered.wait(2)
+        start = time.monotonic()
+        with pytest.raises(RuntimeError, match="worker must stop"):
+            process.shutdown()
+        assert time.monotonic() - start < 3
+        assert not process._process.is_alive()
+        assert process.finished_sending.empty()
+        assert process.finished_recving.empty()
+        assert process.invalid_block_ids.empty()
+    finally:
+        release.set()
+        if process._process.is_alive():
+            os.kill(process._process.pid, signal.SIGCONT)
+        with contextlib.suppress(RuntimeError):
+            process.shutdown()
 
 
 @pytest.mark.asyncio

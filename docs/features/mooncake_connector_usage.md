@@ -100,7 +100,7 @@ Both P and D must run the compression-enabled connector and the same fixed
 profile. Disabled compression uses the native Mooncake path and needs no
 compression dependencies.
 
-The current implementation supports BF16 FullAttention KV caches, including
+The current implementation supports dense BF16 FullAttention KV caches, including
 FullAttention regions of hybrid models. Other regions use raw transfer.
 Compressed P/D requires identical TP and PP sizes and a common logical
 block size across FullAttention groups. `kv_both`, MLA, and FP16/FP8
@@ -108,16 +108,24 @@ compressed KV are unsupported and fail explicitly. No adaptive selection or
 Mooncake Store compression is implemented here.
 The compression pipeline requires the connector's `LBHNC` (`HND`) layout;
 `LBNHC` (`NHD`) is unsupported and rejected before pipeline initialization.
+Backend-specific K/V packing (such as B12x planes) and pooled token/state
+layouts are rejected. Padding and strided layer views of dense K/V are supported.
 
-Install only the dependencies used by the chosen stages. The Python Hadamard
-stage uses `humming-kernels`; ANS uses NVIDIA's nvCOMP Python bindings. A tested
-RTX 5090 environment used PyTorch 2.13.0+cu132, `humming-kernels==0.1.12`,
-`nvidia-nvcomp-cu12==5.3.0.16`, and
-`mooncake-transfer-engine-cuda13==0.3.13.post1`:
+Keep vLLM's installed `humming-kernels` version and CUDA extra; the Python
+Hadamard stage uses this existing dependency. ANS additionally needs NVIDIA's
+nvCOMP Python bindings. Install the wheel matching the CUDA major version:
 
 ```bash
-uv pip install humming-kernels==0.1.12 nvidia-nvcomp-cu12==5.3.0.16
+# CUDA 13 (use nvidia-nvcomp-cu12 for CUDA 12)
+uv pip install nvidia-nvcomp-cu13==5.3.0.16
 ```
+
+nvCOMP 5.3 exposes only a process-global allocator. While compression is active,
+KVServe owns that callback: its streams use reserved workspace, and ordinary
+external codecs on other streams use separate PyTorch allocations. Installing
+another custom nvCOMP allocator before or during this lifetime is unsupported;
+the SDK cannot retrieve or restore it. The last manager resets the SDK allocator
+to its default. External codec allocations are not part of KVServe's budget.
 
 The fixed-profile configuration below must be used on both workers, retaining
 `kv_role=kv_producer` on P and `kv_role=kv_consumer` on D:
@@ -152,6 +160,13 @@ The optional CUDA backend (`KVSERVE_COMPRESSION_BACKEND=cpp`) supports one
 FullAttention group and channel/token axes. It needs a matching CUDA toolkit,
 C++ compiler, and Ninja, and compiles during cache binding before requests.
 It preserves the wire profile of compatible Python configurations.
+Its startup probe does not invoke the Python Hadamard stage.
+
+The helper emits a heartbeat; a stalled helper fails the worker rather than
+publishing completed blocks. Shutdown waits for a bounded interval and retains
+registered buffers if jobs cannot quiesce; vLLM's executor terminates that worker.
+Native RDMA submissions are unchanged. TCP submissions use at most 1,024
+descriptors and a 64 MiB aggregate target; a larger individual region stays intact.
 
 The supported stage order is `transformer`, `quantizer`, `codec`; stages may
 be omitted. ANS is lossless coding, while quantization is lossy. Setting

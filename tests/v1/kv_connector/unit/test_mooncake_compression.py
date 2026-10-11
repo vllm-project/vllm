@@ -3,6 +3,8 @@
 """Configuration, cache-layout and memory-budget contracts for compression."""
 
 import os
+from dataclasses import replace
+from fractions import Fraction
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -266,7 +268,12 @@ def test_memory_budget_probes_only_enabled_dependencies(monkeypatch, stages):
     assert plan is not None
     assert plan.reserved_bytes >= plan.metadata_bytes + 2 * plan.layout.arena_bytes
     if "codec" in stages:
-        assert calls == [(plan.layout.packed_bytes_by_part, "transformer" in stages)]
+        assert calls == [
+            (
+                plan.layout.packed_bytes_by_part,
+                "transformer" in stages and not cpp_backend.enabled(),
+            )
+        ]
         assert plan.codec_workspace_bytes == 2048
         assert plan.retained_driver_bytes == 4096
         assert plan.layout.arena_bytes >= 8192
@@ -401,6 +408,23 @@ def test_unsupported_cache_dtype_fails_before_allocation(dtype):
         build_compression_layout({"model.layers.0.self_attn": spec}, config, {}, 1)
 
 
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        {"tokens_per_state": Fraction(1, 2)},
+        {"num_head_slots": 1, "state_content_bytes": 64},
+        {"num_head_slots": 2},
+        {"state_content_bytes": 64},
+    ],
+)
+def test_packed_or_pooled_bf16_cache_rejected_before_allocation(geometry):
+    spec = replace(_fa_spec(), **geometry)
+    with pytest.raises(ValueError, match="unsupported cache geometry"):
+        build_compression_layout(
+            {"model.layers.0.self_attn": spec}, MooncakeCompressionConfig(), {}, 1
+        )
+
+
 def test_unknown_explicit_backend_does_not_silently_use_python(monkeypatch):
     monkeypatch.setenv("KVSERVE_COMPRESSION_BACKEND", "cpo")
     with pytest.raises(ValueError, match="Unknown KVSERVE_COMPRESSION_BACKEND"):
@@ -462,13 +486,19 @@ def test_cpp_cache_binding_loads_backend_and_keeps_asymmetric_kv_views(monkeypat
             kv_part=i,
             head_size=size,
             dtype=torch.bfloat16,
+            num_heads=2,
+            block_size=1,
             sections=(),
         )
         for i, size in enumerate((8, 16))
     )
     device = torch.device("cuda", 3)
     pipeline = compression_pipeline.CompressionPipeline(
-        SimpleNamespace(layer_parts=parts, fa_group_indices={0}),
+        SimpleNamespace(
+            layer_parts=parts,
+            fa_group_indices={0},
+            parts=lambda kv: tuple(part for part in parts if part.kv_part == kv),
+        ),
         "LBHNC",
         1,
         [],
@@ -478,13 +508,15 @@ def test_cpp_cache_binding_loads_backend_and_keeps_asymmetric_kv_views(monkeypat
         {},
         stages=("quantizer",),
     )
-    cache = torch.arange(96, dtype=torch.bfloat16).reshape(2, 2, 24)
+    cache = torch.arange(96, dtype=torch.bfloat16).reshape(2, 2, 1, 24)
     pipeline.bind_kv_caches({"layer": cache})
     load.assert_called_once_with(device)
     for part, expected in zip(parts, (cache[..., :8], cache[..., 8:])):
         view = pipeline._cache_part(part)
         assert view.data_ptr() == expected.data_ptr()
         torch.testing.assert_close(view, expected)
+    with pytest.raises(ValueError, match="Unsupported compression cache"):
+        pipeline.bind_kv_caches({"layer": cache.squeeze(2)})
 
     # Cache rebinding must discard metadata containing old cache pointers.
     build = Mock(side_effect=[torch.tensor([1]), torch.tensor([2])])

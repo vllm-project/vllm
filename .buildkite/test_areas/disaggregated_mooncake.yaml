@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (B200) Distributed MooncakeConnector PD accuracy"
   key: distributed-mooncakeconnector-pd-accuracy-4-gpus
-  timeout_in_minutes: 10
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   # Runs on b200-k8s because it is the only NVIDIA pool that can carry mooncake
   # transfers: its pods are the only ones granted IPC_LOCK, which RDMA needs to
@@ -19,6 +19,7 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
+    - MOONCAKE_COMPRESSION_CONFIG='{"enable-compression-pipeline":true,"pipeline":["codec"],"logical_blocks_per_chunk":8}' PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=1 bash v1/kv_connector/mooncake_integration/run_accuracy_test.sh --attention-backend FLASH_ATTN
   mirror:
     amd:
       label: ":amd: (MI355) Distributed MooncakeConnector HIP PD accuracy"
