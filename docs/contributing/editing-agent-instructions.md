@@ -44,6 +44,19 @@ cross-file context, and fixes for repeated mistakes.
 Each entry should be short, specific, and actionable — e.g., which files to
 touch, what order to change them in, and which tests to run.
 
+## Skills
+
+Skills live in `.agents/skills/<name>/` and follow the
+[Agent Skills specification](https://agentskills.io/specification).
+
+- Claude Code does not read `.agents/`, so symlink each skill:
+  `ln -s ../../.agents/skills/<name> .claude/skills/<name>`.
+- Frontmatter: `name` matches the directory. `description` says what the
+  skill does and when to use it; quote it if it contains a colon.
+- Keep `SKILL.md` under 500 lines and move detail into files it links to.
+- `tools/pre_commit/check_agent_files.py` runs in pre-commit to check the
+  skill and `AGENTS.md` rules
+
 ## Keeping Docs Lean
 
 - Every addition should trigger review of surrounding content for stale or redundant items.

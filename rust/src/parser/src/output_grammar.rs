@@ -5,6 +5,7 @@
 
 use std::{fmt, str::FromStr};
 
+use serde::Serialize;
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagOptions};
@@ -16,11 +17,16 @@ use xgrammar_structural_tag::{
 
 use crate::tool::Tool;
 
+pub mod arguments;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_utils;
+
 /// Result alias for output grammar construction.
 pub type Result<T> = std::result::Result<T, OutputGrammarError>;
 
 /// How much of the generated stream an output grammar covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GrammarCoverage {
     /// The grammar covers reasoning and advances from the first generated token.
     FromTokenZero,
@@ -29,7 +35,7 @@ pub enum GrammarCoverage {
 }
 
 /// One parser-built output grammar and its generated-stream coverage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BuiltOutputGrammar {
     /// Typed XGrammar structural-tag format.
     pub format: Format,
@@ -249,6 +255,7 @@ mod tests {
                 "required": ["query"]
             }),
             strict,
+            defer_loading: None,
         }
     }
 

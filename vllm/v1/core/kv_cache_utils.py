@@ -9,8 +9,8 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
-from functools import partial
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
+from functools import partial, reduce
+from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -21,7 +21,6 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.hisparse.layout import (
-    get_hisparse_gpu_memory_usage,
     get_hisparse_host_pool_bytes,
     get_hisparse_kv_cache_config,
     get_hisparse_kv_cache_groups,
@@ -33,7 +32,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -54,6 +52,7 @@ from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -304,19 +303,17 @@ class FreeKVCacheBlockQueue:
             The first free block.
 
         """
-        if (
-            self.fake_free_list_head.next_free_block is self.fake_free_list_tail
-            or self.fake_free_list_head.next_free_block is None
-        ):
+        head = self.fake_free_list_head
+        first_block = head.next_free_block
+        if first_block is self.fake_free_list_tail or first_block is None:
             assert self.num_free_blocks == 0, (
                 f"num_free_blocks ({self.num_free_blocks}) is out of sync "
                 "with the free list."
             )
             raise ValueError("No free blocks available")
 
-        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
-
-        if first_block.next_free_block is None:
+        next_block = first_block.next_free_block
+        if next_block is None:
             # This should not happen if the block is from the free list.
             # It indicates a bug in the caller's logic.
             raise RuntimeError(
@@ -326,8 +323,8 @@ class FreeKVCacheBlockQueue:
 
         # Connect fake_head and the next block of first_block (i.e. second block
         # or fake tail).
-        self.fake_free_list_head.next_free_block = first_block.next_free_block
-        first_block.next_free_block.prev_free_block = self.fake_free_list_head
+        head.next_free_block = next_block
+        next_block.prev_free_block = head
 
         # Remove the block from the linked list.
         first_block.prev_free_block = first_block.next_free_block = None
@@ -351,6 +348,16 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks -= n
 
         curr_block = self.fake_free_list_head.next_free_block
+        if n == 1:
+            assert curr_block is not None
+            next_block = curr_block.next_free_block
+            curr_block.prev_free_block = None
+            curr_block.next_free_block = None
+            if next_block is not None:
+                self.fake_free_list_head.next_free_block = next_block
+                next_block.prev_free_block = self.fake_free_list_head
+            return [curr_block]
+
         # Pop n blocks from the head of the list
         ret = []
         for _ in range(n):
@@ -376,15 +383,17 @@ class FreeKVCacheBlockQueue:
             block: The block to remove.
 
         """
-        if block.prev_free_block is None or block.next_free_block is None:
+        prev_block = block.prev_free_block
+        next_block = block.next_free_block
+        if prev_block is None or next_block is None:
             # This should not happen if the block is from the free list.
             # It indicates a bug in the caller's logic.
             raise RuntimeError(f"remove() called on an invalid block: {block}")
 
         # Link the previous block to the next block.
-        block.prev_free_block.next_free_block = block.next_free_block
+        prev_block.next_free_block = next_block
         # Link the next block to the previous block.
-        block.next_free_block.prev_free_block = block.prev_free_block
+        next_block.prev_free_block = prev_block
 
         # Remove the block from the linked list.
         block.prev_free_block = block.next_free_block = None
@@ -398,19 +407,19 @@ class FreeKVCacheBlockQueue:
             block: The block to append.
 
         """
-        if self.fake_free_list_tail.prev_free_block is None:
+        tail = self.fake_free_list_tail
+        last_block = tail.prev_free_block
+        if last_block is None:
             raise RuntimeError(
                 "prev_free_block of fake_free_list_tail should always exist"
             )
-        last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
-
         # Connect the new block after the last block.
         last_block.next_free_block = block
         block.prev_free_block = last_block
 
         # Connect the fake tail after the new block.
-        block.next_free_block = self.fake_free_list_tail
-        self.fake_free_list_tail.prev_free_block = block
+        block.next_free_block = tail
+        tail.prev_free_block = block
 
         self.num_free_blocks += 1
 
@@ -442,10 +451,11 @@ class FreeKVCacheBlockQueue:
             blocks: The blocks to append.
 
         """
-        if len(blocks) == 0:
+        if not blocks:
             return
 
-        last_block = self.fake_free_list_tail.prev_free_block
+        tail = self.fake_free_list_tail
+        last_block = tail.prev_free_block
         assert last_block is not None, (
             "prev_free_block of fake_free_list_tail should always exist"
         )
@@ -456,8 +466,8 @@ class FreeKVCacheBlockQueue:
             last_block = block
 
         # Connect the last block of <blocks> to the fake tail
-        last_block.next_free_block = self.fake_free_list_tail
-        self.fake_free_list_tail.prev_free_block = last_block
+        last_block.next_free_block = tail
+        tail.prev_free_block = last_block
 
         self.num_free_blocks += len(blocks)
 
@@ -502,8 +512,8 @@ def _gen_mm_extra_hash_keys(
 ) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
-    (mm_hash, start_offset) that indicate a mm input contained in the
-    block and its starting offset in the block tokens.
+    ("mm", mm_hash, start_offset) tuples that indicate a mm input contained
+    in the block and its starting offset in the block tokens.
 
     Args:
         request: The request object.
@@ -549,7 +559,7 @@ def _gen_mm_extra_hash_keys(
             # relative to the start of the block so prefix-cache keys stay
             # distinct when the same MM item appears at different positions
             # within otherwise-identical placeholder blocks.
-            extra_keys.append((mm_feature.identifier, offset - start_token_idx))
+            extra_keys.append(("mm", mm_feature.identifier, offset - start_token_idx))
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
@@ -565,25 +575,29 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
+
+    The adapter path is included so that re-pointing a LoRA name at a different
+    adapter does not reuse KV computed with the previous one.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA name of the request if it is a LoRA request. Return empty
-        list otherwise.
+        Return the LoRA name and path of the request if it is a LoRA request.
+        Return empty list otherwise.
 
     """
-    if not request.lora_request:
+    lora_request = request.lora_request
+    if not lora_request:
         return []
-    return [request.lora_request.lora_name]
+    return [("lora", lora_request.lora_name, lora_request.lora_path)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
     request: Request, start_token_idx: int, end_token_idx: int
-) -> list[bytes]:
+) -> list[tuple[str, bytes]]:
     """Generate extra keys related to prompt embeds for block hash computation.
 
     Args:
@@ -605,7 +619,7 @@ def _gen_prompt_embeds_extra_hash_keys(
         # Hash prompt embeds once per block and cache on request
         embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
         request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
-    return [embeds_hash]
+    return [("prompt_embeds", embeds_hash)]
 
 
 def generate_block_hash_extra_keys(
@@ -629,9 +643,11 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
+    lora_extra_keys = _gen_lora_extra_hash_keys(request)
+    cache_salt_keys: list[tuple[str, str]] = (
+        [("cache_salt", request.cache_salt)]
+        if (start_token_idx == 0 and request.cache_salt)
+        else []
     )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
@@ -645,6 +661,35 @@ def generate_block_hash_extra_keys(
         return None, new_start_mm_idx
 
     return tuple(extra_keys), new_start_mm_idx
+
+
+def to_event_extra_keys(
+    extra_keys: Iterable[tuple[Any, ...] | None] | None,
+) -> list[tuple[Any, ...] | None] | None:
+    """Convert block-hash extra keys to the untagged per-block list published
+    in KV events.
+
+    External KV event consumers parse the pre-tagging shapes: bare LoRA names
+    and cache salts, ``(mm_identifier, offset)`` pairs and bare prompt-embeds
+    digests. Events keep that format until consumers handle the tagged keys.
+
+    Args:
+        extra_keys: One entry per block, each as returned by
+            `generate_block_hash_extra_keys`, or None.
+
+    Returns:
+        One untagged entry per block, or None if there are no entries.
+
+    """
+    if not extra_keys:
+        return None
+    event_keys = [
+        None
+        if keys is None
+        else tuple(key[1:] if key[0] == "mm" else key[1] for key in keys)
+        for keys in extra_keys
+    ]
+    return event_keys or None
 
 
 def hash_block_tokens(
@@ -682,12 +727,7 @@ def hash_block_tokens(
 
 def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
     """Return the token span of a cache block under DCP."""
-    layer_specs = iter_layer_specs(spec)
-    if len(layer_specs) > 0 and all(
-        isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
-    ):
-        return spec.block_size * dcp_world_size
-    return spec.block_size
+    return spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
 
 
 def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCacheSpec:
@@ -707,26 +747,58 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
     return replace(spec, block_size=block_size)
 
 
-def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the DCP size that owns this group's block geometry.
+def partial_hash_hits_enabled(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    hash_block_size: int,
+    dcp_world_size: int = 1,
+    manager_classes: Sequence[type["SingleTypeKVCacheManager"]] | None = None,
+) -> bool:
+    """Whether aligned Mamba states support sub-block prefix-cache hits.
 
-    Full-attention KV (including MLA) is sharded across DCP ranks, so prefix
-    hashing and manager ``block_size`` use the process DCP size. Other specs
-    keep replicated per-rank state (Mamba, sliding window, chunked-local) and
-    must keep ``dcp_world_size=1`` even when the process runs with DCP > 1.
-
-    Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
-    ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
-    draft group would need a different spec, not this helper.
+    If ``manager_classes`` (one per group) is given, also require every other
+    prefix-cacheable group to support fine-grained lookups.
     """
-    if dcp_world_size <= 1:
-        return 1
-    inner = spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        inner = next(iter(spec.kv_cache_specs.values()))
-    if isinstance(inner, FullAttentionSpec):
-        return dcp_world_size
-    return 1
+    if not any(
+        isinstance(spec, MambaSpec)
+        and spec.mamba_cache_mode == "align"
+        and (
+            (dcp_world_size == 1 and spec.block_size > hash_block_size)
+            or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
+        )
+        for group in kv_cache_groups
+        for spec in iter_layer_specs(group.kv_cache_spec)
+    ):
+        return False
+    if manager_classes is None:
+        return True
+    unsupported_managers = {
+        manager_cls.__name__
+        for group, manager_cls in zip(kv_cache_groups, manager_classes)
+        if group.kv_cache_spec.prefix_cacheable
+        and not manager_cls.supports_fine_grained_hash_lookup
+        and resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_world_size)
+        != hash_block_size
+    }
+    if unsupported_managers:
+        logger.warning_once(
+            "Disabling fine-grained prefix-cache hits because these KV "
+            "cache managers require block-aligned lookups: %s.",
+            ", ".join(sorted(unsupported_managers)),
+        )
+        return False
+    return True
+
+
+def eagle_proof_margin(
+    block_size: int, hash_block_size: int, fine_grained_lookup: bool
+) -> int:
+    """Tokens an EAGLE group matches past a cache hit before dropping them.
+
+    Fine-grained lookups drop one hash unit; others drop one cache block.
+    """
+    if fine_grained_lookup and block_size > hash_block_size:
+        return hash_block_size
+    return block_size
 
 
 def resolve_kv_cache_block_sizes(
@@ -741,7 +813,9 @@ def resolve_kv_cache_block_sizes(
       group's effective block size. Attention groups are scaled by DCP;
       Mamba groups keep their full per-rank state and are not scaled.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
-      is computed. Single group: equals scheduler block size. Multiple groups:
+      is computed. Single group: equals scheduler block size, and any other
+      ``cache_config.prefix_match_unit`` is rejected while block hashing is
+      active. Multiple groups:
       ``cache_config.prefix_match_unit`` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
@@ -752,7 +826,23 @@ def resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
+        if groups and not groups[0].kv_cache_spec.dcp_sharded:
+            dcp = 1
         bs = cache_config.block_size * dcp
+        # Reject a prefix_match_unit that would otherwise be silently ignored.
+        if (
+            cache_config.prefix_match_unit not in (None, bs)
+            and len(groups) == 1
+            and (
+                cache_config.enable_prefix_caching
+                or vllm_config.kv_transfer_config is not None
+            )
+        ):
+            raise ValueError(
+                f"Invalid prefix_match_unit={cache_config.prefix_match_unit}; "
+                "with a single KV cache group, prefix-cache hits land on the "
+                f"block size ({bs}). Unset it or set it to {bs}."
+            )
         return bs, bs
 
     group_block_sizes = [
@@ -760,8 +850,8 @@ def resolve_kv_cache_block_sizes(
     ]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
-    logger.info("kv cache group sizes %s", group_block_sizes)
-    logger.info("kv lcm block sizes %s", scheduler_block_size)
+    logger.info_once("kv cache group sizes %s", tuple(group_block_sizes))
+    logger.info_once("kv lcm block sizes %s", scheduler_block_size)
 
     # Block hashes are only consumed by prefix caching and KV connectors
     # (P/D, offloading); when neither is active, keep hash_block_size equal
@@ -802,18 +892,10 @@ def resolve_kv_cache_block_sizes(
         and isinstance(spec.tokens_per_state, int)
         and spec.tokens_per_state > 1
     }
-    has_partial_mamba_group = any(
-        isinstance(spec, MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and (
-            (dcp == 1 and block_size > hash_block_size)
-            or (dcp > 1 and block_size >= hash_block_size)
-        )
-        for group, block_size in zip(groups, group_block_sizes)
-        for spec in iter_layer_specs(group.kv_cache_spec)
-    )
     cache_hit_alignment = (
-        hash_block_size if has_partial_mamba_group else scheduler_block_size
+        hash_block_size
+        if partial_hash_hits_enabled(groups, hash_block_size, dcp)
+        else scheduler_block_size
     )
     if any(cache_hit_alignment % alignment for alignment in prefix_alignments):
         raise ValueError(
@@ -822,6 +904,38 @@ def resolve_kv_cache_block_sizes(
             f"Got alignments={sorted(prefix_alignments)}."
         )
     return scheduler_block_size, hash_block_size
+
+
+def resolve_cache_hit_alignment_tokens(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    scheduler_block_size: int,
+    hash_block_size: int,
+) -> int:
+    """Token granularity at which prefix-cache hits land.
+
+    Mirrors the alignment the hybrid KV cache coordinator pushes to its
+    managers: fine-grained hits land on ``hash_block_size``, all others on
+    ``scheduler_block_size``.
+    """
+    groups = kv_cache_config.kv_cache_groups
+    if not vllm_config.cache_config.enable_prefix_caching or len(groups) <= 1:
+        return scheduler_block_size
+    manager_classes = []
+    for group in groups:
+        manager_cls = KVCacheSpecRegistry.get_manager_class(
+            group.kv_cache_spec, group.role
+        )
+        assert manager_cls is not None
+        manager_classes.append(manager_cls)
+    if partial_hash_hits_enabled(
+        groups,
+        hash_block_size,
+        vllm_config.parallel_config.decode_context_parallel_size,
+        manager_classes,
+    ):
+        return hash_block_size
+    return scheduler_block_size
 
 
 def get_request_block_hasher(
@@ -1011,7 +1125,7 @@ def check_enough_kv_cache_memory(
         # of the specs since grouping may unify them in-place.
         groups = get_kv_cache_groups(vllm_config, dict(kv_cache_spec))
         check_memory = (
-            available_memory - _pool_bytes_per_block(groups)
+            available_memory - _pool_bytes_per_block(vllm_config, groups)
             if groups
             else available_memory
         )
@@ -1122,13 +1236,18 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _pool_bytes_per_block(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> int:
     """Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    return _get_kv_cache_bytes_per_block(kv_cache_groups)
+    return _get_kv_cache_bytes_per_block(
+        [group for group in kv_cache_groups if not group.host_resident],
+        vllm_config.cache_config.get_resolved_kv_cache_layout(),
+    )
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1168,205 +1287,6 @@ def _get_kv_cache_groups_uniform_type(
 
     """
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
-
-
-def _pp_balanced_mamba_group_count(
-    vllm_config: VllmConfig,
-    mamba_layer_names: list[str],
-    mla_layer_names: list[str],
-) -> int | None:
-    """Return a Mamba group count whose PP projections fit the MLA slots."""
-    num_groups = cdiv(len(mamba_layer_names), len(mla_layer_names))
-    pp_size = vllm_config.parallel_config.pipeline_parallel_size
-    if pp_size == 1:
-        return num_groups
-
-    from vllm.distributed.utils import get_pp_indices
-    from vllm.model_executor.models.utils import extract_layer_index
-
-    total_layers = vllm_config.model_config.get_total_num_hidden_layers()
-    mamba_indices = [extract_layer_index(name) for name in mamba_layer_names]
-    mla_indices = [extract_layer_index(name) for name in mla_layer_names]
-    for rank in range(pp_size):
-        start, end = get_pp_indices(total_layers, rank, pp_size)
-        num_mamba = sum(start <= index < end for index in mamba_indices)
-        num_mla = sum(start <= index < end for index in mla_indices)
-        if not num_mamba:
-            continue
-        if not num_mla:
-            return None
-        num_groups = max(num_groups, cdiv(num_mamba, num_mla))
-    return num_groups
-
-
-def _get_kv_cache_groups_glm5_next(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec] | None:
-    """Build GLM-5.3-Flash groups with Mamba/MLA and tail/indexer aliasing."""
-    mamba_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MambaSpec)
-    }
-    tail_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if isinstance(spec, KpoolTailSpec)
-    }
-    attn_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if not isinstance(spec, (MambaSpec, KpoolTailSpec))
-    }
-    if not mamba_specs or not all(
-        type(spec) is MLAAttentionSpec for spec in attn_specs.values()
-    ):
-        return None
-
-    mla_specs = cast(dict[str, MLAAttentionSpec], attn_specs)
-    idx_pages = {
-        spec.page_size_bytes for spec in mla_specs.values() if spec.tokens_per_state > 1
-    }
-    if not idx_pages:
-        return None
-
-    assert all(spec.page_size_padded is None for spec in mla_specs.values())
-    assert len(idx_pages) == 1
-    mla_names = [name for name, spec in mla_specs.items() if spec.tokens_per_state == 1]
-    mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
-    assert len(mla_pages) == 1
-    mla_page = mla_pages.pop()
-    uniform_spec = UniformTypeKVCacheSpecs.from_specs(attn_specs)
-    assert uniform_spec is not None
-
-    tail_group: KVCacheGroupSpec | None = None
-    if tail_specs:
-        idx_page = next(iter(idx_pages))
-        padded_tail_specs: dict[str, KVCacheSpec] = {
-            name: replace(spec, page_size_padded=idx_page)
-            for name, spec in tail_specs.items()
-        }
-        tail_uniform = UniformTypeKVCacheSpecs.from_specs(padded_tail_specs)
-        assert tail_uniform is not None
-        tail_group = KVCacheGroupSpec(list(padded_tail_specs), tail_uniform)
-
-    any_mamba = next(iter(mamba_specs.values()))
-    assert all(spec == any_mamba for spec in mamba_specs.values())
-    if any_mamba.real_page_size_bytes > mla_page:
-        raise ValueError(
-            f"the mamba state page ({any_mamba.real_page_size_bytes} bytes) "
-            f"does not fit the MLA page ({mla_page} bytes); increase tensor "
-            "parallelism or use a wider KV cache dtype"
-        )
-    padded_specs: dict[str, KVCacheSpec] = {
-        name: replace(any_mamba, page_size_padded=mla_page) for name in mamba_specs
-    }
-    num_groups = _pp_balanced_mamba_group_count(
-        vllm_config, list(mamba_specs), mla_names
-    )
-    if num_groups is None:
-        raise ValueError(
-            "a pipeline stage has mamba layers but no MLA layer to share "
-            "slots with; realign the stage boundaries (VLLM_PP_LAYER_PARTITION)"
-        )
-    mamba_grouped_names: list[list[str]] = [[] for _ in range(num_groups)]
-    for index, name in enumerate(mamba_specs):
-        mamba_grouped_names[index % num_groups].append(name)
-
-    return (
-        [KVCacheGroupSpec(list(attn_specs), uniform_spec)]
-        + ([tail_group] if tail_group is not None else [])
-        + create_kv_cache_group_specs(padded_specs, mamba_grouped_names)
-    )
-
-
-def _glm5_next_tensor_layout(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> (
-    tuple[
-        KVCacheGroupSpec,
-        list[KVCacheGroupSpec],
-        list[str],
-        list[str],
-        int,
-        int,
-        list[str],
-        int,
-    ]
-    | None
-):
-    """Recognize the GLM-5.3-Flash grouping after optional PP projection."""
-    uniform_groups = [
-        group
-        for group in kv_cache_groups
-        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-    ]
-    mamba_groups = [
-        group for group in kv_cache_groups if isinstance(group.kv_cache_spec, MambaSpec)
-    ]
-    attn_group: KVCacheGroupSpec | None = None
-    tail_group: KVCacheGroupSpec | None = None
-    for group in uniform_groups:
-        inner = cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).kv_cache_specs
-        if all(type(spec) is MLAAttentionSpec for spec in inner.values()):
-            attn_group = group
-        elif all(isinstance(spec, KpoolTailSpec) for spec in inner.values()):
-            tail_group = group
-    if attn_group is None or not mamba_groups:
-        return None
-    if len(uniform_groups) + len(mamba_groups) != len(kv_cache_groups):
-        return None
-
-    attn_uniform = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
-    mla_inner = cast(dict[str, MLAAttentionSpec], attn_uniform.kv_cache_specs)
-    if not all(
-        type(spec) is MLAAttentionSpec and spec.page_size_padded is None
-        for spec in mla_inner.values()
-    ):
-        return None
-    mla_names = [
-        name for name in attn_group.layer_names if mla_inner[name].tokens_per_state == 1
-    ]
-    idx_names = [
-        name for name in attn_group.layer_names if mla_inner[name].tokens_per_state > 1
-    ]
-    mla_pages = {mla_inner[name].page_size_bytes for name in mla_names}
-    idx_pages = {mla_inner[name].page_size_bytes for name in idx_names}
-    if len(mla_pages) != 1 or len(idx_pages) != 1:
-        return None
-    mla_page = mla_pages.pop()
-    idx_page = idx_pages.pop()
-    if any(group.kv_cache_spec.page_size_bytes != mla_page for group in mamba_groups):
-        return None
-
-    tail_names: list[str] = []
-    tail_page = 0
-    if tail_group is not None:
-        tail_names = list(tail_group.layer_names)
-        tail_inner = cast(
-            UniformTypeKVCacheSpecs, tail_group.kv_cache_spec
-        ).kv_cache_specs
-        tail_pages = {
-            cast(KpoolTailSpec, spec).unpadded_page_size_bytes
-            for spec in tail_inner.values()
-        }
-        if len(tail_pages) != 1 or len(tail_names) != len(idx_names):
-            return None
-        tail_page = tail_pages.pop()
-        if tail_page > idx_page:
-            return None
-
-    return (
-        attn_group,
-        mamba_groups,
-        mla_names,
-        idx_names,
-        mla_page,
-        idx_page,
-        tail_names,
-        tail_page,
-    )
 
 
 def unify_kv_cache_spec_page_size(
@@ -1592,14 +1512,24 @@ def _get_per_layer_spec(
     return spec
 
 
+def _get_layer_block_stride(spec: KVCacheSpec) -> int:
+    """A layer-outer block stride: the page padded to its alignment."""
+    return round_up(spec.page_size_bytes, spec.get_block_stride_alignment())
+
+
 def _get_kv_cache_bytes_per_block(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
 ) -> int:
     """Return the largest cache group's bytes per block."""
-    if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-        _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
-        return len(mla_names) * mla_page + len(idx_names) * idx_page
-
+    if not layout.is_block_outermost:
+        # Each layer's block stride is its own padded page.
+        return max(
+            sum(
+                _get_layer_block_stride(_get_per_layer_spec(group, layer_name))
+                for layer_name in group.layer_names
+            )
+            for group in kv_cache_groups
+        )
     bytes_per_block = max(
         sum(
             _get_per_layer_spec(group, layer_name).page_size_bytes
@@ -1614,7 +1544,7 @@ def _get_kv_cache_bytes_per_block(
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     ]
     alignments.extend(
-        _get_per_layer_spec(group, layer_name).block_stride_alignment or 1
+        _get_per_layer_spec(group, layer_name).get_block_stride_alignment()
         for group in kv_cache_groups
         for layer_name in group.layer_names
     )
@@ -1689,72 +1619,9 @@ def get_kv_cache_config_from_groups(
             vllm_config, kv_cache_groups, available_memory, host_budget
         )
 
-    if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-        (
-            attn_group,
-            mamba_groups,
-            mla_names,
-            idx_names,
-            mla_page,
-            idx_page,
-            tail_names,
-            _,
-        ) = glm5_layout
-        bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
-        num_blocks = may_override_num_blocks(
-            vllm_config, available_memory // bytes_per_block
-        )
-        size = bytes_per_block * num_blocks
-        attn_specs = cast(
-            UniformTypeKVCacheSpecs, attn_group.kv_cache_spec
-        ).kv_cache_specs
-
-        kv_cache_tensors: list[KVCacheTensor] = []
-
-        def add_tensor(layer_name: str, spec: KVCacheSpec, offset: int) -> None:
-            kv_cache_tensors.append(
-                KVCacheTensor(
-                    size=size,
-                    layers=[layer_name],
-                    layer_stride=spec.page_size_bytes * num_blocks,
-                    block_stride=spec.page_size_bytes,
-                    offset=offset,
-                )
-            )
-
-        for index, mla_name in enumerate(mla_names):
-            offset = index * mla_page * num_blocks
-            add_tensor(mla_name, attn_specs[mla_name], offset)
-            for group in mamba_groups:
-                if index < len(group.layer_names):
-                    add_tensor(group.layer_names[index], group.kv_cache_spec, offset)
-
-        idx_base = len(mla_names) * mla_page * num_blocks
-        for index, idx_name in enumerate(idx_names):
-            offset = idx_base + index * idx_page * num_blocks
-            add_tensor(idx_name, attn_specs[idx_name], offset)
-            if tail_names:
-                tail_name = tail_names[index]
-                tail_group = next(
-                    group for group in kv_cache_groups if tail_name in group.layer_names
-                )
-                tail_specs = cast(
-                    UniformTypeKVCacheSpecs, tail_group.kv_cache_spec
-                ).kv_cache_specs
-                add_tensor(tail_name, tail_specs[tail_name], offset)
-
-        return KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=kv_cache_tensors,
-            kv_cache_groups=kv_cache_groups,
-            prefix_cache_retention_interval=(
-                vllm_config.cache_config.prefix_cache_retention_interval
-            ),
-        )
-
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
@@ -1784,17 +1651,17 @@ def get_kv_cache_config_from_groups(
 
         byte_offset = 0
         for spec, layer_names in layers_by_spec.items():
+            block_stride = interleaved_block_stride
+            padded_page = _get_layer_block_stride(spec)
+            if block_stride is None and padded_page != spec.page_size_bytes:
+                assert layout.is_block_compact, f"{layout.name} cannot pad pages"
+                block_stride = padded_page
             layer_stride, block_stride, _, _, _ = compute_layout_strides(
                 spec,
                 num_blocks,
                 len(layer_names),
                 layout,
-                fixed_strides=(None, interleaved_block_stride, None, None, None),
-            )
-            offset = (
-                byte_offset
-                * max(layer_stride, spec.page_size_bytes)
-                // spec.page_size_bytes
+                fixed_strides=(None, block_stride, None, None, None),
             )
             kv_cache_tensors.append(
                 KVCacheTensor(
@@ -1802,10 +1669,13 @@ def get_kv_cache_config_from_groups(
                     layers=layer_names,
                     layer_stride=layer_stride,
                     block_stride=block_stride,
-                    offset=offset,
+                    offset=byte_offset,
                 )
             )
-            byte_offset += len(layer_names) * spec.page_size_bytes
+            # Block-outer layers share each block; layer-outer ones own regions.
+            byte_offset += len(layer_names) * (
+                spec.page_size_bytes if layout.is_block_outermost else layer_stride
+            )
 
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -1935,18 +1805,21 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
 
     """
-    if is_kv_cache_spec_uniform(
-        kv_cache_spec
-    ) or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
-        return
-
-    logger.warning(
-        "Hybrid KV cache manager is disabled for this hybrid model, "
-        "This means we do not enable any optimizations for saving KV cache "
-        "memory (e.g., dropping the KV cache outside the sliding window). "
-        "The compute of layers like sliding window is still saved."
-    )
-    kv_cache_spec.update(_promote_local_kv_cache_specs(kv_cache_spec))
+    groups: defaultdict[bool, dict[str, KVCacheSpec]] = defaultdict(dict)
+    for name, spec in kv_cache_spec.items():
+        replicated = isinstance(spec, AttentionSpec) and not spec.dcp_sharded
+        groups[replicated][name] = spec
+    for specs in groups.values():
+        promoted_specs = _promote_local_kv_cache_specs(specs)
+        if promoted_specs == specs:
+            continue
+        logger.warning(
+            "Hybrid KV cache manager is disabled for this hybrid model, "
+            "This means we do not enable any optimizations for saving KV cache "
+            "memory (e.g., dropping the KV cache outside the sliding window). "
+            "The compute of layers like sliding window is still saved."
+        )
+        kv_cache_spec.update(promoted_specs)
 
 
 def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -> int:
@@ -2276,7 +2149,7 @@ def _ensure_min_page_size(
     scaled: list[KVCacheGroupSpec] = []
     for g in groups:
         s = g.kv_cache_spec
-        kw: dict[str, int] = {"block_size": s.block_size * scale}
+        kw: dict[str, Any] = {"block_size": s.block_size * scale}
         if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
             kw["page_size_padded"] = s.page_size_padded * scale
         scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
@@ -2318,9 +2191,6 @@ def get_kv_cache_groups(
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
-    elif glm5_groups := _get_kv_cache_groups_glm5_next(vllm_config, kv_cache_spec):
-        return glm5_groups
-
     # Hidden-state layers use their own block table and must not be absorbed
     # into a compatible attention bucket.
     hidden_specs = {
@@ -2381,6 +2251,26 @@ def get_kv_cache_groups(
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
+
+
+def _layer_tp_replicas(spec: KVCacheSpec, tp_size: int, dcp_size: int) -> int:
+    if not isinstance(spec, AttentionSpec) or spec.max_tp_shards is None:
+        return 1
+    if spec.dcp_sharded and dcp_size > 1:
+        return 1
+    return max(1, tp_size // spec.max_tp_shards)
+
+
+def kv_cache_groups_tp_replicas(
+    groups: list[KVCacheGroupSpec], tp_size: int, dcp_size: int = 1
+) -> int:
+    """Consecutive TP ranks holding identical KV for every layer."""
+    specs = [spec for g in groups for spec in iter_layer_specs(g.kv_cache_spec)]
+    if not specs:
+        return 1
+    return reduce(
+        math.gcd, (_layer_tp_replicas(s, tp_size, dcp_size) for s in specs), tp_size
+    )
 
 
 def generate_scheduler_kv_cache_config(
@@ -2450,37 +2340,11 @@ def _max_memory_usage_bytes_from_groups(
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
     """
+    kv_cache_groups = [group for group in kv_cache_groups if not group.host_resident]
     if not kv_cache_groups:
         return 0
 
-    if vllm_config.attention_config.hisparse_config is not None:
-        return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
-
-    if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-        (
-            attn_group,
-            mamba_groups,
-            mla_names,
-            idx_names,
-            mla_page,
-            idx_page,
-            tail_names,
-            _,
-        ) = glm5_layout
-        uniform_spec = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
-        total_blocks = uniform_spec.max_memory_usage_pages(vllm_config)
-        total_blocks += sum(
-            cdiv(
-                group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-                group.kv_cache_spec.page_size_bytes,
-            )
-            for group in mamba_groups
-        )
-        if tail_names:
-            total_blocks += 1
-        return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
-
-    bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
+    bytes_per_block = _pool_bytes_per_block(vllm_config, kv_cache_groups)
     total_blocks = 0
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
@@ -2513,12 +2377,11 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = model_len
         if hisparse_enabled:
             try:
-                config = get_kv_cache_config_from_groups(
+                get_kv_cache_config_from_groups(
                     vllm_config, kv_cache_groups, available_memory
                 )
             except ValueError:
                 return False
-            return get_max_concurrency_for_kv_cache_config(vllm_config, config) >= 1
         return (
             _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
             <= available_memory
@@ -2628,6 +2491,9 @@ def _project_kv_cache_groups_to_worker(
         worker_layer_names = [
             layer_name for layer_name in group.layer_names if layer_name in worker_spec
         ]
+        if len(worker_layer_names) == len(group.layer_names):
+            projected_groups.append(group)
+            continue
         group_spec = group.kv_cache_spec
         if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
             group_spec = UniformTypeKVCacheSpecs(
@@ -2734,7 +2600,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _pool_bytes_per_block(vllm_config, groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,
@@ -2743,14 +2609,11 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
-    if vllm_config.attention_config.hisparse_config is not None:
-        available_memory = [min(available_memory)] * len(available_memory)
-
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below
     # still uses the full memory.
     check_memory = [
-        avail_mem - _pool_bytes_per_block(groups) if groups else avail_mem
+        avail_mem - _pool_bytes_per_block(vllm_config, groups) if groups else avail_mem
         for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
     ]
 
@@ -2794,7 +2657,16 @@ def get_kv_cache_configs(
         # strides and offsets stay consistent with the shrunken allocation.
         groups = kv_cache_config.kv_cache_groups
         kv_cache_configs[i] = get_kv_cache_config_from_groups(
-            vllm_config, groups, min_num_blocks * _pool_bytes_per_block(groups)
+            vllm_config,
+            groups,
+            min_num_blocks * _pool_bytes_per_block(vllm_config, groups),
+        )
+
+    for kv_cache_config in kv_cache_configs:
+        kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
+            kv_cache_config.kv_cache_groups,
+            vllm_config.parallel_config.tensor_parallel_size,
+            vllm_config.parallel_config.decode_context_parallel_size,
         )
 
     return kv_cache_configs

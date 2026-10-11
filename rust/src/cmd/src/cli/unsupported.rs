@@ -359,10 +359,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// The interval (or buffer size) for streaming in terms of token length.
-    #[arg(long)]
-    pub stream_interval: Option<Unsupported>,
-
     /// Maximum number of requests that can be in-flight (waiting or running)
     /// at the same time. When the limit is reached, new requests are rejected
     /// with HTTP 503 so the client can retry on another instance.
@@ -408,6 +404,17 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub trust_request_chat_template: Option<Unsupported>,
+
+    /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
+    /// and `media_io_kwargs`). If False, the server rejects non-empty values
+    /// because they can change multimodal preprocessing resource usage.
+    #[arg(
+        long,
+        visible_alias = "no-trust-request-mm-kwargs",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub trust_request_mm_kwargs: Option<Unsupported>,
 
     /// The role name to return if `request.add_generation_prompt=true`.
     #[arg(long)]

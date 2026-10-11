@@ -39,6 +39,7 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -342,7 +343,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     use_shuffle_kv_layout: str,
     kv_layout: KVCacheLayout,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     rms_norm_eps: float,
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -611,7 +612,7 @@ def test_qk_norm_rope_kvcache_fusion(
     kv_layout: KVCacheLayout,
     block_size: int,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     rms_norm_eps: float,
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -663,7 +664,7 @@ def test_qk_norm_mrope_kvcache_fusion(
     mrope_interleaved: bool,
     is_neox: bool,
     kv_layout: KVCacheLayout,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     monkeypatch: pytest.MonkeyPatch,
 ):
     _run_qk_norm_rope_kvcache_fusion_test(

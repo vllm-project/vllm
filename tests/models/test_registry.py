@@ -88,70 +88,68 @@ def test_registry_imports(model_arch):
         assert supports_multimodal(model_cls)
 
 
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
-    "model_arch,is_mm,init_cuda,score_type",
+    "model_arch,is_mm,score_type",
     [
-        ("LlamaForCausalLM", False, False, "bi-encoder"),
-        ("LlavaForConditionalGeneration", True, True, "bi-encoder"),
-        ("DeepseekV41ForCausalLM", True, False, "bi-encoder"),
-        ("BertForSequenceClassification", False, False, "cross-encoder"),
-        ("RobertaForSequenceClassification", False, False, "cross-encoder"),
-        ("XLMRobertaForSequenceClassification", False, False, "cross-encoder"),
-        ("GteNewModel", False, False, "bi-encoder"),
-        ("GteNewForSequenceClassification", False, False, "cross-encoder"),
-        ("HF_ColBERT", False, False, "late-interaction"),
+        ("LlamaForCausalLM", False, "bi-encoder"),
+        ("LlavaForConditionalGeneration", True, "bi-encoder"),
+        ("DeepseekV41ForCausalLM", True, "bi-encoder"),
+        ("BertForSequenceClassification", False, "cross-encoder"),
+        ("RobertaForSequenceClassification", False, "cross-encoder"),
+        ("XLMRobertaForSequenceClassification", False, "cross-encoder"),
+        ("GteNewModel", False, "bi-encoder"),
+        ("GteNewForSequenceClassification", False, "cross-encoder"),
+        ("HF_ColBERT", False, "late-interaction"),
     ],
 )
-def test_registry_model_property(model_arch, is_mm, init_cuda, score_type):
+def test_registry_model_property(model_arch, is_mm, score_type):
     model_info = ModelRegistry._try_inspect_model_cls(model_arch)
     assert model_info is not None
 
     assert model_info.supports_multimodal is is_mm
     assert model_info.score_type == score_type
 
-    if init_cuda and current_platform.is_cuda_alike():
-        assert not torch.cuda.is_initialized()
 
-        ModelRegistry._try_load_model_cls(model_arch)
-        if not torch.cuda.is_initialized():
-            warnings.warn(
-                "This model no longer initializes CUDA on import. "
-                "Please test using a different one.",
-                stacklevel=2,
-            )
-
-
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
-    "model_arch,is_pp,init_cuda",
+    "model_arch,is_pp",
     [
         # TODO(woosuk): Re-enable this once the MLP Speculator is supported
         # in V1.
-        # ("MLPSpeculatorPreTrainedModel", False, False),
-        ("DeepseekV2ForCausalLM", True, False),
-        ("Qwen2VLForConditionalGeneration", True, True),
+        # ("MLPSpeculatorPreTrainedModel", False),
+        ("DeepseekV2ForCausalLM", True),
+        ("Qwen2VLForConditionalGeneration", True),
     ],
 )
-def test_registry_is_pp(model_arch, is_pp, init_cuda):
+def test_registry_is_pp(model_arch, is_pp):
     model_info = ModelRegistry._try_inspect_model_cls(model_arch)
     assert model_info is not None
 
     assert model_info.supports_pp is is_pp
 
-    if init_cuda and current_platform.is_cuda_alike():
-        assert not torch.cuda.is_initialized()
-
-        ModelRegistry._try_load_model_cls(model_arch)
-        if not torch.cuda.is_initialized():
-            warnings.warn(
-                "This model no longer initializes CUDA on import. "
-                "Please test using a different one.",
-                stacklevel=2,
-            )
-
 
 @create_new_process_for_each_test()
+@pytest.mark.parametrize(
+    "model_arch",
+    ["LlavaForConditionalGeneration", "Qwen2VLForConditionalGeneration"],
+)
+def test_registry_inspect_does_not_init_cuda(model_arch):
+    """Inspecting a model must not import it: these architectures initialize
+    CUDA at import time, so the inspection path has to stay out-of-process."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires a CUDA-like platform")
+
+    assert ModelRegistry._try_inspect_model_cls(model_arch) is not None
+    assert not torch.cuda.is_initialized()
+
+    ModelRegistry._try_load_model_cls(model_arch)
+    if not torch.cuda.is_initialized():
+        warnings.warn(
+            "This model no longer initializes CUDA on import. "
+            "Please test using a different one.",
+            stacklevel=2,
+        )
+
+
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
