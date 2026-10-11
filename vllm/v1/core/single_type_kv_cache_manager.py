@@ -492,7 +492,7 @@ class SingleTypeKVCacheManager(ABC):
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
             replay_boundaries: Positions a later request replaying this prompt
-                can resume at, from ``get_replay_boundaries``.
+                can resume at, from ``replay_boundaries``.
 
         """
         if not self.kv_cache_spec.prefix_cacheable:
@@ -505,7 +505,7 @@ class SingleTypeKVCacheManager(ABC):
 
         # Token boundaries whose reachable tail must be retained under sparse
         # retention: every position a replaying sibling can resume at (see
-        # ``get_replay_boundaries``) and any detected shared-prefix junction.
+        # ``replay_boundaries``) and any detected shared-prefix junction.
         reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
