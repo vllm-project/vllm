@@ -520,6 +520,31 @@ class TestReceiveAllocation:
         assert raised.value.__cause__ is cause
 
 
+def test_slot_reuse_waits_for_queued_read_done_event():
+    class Event:
+        ready = False
+        queries = 0
+
+        def query(self):
+            self.queries += 1
+            return self.ready
+
+    engine = _engine(ring_depth=1)
+    event = Event()
+    engine._slot_read_done = [event]
+    engine._slot_cv = threading.Condition()
+    engine._slot_queued = [1]
+    engine._slot_done = [0]
+
+    assert not engine._slot_free(0)
+    assert event.queries == 0
+
+    engine._slot_done[0] = 1
+    assert not engine._slot_free(0)
+    event.ready = True
+    assert engine._slot_free(0)
+
+
 class _LanePulls:
     """Transport-free hooks that check each lane's slot window."""
 
