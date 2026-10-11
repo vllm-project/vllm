@@ -427,22 +427,31 @@ class ThinkingBudgetStateHolder:
                 # forcing starts. If we're already over budget without spec
                 # tokens, force from position 0. Force from the position
                 # where budget is exceeded.
+                remaining_budget = state["thinking_token_budget"] - state["think_count"]
+                spec_len = len(state["spec_token_ids"])
+                if 0 < remaining_budget < spec_len:
+                    force_index = remaining_budget
+                elif remaining_budget <= 0:
+                    force_index = 0
+                else:
+                    # remaining_budget >= spec_len: all spec tokens are within
+                    # budget; force the bonus token position
+                    force_index = spec_len
+                # Drafts ending thinking within budget are a natural end if
+                # accepted; forcing would emit a second end after them.
+                if (
+                    self._find_last_sequence_index(
+                        state["spec_token_ids"][:force_index],
+                        self.think_end_token_ids,
+                    )
+                    >= 0
+                ):
+                    return
                 state["in_think"] = False
                 state["in_end"] = True
                 state["end_count"] = 0
                 state["check_count_down"] = state["thinking_token_budget"]
-                remaining_budget = state["thinking_token_budget"] - state["think_count"]
-                spec_len = len(state["spec_token_ids"])
-                if 0 < remaining_budget < spec_len:
-                    state["force_index"] = [remaining_budget]
-
-                elif remaining_budget <= 0:
-                    state["force_index"] = [0]
-
-                else:
-                    # remaining_budget >= spec_len: all spec tokens are within
-                    # budget; force the bonus token position
-                    state["force_index"] = [len(state["spec_token_ids"])]
+                state["force_index"] = [force_index]
 
         else:
             state["force_index"] = []
