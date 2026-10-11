@@ -565,6 +565,9 @@ def kernel_unified_attention(
                 qq_bias_row_ptrs, seq_offset, context_len, qq_bias_stride_0
             )
 
+        # No visible key yet (fully masked tiles so far): drop the stale
+        # maximum so the first tile with keys starts from -inf.
+        M = tl.where(L > 0.0, M, float("-inf"))
         M, L, P, alpha = softmax_step(S, M, L)
         acc = acc * alpha[:, None]
 

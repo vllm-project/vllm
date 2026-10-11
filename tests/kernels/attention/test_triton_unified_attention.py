@@ -939,15 +939,18 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
 
 
-def _spec_verify_3d(seq_len, q_len, block_size, kv_dtype, negative):
+def _spec_verify_3d(
+    seq_len, q_len, block_size, kv_dtype, negative, window=None, segments=16
+):
     """One causal multi-token query batch through the 3D path vs. a dense reference.
 
     With ``negative`` all logits are strongly negative, so a row whose keys are
     all masked in one segment must not report a finite segment maximum.
+    ``window`` enables sliding-window attention (each token sees ``window`` keys).
     """
     import vllm.v1.attention.ops.triton_unified_attention as ua
 
-    hq, hkv, d, segments, threshold = 24, 4, 256, 16, 32
+    hq, hkv, d, threshold = 24, 4, 256, 32
     nb = -(-seq_len // block_size) + 1
     k = torch.randn(nb, block_size, hkv, d, device=DEVICE_TYPE, dtype=torch.bfloat16)
     v = torch.randn_like(k)
@@ -972,7 +975,7 @@ def _spec_verify_3d(seq_len, q_len, block_size, kv_dtype, negative):
         max_seqlen_k=seq_len,
         softmax_scale=d**-0.5,
         causal=True,
-        window_size=(-1, -1),
+        window_size=(-1, -1) if window is None else (window - 1, 0),
         block_table=block_table,
         softcap=0,
         q_descale=None,
@@ -992,6 +995,8 @@ def _spec_verify_3d(seq_len, q_len, block_size, kv_dtype, negative):
     visible = seq_len - q_len + torch.arange(q_len, device=DEVICE_TYPE)[:, None]
     pos = torch.arange(seq_len, device=DEVICE_TYPE)[None, :]
     masked = pos > visible
+    if window is not None:
+        masked = masked | (pos <= visible - window)
     probs = scores.masked_fill(masked, float("-inf")).softmax(-1).nan_to_num(0.0)
     # Rows that see no key at all (seq_len < q_len) must come out as 0, not NaN.
     ref = torch.einsum("hqk,khd->qhd", probs, vals)
@@ -1027,3 +1032,22 @@ def test_spec_verify_3d_fully_masked_segment_rows(monkeypatch):
     set_random_seed(0)
     for seq_len in range(1, 200):
         _spec_verify_3d(seq_len, 4, 16, None, negative=True)
+
+
+@pytest.mark.parametrize("window", [8, 20, 40])
+@torch.inference_mode()
+def test_spec_verify_3d_sliding_window_masked_first_tile(monkeypatch, window):
+    """Sliding window: a later query row can start on a fully masked KV tile.
+
+    The tile loop starts at the window of the first token of the query block, so
+    for the next token the first tile can be fully masked while later tiles of
+    the same segment hold its keys. With strongly negative logits those keys
+    must not be lost to the stale maximum left by the masked tile. Few segments
+    give several tiles per segment; the sweep covers every window alignment.
+    """
+    import vllm.v1.attention.ops.triton_unified_attention as ua
+
+    monkeypatch.setattr(ua, "_TRITON_3D_MAX_Q", 4)
+    set_random_seed(0)
+    for seq_len in range(8, 200):
+        _spec_verify_3d(seq_len, 4, 16, None, negative=True, window=window, segments=4)
