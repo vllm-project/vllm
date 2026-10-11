@@ -34,18 +34,12 @@ def _run_transport_stage(rank: int, init_method: str):
                 buffer=buffer, receive=rank > 0, send=rank < 2
             ),
         },
-        payload_types=(
-            PPTransportDataType.MULTIMODAL_EMBEDDINGS,
-            PPTransportDataType.TARGET_EMBEDDINGS,
-        ),
+        payload_types=(PPTransportDataType.MULTIMODAL_EMBEDDINGS,),
     )
     try:
         for step in range(2):
             if rank == 0:
                 payload = transport.new_payload()
-                payload.set_tensor(
-                    PPTransportDataType.TARGET_EMBEDDINGS, torch.full((4, 4), step)
-                )
                 if step == 0:
                     embedding = torch.arange(15).reshape(3, 5)[:, :4]
                     embedding.modality = "image"
@@ -77,10 +71,6 @@ def _run_transport_stage(rank: int, init_method: str):
                 for handle in handles:
                     handle.wait()
             else:
-                torch.testing.assert_close(
-                    payload.get_tensor(PPTransportDataType.TARGET_EMBEDDINGS),
-                    torch.full((4, 4), step),
-                )
                 result = payload.get_multimodal_embeddings()
                 if step == 0:
                     assert result is not None
@@ -109,15 +99,9 @@ def test_multihop_multimodal_payload():
     audio = torch.ones(2, 4)
     audio.modality = "audio"
     mask = torch.tensor([False, True, True, True, False, True, True])
-    transport = PPTransport(
-        payload_types=(
-            PPTransportDataType.MULTIMODAL_EMBEDDINGS,
-            PPTransportDataType.TARGET_EMBEDDINGS,
-        )
-    )
+    transport = PPTransport(payload_types=(PPTransportDataType.MULTIMODAL_EMBEDDINGS,))
     payload = transport.new_payload()
     payload.set_multimodal_embeddings([image, audio], mask)
-    payload.set_tensor(PPTransportDataType.TARGET_EMBEDDINGS, torch.ones(7, 4))
 
     for stage in range(3):
         output = IntermediateTensors(
@@ -140,9 +124,6 @@ def test_multihop_multimodal_payload():
     assert [embedding.modality for embedding in embeddings] == ["image", "audio"]
     assert received_mask.device.type == "cpu"
     torch.testing.assert_close(received_mask, mask)
-    torch.testing.assert_close(
-        payload.get_tensor(PPTransportDataType.TARGET_EMBEDDINGS), torch.ones(7, 4)
-    )
     # A subsequent text-only batch must not reuse the preceding batch's images.
     assert (
         transport.new_payload(
@@ -273,14 +254,14 @@ def test_stage_schema_and_buffer_direction(receive, send):
 
 
 def test_payload_selection_and_unknown_fields():
-    transport = PPTransport(payload_types=(PPTransportDataType.TARGET_EMBEDDINGS,))
+    transport = PPTransport()
     payload = transport.new_payload(
         {
-            PPTransportDataType.TARGET_EMBEDDINGS.value: torch.ones(3, 4),
+            "pp_transport.multimodal_embeddings.0.image": torch.ones(3, 4),
             PPTransportDataType.MULTIMODAL_MASK.value: torch.ones(3, dtype=torch.bool),
         }
     )
-    assert list(payload.tensors) == [PPTransportDataType.TARGET_EMBEDDINGS.value]
+    assert not payload.tensors
     with pytest.raises(ValueError, match="not selected"):
         payload.set_multimodal_embeddings([], torch.zeros(3, dtype=torch.bool))
     with pytest.raises(ValueError, match="Unregistered"):
@@ -290,4 +271,6 @@ def test_payload_selection_and_unknown_fields():
     with pytest.raises(ValueError, match="model input schema"):
         PPTransport(payload_types=(PPTransportDataType.TOPK_INDICES,))
     with pytest.raises(ValueError, match="PP payload"):
-        PPTransport({PPTransportDataType.TARGET_EMBEDDINGS: PPTransportTensor((4,))})
+        PPTransport(
+            {PPTransportDataType.MULTIMODAL_EMBEDDINGS: PPTransportTensor((4,))}
+        )

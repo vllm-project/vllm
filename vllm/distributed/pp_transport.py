@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Typed side inputs carried by the existing PP tensor-dict transport.
 
-Embedding entries contain activations, not weights. Drafters retain their local
-embedding lookup for newly sampled tokens.
+Multimodal embedding entries contain encoder outputs, not weights. Drafters
+retain their local text embedding lookup.
 """
 
 from collections.abc import Mapping, Sequence
@@ -23,7 +23,6 @@ class PPTransportDataType(str, Enum):
     HIDDEN_STATES = "hidden_states"
     RESIDUAL = "residual"
     TOPK_INDICES = "pp_transport.topk_indices"
-    TARGET_EMBEDDINGS = "pp_transport.target_embeddings"
     MULTIMODAL_EMBEDDINGS = "pp_transport.multimodal_embeddings"
     MULTIMODAL_MASK = "pp_transport.multimodal_mask"
 
@@ -48,7 +47,6 @@ PP_TRANSPORT_REGISTRY: Mapping[PPTransportDataType, PPTransportDataSpec] = (
                 model_input=True, all_gather=None
             ),
             PPTransportDataType.TOPK_INDICES: PPTransportDataSpec(model_input=True),
-            PPTransportDataType.TARGET_EMBEDDINGS: PPTransportDataSpec(),
             PPTransportDataType.MULTIMODAL_EMBEDDINGS: PPTransportDataSpec(
                 indexed=True, companions=(PPTransportDataType.MULTIMODAL_MASK,)
             ),
@@ -217,16 +215,6 @@ class PPTransportPayload:
             for key, tensor in (tensors or {}).items()
             if _get_data_type(key) in data_types
         }
-
-    def set_tensor(self, data_type: PPTransportDataType, tensor: torch.Tensor) -> None:
-        if data_type not in self._data_types:
-            raise ValueError(f"PP payload field was not selected: {data_type.value}")
-        if PP_TRANSPORT_REGISTRY[data_type].indexed:
-            raise ValueError(f"{data_type.value} requires an indexed payload")
-        self.tensors[data_type.value] = tensor.contiguous()
-
-    def get_tensor(self, data_type: PPTransportDataType) -> torch.Tensor | None:
-        return self.tensors.get(data_type.value)
 
     def set_multimodal_embeddings(
         self, embeddings: list[torch.Tensor], is_multimodal: torch.Tensor

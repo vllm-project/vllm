@@ -16,7 +16,6 @@ tensors, and companions select related fields together.
 | --- | --- | --- |
 | Hidden states, residual | Model inputs | Existing worker policy |
 | Shared top-k indices | Model inputs | Matching TP lane |
-| Target embedding activations | Graph-external payload | Matching TP lane |
 | Multimodal embeddings and CPU mask | Graph-external payload | Matching TP lane |
 
 Unknown `pp_transport.*` fields are rejected. Other existing intermediate tensor
@@ -84,8 +83,7 @@ Selecting multimodal embeddings also selects their CPU mask. Modality labels
 are preserved in the wire keys; the mask stays on CPU without a device-to-host
 copy. All relaying stages must select the same payload types.
 
-MRV2 enables this relay when the loaded draft supports multimodal inputs.
-Target embedding activations are an opt-in interface through
-`set_tensor(TARGET_EMBEDDINGS, tensor)` and `get_tensor(TARGET_EMBEDDINGS)`;
-existing drafters do not yet consume this fast path. Neither interface transfers
-embedding weights or removes the draft's local embedding lookup.
+MRV2 enables this relay when the loaded draft supports multimodal inputs. Only
+multimodal encoder outputs and their mask are relayed; text embedding activations
+and embedding weights are not transported. Drafters retain their local text
+embedding lookup.
