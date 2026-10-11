@@ -46,8 +46,7 @@ TokenPoolerOutput: TypeAlias = list[torch.Tensor | None]
 
 
 class TokenPooler(Pooler):
-    """
-    A layer that pools specific information from hidden states.
+    """A layer that pools specific information from hidden states.
 
     This layer does the following:
     1. Extracts specific tokens or aggregates data based on pooling method.
@@ -64,6 +63,10 @@ class TokenPooler(Pooler):
 
         self.pooling = pooling
         self.head = head
+
+    def extra_repr(self) -> str:
+        head_name = self.head.__class__.__name__ if self.head is not None else None
+        return f"pooling={self.pooling.__class__.__name__}, head={head_name}"
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         tasks = set(POOLING_TASKS)

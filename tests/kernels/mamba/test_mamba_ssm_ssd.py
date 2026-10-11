@@ -9,8 +9,18 @@ from einops import rearrange, repeat
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import compute_varlen_chunk_metadata
+
+# All kernels exercised here are pure Triton, so they run on any backend
+# that the vLLM platform layer treats as a CUDA-alike device or as XPU.
+DEVICE = current_platform.device_type
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Mamba2 SSD Triton kernels require a CUDA-alike or XPU device.",
+)
 
 # Added by the IBM Team, 2024
 
@@ -31,14 +41,15 @@ def segsum(x):
 
 
 def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
-    """
-    Arguments:
+    """Arguments:
         X: (batch, length, n_heads, d_head)
         A: (batch, length, n_heads)
         B: (batch, length, n_heads, d_state)
         C: (batch, length, n_heads, d_state)
+
     Return:
         Y: (batch, length, n_heads, d_head)
+
     """
     assert X.dtype == A.dtype == B.dtype == C.dtype
     assert X.shape[1] % block_len == 0
@@ -81,7 +92,7 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
     return Y, final_state
 
 
-def generate_random_inputs(batch_size, seqlen, n_heads, d_head, itype, device="cuda"):
+def generate_random_inputs(batch_size, seqlen, n_heads, d_head, itype, device=DEVICE):
     set_random_seed(0)
     A = -torch.exp(torch.rand(n_heads, dtype=itype, device=device))
     dt = F.softplus(
@@ -103,7 +114,7 @@ def generate_continuous_batched_examples(
     n_heads,
     d_head,
     itype,
-    device="cuda",
+    device=DEVICE,
     return_naive_ref=True,
 ):
     # this function generates a random examples of certain length
@@ -215,7 +226,7 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, it
         X * dt.unsqueeze(-1), A * dt, B, C, chunk_size
     )
 
-    cu_seqlens = torch.tensor((0, seqlen), device="cuda").cumsum(dim=0)
+    cu_seqlens = torch.tensor((0, seqlen), device=DEVICE).cumsum(dim=0)
     cu_chunk_seqlens, last_chunk_indices, seq_idx_chunks = (
         compute_varlen_chunk_metadata(cu_seqlens, chunk_size)
     )

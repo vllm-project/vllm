@@ -42,6 +42,9 @@ BASE_ARGS = [
     "--max-num-batched-tokens",
     "256",
     "--enable-prefix-caching",
+    # The cache-disclosure test keeps two servers alive on the same GPU.
+    "--gpu-memory-utilization",
+    "0.4",
 ]
 
 

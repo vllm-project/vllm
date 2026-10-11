@@ -43,6 +43,16 @@ class EmbeddingPoolerHead(SequencePoolerHead):
         self.head_dtype = head_dtype
         self.activation = activation
 
+    def extra_repr(self) -> str:
+        attrs = []
+        if self.head_dtype is not None:
+            attrs.append(f"head_dtype={self.head_dtype}")
+        if self.projector is not None:
+            attrs.append("projector=True")
+        if self.activation is not None:
+            attrs.append(f"activation={self.activation.__class__.__name__}")
+        return ", ".join(attrs)
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"embed"}
 
@@ -124,6 +134,20 @@ class ClassifierPoolerHead(SequencePoolerHead):
         self.head_dtype = head_dtype
         self.activation = activation
 
+    def extra_repr(self) -> str:
+        attrs = []
+        if self.head_dtype is not None:
+            attrs.append(f"head_dtype={self.head_dtype}")
+        if self.classifier is not None:
+            attrs.append("classifier=True")
+        if self.logit_mean is not None:
+            attrs.append(f"logit_mean={self.logit_mean}")
+        if self.logit_sigma is not None:
+            attrs.append(f"logit_sigma={self.logit_sigma}")
+        if self.activation is not None:
+            attrs.append(f"activation={self.activation.__class__.__name__}")
+        return ", ".join(attrs)
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify"}
 
@@ -147,16 +171,24 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
-            logits = self.classifier(pooled_data)
+            logits: SequencePoolerHeadOutput = self.classifier(pooled_data)
         else:
             logits = pooled_data
 
         # logits shape: [batchsize, num_labels]
         # Affine score calibration: activation((logit - mean) / sigma)
         if self.logit_mean is not None:
-            logits = logits - self.logit_mean
+            logits = (
+                [value - self.logit_mean for value in logits]
+                if isinstance(logits, list)
+                else logits - self.logit_mean
+            )
         if self.logit_sigma is not None:
-            logits = logits / self.logit_sigma
+            logits = (
+                [value / self.logit_sigma for value in logits]
+                if isinstance(logits, list)
+                else logits / self.logit_sigma
+            )
 
         if self.activation is not None:
             flags = [p.use_activation for p in pooling_params]

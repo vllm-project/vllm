@@ -1,0 +1,17 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "look"
+        },
+        {
+          "type": "image_url",
+          "image_url": "data:image/png;base64,"
+        }
+      ]
+    }
+  ]
+}

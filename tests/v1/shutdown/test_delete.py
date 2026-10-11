@@ -4,12 +4,14 @@
 
 import pytest
 
-from tests.utils import wait_for_gpu_memory_to_clear
+from tests.conftest import VllmRunner
+from tests.utils import create_new_process_for_each_test, wait_for_gpu_memory_to_clear
 from tests.v1.shutdown.utils import (
     SHUTDOWN_TEST_THRESHOLD_BYTES,
     SHUTDOWN_TEST_TIMEOUT_SEC,
 )
 from vllm import LLM, SamplingParams
+from vllm.config import KernelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
@@ -33,12 +35,16 @@ async def test_async_llm_delete(
       model: model under test
       tensor_parallel_size: degree of tensor parallelism
       send_one_request: send one request to engine before deleting
+
     """
     if current_platform.device_count() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     engine_args = AsyncEngineArgs(
-        model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
+        model=model,
+        enforce_eager=True,
+        tensor_parallel_size=tensor_parallel_size,
+        kernel_config=KernelConfig(enable_jit_warmup=False),
     )
 
     # Instantiate AsyncLLM; make request to complete any deferred
@@ -82,6 +88,7 @@ def test_llm_delete(
       tensor_parallel_size: degree of tensor parallelism
       enable_multiprocessing: enable workers in separate process(es)
       send_one_request: send one request to engine before deleting
+
     """
     if current_platform.device_count() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
@@ -93,7 +100,10 @@ def test_llm_delete(
         # Instantiate LLM; make request to complete any deferred
         # initialization; then delete instance
         llm = LLM(
-            model=model, enforce_eager=True, tensor_parallel_size=tensor_parallel_size
+            model=model,
+            enforce_eager=True,
+            tensor_parallel_size=tensor_parallel_size,
+            kernel_config=KernelConfig(enable_jit_warmup=False),
         )
         if send_one_request:
             llm.generate(
@@ -105,4 +115,42 @@ def test_llm_delete(
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),
             threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+        )
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("send_one_request", [False, True])
+def test_llm_delete_inprocess(
+    monkeypatch,
+    model: str,
+    send_one_request: bool,
+) -> None:
+    """Test that VllmRunner frees GPU memory in in-process (no MP) mode."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+        with VllmRunner(
+            model,
+            kernel_config=KernelConfig(enable_jit_warmup=False),
+        ) as vllm_model:
+            if send_one_request:
+                vllm_model.generate(
+                    ["Hello my name is"],
+                    SamplingParams(max_tokens=1),
+                )
+
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
+            threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+            # Activate the helper's ROCm idle-runtime floor. VllmRunner already
+            # performed the stable-memory wait during context exit.
+            threshold_ratio=0.01 if current_platform.is_rocm() else None,
+            # Fail in the child before the outer pytest timeout expires.
+            timeout_s=(
+                SHUTDOWN_TEST_TIMEOUT_SEC // 2
+                if current_platform.is_rocm()
+                else SHUTDOWN_TEST_TIMEOUT_SEC
+            ),
         )

@@ -3,15 +3,14 @@
 
 # Adapted from
 # https://github.com/zai-org/CogAgent
-from transformers import PreTrainedTokenizer
-from transformers.image_processing_utils_fast import BaseImageProcessorFast
+from transformers import PythonBackend
+from transformers.image_processing_backends import TorchvisionBackend
 from transformers.image_utils import PILImageResampling
 from transformers.processing_utils import ProcessorMixin
 
 
-class GLM4VImageProcessorFast(BaseImageProcessorFast):
-    """
-    Port of https://huggingface.co/zai-org/glm-4v-9b/blob/main/tokenization_chatglm.py#L177
+class GLM4VImageProcessorFast(TorchvisionBackend):
+    """Port of https://huggingface.co/zai-org/glm-4v-9b/blob/main/tokenization_chatglm.py#L177
     to HF Transformers.
     """
 
@@ -30,7 +29,7 @@ class GLM4VProcessor(ProcessorMixin):
     def __init__(
         self,
         image_processor: GLM4VImageProcessorFast,
-        tokenizer: PreTrainedTokenizer,
+        tokenizer: PythonBackend,
     ) -> None:
         self.image_processor = image_processor
         self.tokenizer = tokenizer

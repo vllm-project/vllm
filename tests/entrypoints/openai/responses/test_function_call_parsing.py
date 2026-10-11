@@ -5,7 +5,7 @@
 import json
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
@@ -57,7 +57,6 @@ def test_direct_function_call_object_preservation():
 
 def test_mixed_input_types_with_function_calls():
     """Test parsing with mixed input types including function calls."""
-
     request_data = {
         "model": "gpt-oss",
         "input": [
@@ -177,7 +176,6 @@ def test_empty_list_input():
 
 def test_function_call_output_not_affected():
     """Test that FunctionCallOutput is not affected by the function_call parsing."""
-
     # Test with FunctionCallOutput as dict (should not be parsed)
     request_data = {
         "model": "gpt-oss",
@@ -265,7 +263,6 @@ def test_function_call_validation_failure_logs_debug(caplog):
 
 def test_validator_handles_iterator_input():
     """Test that validator can handle ValidatorIterator input (Pydantic internal)."""
-
     # This test simulates when Pydantic passes a ValidatorIterator instead of a list
     # This happened with complex nested structures containing reasoning + function_call
 
@@ -328,3 +325,52 @@ def test_validator_handles_empty_iterator():
 
     request = ResponsesRequest(**mock_data)
     assert request.input == []
+
+
+def test_assistant_string_content_stays_easyinput():
+    """EasyInput assistant message with plain string content is not
+    coerced into a ResponseOutputMessage."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {"type": "message", "role": "assistant", "content": "hello"},
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    item = request.input[0]
+    assert isinstance(item, dict), (
+        "String-content assistant message should remain a dict (EasyInput), "
+        f"got {type(item)}"
+    )
+    assert item.get("content") == "hello"
+    assert "id" not in item
+    assert "status" not in item
+
+
+def test_assistant_output_style_content_coerced():
+    """Assistant message whose content is output-message-shaped (list of
+    output_text items) should be coerced to ResponseOutputMessage."""
+    request_data = {
+        "model": "test-model",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "world"}],
+            },
+        ],
+    }
+
+    request = ResponsesRequest(**request_data)
+
+    item = request.input[0]
+    assert isinstance(item, ResponseOutputMessage), (
+        "Output-style assistant message should be coerced to "
+        f"ResponseOutputMessage, got {type(item)}"
+    )
+    assert item.content[0].text == "world"
+    assert item.content[0].annotations == []
+    assert item.status == "completed"
+    assert item.id.startswith("msg_")

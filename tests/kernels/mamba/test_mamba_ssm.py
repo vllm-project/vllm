@@ -17,6 +17,25 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+DEVICE = current_platform.device_type
+
+pytestmark = pytest.mark.skipif(
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_xpu()
+        or current_platform.is_cpu()
+    ),
+    reason="mamba_ssm kernels require CUDA-alike, XPU, or CPU",
+)
+
+# selective_scan_fn is backed by the CUDA-only `ops.selective_scan_fwd` C++ op,
+# so tests exercising it must be skipped on XPU. selective_state_update is
+# pure Triton and runs on both CUDA-alike and XPU.
+skip_unless_cuda_alike = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="selective_scan_fn uses CUDA-only custom op",
+)
+
 
 def selective_scan_ref(
     u,
@@ -32,8 +51,7 @@ def selective_scan_ref(
     prev_state=None,
     final_state_out=None,
 ):
-    """
-    u: r(B D L)
+    """u: r(B D L)
     delta: r(B D L)
     A: c(D N) or r(D N)
     B: c(D N) or r(B N L) or r(B N 2L) or r(B G N L) or (B G N L)
@@ -116,7 +134,7 @@ def selective_scan_opcheck_fn(
     cu_chunk_seqlen=None,
     last_chunk_indices=None,
 ):
-    """if return_last_state is True, returns (out, last_state)
+    """If return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate).
     """
     if u.stride(-1) != 1:
@@ -181,6 +199,7 @@ def selective_scan_opcheck_fn(
 @pytest.mark.parametrize("is_variable_C", [True])
 @pytest.mark.parametrize("is_variable_B", [True])
 @pytest.mark.parametrize("scan_chunks", [1, 3])
+@skip_unless_cuda_alike
 def test_selective_scan(
     is_variable_B,
     is_variable_C,
@@ -326,12 +345,23 @@ def test_selective_scan(
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update(dim, dstate, has_z, itype):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
-        if torch.version.hip:
+        if (
+            current_platform.is_rocm()
+            or current_platform.is_xpu()
+            or current_platform.is_device_capability_family(90)
+        ):
             atol *= 2
     # set seed
     set_random_seed(0)
@@ -370,7 +400,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
     " on compute capability 10.0 CUDA devices.",
 )
 def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_rounds):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = 5e-3, 1e-1
     # set seed
     set_random_seed(0)
@@ -416,12 +446,19 @@ def test_selective_state_update_stochastic_rounding(dim, dstate, has_z, philox_r
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 @pytest.mark.parametrize("max_seq_len", [1, 2, 4])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 5e-2, 1.5e-1
-        if torch.version.hip:
+        if current_platform.is_rocm() or current_platform.is_xpu():
             atol *= 2
     # set seed
     set_random_seed(0)
@@ -498,6 +535,7 @@ def test_selective_state_update_varlen(dim, dstate, has_z, itype, max_seq_len):
 @pytest.mark.parametrize("is_variable_B", [True])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [False, True])
+@skip_unless_cuda_alike
 def test_selective_scan_varlen(
     with_padding,
     is_variable_B,
@@ -676,14 +714,21 @@ def test_selective_scan_varlen(
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # tests correctness in case subset of the sequences are padded
 @pytest.mark.parametrize("with_padding", [True, False])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_with_batch_indices(
     with_padding, dim, dstate, has_z, itype
 ):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-1, 1e-1
-        if torch.version.hip:
+        if current_platform.is_rocm() or current_platform.is_xpu():
             atol *= 2
     # set seed
     torch.random.manual_seed(0)
@@ -768,10 +813,17 @@ def test_selective_state_update_with_batch_indices(
 @pytest.mark.parametrize("ngroups", [1, 4])
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_with_heads_with_batch_indices(
     dim, dstate, ngroups, has_z, tie_hdim, itype
 ):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 3e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-1, 1e-1
@@ -841,14 +893,21 @@ def test_selective_state_update_with_heads_with_batch_indices(
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.parametrize("max_seq_len", [2, 4])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_with_num_accepted_tokens(
     dim, dstate, has_z, itype, max_seq_len
 ):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 5e-2, 1.5e-1
-        if torch.version.hip:
+        if current_platform.is_rocm() or current_platform.is_xpu():
             atol *= 2
 
     set_random_seed(0)
@@ -967,14 +1026,21 @@ def test_selective_state_update_with_num_accepted_tokens(
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.parametrize("max_seq_len", [2, 4])
+@pytest.mark.skipif(
+    current_platform.is_cpu(),
+    reason=(
+        "CPU kernel for selective_state_update only supports "
+        "Mamba 2 (scalar A/dt), not Mamba 1."
+    ),
+)
 def test_selective_state_update_varlen_with_num_accepted(
     dim, dstate, has_z, itype, max_seq_len
 ):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 5e-2, 1.5e-1
-        if torch.version.hip:
+        if current_platform.is_rocm() or current_platform.is_xpu():
             atol *= 2
 
     set_random_seed(0)

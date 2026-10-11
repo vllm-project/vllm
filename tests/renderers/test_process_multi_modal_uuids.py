@@ -1,18 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from http import HTTPStatus
+
 import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.serve import create_error_response
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
-baby_reading_np_ndarrays = VideoAsset("baby_reading").np_ndarrays
+baby_reading_video_asset = VideoAsset("baby_reading")
+baby_reading_video = (
+    baby_reading_video_asset.np_ndarrays,
+    baby_reading_video_asset.metadata,
+)
 
 
 def _build_renderer(
@@ -33,6 +40,32 @@ def _build_renderer(
         vllm_config,
         cached_tokenizer_from_config(model_config),
     )
+
+
+def _build_text_only_renderer() -> HfRenderer:
+    model_config = ModelConfig(model="openai-community/gpt2", max_model_len=128)
+
+    return HfRenderer(
+        VllmConfig(model_config=model_config),
+        cached_tokenizer_from_config(model_config),
+    )
+
+
+def test_text_only_model_mm_data_maps_to_bad_request():
+    """Sending multimodal data to a text-only model is a client mistake, so it
+    must surface as a ValueError and reach the client as HTTP 400, not 500."""
+    renderer = _build_text_only_renderer()
+
+    with pytest.raises(ValueError, match="text-only") as exc_info:
+        renderer._process_multimodal(
+            prompt=[1],
+            mm_data={"image": [cherry_pil_image]},
+            mm_uuids=None,
+            mm_processor_kwargs=None,
+        )
+
+    error_response = create_error_response(exc_info.value)
+    assert error_response.error.code == HTTPStatus.BAD_REQUEST
 
 
 def test_multi_modal_uuids_length_mismatch_raises():
@@ -98,7 +131,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
 
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
 
     # Use a consistent two-image scenario across all configurations
@@ -147,17 +180,39 @@ def test_multi_modal_uuids_accepts_empty(
     assert processed_mm_uuids == mm_uuids
 
 
-def test_multi_modal_uuids_ignored_when_caching_disabled():
-    # When both processor cache is 0 and prefix caching disabled, the
-    # processor builds overrides from request id instead of using user UUIDs.
+@pytest.mark.parametrize(
+    "mm_uuids, expected",
+    [
+        (
+            {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]},
+            {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]},
+        ),
+        (
+            {"image": [None, "hash_stop"], "video": None},
+            {"image": ["req-42-image-0", "hash_stop"], "video": ["req-42-video-0"]},
+        ),
+        (
+            {"image": ["", None]},
+            {"image": ["", "req-42-image-1"], "video": ["req-42-video-0"]},
+        ),
+        (
+            {},
+            {
+                "image": ["req-42-image-0", "req-42-image-1"],
+                "video": ["req-42-video-0"],
+            },
+        ),
+    ],
+)
+def test_multi_modal_uuids_preserved_when_caching_disabled(mm_uuids, expected):
+    """Only missing UUIDs get request-local IDs when both caches are disabled."""
     renderer = _build_renderer(mm_cache_gb=0.0, enable_prefix_caching=False)
 
     request_id = "req-42"
     mm_data = {
         "image": [cherry_pil_image, stop_pil_image],
-        "video": baby_reading_np_ndarrays,
+        "video": baby_reading_video,
     }
-    mm_uuids = {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]}
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
@@ -167,16 +222,4 @@ def test_multi_modal_uuids_ignored_when_caching_disabled():
         mm_data, mm_data_items, mm_uuid_items, request_id
     )
 
-    # Expect request-id-based overrides are passed through
-    assert set(mm_uuids.keys()) == {"image", "video"}
-    assert len(mm_uuids["image"]) == 2
-    assert len(mm_uuids["video"]) == 1
-    assert processed_mm_uuids["image"][0].startswith(
-        f"{request_id}-image-"
-    ) and processed_mm_uuids["image"][0].endswith("-0")
-    assert processed_mm_uuids["image"][1].startswith(
-        f"{request_id}-image-"
-    ) and processed_mm_uuids["image"][1].endswith("-1")
-    assert processed_mm_uuids["video"][0].startswith(
-        f"{request_id}-video-"
-    ) and processed_mm_uuids["video"][0].endswith("-0")
+    assert processed_mm_uuids == expected

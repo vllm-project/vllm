@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark comparing Triton vs PyTorch sort-based top-k/top-p implementations.
+"""Benchmark comparing Triton vs PyTorch sort-based top-k/top-p implementations.
 
 Compares:
 - apply_top_k_top_p_triton (Triton binary search)
@@ -47,8 +46,7 @@ def calculate_ops_pct(
     vocab_size: int,
     batch_size: int,
 ) -> float:
-    """
-    Calculate the percentage of active top-k and top-p operations.
+    """Calculate the percentage of active top-k and top-p operations.
 
     Returns percentage where 100% = batch_size ops.
     E.g., if all rows have both top-k and top-p active, returns 200%.
@@ -117,8 +115,7 @@ def benchmark_function(
     warmup_iters: int = 5,
     benchmark_iters: int = 20,
 ) -> tuple[float, int]:
-    """
-    Benchmark a function and return (avg_time_ms, peak_memory_bytes).
+    """Benchmark a function and return (avg_time_ms, peak_memory_bytes).
 
     Returns average time in milliseconds and peak memory usage.
     """

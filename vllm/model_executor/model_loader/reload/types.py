@@ -29,6 +29,10 @@ class LayerReloadingInfo:
     # kernel formatted tensors, copied into by `_layerwise_process` when reloading
     kernel_tensors: LayerTensors | None = None
 
+    # non-persistent buffer names captured with `kernel_tensors`, so buffer
+    # persistence survives `_non_persistent_buffers_set` being mutated during reload
+    kernel_non_persistent_buffers: set[str] = field(default_factory=set)
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
             restore_metadata=self.restore_metadata, restore_device=self.restore_device

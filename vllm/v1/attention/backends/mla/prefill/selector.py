@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from vllm.logger import init_logger
-from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -31,52 +30,21 @@ class MLAPrefillSelectorConfig(NamedTuple):
     """
 
     dtype: torch.dtype
-    is_r1_compatible: bool
+    mla_dimensions: MLADimensions = MLADimensions(
+        qk_nope_head_dim=0,
+        qk_rope_head_dim=0,
+        v_head_dim=0,
+    )
 
-
-def is_deepseek_r1_mla_compatible(vllm_config: "VllmConfig") -> bool:
-    """Check if model has DeepSeek R1 compatible MLA dimensions.
-
-    DeepSeek R1 MLA dimensions are:
-    - qk_nope_head_dim = 128
-    - qk_rope_head_dim = 64
-    - v_head_dim = 128
-    """
-    if vllm_config.model_config is None:
-        return False
-    hf_text_config = vllm_config.model_config.hf_text_config
-    qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-    qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", 1)
-    v_head_dim = getattr(hf_text_config, "v_head_dim", 1)
-    return qk_nope_head_dim == 128 and qk_rope_head_dim == 64 and v_head_dim == 128
-
-
-def _get_mla_prefill_backend_priorities(
-    device_capability: DeviceCapability,
-) -> list[MLAPrefillBackendEnum]:
-    """Get MLA prefill backend priorities based on device capability.
-
-    Args:
-        device_capability: The device's compute capability.
-
-    Returns:
-        List of backends in priority order (highest priority first).
-    """
-    if device_capability.major == 10:  # Blackwell
-        return [
-            MLAPrefillBackendEnum.FLASH_ATTN,
-            MLAPrefillBackendEnum.TRTLLM_RAGGED,
-            MLAPrefillBackendEnum.FLASHINFER,
-            MLAPrefillBackendEnum.TOKENSPEED_MLA,
-        ]
-    else:  # Hopper (SM90) and older
-        return [
-            MLAPrefillBackendEnum.FLASH_ATTN,
-        ]
+    def __repr__(self):
+        return (
+            f"MLAPrefillSelectorConfig(dtype={self.dtype}, "
+            f"mla_dimensions={self.mla_dimensions})"
+        )
 
 
 def get_mla_prefill_backend(
-    vllm_config: "VllmConfig",
+    vllm_config: "VllmConfig | None",
 ) -> "type[MLAPrefillBackend]":
     """Select the MLA prefill backend based on configuration and device.
 
@@ -85,32 +53,44 @@ def get_mla_prefill_backend(
     priority-based selection.
 
     Args:
-        vllm_config: The vLLM configuration.
+        vllm_config: The vLLM configuration. May be None before model
+            resolution, in which case defaults are used.
 
     Returns:
         The selected prefill backend class.
+
     """
     from vllm.platforms import current_platform
 
-    device_capability = current_platform.get_device_capability()
-    if device_capability is None:
-        logger.info_once(
-            "Device capability not available, using FlashAttention MLA prefill backend."
+    model_config = vllm_config.model_config if vllm_config is not None else None
+    if model_config is None:
+        selector_config = MLAPrefillSelectorConfig(dtype=torch.get_default_dtype())
+    else:
+        hf_text_config = model_config.hf_text_config
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=model_config.dtype,
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=getattr(hf_text_config, "qk_nope_head_dim", 0),
+                qk_rope_head_dim=getattr(hf_text_config, "qk_rope_head_dim", 0),
+                v_head_dim=getattr(hf_text_config, "v_head_dim", 0),
+            ),
         )
-        return MLAPrefillBackendEnum.FLASH_ATTN.get_class()
 
-    attention_config = vllm_config.attention_config
+    if current_platform.is_cpu():
+        # CPUs have a single fixed MLA prefill backend, so explicit backend
+        # configuration does not apply; always auto-select via the platform.
+        return _auto_select_mla_prefill_backend(selector_config)
 
-    selector_config = MLAPrefillSelectorConfig(
-        dtype=vllm_config.model_config.dtype,
-        is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
-    )
-
-    if attention_config.mla_prefill_backend is not None:
+    attention_config = vllm_config.attention_config if vllm_config is not None else None
+    if (
+        attention_config is not None
+        and attention_config.mla_prefill_backend is not None
+    ):
         selected_backend = attention_config.mla_prefill_backend
         backend_cls: type[MLAPrefillBackend] | None = None
         try:
             backend_cls = selected_backend.get_class()
+            device_capability = current_platform.get_device_capability()
             invalid_reasons = backend_cls.validate_configuration(
                 device_capability, selector_config
             )
@@ -123,62 +103,30 @@ def get_mla_prefill_backend(
                 f"Reason: {invalid_reasons}"
             )
         assert backend_cls is not None
-        logger.info("Using %s MLA prefill backend.", selected_backend.name)
+        logger.info_once("Using %s MLA prefill backend.", selected_backend.name)
         return backend_cls
 
-    return _auto_select_mla_prefill_backend(
-        device_capability,
-        selector_config,
-    )
+    return _auto_select_mla_prefill_backend(selector_config)
 
 
 @cache
 def _auto_select_mla_prefill_backend(
-    device_capability: DeviceCapability,
     selector_config: MLAPrefillSelectorConfig,
 ) -> "type[MLAPrefillBackend]":
     """Auto-select the best available MLA prefill backend.
 
     Args:
-        device_capability: The device's compute capability.
         selector_config: Hashable configuration for backend selection.
 
     Returns:
         The selected prefill backend class.
+
+    Raises:
+        ValueError: If the platform has no valid MLA prefill backend.
+
     """
-    priorities = _get_mla_prefill_backend_priorities(device_capability)
-    all_invalid_reasons: dict[str, list[str]] = {}
+    from vllm.platforms import current_platform
 
-    for backend_enum in priorities:
-        backend_cls: type[MLAPrefillBackend] | None = None
-        try:
-            backend_cls = backend_enum.get_class()
-            invalid_reasons = backend_cls.validate_configuration(
-                device_capability, selector_config
-            )
-        except ImportError:
-            invalid_reasons = ["ImportError"]
-        if not invalid_reasons:
-            assert backend_cls is not None
-            logger.info_once("Using %s MLA prefill backend.", backend_enum.name)
-            return backend_cls
-        all_invalid_reasons[backend_enum.name] = invalid_reasons
-
-    reasons_str = (
-        "{"
-        + ", ".join(
-            f"{name}: [{', '.join(reasons)}]"
-            for name, reasons in all_invalid_reasons.items()
-        )
-        + "}"
-    )
-    config_str = repr(selector_config)
-    logger.debug_once(
-        "Some MLA prefill backends are not valid with %s. Reasons: %s.",
-        config_str,
-        reasons_str,
-    )
-
-    raise ValueError(
-        f"No valid MLA prefill backend found with {config_str}. Reasons: {reasons_str}."
-    )
+    selected_backend = current_platform.get_mla_prefill_backend_cls(selector_config)
+    logger.info_once("Using %s MLA prefill backend.", selected_backend.get_name())
+    return selected_backend

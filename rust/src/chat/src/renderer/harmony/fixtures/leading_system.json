@@ -1,0 +1,13 @@
+{
+  "reasoning_effort": "high",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Answer tersely."
+    },
+    {
+      "role": "user",
+      "content": "What is 2 + 2?"
+    }
+  ]
+}

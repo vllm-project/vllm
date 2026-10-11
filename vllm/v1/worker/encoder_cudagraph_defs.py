@@ -2,12 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Data transfer objects for encoder CUDA graph management."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 
 import torch
 
 EncoderCudaGraphPaddingLogic = Callable[[torch.Tensor, torch.Tensor], None]
+
+# Reserved mm_kwargs key: models with ``EncoderCudaGraphConfig.capture_axes``
+# put the resolved per-axis keys (one per axis, in order) into the dict
+# returned by ``select_encoder_cudagraph_items()``; the manager pops it before
+# the kwargs are used anywhere else.
+ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG = "encoder_cudagraph_axis_keys"
 
 
 @dataclass
@@ -25,6 +31,29 @@ class EncoderItemSpec:
     output_tokens: int
     """Number of output tokens after encoder processing (e.g. after
     spatial merge)."""
+
+    path_output_tokens: dict[str, int] = field(default_factory=dict)
+    """Per-path output token counts for multi-path encoders.
+
+    Single-path encoders leave this empty and use ``output_tokens`` for the
+    default path.
+    """
+
+    def get_path_output_tokens(self, path: str) -> int:
+        if path == "default" and not self.path_output_tokens:
+            return self.output_tokens
+        return self.path_output_tokens.get(path, 0)
+
+
+@dataclass(frozen=True)
+class EncoderCudaGraphPathConfig:
+    """Capture policy for one independently replayable encoder path."""
+
+    min_token_budget: int | None = None
+    """Smallest capture budget, or the model default minimum when unset."""
+
+    allow_zero_tokens: bool = False
+    """Whether a batch may omit this path entirely."""
 
 
 @dataclass
@@ -59,6 +88,19 @@ class EncoderCudaGraphConfig:
     """Maximum number of frames per video.
     Only relevant when "video" is in ``modalities``.
     Image-only models can use the default of 1."""
+
+    paths: dict[str, EncoderCudaGraphPathConfig] = field(
+        default_factory=lambda: {"default": EncoderCudaGraphPathConfig()}
+    )
+    """Independently captured encoder paths keyed by their forward name."""
+
+    capture_axes: tuple[tuple[Hashable, ...], ...] = ()
+    """Extra capture axes beyond the token budget; empty to disable.
+
+    Each entry is the ordered key set of one axis. When non-empty, one graph
+    is captured per token budget per combination of axis keys (cartesian
+    product), so the total number of captured graphs is
+    ``num_budgets * prod(len(axis) for axis in capture_axes)``."""
 
 
 @dataclass

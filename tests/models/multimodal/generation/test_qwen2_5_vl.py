@@ -4,9 +4,10 @@
 import pytest
 
 from vllm.assets.image import ImageAsset
-from vllm.multimodal.video import sample_frames_from_video
+from vllm.platforms import current_platform
 
 from ....conftest import VIDEO_ASSETS
+from .vlm_utils.builders import sample_frames_with_video_metadata
 
 models = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 target_dtype = "bfloat16"
@@ -52,11 +53,15 @@ def _encoder_cudagraph_config(*, max_vision_items: int) -> dict:
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("video_pruning_rate", [0.0, 0.75])
+@pytest.mark.parametrize(
+    "video_pruning_rate", [0.0] if current_platform.is_cpu() else [0.0, 0.75]
+)
 @pytest.mark.parametrize("num_frames", [16])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("use_bytecode_hook", [True, False])
+@pytest.mark.parametrize(
+    "use_bytecode_hook", [True] if current_platform.is_cpu() else [True, False]
+)
 def test_qwen2_5_vl_evs_functionality(
     vllm_runner,
     video_assets,
@@ -76,7 +81,9 @@ def test_qwen2_5_vl_evs_functionality(
 
     # Sample frames from video assets
     sampled_vids = [
-        sample_frames_from_video(asset.np_ndarrays, num_frames)
+        sample_frames_with_video_metadata(
+            (asset.np_ndarrays, asset.metadata), num_frames
+        )
         for asset in video_assets
     ]
 
@@ -109,11 +116,15 @@ def test_qwen2_5_vl_evs_functionality(
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("video_pruning_rate", [0.0, 0.75])
+@pytest.mark.parametrize(
+    "video_pruning_rate", [0.0] if current_platform.is_cpu() else [0.0, 0.75]
+)
 @pytest.mark.parametrize("num_frames", [16])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("use_bytecode_hook", [True, False])
+@pytest.mark.parametrize(
+    "use_bytecode_hook", [True] if current_platform.is_cpu() else [True, False]
+)
 def test_qwen2_5_vl_evs_batched_videos(
     vllm_runner,
     video_assets,
@@ -136,7 +147,9 @@ def test_qwen2_5_vl_evs_batched_videos(
     monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
     # Sample frames from video assets
     sampled_vids = [
-        sample_frames_from_video(asset.np_ndarrays, num_frames)
+        sample_frames_with_video_metadata(
+            (asset.np_ndarrays, asset.metadata), num_frames
+        )
         for asset in video_assets
     ]
 
@@ -174,7 +187,9 @@ def test_qwen2_5_vl_evs_batched_videos(
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("use_bytecode_hook", [True, False])
+@pytest.mark.parametrize(
+    "use_bytecode_hook", [True] if current_platform.is_cpu() else [True, False]
+)
 def test_qwen2_5_vl_window_attention_image(
     vllm_runner,
     model,
@@ -210,7 +225,9 @@ def test_qwen2_5_vl_window_attention_image(
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("use_bytecode_hook", [True, False])
+@pytest.mark.parametrize(
+    "use_bytecode_hook", [True] if current_platform.is_cpu() else [True, False]
+)
 def test_qwen2_5_vl_window_attention_image_batch(
     vllm_runner,
     model,

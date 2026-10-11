@@ -1,0 +1,1496 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
+from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    placeholder_ranges_from_engine_input,
+)
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+    encode_mm_kwargs_item,
+)
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    GenerateRequest,
+    GenerateTextResponse,
+    GenerateTokensResponse,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
+from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import GenerationError
+from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    PlaceholderRange,
+)
+from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
+from vllm.renderers import renderer_from_config
+from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.sampling_params import SamplingParams
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
+
+MODEL_NAME = "openai-community/gpt2"
+BASE_MODEL_PATHS = [
+    BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
+]
+
+
+@dataclass
+class MockHFConfig:
+    model_type: str = "any"
+
+
+@dataclass
+class MockModelConfig:
+    task = "generate"
+    runner_type = "generate"
+    model = MODEL_NAME
+    tokenizer = MODEL_NAME
+    trust_remote_code = False
+    tokenizer_mode = "auto"
+    max_model_len = 100
+    tokenizer_revision = None
+    multimodal_config = MultiModalConfig()
+    hf_config = MockHFConfig()
+    hf_text_config = MockHFConfig()
+    logits_processors: list[str] | None = None
+    diff_sampling_param: dict | None = None
+    allowed_local_media_path: str = ""
+    allowed_media_domains: list[str] | None = None
+    encoder_config = None
+    generation_config: str = "auto"
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
+    renderer_num_workers: int = 1
+
+    def get_diff_sampling_param(self):
+        return self.diff_sampling_param or {}
+
+
+@dataclass
+class MockParallelConfig:
+    _api_process_rank: int = 0
+
+
+@dataclass
+class MockSchedulerConfig:
+    max_num_seqs: int = 128
+
+
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+    parallel_config: MockParallelConfig
+    scheduler_config: MockSchedulerConfig = field(default_factory=MockSchedulerConfig)
+
+
+def _build_renderer(model_config: MockModelConfig):
+    return renderer_from_config(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+    )
+
+
+def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = OnlineRenderer(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    serving = ServingTokens(
+        engine,
+        models,
+        online_renderer=online_renderer,
+        request_logger=None,
+        **kwargs,
+    )
+
+    async def _fake_preprocess(*args, **kwargs):
+        return [{"prompt_token_ids": [1, 2, 3]}]
+
+    serving.online_renderer.preprocess_completion = AsyncMock(
+        side_effect=_fake_preprocess
+    )
+    return serving
+
+
+def _make_request_output(
+    request_id: str,
+    token_ids: list[int],
+    finish_reason: str | None = None,
+    finished: bool = False,
+    prompt_token_ids: list[int] | None = None,
+    logprobs: list[dict[int, Any] | None] | None = None,
+    num_cached_tokens: int | None = None,
+    index: int = 0,
+    spec_decode_metrics: RequestSpecDecodeMetrics | None = None,
+    text: str = "",
+) -> RequestOutput:
+    return RequestOutput(
+        request_id=request_id,
+        prompt=None,
+        prompt_token_ids=prompt_token_ids or [1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=index,
+                text=text,
+                token_ids=token_ids,
+                cumulative_logprob=None,
+                logprobs=logprobs,
+                finish_reason=finish_reason,
+                spec_decode_metrics=spec_decode_metrics,
+            )
+        ],
+        finished=finished,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+        num_cached_tokens=num_cached_tokens,
+    )
+
+
+def _mock_engine() -> MagicMock:
+    engine = MagicMock(spec=AsyncLLM)
+    engine.errored = False
+    engine.model_config = MockModelConfig()
+    engine.vllm_config = MockVllmConfig(
+        engine.model_config, parallel_config=MockParallelConfig()
+    )
+    engine.input_processor = MagicMock()
+    engine.renderer = _build_renderer(engine.model_config)
+    return engine
+
+
+def _parse_sse_chunks(chunks: list[str]) -> list[Any]:
+    """Parse SSE chunks into dicts (JSON) or raw strings ([DONE])."""
+    parsed: list[Any] = []
+    for chunk in chunks:
+        assert chunk.startswith("data: ") and chunk.endswith("\n\n")
+        payload = chunk[len("data: ") : -len("\n\n")]
+        if payload == "[DONE]":
+            parsed.append("[DONE]")
+        else:
+            parsed.append(json.loads(payload))
+    return parsed
+
+
+def test_placeholder_ranges_from_engine_input():
+    engine_input: Any = {
+        "type": "multimodal",
+        "mm_placeholders": {
+            "image": [
+                PlaceholderRange(offset=1, length=5),
+                PlaceholderRange(offset=8, length=2),
+            ]
+        },
+    }
+
+    placeholders = placeholder_ranges_from_engine_input(engine_input)
+
+    assert placeholders is not None
+    assert [item.model_dump() for item in placeholders["image"]] == [
+        {"offset": 1, "length": 5},
+        {"offset": 8, "length": 2},
+    ]
+
+    text_only: Any = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+    assert placeholder_ranges_from_engine_input(text_only) is None
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=False,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateTokensResponse)
+    assert (
+        serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_threads_session_id_header_to_engine():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=False,
+    )
+    raw_request = MagicMock()
+    raw_request.headers = {"X-Session-ID": "header-session"}
+
+    await serving.serve_tokens(request, raw_request)
+
+    assert engine.generate.call_args.kwargs["session_id"] == "header-session"
+
+
+@pytest.mark.asyncio
+async def test_non_stream_error():
+    """finish_reason='error' raises for the HTTP exception handler."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[], finish_reason="error", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=False,
+    )
+
+    with pytest.raises(GenerationError):
+        await serving.serve_tokens(request)
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_rejects_invalid_shm_handle_before_engine_handoff():
+    engine = _mock_engine()
+    engine.generate = MagicMock()
+    serving = _build_serving_tokens(engine)
+    cache = MagicMock()
+    cache.validate_input_item.side_effect = ValueError(
+        "Invalid SHM handle signature for cache key."
+    )
+    serving.online_renderer.renderer._mm_processor_cache = cache
+    forged_item = MultiModalKwargsItem(
+        {
+            "address": MultiModalFieldElem(data=224, field=MultiModalBatchedField()),
+            "monotonic_id": MultiModalFieldElem(
+                data=4242,
+                field=MultiModalBatchedField(),
+            ),
+        }
+    )
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        features=MultiModalFeatures(
+            mm_hashes={"image": ["image_A"]},
+            mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=1)]},
+            kwargs_data={"image": [encode_mm_kwargs_item(forged_item)]},
+        ),
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, ErrorResponse)
+    cache.validate_input_item.assert_called_once()
+    validated_item, validated_hash = cache.validate_input_item.call_args.args
+    assert validated_hash == "image_A"
+    assert validated_item["address"].data == 224
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_basic():
+    """Streaming returns SSE chunks with correct token_ids and ends with [DONE]."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output("req-1", token_ids=[20, 30])
+        yield _make_request_output(
+            "req-1", token_ids=[40], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+
+    # 3 data chunks + [DONE]
+    assert parsed[-1] == "[DONE]"
+    data_chunks = [c for c in parsed if c != "[DONE]"]
+    assert len(data_chunks) == 3
+
+    assert data_chunks[0]["choices"][0]["token_ids"] == [10]
+    assert data_chunks[1]["choices"][0]["token_ids"] == [20, 30]
+    assert data_chunks[2]["choices"][0]["token_ids"] == [40]
+    assert data_chunks[2]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
+    engine = _mock_engine()
+    metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
+    metrics.observe(num_draft_tokens=3, num_accepted=2)
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            spec_decode_metrics=metrics,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=stream,
+        stream_options=StreamOptions(include_usage=True) if stream else None,
+    )
+
+    response = await serving.serve_tokens(request)
+    if stream:
+        chunks = [chunk async for chunk in response]
+        payload = next(
+            chunk
+            for chunk in _parse_sse_chunks(chunks)
+            if isinstance(chunk, dict) and chunk.get("metrics")
+        )["metrics"]["speculative_decoding"]
+    else:
+        assert isinstance(response, GenerateTokensResponse)
+        assert response.metrics is not None
+        assert response.metrics.speculative_decoding is not None
+        payload = response.metrics.speculative_decoding.model_dump()
+
+    assert payload["num_draft_tokens"] == 3
+    assert payload["num_accepted_draft_tokens"] == 2
+    assert payload["num_spec_steps"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_usage", [False, True])
+async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
+    include_usage,
+):
+    engine = _mock_engine()
+    metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
+    metrics.observe(num_draft_tokens=3, num_accepted=2)
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1",
+            token_ids=[],
+            finish_reason="stop",
+            finished=True,
+            spec_decode_metrics=metrics,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=include_usage),
+    )
+
+    chunks = [chunk async for chunk in await serving.serve_tokens(request)]
+    data_chunks = [chunk for chunk in _parse_sse_chunks(chunks) if chunk != "[DONE]"]
+
+    assert "metrics" not in data_chunks[0]
+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
+    assert "metrics" not in data_chunks[1]
+    assert len(data_chunks) == 2 + int(include_usage)
+    if include_usage:
+        assert data_chunks[2]["choices"] == []
+        assert (
+            data_chunks[2]["metrics"]["speculative_decoding"]["num_draft_tokens"] == 3
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
+    stream: bool,
+):
+    engine = _mock_engine()
+    metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
+    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    result = _make_request_output(
+        "req-1",
+        token_ids=[10],
+        finish_reason="stop",
+        finished=True,
+        spec_decode_metrics=metrics,
+    )
+    result.outputs.append(
+        CompletionOutput(
+            index=1,
+            text="",
+            token_ids=[20],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+            spec_decode_metrics=metrics,
+        )
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield result
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1, n=2),
+        model=MODEL_NAME,
+        stream=stream,
+        stream_options=StreamOptions(include_usage=True) if stream else None,
+    )
+
+    response = await serving.serve_tokens(request)
+    if stream:
+        chunks = [chunk async for chunk in response]
+        assert all(
+            "metrics" not in chunk
+            for chunk in _parse_sse_chunks(chunks)
+            if isinstance(chunk, dict)
+        )
+    else:
+        assert isinstance(response, GenerateTokensResponse)
+        assert response.metrics is None
+
+
+@pytest.mark.asyncio
+async def test_non_stream_returns_final_prompt_token_ids_when_requested():
+    engine = _mock_engine()
+    final_prompt_token_ids = [1, 2, 2, 2, 3]
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            prompt_token_ids=final_prompt_token_ids,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        return_token_ids=True,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateTokensResponse)
+    assert response.prompt_token_ids == final_prompt_token_ids
+
+
+@pytest.mark.asyncio
+async def test_stream_returns_prompt_token_ids_only_once_when_requested():
+    engine = _mock_engine()
+    final_prompt_token_ids = [1, 2, 2, 2, 3]
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], prompt_token_ids=final_prompt_token_ids
+        )
+        yield _make_request_output(
+            "req-1",
+            token_ids=[20],
+            finish_reason="stop",
+            finished=True,
+            prompt_token_ids=final_prompt_token_ids,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=2),
+        model=MODEL_NAME,
+        stream=True,
+        return_token_ids=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    assert data_chunks[0]["prompt_token_ids"] == final_prompt_token_ids
+    assert "prompt_token_ids" not in data_chunks[1]
+
+
+MM_ENGINE_INPUT: Any = {
+    "type": "multimodal",
+    "prompt_token_ids": [1, 2, 2, 2, 3],
+    "mm_placeholders": {"image": [PlaceholderRange(offset=1, length=3)]},
+}
+MM_PLACEHOLDERS = {"image": [{"offset": 1, "length": 3}]}
+
+
+def _build_mm_serving_tokens(engine: AsyncLLM) -> ServingTokens:
+    serving = _build_serving_tokens(engine)
+
+    async def _fake_preprocess(*args, **kwargs):
+        return [MM_ENGINE_INPUT]
+
+    serving.online_renderer.preprocess_completion = AsyncMock(
+        side_effect=_fake_preprocess
+    )
+    return serving
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_token_ids", [False, True])
+async def test_non_stream_prompt_metadata_requires_return_token_ids(
+    return_token_ids: bool,
+):
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_mm_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        return_token_ids=return_token_ids,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateTokensResponse)
+    if return_token_ids:
+        assert response.prompt_token_ids == [1, 2, 3]
+        assert response.model_dump()["mm_placeholders"] == MM_PLACEHOLDERS
+    else:
+        assert response.prompt_token_ids is None
+        assert response.mm_placeholders is None
+        assert request._response_mm_placeholders is None
+
+
+@pytest.mark.asyncio
+async def test_non_stream_text_only_prompt_has_no_mm_placeholders():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        return_token_ids=True,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateTokensResponse)
+    assert response.prompt_token_ids == [1, 2, 3]
+    assert response.mm_placeholders is None
+
+
+@pytest.mark.asyncio
+async def test_non_stream_encoder_decoder_omits_mm_placeholders():
+    engine = _mock_engine()
+    engine.model_config.is_encoder_decoder = True
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_mm_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        return_token_ids=True,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateTokensResponse)
+    assert response.prompt_token_ids == [1, 2, 3]
+    assert response.mm_placeholders is None
+
+
+@pytest.mark.asyncio
+async def test_stream_prompt_metadata_lands_on_first_emitted_chunk():
+    """An empty first output is skipped; metadata goes on the first real chunk,
+    once, and never on the sibling chunk of the same iteration (n=2)."""
+    engine = _mock_engine()
+
+    def _two_outputs(tokens0: list[int], tokens1: list[int], **kwargs):
+        res = _make_request_output("req-1", token_ids=tokens0, **kwargs)
+        res.outputs.append(
+            CompletionOutput(
+                index=1,
+                text="",
+                token_ids=tokens1,
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=kwargs.get("finish_reason"),
+            )
+        )
+        return res
+
+    async def mock_generate(*args, **kwargs):
+        yield _two_outputs([], [])
+        yield _two_outputs([10], [11])
+        yield _two_outputs([20], [21], finish_reason="stop", finished=True)
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_mm_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=2, n=2),
+        model=MODEL_NAME,
+        stream=True,
+        return_token_ids=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    assert [c["choices"][0]["token_ids"] for c in data_chunks] == [
+        [10],
+        [11],
+        [20],
+        [21],
+    ]
+    assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
+    assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+    for chunk in data_chunks[1:]:
+        assert "prompt_token_ids" not in chunk
+        assert "mm_placeholders" not in chunk
+
+
+@pytest.mark.asyncio
+async def test_stream_omits_prompt_metadata_by_default():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_mm_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    assert data_chunks
+    for chunk in data_chunks:
+        assert "prompt_token_ids" not in chunk
+        assert "mm_placeholders" not in chunk
+
+
+@pytest.mark.asyncio
+async def test_stream_text_only_prompt_omits_mm_placeholders_key():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=True,
+        return_token_ids=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
+    assert "mm_placeholders" not in data_chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_stream_zero_token_completion_still_delivers_prompt_metadata():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_mm_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=True,
+        return_token_ids=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    assert len(data_chunks) == 1
+    assert data_chunks[0]["choices"][0]["token_ids"] == []
+    assert data_chunks[0]["choices"][0]["finish_reason"] == "stop"
+    assert data_chunks[0]["prompt_token_ids"] == [1, 2, 3]
+    assert data_chunks[0]["mm_placeholders"] == MM_PLACEHOLDERS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["stop", "length", "abort"])
+async def test_stream_emits_terminal_output_without_new_tokens(finish_reason):
+    """The final output may carry no new tokens (always for an abort); the
+    client must still see why the choice finished."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[], finish_reason=finish_reason, finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    choices = [c["choices"][0] for c in parsed[:-1]]
+
+    assert [c["token_ids"] for c in choices] == [[10], []]
+    assert [c["finish_reason"] for c in choices] == [None, finish_reason]
+    assert parsed[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_stream_parallel_sampling_first_output_missing_a_choice():
+    """With n=2 the first output may carry only one choice; the other must
+    still stream, and an abort finishes both."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], index=0)
+        yield _make_request_output("req-1", token_ids=[11], index=1)
+        aborted = _make_request_output(
+            "req-1", token_ids=[], finish_reason="abort", finished=True
+        )
+        aborted.outputs += _make_request_output(
+            "req-1", token_ids=[], finish_reason="abort", index=1
+        ).outputs
+        yield aborted
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, n=2),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    choices = [c["choices"][0] for c in parsed[:-2]]
+
+    assert [(c["index"], c["token_ids"], c["finish_reason"]) for c in choices] == [
+        (0, [10], None),
+        (1, [11], None),
+        (0, [], "abort"),
+        (1, [], "abort"),
+    ]
+    assert parsed[-2]["usage"]["completion_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_error_mid_generation():
+    """finish_reason='error' mid-stream yields error chunk then [DONE]."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[20], finish_reason="error", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert len(chunks) >= 2
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_stream_error_with_empty_delta():
+    """finish_reason='error' with empty delta_token_ids still raises."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[], finish_reason="error", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_stream_skips_empty_token_output():
+    """Outputs with empty token_ids are skipped (no chunk emitted)."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output("req-1", token_ids=[])
+        yield _make_request_output(
+            "req-1", token_ids=[20], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    assert parsed[-1] == "[DONE]"
+    data_chunks = [c for c in parsed if c != "[DONE]"]
+
+    # Only 2 data chunks — the empty one is skipped
+    assert len(data_chunks) == 2
+    assert data_chunks[0]["choices"][0]["token_ids"] == [10]
+    assert data_chunks[1]["choices"][0]["token_ids"] == [20]
+
+
+@pytest.mark.asyncio
+async def test_stream_include_usage():
+    """stream_options.include_usage emits a final usage-only chunk."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[20], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    assert parsed[-1] == "[DONE]"
+
+    # The chunk before [DONE] should be the usage-only chunk
+    usage_chunk = parsed[-2]
+    assert usage_chunk["choices"] == []
+    assert usage_chunk["usage"]["prompt_tokens"] == 3
+    assert usage_chunk["usage"]["completion_tokens"] == 2
+    assert usage_chunk["usage"]["total_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_stream_continuous_usage():
+    """continuous_usage_stats adds usage to every data chunk."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1", token_ids=[20], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(
+            include_usage=True,
+            continuous_usage_stats=True,
+        ),
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    # Every data chunk should have usage
+    for i, dc in enumerate(data_chunks):
+        assert dc["usage"] is not None, f"chunk {i} missing usage"
+        assert dc["usage"]["prompt_tokens"] == 3
+
+    # First chunk: 1 completion token
+    assert data_chunks[0]["usage"]["completion_tokens"] == 1
+    assert data_chunks[0]["usage"]["total_tokens"] == 4
+
+    # Second chunk: 2 completion tokens (cumulative)
+    assert data_chunks[1]["usage"]["completion_tokens"] == 2
+    assert data_chunks[1]["usage"]["total_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_stream_with_logprobs():
+    """Streaming with logprobs includes logprob data in each chunk."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            logprobs=[{10: Logprob(logprob=-0.5)}],
+        )
+        yield _make_request_output(
+            "req-1",
+            token_ids=[20],
+            logprobs=[{20: Logprob(logprob=-1.0)}],
+            finish_reason="stop",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10, logprobs=1),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    data_chunks = [c for c in parsed if isinstance(c, dict) and c.get("choices")]
+
+    for dc in data_chunks:
+        lp = dc["choices"][0]["logprobs"]
+        assert lp is not None
+        assert len(lp["content"]) == 1
+        assert isinstance(lp["content"][0]["token_id"], int)
+        assert "token" not in lp["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_stream_prompt_tokens_details():
+    """enable_prompt_tokens_details includes cached_tokens in final usage."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            num_cached_tokens=2,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine, enable_prompt_tokens_details=True)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    # Usage-only chunk (before [DONE])
+    usage_chunk = parsed[-2]
+    assert usage_chunk["choices"] == []
+    assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_prompt_tokens_details_zero_cached():
+    """enable_prompt_tokens_details includes cached_tokens=0 in final usage.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/44377:
+    zero cached tokens must not be treated as falsy and omitted.
+    """
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            num_cached_tokens=0,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine, enable_prompt_tokens_details=True)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    # Usage-only chunk (before [DONE])
+    usage_chunk = parsed[-2]
+    assert usage_chunk["choices"] == []
+    # Zero cached tokens must be present, not omitted
+    assert usage_chunk["usage"]["prompt_tokens_details"] is not None
+    assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_mask", [False, True])
+async def test_stream_sampling_mask_matches_each_token_chunk(with_mask):
+    engine = _mock_engine()
+
+    async def generate(*args, **kwargs):
+        for position, tokens in enumerate(([10], [20, 30])):
+            result = _make_request_output(
+                "req-mask",
+                token_ids=list(tokens),
+                finish_reason="length" if position else None,
+                finished=bool(position),
+            )
+            if with_mask:
+                result.outputs[0].sampling_mask = SamplingMask(
+                    [[token, token + 1] for token in tokens]
+                )
+            yield result
+
+    engine.generate = MagicMock(side_effect=generate)
+    serving = _build_serving_tokens(engine)
+    response = await serving.serve_tokens(
+        GenerateRequest(
+            model=MODEL_NAME, token_ids=[1, 2, 3], sampling_params={}, stream=True
+        )
+    )
+    chunks = _parse_sse_chunks([chunk async for chunk in response])
+    choices = [
+        choice
+        for chunk in chunks
+        if isinstance(chunk, dict)
+        for choice in chunk.get("choices", [])
+    ]
+    assert [choice["token_ids"] for choice in choices] == [[10], [20, 30]]
+    for choice in choices:
+        expected = (
+            [[token, token + 1] for token in choice["token_ids"]] if with_mask else None
+        )
+        assert choice["sampling_mask"] == expected
+
+
+async def _collect_sse(response) -> list[Any]:
+    return _parse_sse_chunks([chunk async for chunk in response])
+
+
+def _text_request(**kwargs) -> GenerateRequest:
+    kwargs.setdefault("sampling_params", SamplingParams(max_tokens=10))
+    return GenerateRequest(
+        token_ids=[1, 2, 3], model=MODEL_NAME, output_mode="text", **kwargs
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_stream_tokens_mode_omits_text_and_echoes_output_mode():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], text="ignored", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    response = await serving.serve_tokens(
+        GenerateRequest(
+            token_ids=[1, 2, 3],
+            sampling_params=SamplingParams(max_tokens=10),
+            model=MODEL_NAME,
+        )
+    )
+
+    assert isinstance(response, GenerateTokensResponse)
+    dumped = response.model_dump()
+    assert dumped["output_mode"] == "tokens"
+    assert "text" not in dumped["choices"][0]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_text_mode_returns_text_and_token_ids():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10, 20],
+            text="Hello",
+            finish_reason="stop",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    response = await serving.serve_tokens(_text_request())
+
+    assert isinstance(response, GenerateTextResponse)
+    assert response.output_mode == "text"
+    assert response.choices[0].text == "Hello"
+    assert response.choices[0].token_ids == [10, 20]
+    assert response.choices[0].finish_reason == "stop"
+    assert response.usage is not None
+    assert response.usage.completion_tokens == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("no_tokenizer", ["tokens_only", "skip_tokenizer_init"])
+async def test_text_mode_rejected_without_tokenizer(no_tokenizer: str):
+    """The no-op detokenizer returns "", so text mode must fail instead
+    of answering 200 with empty text."""
+    engine = _mock_engine()
+    kwargs: dict[str, Any] = {}
+    if no_tokenizer == "tokens_only":
+        kwargs["force_no_detokenize"] = True
+    else:
+        engine.model_config.skip_tokenizer_init = True
+        engine.renderer = _build_renderer(engine.model_config)
+    engine.generate = MagicMock()
+    serving = _build_serving_tokens(engine, **kwargs)
+
+    response = await serving.serve_tokens(_text_request())
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert "requires a tokenizer" in response.error.message
+    engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_text_mode_logprobs_have_decoded_tokens_and_bytes():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="é",
+            logprobs=[
+                {
+                    10: Logprob(logprob=-0.5, decoded_token="é"),
+                    11: Logprob(logprob=-1.5, decoded_token="e"),
+                }
+            ],
+            finish_reason="stop",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    response = await serving.serve_tokens(
+        _text_request(sampling_params=SamplingParams(max_tokens=10, logprobs=2))
+    )
+
+    assert isinstance(response, GenerateTextResponse)
+    logprobs = response.choices[0].logprobs
+    assert logprobs is not None and logprobs.content is not None
+    entry = logprobs.content[0]
+    assert (entry.token, entry.bytes) == ("é", [195, 169])
+    assert [(t.token, t.bytes) for t in entry.top_logprobs] == [
+        ("é", [195, 169]),
+        ("e", [101]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_text_mode_logprobs_keep_placeholders_with_return_tokens_as_ids():
+    """--return-tokens-as-token-ids keeps token_id:N placeholders, as it does
+    on /v1/completions, while text is still decoded."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            text="é",
+            logprobs=[{10: Logprob(logprob=-0.5, decoded_token="é")}],
+            finish_reason="stop",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine, return_tokens_as_token_ids=True)
+
+    response = await serving.serve_tokens(
+        _text_request(sampling_params=SamplingParams(max_tokens=10, logprobs=1))
+    )
+
+    assert isinstance(response, GenerateTextResponse)
+    assert response.choices[0].text == "é"
+    logprobs = response.choices[0].logprobs
+    assert logprobs is not None and logprobs.content is not None
+    entry = logprobs.content[0]
+    assert (entry.token, entry.bytes) == ("token_id:10", None)
+    assert [t.token for t in entry.top_logprobs] == ["token_id:10"]
+
+
+@pytest.mark.asyncio
+async def test_stream_text_mode_emits_text_deltas():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="Hel")
+        yield _make_request_output("req-1", token_ids=[20], text="lo")
+        yield _make_request_output(
+            "req-1", token_ids=[30], text=" world", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    response = await serving.serve_tokens(_text_request(stream=True))
+    parsed = await _collect_sse(response)
+
+    assert parsed[-1] == "[DONE]"
+    data_chunks = parsed[:-1]
+    assert {c["output_mode"] for c in data_chunks} == {"text"}
+    assert [c["choices"][0]["text"] for c in data_chunks] == ["Hel", "lo", " world"]
+    assert [c["choices"][0]["token_ids"] for c in data_chunks] == [[10], [20], [30]]
+    assert data_chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_stream_text_mode_emits_chunks_without_new_token_ids():
+    """Text flushed from the stop string buffer and the final abort output
+    carry no token IDs but must still reach the client."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="a")
+        yield _make_request_output("req-1", token_ids=[], text="b")
+        yield _make_request_output(
+            "req-1", token_ids=[], text="", finish_reason="abort", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    response = await serving.serve_tokens(_text_request(stream=True))
+    data_chunks = (await _collect_sse(response))[:-1]
+
+    assert [c["choices"][0]["text"] for c in data_chunks] == ["a", "b", ""]
+    assert data_chunks[1]["choices"][0]["token_ids"] == []
+    assert data_chunks[2]["choices"][0]["finish_reason"] == "abort"
+
+
+@pytest.mark.asyncio
+async def test_stream_text_mode_skips_outputs_without_text_or_finish():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10], text="a")
+        yield _make_request_output("req-1", token_ids=[], text="")
+        yield _make_request_output(
+            "req-1", token_ids=[20], text="b", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    response = await serving.serve_tokens(_text_request(stream=True))
+    data_chunks = (await _collect_sse(response))[:-1]
+
+    assert [c["choices"][0]["text"] for c in data_chunks] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_stream_text_mode_usage_chunk_echoes_output_mode():
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], text="a", finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    response = await serving.serve_tokens(
+        _text_request(stream=True, stream_options=StreamOptions(include_usage=True))
+    )
+    parsed = await _collect_sse(response)
+
+    usage_chunk = parsed[-2]
+    assert usage_chunk["output_mode"] == "text"
+    assert usage_chunk["choices"] == []
+    assert usage_chunk["usage"]["completion_tokens"] == 1

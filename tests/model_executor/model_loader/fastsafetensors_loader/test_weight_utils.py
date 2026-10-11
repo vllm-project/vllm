@@ -20,7 +20,9 @@ from vllm.platforms import current_platform
     not current_platform.is_cuda_alike(),
     reason="fastsafetensors requires NVIDIA/AMD GPUs",
 )
-def test_fastsafetensors_model_loader():
+@pytest.mark.parametrize("queue_size", [0, 1])
+def test_fastsafetensors_model_loader(monkeypatch, queue_size):
+    monkeypatch.setenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", str(queue_size))
     with tempfile.TemporaryDirectory() as tmpdir:
         huggingface_hub.constants.HF_HUB_OFFLINE = False
         download_weights_from_hf(
@@ -45,7 +47,3 @@ def test_fastsafetensors_model_loader():
             assert fastsafetensors_tensor.dtype == hf_safetensors_tensors[name].dtype
             assert fastsafetensors_tensor.shape == hf_safetensors_tensors[name].shape
             assert torch.all(fastsafetensors_tensor.eq(hf_safetensors_tensors[name]))
-
-
-if __name__ == "__main__":
-    test_fastsafetensors_model_loader()
