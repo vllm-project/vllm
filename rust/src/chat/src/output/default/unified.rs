@@ -884,6 +884,7 @@ mod tests {
             description: None,
             parameters: serde_json::json!({ "type": "object" }),
             strict: None,
+            defer_loading: None,
         }];
         let parser = Gemma4UnifiedParser::new(&tools, Arc::new(tokenizer)).unwrap();
         let events = vec![

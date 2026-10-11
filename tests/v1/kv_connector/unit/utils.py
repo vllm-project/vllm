@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
 from typing import Any, Literal
+from unittest.mock import Mock
 
 import torch
 
@@ -42,11 +43,20 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
+
+
+def create_mock_connector() -> Mock:
+    connector = Mock()
+    connector.get_external_cache_hit_sources.side_effect = lambda request, num_tokens: (
+        {CacheHitSource.EXTERNAL_UNSPECIFIED: num_tokens} if num_tokens else {}
+    )
+    return connector
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -60,6 +70,8 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
     assert len(scheduler._inflight_prefills) == 0
+    assert not scheduler._kv_fetch_stages
+    assert not any(scheduler._kv_fetch_counts.values())
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -165,6 +177,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
+    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -195,6 +208,7 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=hash_block_size,
     )
 
 
@@ -520,6 +534,7 @@ def make_kv_cache_config(
 def make_nixl_scheduler(
     has_mamba: bool = False,
     is_hma_required: bool = False,
+    bounded_replay: bool = False,
     heartbeat: bool = False,
     kv_lease_duration: int = 30,
 ):
@@ -536,6 +551,7 @@ def make_nixl_scheduler(
 
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
+    sched._bounded_replay = bounded_replay
     sched._is_hma_required = is_hma_required
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
@@ -603,6 +619,7 @@ def make_nixl_push_scheduler(
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
+    sched._bounded_replay = False
     sched.kv_cache_config = make_kv_cache_config(
         block_size=16,
         mamba_enabled=has_mamba,

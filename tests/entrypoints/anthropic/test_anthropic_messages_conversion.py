@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import (
@@ -1986,6 +1987,32 @@ class TestThinkingConfig:
         assert result.include_reasoning is True
         assert result.thinking_token_budget is None
 
+    @pytest.mark.parametrize(
+        "config",
+        [
+            pytest.param({"output_config": {"effort": "low"}}, id="effort"),
+            pytest.param({"thinking": {"type": "disabled"}}, id="disabled"),
+            pytest.param(
+                {"thinking": {"type": "enabled", "budget_tokens": 2048}},
+                id="enabled",
+            ),
+        ],
+    )
+    def test_count_tokens_matches_messages(self, config):
+        """Effort and thinking change the rendered prompt, so count_tokens must
+        apply them the same way /v1/messages does."""
+        messages = [{"role": "user", "content": "Hello"}]
+        expected = _convert(
+            AnthropicMessagesRequest(
+                model="test-model", max_tokens=4096, messages=messages, **config
+            )
+        )
+        result = _convert(
+            AnthropicCountTokensRequest(model="test-model", messages=messages, **config)
+        )
+        assert result.reasoning_effort == expected.reasoning_effort
+        assert result.thinking_token_budget == expected.thinking_token_budget
+
 
 class TestProbeDisabledThinkingEffort:
     """``auto`` falls back to ``low`` when ``none`` cannot turn thinking off."""
@@ -2032,3 +2059,114 @@ class TestProbeDisabledThinkingEffort:
     @pytest.mark.asyncio
     async def test_renderer_rejects_none(self):
         assert await self._probe(self._reject_none) == "low"
+
+
+class TestMidConversationToolChanges:
+    """``tool_addition``/``tool_removal`` blocks decide which tools the chat
+    template is given, since it has no other way to see them."""
+
+    @staticmethod
+    def _convert_tools(*changes: dict) -> dict[str, bool | None]:
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "Tools changed."}, *changes],
+                },
+            ],
+            tools=[
+                {"name": "bash", "input_schema": {}},
+                {"name": "search", "input_schema": {}, "defer_loading": True},
+                {"name": "fetch", "input_schema": {}, "defer_loading": True},
+            ],
+        )
+        result = _convert(request)
+        assert result.messages[-1] == {"role": "system", "content": "Tools changed."}
+        assert result.tools is not None
+        return {t.function.name: t.function.defer_loading for t in result.tools}
+
+    @staticmethod
+    def _change(block_type: str, name: str) -> dict:
+        return {"type": block_type, "tool": {"type": "tool_reference", "name": name}}
+
+    def test_addition_loads_deferred_tool(self):
+        tools = self._convert_tools(self._change("tool_addition", "search"))
+        assert tools == {"bash": None, "search": None, "fetch": True}
+
+    def test_removal_withdraws_tool_until_added_again(self):
+        removal = self._change("tool_removal", "bash")
+        assert "bash" not in self._convert_tools(removal)
+        readded = self._convert_tools(removal, self._change("tool_addition", "bash"))
+        assert list(readded) == ["bash", "search", "fetch"]
+
+    def test_addition_defines_tool_by_value(self):
+        definition = {"name": "db_query", "input_schema": {}}
+        tools = self._convert_tools(
+            {
+                "type": "tool_addition",
+                "tool": {"type": "tool_definition", "definition": definition},
+            }
+        )
+        assert list(tools) == ["bash", "search", "fetch", "db_query"]
+
+    def test_unknown_tool_reference_is_rejected(self):
+        with pytest.raises(ValueError, match="not declared in tools"):
+            self._convert_tools(self._change("tool_addition", "missing"))
+
+    def test_removal_by_value_is_rejected(self):
+        definition = {"name": "bash", "input_schema": {}}
+        with pytest.raises(ValidationError, match="only accepts a tool_reference"):
+            self._convert_tools(
+                {
+                    "type": "tool_removal",
+                    "tool": {"type": "tool_definition", "definition": definition},
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "request_cls", [AnthropicMessagesRequest, AnthropicCountTokensRequest]
+    )
+    @pytest.mark.parametrize("in_top_level_system", [False, True])
+    def test_tool_change_outside_system_message_is_rejected(
+        self, request_cls, in_top_level_system
+    ):
+        change = self._change("tool_addition", "search")
+        if in_top_level_system:
+            fields = {
+                "messages": [{"role": "user", "content": "Hi"}],
+                "system": [change],
+            }
+        else:
+            fields = {"messages": [{"role": "user", "content": [change]}]}
+        with pytest.raises(
+            ValidationError, match='only allowed in messages with role "system"'
+        ):
+            request_cls(model="test-model", max_tokens=128, **fields)
+
+
+class TestWatermarking:
+    def test_defaults_to_unspecified(self):
+        request = _make_request([{"role": "user", "content": "hi"}])
+
+        assert _convert(request).watermarking is None
+
+    def test_forwards_explicit_enable(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=True)
+
+        assert _convert(request).watermarking is True
+
+    def test_forwards_the_opt_out(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=False)
+
+        assert _convert(request).watermarking is False
+
+    @pytest.mark.parametrize("watermarking", [None, True, False])
+    def test_reaches_sampling_params(self, watermarking):
+        request = _make_request(
+            [{"role": "user", "content": "hi"}], watermarking=watermarking
+        )
+
+        params = _convert(request).to_sampling_params(16, {})
+
+        assert params.watermarking is watermarking

@@ -52,6 +52,9 @@ pub struct Tool {
     pub description: Option<String>,
     pub parameters: Value,
     pub strict: Option<bool>,
+    /// Whether the tool's schema is loaded on demand (tool search). Only chat
+    /// templates consume it; the tool stays callable for parsing and grammars.
+    pub defer_loading: Option<bool>,
 }
 
 /// One tool-call update emitted while parsing assistant text.
