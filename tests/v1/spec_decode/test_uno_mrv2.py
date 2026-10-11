@@ -2096,8 +2096,6 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         ec_connector_output=None,
         cudagraph_stats=None,
         num_spec_tokens_to_schedule=2,
-        skip_speculator_proposal=False,
-        zero_next_draft_req_ids=frozenset(),
     )
     runner.is_last_pp_rank = True
     runner.pcp_manager = None
@@ -2201,31 +2199,16 @@ def test_uno_propose_signature_matches_base_speculator():
     assert shape(UnoSpeculator.propose) == shape(BaseSpeculator.propose)
 
 
-@pytest.mark.parametrize("skip_proposal", [False, True])
-def test_uno_prefill_preserves_base_output_before_proposal_order(
-    monkeypatch, skip_proposal
-):
-    """D2H is issued before postprocessing, with or without a tail proposal."""
+def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
+    """D2H is issued before postprocessing and the proposal."""
     runner, proposer, events, output_type = _uno_sample_tokens_runner(monkeypatch)
-    runner.execute_model_state = runner.execute_model_state._replace(
-        skip_speculator_proposal=skip_proposal,
-        zero_next_draft_req_ids=(
-            frozenset({"request-0"}) if skip_proposal else frozenset()
-        ),
-    )
 
     output = runner.sample_tokens(None)
 
     assert isinstance(output, output_type)
-    proposal_events = [] if skip_proposal else ["propose-step-7"]
-    assert events == ["output", "postprocess", *proposal_events, "publish", "kv"]
-    # Simulate the step mutation formerly caused by a DP dummy run. It is
-    # necessarily after the proposal now, rather than between defer and flush.
-    proposer._step += 1
-    assert proposer._step == (8 if skip_proposal else 9)
-    assert not hasattr(runner, "_pending_uno_proposal")
-    expected_drafts = [[0, 0]] if skip_proposal else [[8, 9]]
-    assert runner.req_states.draft_tokens.tolist() == expected_drafts
+    assert events == ["output", "postprocess", "propose-step-7", "publish", "kv"]
+    assert proposer._step == 8
+    assert runner.req_states.draft_tokens.tolist() == [[8, 9]]
 
 
 def test_attention_config_leaves_the_version_to_the_platform():

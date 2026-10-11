@@ -313,12 +313,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
-        self._zero_next_draft_req_ids: frozenset[str] = frozenset()
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.method == "uno"
-        ):
-            logger.info("Uno draft tail mode: early")
 
         self.pcp_manager: pcp.PCPManager | None = None
 
@@ -1295,12 +1289,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         input_batch: InputBatch,
         num_spec_tokens: int,
-        zero_next_draft_req_ids: frozenset[str] = frozenset(),
     ) -> None:
         """Make device draft tokens visible to the scheduler and PP peers."""
         if self.num_speculative_steps <= 0:
             return
-        self._zero_next_draft_req_ids = zero_next_draft_req_ids
         self.draft_tokens_handler.set_draft_tokens(
             input_batch,
             self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
@@ -2345,8 +2337,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             cudagraph_stats=cudagraph_stats,
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
-            skip_speculator_proposal=scheduler_output.skip_speculator_proposal,
-            zero_next_draft_req_ids=frozenset(scheduler_output.zero_next_draft_req_ids),
         )
 
         if not self.is_last_pp_rank:
@@ -2377,8 +2367,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
-        skip_speculator_proposal = self.execute_model_state.skip_speculator_proposal
-        zero_next_draft_req_ids = self.execute_model_state.zero_next_draft_req_ids
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2410,15 +2398,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, aux_hidden_states, input_batch = (
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )
-        is_uno = isinstance(self.speculator, UnoSpeculator)
-        if not is_uno:
-            zero_next_draft_req_ids = frozenset()
-        skip_speculator_proposal = (
-            is_uno
-            and skip_speculator_proposal
-            and bool(input_batch.req_ids)
-            and all(req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids)
-        )
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -2510,7 +2489,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        if self.speculator is not None and not skip_speculator_proposal:
+        if self.speculator is not None:
             assert self.sampler is not None
             if isinstance(self.speculator, DraftModelSpeculator):
                 self.speculator.observe_verification(
@@ -2539,9 +2518,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Spec-decode and diffusion LLMs both use draft tokens but the latter does
         # not have a speculator (i.e. self.speculator is None).
-        self._publish_draft_tokens(
-            input_batch, num_spec_tokens, zero_next_draft_req_ids
-        )
+        self._publish_draft_tokens(input_batch, num_spec_tokens)
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
@@ -2551,13 +2528,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        drafts = self.draft_tokens_handler.get_draft_tokens()
-        if drafts is not None and self._zero_next_draft_req_ids:
-            drafts.draft_token_ids = [
-                [] if req_id in self._zero_next_draft_req_ids else tokens
-                for req_id, tokens in zip(drafts.req_ids, drafts.draft_token_ids)
-            ]
-        return drafts
+        return self.draft_tokens_handler.get_draft_tokens()
 
     @torch.inference_mode()
     @step_eplb_after()
@@ -2688,8 +2659,6 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
-    skip_speculator_proposal: bool = False
-    zero_next_draft_req_ids: frozenset[str] = frozenset()
 
 
 class BatchReqState(NamedTuple):
