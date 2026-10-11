@@ -72,5 +72,5 @@ fi
 
 if [ "${INSTALL_MOONCAKE_COMPRESSION:-0}" = "1" ]; then
     uv pip install --system -c "${CONSTRAINTS_DIR}/constraints.txt" \
-        "kvserve_v1[runtime,runtime-cu${CUDA_MAJOR}] @ git+https://github.com/hpdps-group/KVServe.git@7482d69a07165022812af0643991655b0f97011b"
+        "kvserve_v1[runtime,runtime-cu${CUDA_MAJOR}] @ https://github.com/hpdps-group/KVServe/archive/7482d69a07165022812af0643991655b0f97011b.tar.gz"
 fi

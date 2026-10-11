@@ -116,10 +116,12 @@ maintained in [KVServe](https://github.com/hpdps-group/KVServe), outside vLLM.
 vLLM adapts cache geometry and retains Mooncake transfer and session ownership.
 The adapter requires runtime API version 1. Install the same pinned KVServe
 revision on both endpoints; version 0.2.0 has not yet been published on PyPI.
+No KVServe checkout or `PYTHONPATH` change is required: the command below builds
+the immutable source archive as a normal wheel in the active vLLM environment.
 
 ```bash
 # CUDA 13; use runtime-cu12 for CUDA 12. Keep the installed vLLM/Torch versions.
-uv pip install 'kvserve_v1[runtime,runtime-cu13] @ git+https://github.com/hpdps-group/KVServe.git@7482d69a07165022812af0643991655b0f97011b'
+uv pip install 'kvserve_v1[runtime,runtime-cu13] @ https://github.com/hpdps-group/KVServe/archive/7482d69a07165022812af0643991655b0f97011b.tar.gz'
 ```
 
 See KVServe's [runtime API and compatibility guide](https://github.com/hpdps-group/KVServe/blob/7482d69a07165022812af0643991655b0f97011b/docs/compression-runtime.md)
