@@ -87,6 +87,7 @@ class SharedExperts(torch.nn.Module):
             "allgather_reducescatter",
             "deepep_v2",
             "flashinfer_nvlink_one_sided",
+            "nixl_ep_v2",
         )
 
         parallel_config = self._moe_config.moe_parallel_config
