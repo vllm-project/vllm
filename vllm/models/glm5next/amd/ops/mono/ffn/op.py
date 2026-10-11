@@ -17,7 +17,8 @@ from vllm.models.glm5next.amd.ops.mono.ffn.layout import POLL_STAGES
 
 @dataclass
 class FlashFfnWeights:
-    """One layer's tensors as the kernel reads them (views, except ``w_r``)."""
+    """One layer's tensors as the kernel reads them; ``*_sh_*`` is the shared
+    expert, a slice of the routed tensors or a packed copy."""
 
     w_r: torch.Tensor
     bias: torch.Tensor
@@ -25,6 +26,10 @@ class FlashFfnWeights:
     s_ug: torch.Tensor
     w_dn: torch.Tensor
     s_dn: torch.Tensor
+    w_sh_ug: torch.Tensor
+    s_sh_ug: torch.Tensor
+    w_sh_dn: torch.Tensor
+    s_sh_dn: torch.Tensor
     hc_fn: torch.Tensor
     hc_scale: torch.Tensor
     hc_base: torch.Tensor
@@ -149,6 +154,10 @@ class FlashFfnOp:
             p(w.s_ug),
             p(w.w_dn),
             p(w.s_dn),
+            p(w.w_sh_ug),
+            p(w.s_sh_ug),
+            p(w.w_sh_dn),
+            p(w.s_sh_dn),
             p(rt.scratch),
             rt.peer.storage.data_ptr(),
             p(rt.peer.addresses),

@@ -14,8 +14,7 @@ from vllm.models.common.mono.spec import MonoSpec
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-# vLLM fuses the shared expert into the routed tensor only at TP4 and TP8
-TP_SIZES = (4, 8)
+TP_SIZES = (2, 4, 8)
 WIDTHS = (2, 4, 8)
 STEP_TOKENS = (1, 2, 4, 8)
 GRID = 256
@@ -68,9 +67,7 @@ def refuse_config(vllm_config: VllmConfig) -> list[str]:
             if getattr(hf, key, None) != want:
                 reasons.append(f"needs {key} {want}, got {getattr(hf, key, None)}")
     if vllm_config.parallel_config.tensor_parallel_size not in TP_SIZES:
-        reasons.append(
-            "needs tensor parallel size 4 or 8 (the fused shared-expert layout)"
-        )
+        reasons.append("needs tensor parallel size 2, 4 or 8")
     if vllm_config.parallel_config.use_sequence_parallel_moe:
         reasons.append("sequence-parallel MoE")
     return reasons
