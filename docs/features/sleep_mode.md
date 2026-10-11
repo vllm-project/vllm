@@ -77,8 +77,15 @@ llm.wake_up(tags=["kv_cache"])
 #### Retaining frozen weights during RLHF updates
 
 Set `sleep_preserve_parameter_names` (CLI: `--sleep-preserve-parameter-names`)
-to runtime parameter-name glob
-patterns for weights that stay frozen during training. Target patterns match
+to runtime parameter-name glob patterns for weights that stay frozen during
+training. It covers two use cases:
+
+- **Frozen Engram tables (original use case):** retain table weights and scales
+  omitted by the trainer, without retransmitting them after every sleep.
+- **Frozen draft weights:** retain draft-private parameters when the trainer
+  updates only the target model.
+
+Target patterns match
 `model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 
 Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
