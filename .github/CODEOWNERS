@@ -45,9 +45,17 @@
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
+/vllm/entrypoints/scale_out @aoshen02
+/vllm/entrypoints/launchers/cli_args.py @aoshen02
+/vllm/entrypoints/launchers/api_server/routers.py @aoshen02
 
 # Rust Frontend
 /rust/ @BugenZhao @njhill
+/rust/src/server/src/routes.rs @BugenZhao @njhill @aoshen02
+/rust/src/server/src/routes/inference @BugenZhao @njhill @aoshen02
+/rust/src/server/src/routes/tests.rs @BugenZhao @njhill @aoshen02
+/rust/src/server/src/config.rs @BugenZhao @njhill @aoshen02
+/rust/src/cmd/src/cli.rs @BugenZhao @njhill @aoshen02
 /rust/src/bench @esmeetu
 /tools/build_rust.sh @BugenZhao @njhill
 /rust-toolchain.toml @BugenZhao @njhill
@@ -100,6 +108,7 @@
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
+/tests/entrypoints/scale_out @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas @aoshen02
 /tests/evals @mgoin @vadiklyutiy @AndreasKaratzas
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
