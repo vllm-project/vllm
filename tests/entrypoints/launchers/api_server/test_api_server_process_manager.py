@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 import zmq
 
+import vllm.envs as envs
 from vllm.utils.network_utils import make_zmq_listener, make_zmq_socket
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.utils import (
@@ -412,9 +413,32 @@ def test_external_process_monitoring(api_server_args):
         WORKER_RUNTIME_SECONDS = prev_worker_runtime
 
 
-def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
-    """The Rust frontend command carries every non-default arg as JSON.
-    Credentials must not reach the log line."""
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    (
+        "media_mb",
+        "audio_mb",
+        "existing_audio_mb",
+        "expected_media_mb",
+        "expected_audio_mb",
+    ),
+    [
+        (256, 25, None, 256, 25),
+        (10, 25, None, 10, 10),
+        (256, 25, 5, 256, 5),
+        (256, 25, 0, 256, 0),
+        (512, 512, None, 256, 256),
+    ],
+)
+def test_rust_frontend_launch_config(
+    monkeypatch,
+    media_mb,
+    audio_mb,
+    existing_audio_mb,
+    expected_media_mb,
+    expected_audio_mb,
+):
+    """Forward media limits without changing the parent or logging credentials."""
     import subprocess as subprocess_mod
 
     from vllm.entrypoints.launchers.cli_args import make_arg_parser
@@ -423,6 +447,14 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
 
     hf_token = "hf_TESTTOKEN123"
     api_key = "sk-TESTKEY456"
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB", media_mb)
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", audio_mb)
+    for modality in ("IMAGE", "VIDEO", "AUDIO"):
+        monkeypatch.delenv(f"SMG_{modality}_MAX_INPUT_BYTES", raising=False)
+    if existing_audio_mb is not None:
+        monkeypatch.setenv(
+            "SMG_AUDIO_MAX_INPUT_BYTES", str(existing_audio_mb * (1 << 20))
+        )
     args = make_arg_parser(FlexibleArgumentParser()).parse_args(
         ["--model", "org/model", "--hf-token", hf_token, "--api-key", api_key]
     )
@@ -440,8 +472,14 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     input_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
     output_listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.PULL)
+    popen_calls = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(kwargs)
+        return _FakeProc()
+
     try:
-        monkeypatch.setattr(subprocess_mod, "Popen", lambda *a, **kw: _FakeProc())
+        monkeypatch.setattr(subprocess_mod, "Popen", fake_popen)
         with patch("vllm.v1.utils.logger.info") as log_info:
             RustFrontendProcessManager(
                 binary_path="/nonexistent/vllm-rs",
@@ -463,6 +501,17 @@ def test_rust_frontend_launch_log_redacts_credentials(monkeypatch):
     assert api_key not in message
     assert '"hf_token": "***"' in message
     assert '"api_key": "***"' in message
+    [popen_kwargs] = popen_calls
+    rust_env = popen_kwargs["env"]
+    for modality in ("IMAGE", "VIDEO"):
+        assert rust_env[f"SMG_{modality}_MAX_INPUT_BYTES"] == str(
+            expected_media_mb * (1 << 20)
+        )
+    assert rust_env["SMG_AUDIO_MAX_INPUT_BYTES"] == str(expected_audio_mb * (1 << 20))
+    parent_audio_limit = (
+        str(existing_audio_mb * (1 << 20)) if existing_audio_mb is not None else None
+    )
+    assert os.environ.get("SMG_AUDIO_MAX_INPUT_BYTES") == parent_audio_limit
 
 
 def test_rust_frontend_uses_config_model_as_model_tag(monkeypatch, caplog, tmp_path):
