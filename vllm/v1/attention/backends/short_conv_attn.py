@@ -283,7 +283,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
 
         has_initial_states_p = None
         has_initial_states_d = None
-        num_computed_tokens_p = None
 
         # Per-request classification by mask, NOT by position. With
         # spec-decode, the front decode group can contain both spec-decode
@@ -402,10 +401,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 assert non_spec_query_start_loc is not None
                 query_start_loc_d = non_spec_query_start_loc[: num_decodes + 1]
             if num_prefills > 0:
-                num_computed_tokens_p = num_computed_tokens[
-                    num_decodes : num_decodes + num_prefills
-                ]
-                has_initial_states_p = num_computed_tokens_p > 0
+                has_initial_states_p = (
+                    num_computed_tokens[num_decodes : num_decodes + num_prefills] > 0
+                )
                 assert non_spec_query_start_loc is not None
                 query_start_loc_p = (
                     non_spec_query_start_loc[num_decodes:] - num_decode_tokens
@@ -478,11 +476,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             query_start_loc_d=query_start_loc_d,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
-            num_computed_tokens_p=num_computed_tokens_p,
-            block_idx_last_scheduled_token=None,
-            block_idx_first_scheduled_token_p=None,
-            block_idx_last_computed_token=None,
-            block_idx_last_scheduled_token_prev_step=None,
             seq_lens=m.seq_lens,
         )
 

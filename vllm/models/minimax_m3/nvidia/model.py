@@ -500,6 +500,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # of wrapping the generic Attention module. Keep the same runtime scale
         # attributes so FP8 KV reads can honor vLLM's per-layer descale contract.
         set_default_quant_scales(self, register_buffer=True)
+        # The fused insert quantizes k/v into NVFP4 pages with these scales.
+        self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
         # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main
         # cache (--attention-config '{"indexer_kv_dtype": ...}').
         self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
@@ -611,6 +613,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
+        # With query_fp8, q is emitted only in fp8; the attend dequantizes it
+        # into ``q`` for the tokens that run on bf16-query kernels.
         query_fp8 = self._allocate_query_fp8(qkv)
         # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
         # the fused kernel emits fp8 directly when this buffer is e4m3.
@@ -636,11 +640,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.kv_cache,
             self.indexer.index_cache.kv_cache,
             self.kv_cache.size(2),  # paged-cache block size
-            q,
+            q if query_fp8 is None else None,
             index_q,
             self.kv_cache_dtype,
             q_fp8_out=query_fp8,
             q_fp8_scale=self._q_scale_float,
+            kv_k_scale=self._k_scale if self.use_nvfp4_kv else None,
+            kv_v_scale=self._v_scale if self.use_nvfp4_kv else None,
         )
 
         output = torch.empty_like(q)

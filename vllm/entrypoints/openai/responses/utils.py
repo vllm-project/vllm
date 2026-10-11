@@ -30,7 +30,6 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import FunctionCall, FunctionDefinition
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionMessageParam,
@@ -39,6 +38,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.utils import (
     build_responses_tool_call_name_map,
     flat_namespace_tool_name,
@@ -110,6 +110,28 @@ def build_response_output_items(
             )
 
     return outputs
+
+
+def reuse_streamed_item_ids(
+    items: list[ResponseOutputItem],
+    streamed_items: list[ResponseOutputItem],
+) -> None:
+    """Give rebuilt output items the ids already streamed for the same message.
+
+    Items are paired by type in order; an item without a streamed counterpart
+    keeps its own id.
+    """
+    remaining = list(streamed_items)
+    for item in items:
+        for i, streamed in enumerate(remaining):
+            if streamed.type != item.type:
+                continue
+            item.id = streamed.id
+            if isinstance(item, ResponseFunctionToolCall):
+                assert isinstance(streamed, ResponseFunctionToolCall)
+                item.call_id = streamed.call_id
+            del remaining[i]
+            break
 
 
 def should_continue_final_message(
