@@ -855,7 +855,10 @@ class AsyncLLM(EngineClient):
                         outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs

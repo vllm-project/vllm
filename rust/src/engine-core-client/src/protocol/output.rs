@@ -228,6 +228,9 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
+    /// Decoded for Python wire compatibility; not exposed by the Rust frontend.
+    #[serde(default)]
+    weight_version: Option<String>,
 }
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
