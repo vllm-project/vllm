@@ -146,7 +146,10 @@ def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
     else:
         x, res = ln.forward_native(w["hidden"], w["residual"].clone())
     if proj is None:
-        qkvz = F.linear(x, w["w_qkvz"])
+        if "w_qkvzs" in w:  # online MXFP4: dynamic MXFP4 of x, fp32 accumulation
+            qkvz = F.linear(_mxfp4_qdq(x).to(bf), w["w_qkvz_ref"])
+        else:
+            qkvz = F.linear(x, w["w_qkvz"])
         ba = F.linear(x, w["w_ba"])
     else:
         qkvz, ba = proj.split([w["w_qkvz"].size(0), w["w_ba"].size(0)], dim=-1)
@@ -204,9 +207,9 @@ def _gdn_reference(w, n: int, proj: torch.Tensor | None = None):
 def test_attention_front_matches_vllm_ops(s: int) -> None:
     """A full-attention layer's front, which the mono forward runs between K2
     launches: the compiled Gemma add + norm against GemmaRMSNorm.forward_native,
-    and the fused split / q, k norm / RoPE / sigmoid gate against the model's
-    eager ops (``_project_qkv_gate`` off CUDA). TP8 shapes: 8 query heads and
-    one KV head of 256 a rank, 64 rotary dims."""
+    and the fused split / q, k norm / RoPE / gate copy against the model's
+    eager ops (``_project_qkv_gate`` off CUDA; K2 applies the sigmoid gate).
+    TP8 shapes: 8 query heads and one KV head of 256 a rank, 64 rotary dims."""
     from vllm.config import VllmConfig, set_current_vllm_config
 
     with set_current_vllm_config(VllmConfig()):
@@ -252,33 +255,69 @@ def _attention_front(s: int) -> None:
         head_dim=hd,
         attn=lambda q, k, v: q + k.repeat(1, hq) + v.repeat(1, hq),
     )
-    got = md._attention_core(attn, qkv, positions)
+    got, got_gate = md._attention_core(attn, qkv, positions)
 
     q_gate, k, v = qkv.split([hq * hd * 2, hkv * hd, hkv * hd], dim=-1)
     q, gate = q_gate.view(s, hq, 2 * hd).chunk(2, dim=-1)
     q = q_norm.forward_native(q.reshape(s, hq, hd)).reshape(s, hq * hd)
     k = k_norm.forward_native(k.reshape(s, hkv, hd)).reshape(s, hkv * hd)
     q, k = rope.forward_native(positions, q, k)
-    want = attn.attn(q, k, v) * torch.sigmoid(gate.reshape(s, hq * hd))
-    assert got.is_contiguous() and got.shape == want.shape
+    want = attn.attn(q, k, v)
+    assert torch.equal(got_gate, gate.reshape(s, hq * hd))
+    assert got_gate.is_contiguous() and got.is_contiguous()
+    assert got.shape == want.shape
     assert _cos(got, want) > COS_MIN
     torch.testing.assert_close(got, want, atol=3e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize(
+    "pm,cx,bs,hq,go",
+    [
+        (False, False, False, False, False),
+        (True, True, False, False, False),
+        (True, True, True, False, False),
+        (True, True, True, True, False),
+        (True, True, True, True, True),
+    ],
+)
+@pytest.mark.parametrize("qq", [False, True])
+@pytest.mark.parametrize(
     "s,n_real,first", [(1, 1, False), (5, 4, False), (8, 8, False), (8, 7, True)]
 )
-def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
+def test_k1_matches_vllm_ops(
+    s: int,
+    n_real: int,
+    first: bool,
+    qq: bool,
+    pm: bool,
+    cx: bool,
+    bs: bool,
+    hq: bool,
+    go: bool,
+) -> None:
     """K1 against GemmaRMSNorm -> in_proj -> AITER's conv update + fused gated
     delta rule -> RMSNormGated on one decode step, the states it leaves behind,
     and the pad rows (null block: no state written, zero core). The conv state
-    is in the (slots, 3, dim) layout AITER's conv update takes."""
+    is in the (slots, 3, dim) layout AITER's conv update takes. ``qq``: an
+    online-MXFP4 in_proj_qkvz on the ASM FP4 GEMM; ``pm`` / ``cx``: the GDN
+    tasks phase by phase, x built by the in_proj CTAs; ``bs``: in_proj_ba as
+    K-split parts the gates sum; ``hq``: x's MXFP4 on the hardware converts;
+    ``go``: one GDN round past the front CTAs."""
+    if bs and not qq:
+        pytest.skip("bs splits the fp4 path's in_proj_ba")
     from vllm.models.qwen3_5.amd.mono import gdn
-    from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN
+    from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN, QKVZ
 
     w = _gdn_inputs(s, n_real, first)
+    if qq:
+        g = torch.Generator(device="cuda").manual_seed(1)
+        q, sc, w["w_qkvz"], w["w_qkvzs"] = _mxfp4_linear(g, QKVZ, HIDDEN)
+        w["w_qkvz_ref"] = _mxfp4_dequant(q, sc).to(bf)
     ref = _gdn_reference(w, n_real)
-    key = gdn.K1Build(tokens=s, first=first)
+    if qq:
+        stock = _mxfp4_linear_stock(ref["x"], w["w_qkvz"], w["w_qkvzs"])
+        assert _cos(stock, ref["proj"][:, :QKVZ]) > STOCK_COS_MIN
+    key = gdn.K1Build(tokens=s, first=first, qq=qq, pm=pm, cx=cx, bs=bs, hq=hq, go=go)
     conv_state, rstate = w["conv_state"].clone(), w["rstate"].clone()
     res_out = torch.empty(s, HIDDEN, dtype=bf, device="cuda")
     core = torch.full((s, CORE), float("nan"), dtype=bf, device="cuda")
@@ -290,6 +329,7 @@ def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
         res_out=res_out,
         ln_w=w["ln_w"],
         w_qkvz=w["w_qkvz"],
+        w_qkvzs=w.get("w_qkvzs"),
         w_ba=w["w_ba"],
         conv_w=w["conv_w"],
         conv_state=conv_state,
@@ -307,9 +347,19 @@ def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
 
     lay = gdn.scratch_layout(key)
     torch.testing.assert_close(res_out, ref["residual"], atol=0, rtol=0)
-    x = scratch[lay["xrow"][0] : lay["xrow"][0] + s * HIDDEN * 2].view(bf)
-    assert _cos(x, ref["x"]) > COS_MIN
+    if not cx:  # cx: x stays in the CTAs' LDS (in_proj's output checks it)
+        x = scratch[lay["xrow"][0] : lay["xrow"][0] + s * HIDDEN * 2].view(bf)
+        assert _cos(x, ref["x"]) > COS_MIN
     proj = _pairs(scratch, lay["proj"], s * gdn.NPROJ).view(s, gdn.NPROJ)
+    if bs:  # b and a: the parts summed in part order, as the gates do
+        parts = _pairs(scratch, lay["bapart"], gdn.BA_TASKS * s * 16)
+        parts = parts.view(2, gdn.BA_PARTS, s, 16)
+        ba = parts[:, 0]
+        for q in range(1, gdn.BA_PARTS):
+            ba = ba + parts[:, q]
+        proj = proj.clone()
+        proj[:, gdn.B0 : gdn.B0 + 16] = ba[0].to(bf).float()
+        proj[:, gdn.A0 : gdn.A0 + 16] = ba[1].to(bf).float()
     assert _cos(proj, ref["proj"]) > COS_MIN
     live = w["st_idx"][:n_real].long()
 
@@ -325,9 +375,11 @@ def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
     assert own["conv_state"] == 0 and own["rstate"] < 1e-6, own
     assert own["core"] < 1e-4, own
     # end to end: the GEMV's summation order flips a few bf16 roundings of
-    # in_proj's output, which the recurrence carries into the state
+    # in_proj's output, which the recurrence carries into the state; fp4, an x
+    # an ulp off the reference's can also land in another e2m1 bin
     errs = errs_vs(ref)
-    assert errs["conv_state"] < 5e-4 and errs["rstate"] < 5e-4, errs
+    tol = 5e-3 if qq else 5e-4
+    assert errs["conv_state"] < tol and errs["rstate"] < tol, errs
     assert _cos(core[:n_real], ref["core"][:n_real]) > COS_MIN, errs
     assert torch.equal(core[n_real:], torch.zeros_like(core[n_real:]))
     # the null block is left alone
@@ -338,10 +390,15 @@ def test_k1_matches_vllm_ops(s: int, n_real: int, first: bool) -> None:
 # ---------------------------------------------------------------- K2
 
 
-def _moe_weights(rank: int, device):
-    """One layer's MoE block at TP8 as vLLM holds it after loading: bf16 router,
-    shared expert and its gate; the routed experts' MXFP4 through the
-    ``AITER_MXFP4_MXFP4`` load path (``shuffle_weights``, ``e8m0_shuffle``)."""
+def _u8(g, *shape, lo=0, hi=256):
+    return torch.randint(lo, hi, shape, generator=g, device=g.device).to(torch.uint8)
+
+
+def _moe_weights(rank: int, device, fse: bool = False):
+    """One layer's MoE block at TP8 as vLLM holds it after loading: bf16 router
+    and shared-expert gate; the routed experts' MXFP4 through the
+    ``AITER_MXFP4_MXFP4`` load path (``shuffle_weights``, ``e8m0_shuffle``).
+    The shared expert is bf16, or fused (``fse``) as MXFP4 expert 512."""
     from aiter.utility.fp4_utils import e8m0_shuffle
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -349,35 +406,60 @@ def _moe_weights(rank: int, device):
 
     gc = torch.Generator(device=device).manual_seed(7)  # replicated weights
     gr = torch.Generator(device=device).manual_seed(100 + rank)  # TP shards
-
-    def u8(g, *shape, lo=0, hi=256):
-        return torch.randint(lo, hi, shape, generator=g, device=device).to(torch.uint8)
+    ne = E + int(fse)
 
     fp4, e8 = torch.float4_e2m1fn_x2, torch.float8_e8m0fnu
-    w13q, w2q = u8(gr, E, 2 * RI, HIDDEN // 2), u8(gr, E, HIDDEN, RI // 2)
+    w13q, w2q = _u8(gr, ne, 2 * RI, HIDDEN // 2), _u8(gr, ne, HIDDEN, RI // 2)
     w13, w2 = rocm_aiter_ops.shuffle_weights(
         w13q.clone().view(fp4), w2q.clone().view(fp4)
     )
-    w13s = u8(gr, E * 2 * RI, HIDDEN // 32, lo=118, hi=123)
-    w2s = u8(gr, E * HIDDEN, RI // 32, lo=118, hi=123)
+    w13s = _u8(gr, ne * 2 * RI, HIDDEN // 32, lo=118, hi=123)
+    w2s = _u8(gr, ne * HIDDEN, RI // 32, lo=118, hi=123)
     raw = {
         "w13": w13q,
         "w2": w2q,
-        "w13s": w13s.view(E, 2 * RI, -1),
-        "w2s": w2s.view(E, HIDDEN, -1),
+        "w13s": w13s.view(ne, 2 * RI, -1),
+        "w2s": w2s.view(ne, HIDDEN, -1),
     }
     w13s, w2s = w13s.clone().view(e8), w2s.clone().view(e8)
-    return {
+    mw = {
         "raw": raw,
         "w_gate": _randn(gc, E, HIDDEN, scale=0.02),
         "w_sg": _randn(gc, 1, HIDDEN, scale=0.02),
-        "w_sgu": _randn(gr, 2 * SI, HIDDEN, scale=0.02),
-        "w_sd": _randn(gr, HIDDEN, SI, scale=0.03),
         "w13": w13,
         "w2": w2,
-        "w13s": e8m0_shuffle(w13s).view(E, 2 * RI, -1),
-        "w2s": e8m0_shuffle(w2s).view(E, HIDDEN, -1),
+        "w13s": e8m0_shuffle(w13s).view(ne, 2 * RI, -1),
+        "w2s": e8m0_shuffle(w2s).view(ne, HIDDEN, -1),
     }
+    if not fse:
+        mw["w_sgu"] = _randn(gr, 2 * SI, HIDDEN, scale=0.02)
+        mw["w_sd"] = _randn(gr, HIDDEN, SI, scale=0.03)
+    return mw
+
+
+def _mxfp4_linear(gr, n: int, k: int):
+    """An online-MXFP4 linear (``Mxfp4OnlineLinearMethod``) as the AITER kernel
+    holds it on the ASM FP4 GEMM: random fp4x2 (n, k / 2) and e8m0 (n, k / 32),
+    the weight through ``shuffle_weight(layout=(16, 16))``, the scales through
+    ``AiterMxfp4LinearKernel``'s swizzle. Returns (raw q, raw scales, w, ws)."""
+    from aiter.ops.shuffle import shuffle_weight
+
+    q = _u8(gr, n, k // 2)
+    sc = _u8(gr, n, k // 32, lo=118, hi=123)
+    w = shuffle_weight(q.clone().view(torch.float4_e2m1fn_x2), layout=(16, 16))
+    sm, sn = sc.shape
+    ws = sc.view(sm // 32, 2, 16, sn // 8, 2, 4, 1).permute(0, 3, 5, 2, 4, 1, 6)
+    return q, sc, w, ws.contiguous().view(sm, sn)
+
+
+def _mxfp4_linear_stock(x, w, ws):
+    """The ASM FP4 GEMM path of ``gemm_with_dynamic_quant`` at decode rows."""
+    from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+    xq, xs = per_1x32_f4_quant_hip(x, shuffle=True)
+    return gemm_a4w4(
+        xq, w.view(xq.dtype), xs, ws.view(xs.dtype), dtype=bf, bpreshuffle=True
+    )[: x.shape[0]]
 
 
 _FP4 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
@@ -406,22 +488,53 @@ def _mxfp4_qdq(v):
     return (torch.sign(b) * q * sc).flatten(-2)
 
 
-def _route_and_shared(x, mw):
-    """The bf16 router's softmax top-10 renormalized; the shared expert
-    (SiluAndMul) times sigmoid(shared_expert_gate)."""
-    from vllm.models.qwen3_5.amd.mono.layout import SI, TOPK
+def _route_and_shared(x, mw, ids=None):
+    """The bf16 router's softmax top-10 (or the experts ``ids``) renormalized;
+    the shared expert (SiluAndMul) times sigmoid(shared_expert_gate). Fused (no
+    ``w_sgu``), the shared expert is pick 10, expert 512, weight sigmoid (fp32)
+    of the bf16 gate logit, and the shared output is zero."""
+    from vllm.models.qwen3_5.amd.mono.layout import SI, TOPK, E
 
     logits = F.linear(x, mw["w_gate"])
     probs = torch.softmax(logits.float(), dim=-1)
-    wts, ids = torch.topk(probs, TOPK, dim=-1, sorted=True)
+    if ids is None:
+        ids = torch.topk(probs, TOPK, dim=-1, sorted=True)[1]
+    wts = probs.gather(-1, ids)
     wts = wts / wts.sum(-1, keepdim=True)
+    if "w_sgu" not in mw:
+        sg = torch.sigmoid(F.linear(x, mw["w_sg"]).float())
+        wts = torch.cat([wts, sg], dim=-1)
+        ids = torch.cat([ids, torch.full_like(ids[:, :1], E)], dim=-1)
+        return wts, ids, torch.zeros_like(x)
     gu = F.linear(x, mw["w_sgu"])
     h = (F.silu(gu[:, :SI].float()) * gu[:, SI:].float()).to(bf)
     shared = torch.sigmoid(F.linear(x, mw["w_sg"])) * F.linear(h, mw["w_sd"])
     return wts, ids, shared
 
 
-def _moe_emulation(x, mw):
+def _check_route(scratch, region, x, mw):
+    """The kernel's ROUTE: each token's picks a top-10 of the bf16 logits up
+    to ties (the kernel's logit sums round to bf16 in another order, and equal
+    keys go to the lower expert), their weights the renormalized softmax.
+    Returns the picks, so the numerics compare on the same experts."""
+    from vllm.models.qwen3_5.amd.mono.layout import TOPK
+
+    s = x.shape[0]
+    off = region[0]
+    words = scratch[off : off + s * 2 * TOPK * 8].view(torch.int32)
+    words = words.view(s, 2 * TOPK, 2)[:, :, 0]
+    ids, wts = words[:, :TOPK].long(), words[:, TOPK:].contiguous().view(torch.float32)
+    logits = F.linear(x, mw["w_gate"]).float()
+    tenth = torch.topk(logits, TOPK, dim=-1)[0][:, -1:]
+    slack = 2 * 2.0**-7 * tenth.abs()
+    assert (logits.gather(-1, ids) >= tenth - slack).all(), "picks not a top-10"
+    assert all(len(set(r.tolist())) == TOPK for r in ids), "repeated pick"
+    want = _route_and_shared(x, mw, ids)[0][:, :TOPK]
+    torch.testing.assert_close(wts, want, rtol=1e-2, atol=1e-3)
+    return ids
+
+
+def _moe_emulation(x, mw, ids=None):
     """The MoE block with the routed experts as the stock decode kernel computes
     them (``fmoe_bf16_pertokenMXfp4_g1u1_flat``: x and silu(g) u through dynamic
     MXFP4, fp32 accumulation, the route weight after w2), in plain torch; then
@@ -429,7 +542,7 @@ def _moe_emulation(x, mw):
     from vllm.models.qwen3_5.amd.mono.layout import RI
 
     raw = mw["raw"]
-    wts, ids, shared = _route_and_shared(x, mw)
+    wts, ids, shared = _route_and_shared(x, mw, ids)
     xq = _mxfp4_qdq(x)
     routed = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
     for t in range(x.shape[0]):
@@ -441,14 +554,14 @@ def _moe_emulation(x, mw):
     return _all_reduce_fp32((routed + shared.float()).to(bf))
 
 
-def _moe_reference(x, mw):
+def _moe_reference(x, mw, ids=None):
     """Qwen3NextSparseMoeBlock's decode path on ``x`` through vLLM's ops: the
     router and shared expert of ``_route_and_shared``, aiter's ``fused_moe`` for
     the MXFP4 experts, the all-reduce."""
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
 
-    wts, ids, shared = _route_and_shared(x, mw)
+    wts, ids, shared = _route_and_shared(x, mw, ids)
     routed = fused_moe(
         x,
         mw["w13"],
@@ -490,56 +603,368 @@ def _k2_worker(
     peers = PeerBuffer(k2.peer_bytes(MAX_TOKENS), tp.cpu_group, rank, tp_size, device)
     peers.bytes.zero_()
     epoch = torch.zeros(1, dtype=torch.int32, device=device)
-    mw = _moe_weights(rank, device)
-    gc = torch.Generator(device=device).manual_seed(11)
-    gr = torch.Generator(device=device).manual_seed(200 + rank)
-    w_o = _randn(gr, HIDDEN, CORE, scale=0.02)
-    ln_w = _randn(gc, HIDDEN, scale=0.1)
+    step = 0
+    seen: dict[tuple, torch.Tensor] = {}
+    for flags in K2_MODES:
+        fse, oq = flags.get("fse", False), flags.get("oq", False)
+        mw = _moe_weights(rank, device, fse=fse)
+        gc = torch.Generator(device=device).manual_seed(11)
+        gr = torch.Generator(device=device).manual_seed(200 + rank)
+        ln_w = _randn(gc, HIDDEN, scale=0.1)
+        if oq:
+            oq_raw, os_raw, w_o, w_os = _mxfp4_linear(gr, HIDDEN, CORE)
+            w_o_ref = _mxfp4_dequant(oq_raw, os_raw).to(bf)
+        else:
+            w_o, w_os = _randn(gr, HIDDEN, CORE, scale=0.02), None
+        mode = str(flags)
 
-    # both epoch parities, a layer slot each; every decode width's build
-    for step, s in enumerate((1, 3, 8, 8)):
-        epoch.add_(1)
-        key = k2.K2Build(tokens=s)
-        core = _randn(gr, s, CORE)
-        residual = _randn(gc, s, HIDDEN, scale=2.0)
-        scratch = torch.zeros(k2.scratch_bytes(key), dtype=torch.uint8, device=device)
-        out = torch.empty(s, HIDDEN, dtype=bf, device=device)
-        res_out = torch.empty_like(out)
-        k2.layer_post(
-            key,
-            core=core,
-            residual=residual,
-            w_o=w_o,
-            ln_w=ln_w,
-            out=out,
-            res_out=res_out,
-            scratch=scratch,
-            peers=peers.addresses,
-            rank=rank,
-            epoch=epoch,
-            layer=step,
-            **{k: v for k, v in mw.items() if k != "raw"},
-        )
-        torch.accelerator.synchronize()
+        # both epoch parities, a layer slot each; every decode width's build
+        for si, s in enumerate((1, 3, 8, 8)):
+            step += 1
+            epoch.add_(1)
+            key = k2.K2Build(tokens=s, **flags)
+            core = _randn(gr, s, CORE)
+            gate = _randn(gr, s, CORE, scale=2.0) if key.og else None
+            residual = _randn(gc, s, HIDDEN, scale=2.0)
+            scratch = torch.zeros(
+                k2.scratch_bytes(key), dtype=torch.uint8, device=device
+            )
+            out = torch.empty(s, HIDDEN, dtype=bf, device=device)
+            res_out = torch.empty_like(out)
+            k2.layer_post(
+                key,
+                core=core,
+                gate=gate,
+                residual=residual,
+                w_o=w_o,
+                w_os=w_os,
+                ln_w=ln_w,
+                out=out,
+                res_out=res_out,
+                scratch=scratch,
+                peers=peers.addresses,
+                rank=rank,
+                epoch=epoch,
+                layer=step,
+                **{k: v for k, v in mw.items() if k != "raw"},
+            )
+            torch.accelerator.synchronize()
 
-        res_ref = _all_reduce_fp32(F.linear(core, w_o)) + residual
-        # the kernel sums the ranks in rank order, NCCL in its own order
-        assert _rel_l2(res_out, res_ref) < 1e-2, s
-        v = res_ref.float()
-        x_ref = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
-        x_ref = (x_ref * (1.0 + ln_w.float())).to(bf)
-        lay = k2.scratch_layout(key)["xrow"][0]
-        x = scratch[lay : lay + s * HIDDEN * 2].view(bf).view(s, HIDDEN)
-        assert _cos(x, x_ref) > COS_MIN, s
-        assert _cos(out, _moe_emulation(x.clone(), mw)) > COS_MIN, s
-        # fused_moe's flat kernel varies run to run
-        assert _cos(out, _moe_reference(x.clone(), mw)) > STOCK_COS_MIN, s
-        outs = [torch.empty_like(out) for _ in range(tp_size)]
-        dist.all_gather(outs, out)
-        assert all(torch.equal(outs[0], o) for o in outs), "ranks disagree"
+            if gate is not None:
+                core = (core.float() * torch.sigmoid(gate.float())).to(bf)
+            if oq:
+                part = F.linear(_mxfp4_qdq(core).to(bf), w_o_ref)
+                part_stock = _mxfp4_linear_stock(core, w_o, w_os)
+                assert _cos(part_stock, part) > STOCK_COS_MIN, (mode, s)
+            else:
+                part = F.linear(core, w_o)
+            res_ref = _all_reduce_fp32(part) + residual
+            # the kernel sums the ranks in rank order, NCCL in its own order
+            assert _rel_l2(res_out, res_ref) < 1e-2, (mode, s)
+            v = res_ref.float()
+            x_ref = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
+            x_ref = (x_ref * (1.0 + ln_w.float())).to(bf)
+            lay = k2.scratch_layout(key)["xrow"][0]
+            x = scratch[lay : lay + s * HIDDEN * 2].view(bf).view(s, HIDDEN)
+            if key.cx:
+                # the AR sums: x is the consumers' (stage_norm's arithmetic)
+                v = x.float() + residual.float()
+                x = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
+                x = (x * (1.0 + ln_w.float())).to(bf)
+            assert _cos(x, x_ref) > COS_MIN, (mode, s)
+            ids = _check_route(scratch, k2.scratch_layout(key)["route"], x, mw)
+            emu = _cos(out, _moe_emulation(x.clone(), mw, ids))
+            assert emu > COS_MIN, (mode, s, emu)
+            # fused_moe's flat kernel varies run to run
+            ref = _moe_reference(x.clone(), mw, ids)
+            assert _cos(out, ref) > STOCK_COS_MIN, (mode, s)
+            outs = [torch.empty_like(out) for _ in range(tp_size)]
+            dist.all_gather(outs, out)
+            assert all(torch.equal(outs[0], o) for o in outs), (mode, "ranks disagree")
+            # the same x codes another way: bitwise its twin's output
+            base = {k: v for k, v in flags.items() if k not in _SAME_MATH}
+            if flags.get("xq"):
+                base["cx"] = True
+            twin, me = tuple(sorted(base.items())), tuple(sorted(flags.items()))
+            if twin != me and (twin, si) in seen:
+                same = torch.equal(seen[twin, si], out)
+                if rank == 0:
+                    print(f"HQ-EQUAL {mode} s={s}: {same}")
+                assert same, (mode, s, "not bitwise its twin")
+            seen[me, si] = out.clone()
+        del mw
+        torch.accelerator.empty_cache()
     peers.close()
+
+
+# the bf16 shared expert and o_proj; the stock weekly flags' fused shared
+# expert, with the bf16 o_proj (attention) and the MXFP4 out_proj; the latter
+# routed in every CTA, x built by its consumers; its ug and down on the fp4 MFMA
+# flags that change how, not what, K2 computes: bitwise the run without them
+_SAME_MATH = ("hq", "xq", "ps", "dp", "u1", "mp", "ls", "ul")
+_OG = {
+    "fse": True,
+    "lr": True,
+    "cx": True,
+    "sp": True,
+    "f4m": True,
+    "f4d": True,
+    "hq": True,
+}
+K2_MODES: tuple[dict[str, bool], ...] = (
+    {},
+    {"fse": True},
+    {"fse": True, "oq": True},
+    {"fse": True, "oq": True, "lr": True, "cx": True},
+    {
+        "fse": True,
+        "oq": True,
+        "lr": True,
+        "cx": True,
+        "sp": True,
+        "f4m": True,
+        "f4d": True,
+    },
+    {"fse": True, "oq": True, "cx": True, "sp": True, "f4m": True, "f4d": True},
+    {
+        "fse": True,
+        "oq": True,
+        "cx": True,
+        "sp": True,
+        "f4m": True,
+        "f4d": True,
+        "hq": True,
+    },
+    {
+        "fse": True,
+        "oq": True,
+        "lr": True,
+        "cx": True,
+        "sp": True,
+        "f4m": True,
+        "f4d": True,
+        "hq": True,
+    },
+    {"fse": True, "oq": True, "sp": True, "f4m": True, "f4d": True, "xq": True},
+    {
+        "fse": True,
+        "oq": True,
+        "lr": True,
+        "sp": True,
+        "f4m": True,
+        "f4d": True,
+        "xq": True,
+        "hq": True,
+    },
+    {
+        "fse": True,
+        "oq": True,
+        "lr": True,
+        "cx": True,
+        "sp": True,
+        "f4m": True,
+        "f4d": True,
+        "hq": True,
+        "ps": True,
+        "dp": True,
+        "u1": True,
+        "mp": True,
+    },
+    {
+        "fse": True,
+        "oq": True,
+        "lr": True,
+        "sp": True,
+        "f4m": True,
+        "f4d": True,
+        "xq": True,
+        "hq": True,
+        "ps": True,
+        "dp": True,
+        "u1": True,
+    },
+    _OG,
+    {**_OG, "og": True},
+    {**_OG, "oq": True, "ls": True, "mp": True},
+    {**_OG, "oq": True, "ps": True, "u1": True},
+    {**_OG, "oq": True, "ls": True, "u1": True},
+    {**_OG, "oq": True, "ls": True, "ps": True},
+    {**_OG, "oq": True, "ls": True, "ps": True, "u1": True},
+    {**_OG, "oq": True, "og": True, "ps": True, "mp": True},
+    {**_OG, "oq": True, "mp": True, "u1": True, "ul": True},
+    {**_OG, "oq": True, "ps": True, "mp": True, "ul": True},
+    {"fse": True, "oq": True, "sp": True, "f4m": True, "f4d": True, "ul": True},
+)
 
 
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_matches_vllm_ops(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
+
+
+REPLAY_WIDTHS = (8, 1, 3, 8, 2, 5)  # consecutive decode steps of mixed widths
+REPLAYS = 300
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _replay_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.distributed import get_tp_group
+    from vllm.models.kimi_k3.amd.mono.common.peer_memory import PeerBuffer
+    from vllm.models.qwen3_5.amd.mono import gdn
+    from vllm.models.qwen3_5.amd.mono import layer as k2
+    from vllm.models.qwen3_5.amd.mono.layout import CORE, HIDDEN, MAX_TOKENS, QKVZ
+
+    tp = get_tp_group()
+    peers = PeerBuffer(k2.peer_bytes(MAX_TOKENS), tp.cpu_group, rank, tp_size, device)
+    peers.bytes.zero_()
+    epoch = torch.zeros(1, dtype=torch.int32, device=device)
+    gr = torch.Generator(device=device).manual_seed(300 + rank)
+    ln_w = _randn(gr, HIDDEN, scale=0.1)
+    w = _gdn_inputs(MAX_TOKENS, MAX_TOKENS, False)
+    # two GDN layers, each with its own state, as MonoDecode.forward runs them:
+    # the bf16 weights, then the stock weekly flags' (MXFP4 in_proj_qkvz and
+    # out_proj, the fused shared expert)
+    layers = []
+    for fp4 in (False, True):
+        lw = {"mw": _moe_weights(rank, device, fse=fp4), "fp4": fp4}
+        lw["mw"].pop("raw")
+        if fp4:
+            _, _, lw["w_qkvz"], lw["w_qkvzs"] = _mxfp4_linear(gr, QKVZ, HIDDEN)
+            _, _, lw["w_o"], lw["w_os"] = _mxfp4_linear(gr, HIDDEN, CORE)
+        else:
+            lw["w_qkvz"], lw["w_qkvzs"] = w["w_qkvz"], None
+            lw["w_o"], lw["w_os"] = _randn(gr, HIDDEN, CORE, scale=0.02), None
+        layers.append(lw)
+    states0 = [(w["conv_state"].clone(), w["rstate"].clone()) for _ in layers]
+    states = [(c.clone(), r.clone()) for c, r in states0]
+    k1_scr = {
+        s: torch.zeros(
+            gdn.scratch_bytes(gdn.K1Build(tokens=s)), dtype=torch.uint8, device=device
+        )
+        for s in set(REPLAY_WIDTHS)
+    }
+    k2_scr = {
+        s: torch.zeros(
+            max(
+                k2.scratch_bytes(k2.K2Build(tokens=s, fse=f, **k2.tuned(s, f)))
+                for f in (False, True)
+            ),
+            dtype=torch.uint8,
+            device=device,
+        )
+        for s in set(REPLAY_WIDTHS)
+    }
+    outs = [torch.empty(s, HIDDEN, dtype=bf, device=device) for s in REPLAY_WIDTHS]
+    # the last row of odd widths is a cudagraph pad row
+    idxs = {}
+    for s in set(REPLAY_WIDTHS):
+        idxs[s] = w["st_idx"][:s].clone()
+        if s % 2:
+            idxs[s][-1] = 0
+
+    def steps() -> None:
+        for (c, r), (c0, r0) in zip(states, states0):
+            c.copy_(c0)
+            r.copy_(r0)
+        for i, s in enumerate(REPLAY_WIDTHS):
+            epoch.add_(1)
+            h, res = w["hidden"][:s].contiguous(), w["residual"][:s].contiguous()
+            idx = idxs[s]
+            for li, ((conv, rstate), lw) in enumerate(zip(states, layers)):
+                fp4 = lw["fp4"]
+                core = torch.empty(s, CORE, dtype=bf, device=device)
+                res_attn = torch.empty_like(h)
+                gdn.gdn_pre(
+                    gdn.K1Build(
+                        tokens=s, qq=fp4, **(gdn.tuned(s, True) if fp4 else {})
+                    ),
+                    hidden=h,
+                    residual=res,
+                    res_out=res_attn,
+                    ln_w=w["ln_w"],
+                    w_qkvz=lw["w_qkvz"],
+                    w_qkvzs=lw["w_qkvzs"],
+                    w_ba=w["w_ba"],
+                    conv_w=w["conv_w"],
+                    conv_state=conv,
+                    a_log=w["a_log"],
+                    dt_bias=w["dt_bias"],
+                    norm_w=w["norm_w"],
+                    rstate=rstate,
+                    st_idx=idx,
+                    core=core,
+                    scratch=k1_scr[s],
+                    epoch=epoch,
+                    layer=li,
+                )
+                h = outs[i] if li == len(states) - 1 else torch.empty_like(h)
+                res = torch.empty_like(h)
+                k2.layer_post(
+                    # the second layer: production's flags
+                    k2.K2Build(
+                        tokens=s, fse=fp4, oq=fp4, **(k2.tuned(s, fp4) if fp4 else {})
+                    ),
+                    core=core,
+                    residual=res_attn,
+                    w_o=lw["w_o"],
+                    w_os=lw["w_os"],
+                    ln_w=ln_w,
+                    out=h,
+                    res_out=res,
+                    scratch=k2_scr[s],
+                    peers=peers.addresses,
+                    rank=rank,
+                    epoch=epoch,
+                    layer=k2.TAG_SLOTS // 2 + li,
+                    **lw["mw"],
+                )
+
+    def snapshot() -> list[torch.Tensor]:
+        return [o.clone() for o in outs] + [t.clone() for st in states for t in st]
+
+    steps()  # eager: builds every width before the capture
+    torch.accelerator.synchronize()
+    eager = snapshot()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        steps()
+    graph.replay()
+    torch.accelerator.synchronize()
+    first = snapshot()
+    assert all(torch.equal(a, b) for a, b in zip(eager, first)), "graph != eager"
+    for n in range(REPLAYS - 1):
+        graph.replay()
+        torch.accelerator.synchronize()
+        bad = [
+            i
+            for i, (a, b) in enumerate(zip(snapshot(), first))
+            if not torch.equal(a, b)
+        ]
+        assert not bad, f"replay {n + 2}: tensors {bad} differ"
+    for o in outs:
+        gathered = [torch.empty_like(o) for _ in range(tp_size)]
+        dist.all_gather(gathered, o)
+        assert all(torch.equal(gathered[0], g) for g in gathered), "ranks disagree"
+    peers.close()
+
+
+@multi_gpu_test(num_gpus=8)
+def test_mixed_width_graph_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K1 and K2 of two layers at six consecutive decode steps of widths 1-8
+    (pad rows included), captured in one HIP graph as a FULL decode graph holds
+    them and replayed 300 times: bit-identical to the eager run every time, on
+    every rank. Steps of different widths share the peer buffer and the epoch;
+    a scratch race between widths shows up as a mismatch. The second layer
+    runs the MXFP4 in_proj_qkvz / out_proj and fused-shared-expert variants."""
+    multi_process_parallel(monkeypatch, 8, 1, _replay_worker)

@@ -13,6 +13,11 @@ two persistent launches:
   experts, the gated shared expert) + the MoE all-reduce. A full-attention
   layer runs vLLM's attention up to o_proj's input, then K2.
 
+The kernels read the weights as the stock flags leave them: the shared expert
+bf16 or fused as MXFP4 expert 512 (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``);
+in_proj_qkvz and out_proj / o_proj bf16 or online MXFP4 on the ASM FP4 GEMM
+(``VLLM_ROCM_USE_AITER_FP4_ASM_GEMM``).
+
 The step is chosen whole in the model's outer forward, which no torch.compile
 traces; a FULL decode graph captures it per width. Any other step (prefill,
 mixed, spec decode, more rows) takes the compiled model.
@@ -48,6 +53,28 @@ def enabled() -> bool:
 
 def _routed_experts(mlp):
     return getattr(mlp.experts, "routed_experts", mlp.experts)
+
+
+def _o_proj(layer):
+    if layer.layer_type == "linear_attention":
+        return layer.linear_attn.out_proj
+    return layer.self_attn.o_proj
+
+
+def _asm_mxfp4(linear) -> bool:
+    """An online-MXFP4 linear on AITER's ASM FP4 GEMM: its weight and scales
+    shuffled as K2's fp4 o_proj reads them."""
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4OnlineLinearMethod,
+    )
+
+    qm = linear.quant_method
+    return (
+        isinstance(qm, Mxfp4OnlineLinearMethod)
+        and isinstance(qm.kernel, AiterMxfp4LinearKernel)
+        and qm.kernel.use_asm_gemm
+    )
 
 
 def _refusals(vllm_config) -> list[str]:
@@ -103,8 +130,6 @@ def _unsupported(model) -> str | None:
     )
     if not shape:
         return "not the Qwen3.8 shape"
-    if model.is_fused_shared_expert_enabled:
-        return "fused shared expert"
     if model.start_layer != 0 or model.end_layer != len(model.layers):
         return "partial layers"
     for layer in model.layers:
@@ -113,7 +138,8 @@ def _unsupported(model) -> str | None:
             return "layer scale or sequence parallel"
         if not isinstance(mlp, Qwen3NextSparseMoeBlock):
             return "dense MLP"
-        if mlp.shared_expert is None or mlp.replicate_shared_expert:
+        fused = mlp.is_fused_shared_expert_enabled
+        if not fused and (mlp.shared_expert is None or mlp.replicate_shared_expert):
             return "shared expert not TP sharded"
         if layer.layer_type == "linear_attention":
             a = layer.linear_attn
@@ -181,7 +207,15 @@ class MonoDecode:
             for s in widths
         }
         self.k2_scratch = {
-            s: buf(layer.scratch_bytes(layer.K2Build(tokens=s))) for s in widths
+            s: buf(
+                max(
+                    layer.scratch_bytes(
+                        layer.K2Build(tokens=s, fse=f, **layer.tuned(s, f))
+                    )
+                    for f in (False, True)
+                )
+            )
+            for s in widths
         }
         self.epoch = torch.zeros(1, dtype=torch.int32, device=dev)
         tp = get_tp_group()
@@ -200,9 +234,7 @@ class MonoDecode:
         with torch.inference_mode():
             for s in (1, 2):
                 x = torch.zeros(s, L.HIDDEN, dtype=torch.bfloat16, device=dev)
-                o = torch.zeros(s, L.CORE, dtype=torch.bfloat16, device=dev)
                 _gemma_norm(model.norm, x, x)
-                _sigmoid_gate(o, o)
         logger.info_once(
             "Qwen3.8 mono decode on for decode steps of <= %d rows", L.MAX_TOKENS
         )
@@ -222,42 +254,54 @@ class MonoDecode:
         bf = torch.bfloat16
         for layer in self.model.layers:
             mlp = layer.mlp
+            fused = mlp.is_fused_shared_expert_enabled
             ex = _routed_experts(mlp)
             backend = getattr(ex.quant_method, "mxfp4_backend", None)
             if backend is not Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
                 return f"routed experts on {backend}, not AITER_MXFP4_MXFP4"
             if not getattr(ex.w13_weight, "is_shuffled", False):
                 return "routed experts not shuffled"
-            if ex.w13_weight.shape[0] != L.E:
+            if ex.w13_weight.shape[0] != L.E + int(fused):
                 return "routed experts not all local"
+            dense: dict[str, torch.Tensor] = {}
             if layer.layer_type == "linear_attention":
                 a = layer.linear_attn
-                dense: tuple[torch.Tensor, ...] = (
-                    a.in_proj_qkvz.weight,
-                    a.in_proj_ba.weight,
-                    a.conv1d.weight,
-                    a.dt_bias,
-                    a.norm.weight,
-                    a.out_proj.weight,
-                )
+                if _asm_mxfp4(a.in_proj_qkvz):
+                    if a.in_proj_qkvz.weight.shape != (L.QKVZ, L.HIDDEN // 2):
+                        return f"layer {layer.layer_idx}: in_proj_qkvz shape"
+                else:
+                    dense["in_proj_qkvz"] = a.in_proj_qkvz.weight
+                dense |= {
+                    "in_proj_ba": a.in_proj_ba.weight,
+                    "conv1d": a.conv1d.weight,
+                    "dt_bias": a.dt_bias,
+                    "norm": a.norm.weight,
+                }
                 if a.A_log.dtype != torch.float32:
                     return "A_log not fp32"
-                w_o = a.out_proj.weight
-            else:
-                dense = (layer.self_attn.o_proj.weight,)
-                w_o = layer.self_attn.o_proj.weight
-            dense += (
-                layer.input_layernorm.weight,
-                layer.post_attention_layernorm.weight,
-                mlp.gate.weight,
-                mlp.shared_expert_gate.weight,
-                mlp.shared_expert.gate_up_proj.weight,
-                mlp.shared_expert.down_proj.weight,
-            )
-            if any(w.dtype != bf for w in dense):
-                return f"layer {layer.layer_idx}: a dense weight is not bf16"
-            if w_o.shape != (L.HIDDEN, L.CORE):
-                return f"layer {layer.layer_idx}: o_proj shape {tuple(w_o.shape)}"
+            o = _o_proj(layer)
+            fp4_o = _asm_mxfp4(o)
+            if o.weight.shape != (L.HIDDEN, L.CORE // 2 if fp4_o else L.CORE):
+                return f"layer {layer.layer_idx}: o_proj shape {tuple(o.weight.shape)}"
+            if not fp4_o:
+                dense["o_proj"] = o.weight
+            dense |= {
+                "input_layernorm": layer.input_layernorm.weight,
+                "post_attention_layernorm": layer.post_attention_layernorm.weight,
+                "gate": mlp.gate.weight,
+                "shared_expert_gate": mlp.shared_expert_gate.weight,
+            }
+            if not fused:
+                dense["shared_expert.gate_up_proj"] = (
+                    mlp.shared_expert.gate_up_proj.weight
+                )
+                dense["shared_expert.down_proj"] = mlp.shared_expert.down_proj.weight
+            for name, w in dense.items():
+                if w.dtype != bf:
+                    return (
+                        f"layer {layer.layer_idx}: {name} is {w.dtype}, neither "
+                        "bf16 nor in a quantized layout the kernels read"
+                    )
         return None
 
     def eligible(self, input_ids, positions, intermediate_tensors, inputs_embeds):
@@ -300,10 +344,11 @@ class MonoDecode:
                 core = torch.empty(s, L.CORE, dtype=h.dtype, device=h.device)
                 res_attn = torch.empty_like(h)
                 self._k1(layer, md, h, residual, res_attn, core)
+                gate = None
             else:
                 x, res_attn = _gemma_norm(layer.input_layernorm, h, residual)
-                core = _attention_core(layer.self_attn, x, positions)
-            h, residual = self._k2(layer, core, res_attn)
+                core, gate = _attention_core(layer.self_attn, x, positions)
+            h, residual = self._k2(layer, core, res_attn, gate)
         h, _ = _gemma_norm(model.norm, h, residual)
         return h
 
@@ -316,18 +361,22 @@ class MonoDecode:
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
         s = h.size(0)
+        qq = _asm_mxfp4(a.in_proj_qkvz)
         gdn.gdn_pre(
             gdn.K1Build(
                 tokens=s,
                 first=residual is None,
                 eps=layer.input_layernorm.variance_epsilon,
                 norm_eps=a.norm.eps,
+                qq=qq,
+                **gdn.tuned(s, qq),
             ),
             hidden=h,
             residual=residual,
             res_out=res_out,
             ln_w=layer.input_layernorm.weight,
             w_qkvz=a.in_proj_qkvz.weight,
+            w_qkvzs=a.in_proj_qkvz.weight_scale if qq else None,
             w_ba=a.in_proj_ba.weight,
             conv_w=a.conv1d.weight,
             conv_state=conv_state,
@@ -342,28 +391,36 @@ class MonoDecode:
             layer=layer.layer_idx,
         )
 
-    def _k2(self, layer, core, residual) -> tuple[torch.Tensor, torch.Tensor]:
+    def _k2(self, layer, core, residual, gate) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm.models.qwen3_5.amd.mono import layer as k2
 
         mlp = layer.mlp
         ex = _routed_experts(mlp)
-        if layer.layer_type == "linear_attention":
-            w_o = layer.linear_attn.out_proj.weight
-        else:
-            w_o = layer.self_attn.o_proj.weight
+        o = _o_proj(layer)
+        oq = _asm_mxfp4(o)
+        fused = mlp.is_fused_shared_expert_enabled
         s = core.size(0)
         out = torch.empty_like(residual)
         res_out = torch.empty_like(residual)
         k2.layer_post(
-            k2.K2Build(tokens=s, eps=layer.post_attention_layernorm.variance_epsilon),
+            k2.K2Build(
+                tokens=s,
+                eps=layer.post_attention_layernorm.variance_epsilon,
+                fse=fused,
+                oq=oq,
+                og=gate is not None,
+                **k2.tuned(s, fused),
+            ),
             core=core,
+            gate=gate,
             residual=residual,
-            w_o=w_o,
+            w_o=o.weight,
+            w_os=o.weight_scale if oq else None,
             ln_w=layer.post_attention_layernorm.weight,
             w_gate=mlp.gate.weight,
             w_sg=mlp.shared_expert_gate.weight,
-            w_sgu=mlp.shared_expert.gate_up_proj.weight,
-            w_sd=mlp.shared_expert.down_proj.weight,
+            w_sgu=None if fused else mlp.shared_expert.gate_up_proj.weight,
+            w_sd=None if fused else mlp.shared_expert.down_proj.weight,
             w13=ex.w13_weight,
             w13s=ex.w13_weight_scale,
             w2=ex.w2_weight,
@@ -391,20 +448,16 @@ def _gemma_add_rms_norm(
     return (t * (weight.float() + 1.0)).to(x.dtype), res
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def _sigmoid_gate(o: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    return o * torch.sigmoid(gate)
-
-
 def _gemma_norm(norm, x, residual):
     if residual is None:
         return norm(x), x
     return _gemma_add_rms_norm(x, residual, norm.weight, norm.variance_epsilon)
 
 
-def _attention_core(attn, x, positions) -> torch.Tensor:
-    """Qwen3NextAttention.forward up to o_proj's input, with the split, q / k
-    norms, RoPE and gate copy in one launch as the model's CUDA path runs them."""
+def _attention_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
+    """Qwen3NextAttention.forward up to the output gate (K2 applies it to
+    o_proj's input), with the split, q / k norms, RoPE and gate copy in one
+    launch as the model's CUDA path runs them -> (attention output, gate)."""
     qkv, _ = attn.qkv_proj(x)
     q_gate, k, v = qkv.split([attn.q_size * 2, attn.kv_size, attn.kv_size], dim=-1)
     rope = attn.rotary_emb
@@ -425,4 +478,4 @@ def _attention_core(attn, x, positions) -> torch.Tensor:
         rope.rotary_dim,
         norm_beta=1.0,
     )
-    return _sigmoid_gate(attn.attn(q, k, v), gate)
+    return attn.attn(q, k, v), gate

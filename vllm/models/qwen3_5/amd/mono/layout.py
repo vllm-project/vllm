@@ -63,8 +63,9 @@ def fp4_tile_dword(expert_base, rg, k, st, lane):
 
 
 def w13_base(e):
-    """First dword of expert ``e``'s w13 (2 RI rows, K = HIDDEN)."""
-    return e * (2 * RI) * HIDDEN // 8
+    """First dword of expert ``e``'s w13 (2 RI rows, K = HIDDEN). The constant
+    folds first: ``e`` is i32 in the kernel and e 2 RI HIDDEN is 2^31 at e 512."""
+    return e * (2 * RI * HIDDEN // 8)
 
 
 def w13_group(gate_or_up, g):
@@ -75,7 +76,7 @@ def w13_group(gate_or_up, g):
 
 def w2_base(e):
     """First dword of expert ``e``'s w2 (HIDDEN rows, K = RI)."""
-    return e * HIDDEN * RI // 8
+    return e * (HIDDEN * RI // 8)
 
 
 def scale_index(row, col, cols):
