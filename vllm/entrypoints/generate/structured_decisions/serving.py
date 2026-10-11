@@ -96,7 +96,7 @@ class ServingStructuredDecisions(BaseServing):
             questions = parse_questions(request, self.limits)
             media = self._media(request)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
-            engine_client.check_admission(len(questions))
+            engine_client.check_admission(self.strategy.num_requests(questions))
             trace_headers = (
                 None
                 if raw_request is None

@@ -62,14 +62,9 @@ If your model is not in the above list, we will try to automatically convert the
 !!! note
     For more information about multimodal models inputs, see [this page](../supported_models.md#list-of-multimodal-language-models).
 
-| Architecture                                  | Models              | Inputs                                            | Example HF Models                          | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
-| --------------------------------------------- | ------------------- | ------------------------------------------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------ |
-| `ClefOmniForJointSchema`                      | Clef-Omni           | T + I<sup>+</sup> + V<sup>+</sup> + A<sup>+</sup> | `Cloudflare/clef-omni` (see note)          |                                |                                            |
-| `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup>                                 | `Qwen/Qwen3-ForcedAligner-0.6B` (see note) |                                | ✅︎                                         |
-
-!!! note
-    Clef-Omni answers typed questions through the
-    [structured decisions API](../../serving/online_serving/structured_decisions.md#clef-omni).
+| Architecture                                  | Models              | Inputs            | Example HF Models                          | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| --------------------------------------------- | ------------------- | ----------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------ |
+| `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup> | `Qwen/Qwen3-ForcedAligner-0.6B` (see note) |                                | ✅︎                                         |
 
 !!! note
     Forced alignment usage requires `--hf-overrides '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'`.

@@ -95,6 +95,10 @@ class ReadStrategy(ABC):
         """The request's state as the model reads it."""
         return state_text(state)
 
+    def num_requests(self, questions: list[Question]) -> int:
+        """The engine requests a decision takes."""
+        return len(questions)
+
     @abstractmethod
     async def read(
         self,
@@ -416,6 +420,9 @@ class JointSchemaStrategy(ReadStrategy):
 
     def render_state(self, state: Any) -> str:
         return self._render(state)
+
+    def num_requests(self, questions: list[Question]) -> int:
+        return 1
 
     @staticmethod
     def _render(value: Any) -> str:

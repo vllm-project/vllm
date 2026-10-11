@@ -391,6 +391,7 @@ async def test_joint_schema_reads_every_question_at_once(joint_schema):
     assert isinstance(response, StructuredDecisionResponse)
 
     engine.encode.assert_called_once()
+    engine.check_admission.assert_called_once_with(1)
     prompt, params = engine.encode.call_args.args[:2]
     ids = prompt["prompt_token_ids"]
     assert tokenizer.decode(ids) == JOINT_SCHEMA_PROMPT

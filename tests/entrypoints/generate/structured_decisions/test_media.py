@@ -6,8 +6,10 @@ from io import BytesIO
 
 import av
 import numpy as np
+import pytest
 
 from vllm.entrypoints.generate.structured_decisions.media import (
+    DecodedMediaIO,
     decode_audio_clip,
     decode_video,
 )
@@ -57,3 +59,8 @@ def test_audio_is_16khz_mono():
     samples = decode_audio_clip(encode_wav(1.5, rate=22050))
     assert samples.dtype == np.float32 and samples.ndim == 1
     assert abs(samples.size - 24000) <= 16
+
+
+def test_bad_media_is_a_request_error():
+    with pytest.raises(ValueError, match="invalid or corrupted media"):
+        DecodedMediaIO(decode_video).load_bytes(b"not a video")

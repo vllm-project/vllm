@@ -46,7 +46,10 @@ class DecodedMediaIO(MediaIO[_T]):
     def load_bytes(self, data: bytes) -> _T:
         if self.max_bytes is not None and len(data) > self.max_bytes:
             raise ValueError(f"media is larger than {self.max_bytes} bytes")
-        return self.decode(data)
+        try:
+            return self.decode(data)
+        except av.error.FFmpegError as e:
+            raise ValueError(f"invalid or corrupted media: {e}") from e
 
     def load_base64(self, media_type: str, data: str) -> _T:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
