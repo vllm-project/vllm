@@ -20,6 +20,7 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
@@ -30,6 +31,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as spe
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
+from vllm.v1.worker.utils import AttentionGroup
 
 
 class _TestSpeculator(TargetDependentARSpeculator):
@@ -102,6 +104,7 @@ def test_pcp_draft_metadata_keeps_graph_padding_in_decode(cg_mode):
                 get_metadata_builder=lambda _: SimpleNamespace(
                     build=build, supports_update_block_table=False
                 ),
+                build_metadata=lambda cm, ubatch_idx=0, **_: build(0, cm),
                 layer_names=["draft"],
             )
         ]
@@ -427,6 +430,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         query_start_loc=torch.arange(3),
     )
     speculator.idx_mapping = torch.arange(2)
+    speculator.attn_groups = []
+    speculator.block_tables = SimpleNamespace(input_block_tables=[])
     generate_draft = Mock()
     speculator._generate_draft = generate_draft
     run_fullgraph = Mock()
@@ -448,6 +453,52 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
 
     assert generate_draft.call_count == expected_eager_calls
     assert run_fullgraph.call_count == expected_graph_replays
+
+
+def test_fused_full_graph_maps_split_group_block_tables():
+    """The fused FULL replay skips build(), so split groups' tables are mapped first."""
+    spec = MLAAttentionSpec(
+        block_size=1024, num_kv_heads=1, head_size=128, dtype=torch.uint8
+    )
+    group = AttentionGroup(
+        SimpleNamespace(),
+        ["layer.0"],
+        spec,
+        0,
+        kernel_block_size=256,
+        kernel_block_table=torch.zeros(1, 4, 32, dtype=torch.int32),
+        kernel_block_offsets=torch.arange(4, dtype=torch.int32),
+    )
+    speculator = object.__new__(_TestSpeculator)
+    speculator.input_buffers = SimpleNamespace(
+        positions=torch.arange(2), query_start_loc=torch.arange(3)
+    )
+    speculator.idx_mapping = torch.arange(2)
+    speculator.attn_groups = [[group]]
+    speculator.block_tables = SimpleNamespace(
+        input_block_tables=[torch.tensor([[1, 2], [0, 3]], dtype=torch.int32)]
+    )
+    replayed_tables = []
+    speculator.decode_cudagraph_manager = SimpleNamespace(
+        run_fullgraph=lambda _: replayed_tables.append(
+            group.kernel_block_table[0, :2, :8].tolist()
+        )
+    )
+
+    speculator._fused_multi_step_decode(
+        num_reqs=2,
+        skip_attn=False,
+        batch_desc=BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.FULL, num_tokens=2, num_reqs=2
+        ),
+        num_tokens_across_dp=None,
+        seq_lens_cpu_upper_bound=None,
+        num_speculative_steps=4,
+    )
+
+    assert replayed_tables == [
+        [[4, 5, 6, 7, 8, 9, 10, 11], [0, 1, 2, 3, 12, 13, 14, 15]]
+    ]
 
 
 def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
