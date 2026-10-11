@@ -1223,7 +1223,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
-        self.hc_attn_fn_broadcast: torch.Tensor | None = None
+        self.register_buffer("hc_attn_fn_broadcast", None, persistent=False)
+        self._vllm_derived_buffers = {"hc_attn_fn_broadcast"}
+        self._hc_broadcast_enabled = False
         self.hc_ffn_fn = nn.Parameter(
             torch.empty(
                 (mix_hc, hc_dim),
@@ -1376,6 +1378,20 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.ffn(x, input_ids, mega_gate_metadata)
         x = mhc_post_tilelang(x, residual, post, comb)
         return x, None, None, None
+
+    @torch.no_grad()
+    def _refresh_hc_broadcast(self) -> None:
+        broadcast = (
+            self.hc_attn_fn.detach().view(-1, self.hc_mult, self.hidden_size).sum(dim=1)
+        )
+        if self.hc_attn_fn_broadcast is None:
+            self.hc_attn_fn_broadcast = broadcast
+        else:
+            self.hc_attn_fn_broadcast.copy_(broadcast)
+
+    def post_weights_reload(self) -> None:
+        if self._hc_broadcast_enabled:
+            self._refresh_hc_broadcast()
 
     def forward(
         self,
@@ -1899,15 +1915,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             return
         layer = self.layers[self.start_layer]
         if isinstance(layer, DeepseekV4DecoderLayer):
-            broadcast = (
-                layer.hc_attn_fn.detach()
-                .view(-1, layer.hc_mult, layer.hidden_size)
-                .sum(dim=1)
-            )
-            if layer.hc_attn_fn_broadcast is None:
-                layer.hc_attn_fn_broadcast = broadcast
-            else:
-                layer.hc_attn_fn_broadcast.copy_(broadcast)
+            layer._hc_broadcast_enabled = True
+            layer._refresh_hc_broadcast()
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
