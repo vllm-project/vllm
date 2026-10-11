@@ -849,8 +849,11 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
 @pytest.mark.parametrize(
     "use_aux,use_graph", [(False, False), (True, False), (True, True)]
 )
+@pytest.mark.parametrize("fuse_cache", [False, True])
 @torch.inference_mode()
-def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph):
+def test_v41_attention_joins_cache_writes_before_consumption(
+    use_aux, use_graph, fuse_cache
+):
     """Both reused-event joins must publish this forward's states and cache rows."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.attention import (
@@ -920,6 +923,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
     auxiliary = [torch.cuda.Stream()] if use_aux else None
     attention = SimpleNamespace(
         compressor=compressor,
+        _fuse_compressor_cache=fuse_cache,
         indexer=prepare_indexer,
         aux_stream_list=auxiliary,
         ln_events=[torch.cuda.Event(), torch.cuda.Event()],
@@ -961,10 +965,12 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         raw.normal_()
         reset()
         attention.aux_stream_list = None
+        attention._fuse_compressor_cache = False
         run()
         expected = tuple(output.clone() for output in observed)
         reset()
         attention.aux_stream_list = auxiliary
+        attention._fuse_compressor_cache = fuse_cache
         if graph is None:
             run()
         else:
