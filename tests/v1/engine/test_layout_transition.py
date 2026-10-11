@@ -497,7 +497,8 @@ def test_transition_dummy_load_preserves_original_loader_config(
     load_config.model_loader_extra_config = original_extra
     worker.cache_config = worker.vllm_config.cache_config
     worker.device = torch.device("cpu")
-    worker._init_model_runner = lambda: None
+    runner = object()
+    worker._make_model_runner = lambda: runner
     worker.weight_transfer_engine = SimpleNamespace(
         parse_init_info=lambda payload: payload,
         init_transfer_engine=lambda info: None,
@@ -522,6 +523,7 @@ def test_transition_dummy_load_preserves_original_loader_config(
         worker._load_layout_model()
         assert worker._weight_update_active
     assert worker.vllm_config.load_config is load_config
+    assert worker.model_runner is runner
     assert load_config.load_format == "auto"
     assert load_config.model_loader_extra_config is original_extra
 
