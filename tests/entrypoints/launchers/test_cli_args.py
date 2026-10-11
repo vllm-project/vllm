@@ -44,6 +44,13 @@ def serve_parser():
     return _build_vllm_parsers()["vllm serve"]
 
 
+def test_cors_origins_require_explicit_opt_in(serve_parser):
+    assert serve_parser.parse_args([]).allowed_origins == []
+    assert serve_parser.parse_args(
+        ["--allowed-origins", '["http://trusted.example"]']
+    ).allowed_origins == ["http://trusted.example"]
+
+
 ### Test config parsing
 def test_config_arg_parsing(serve_parser, cli_config_file):
     args = serve_parser.parse_args([])
