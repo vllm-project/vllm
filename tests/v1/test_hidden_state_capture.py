@@ -152,11 +152,17 @@ def test_hidden_capture_dflash_layout_excludes_final_state():
     assert not result.includes_final_layer
 
 
-def test_hidden_capture_keeps_bfloat16_on_cpu():
+@pytest.mark.parametrize("non_blocking", [False, True])
+def test_hidden_capture_keeps_bfloat16_on_cpu(non_blocking):
     plan = HiddenStateCapturePlan.from_window("req", 1, 0, 1, "collection")
     hidden = torch.tensor([[1.0]], dtype=torch.bfloat16)
     chunk = capture_scheduled_hidden_states(
-        {"req": plan}, ["req"], {"req": 1}, {"req": 0}, hidden
+        {"req": plan},
+        ["req"],
+        {"req": 1},
+        {"req": 0},
+        hidden,
+        non_blocking=non_blocking,
     )["req"]
     assert chunk.hidden_states.dtype == torch.bfloat16
     buffer = HiddenStateCaptureBuffer(plan)
@@ -164,6 +170,89 @@ def test_hidden_capture_keeps_bfloat16_on_cpu():
     result = buffer.finish()
     assert result is not None
     assert result.hidden_states.dtype == torch.bfloat16
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("layout", ["final", "aux_final", "dflash_aux"])
+@pytest.mark.parametrize("blocking", [False, True])
+def test_hidden_capture_async_rows_survive_graph_output_reuse(layout, blocking):
+    """The runner's output event makes copies readable despite graph replay reuse."""
+    from vllm.v1.outputs import ModelRunnerOutput
+    from vllm.v1.worker.gpu.async_utils import AsyncOutput
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+    main_stream = torch.cuda.Stream()
+    copy_stream = torch.cuda.Stream()
+    source = torch.arange(12, dtype=torch.bfloat16, device="cuda").reshape(6, 2)
+    main_stream.wait_stream(torch.cuda.current_stream())
+    aux_ids = () if layout == "final" else (3,)
+    plans = {
+        req: HiddenStateCapturePlan.from_window(
+            req, 1, 1, 3, req, aux_layer_ids=aux_ids, hidden_layout=layout
+        )
+        for req in ("a", "c")
+    }
+    with torch.cuda.stream(main_stream):
+        hidden = torch.empty_like(source)
+        aux = torch.empty_like(source)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=main_stream):
+            hidden.copy_(source)
+            aux.copy_(source + 100)
+        snapshots = []
+        for _ in range(2):
+            graph.replay()
+            chunks = capture_scheduled_hidden_states(
+                plans,
+                ["a", "b", "c"],
+                {"a": 2, "b": 2, "c": 2},
+                {"a": 1, "b": 1, "c": 1},
+                hidden,
+                [aux] if aux_ids else None,
+                non_blocking=True,
+            )
+            counts = torch.ones(2, dtype=torch.int32, device="cuda")
+            sampled = SamplerOutput(
+                torch.full((2, 1), 7, dtype=torch.int64, device="cuda"),
+                None,
+                None,
+                counts,
+                torch.zeros_like(counts),
+            )
+            snapshots.append(
+                AsyncOutput(
+                    ModelRunnerOutput(
+                        req_ids=["a", "c"],
+                        req_id_to_index={"a": 0, "c": 1},
+                        hidden_state_capture=chunks,
+                    ),
+                    sampled,
+                    counts,
+                    main_stream,
+                    copy_stream,
+                    False,
+                    None,
+                    blocking=blocking,
+                )
+            )
+            source.add_(20)
+    for step, pending in enumerate(snapshots):
+        output = pending.get_output()
+        assert output.sampled_token_ids == [[7], [7]]
+        chunks = output.hidden_state_capture
+        assert set(chunks) == {"a", "c"}
+        for req, offset in (("a", 0), ("c", 4)):
+            expected = torch.arange(12, dtype=torch.bfloat16).reshape(6, 2)
+            expected = expected[offset : offset + 2] + step * 20
+            if layout == "aux_final":
+                expected = torch.cat((expected + 100, expected), dim=-1)
+            elif layout == "dflash_aux":
+                expected = expected + 100
+            chunk = chunks[req]
+            assert chunk.hidden_states.is_pinned()
+            assert chunk.copied_bytes == expected.numel() * expected.element_size()
+            np.testing.assert_array_equal(chunk.positions, [1, 2])
+            torch.testing.assert_close(chunk.hidden_states, expected)
 
 
 def test_hidden_capture_reports_sparse_positions_without_filling_gaps():

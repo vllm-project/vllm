@@ -2234,6 +2234,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     hidden_states,
                     aux_hidden_states,
                     input_batch.query_start_loc_np,
+                    # AsyncOutput waits for this stream before exposing CPU rows.
+                    non_blocking=True,
                 )
 
         # Prepare the model runner output.
@@ -2262,6 +2264,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             pending_aux_output=pending_aux_output,
+            blocking=(
+                self.scheduler_config.async_scheduling
+                or self.parallel_config.world_size_across_dp > 1
+                or self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            ),
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

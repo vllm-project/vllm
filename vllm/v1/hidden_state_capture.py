@@ -171,8 +171,15 @@ def capture_scheduled_hidden_states(
     hidden_states: torch.Tensor,
     aux_hidden_states: list[torch.Tensor] | None = None,
     query_start_loc: np.ndarray | None = None,
+    *,
+    non_blocking: bool = False,
 ) -> dict[str, HiddenStateCaptureChunk]:
-    """Copy only scheduled rows inside each request's capture window."""
+    """Copy scheduled window rows, optionally deferring completion to the runner.
+
+    With non_blocking=True, the caller must synchronize the current CUDA stream
+    before reading or serializing returned CPU tensors. copy_ms then measures
+    host submission time rather than completion time.
+    """
     chunks: dict[str, HiddenStateCaptureChunk] = {}
     row_offset = 0
     for index, req_id in enumerate(req_ids):
@@ -203,7 +210,11 @@ def capture_scheduled_hidden_states(
                 else:
                     states = hidden_states[first_row:end_row]
                 copy_started = perf_counter()
-                cpu_states = states.detach().to("cpu")
+                if non_blocking and states.device.type == "cuda":
+                    cpu_states = torch.empty_like(states, device="cpu", pin_memory=True)
+                    cpu_states.copy_(states.detach(), non_blocking=True)
+                else:
+                    cpu_states = states.detach().to("cpu")
                 chunks[req_id] = HiddenStateCaptureChunk(
                     positions=np.arange(first, end, dtype=np.int64),
                     hidden_states=cpu_states,
