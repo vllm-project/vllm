@@ -599,6 +599,7 @@ def test_multi_connector_handle_preemptions_integration():
         shutil.rmtree(storage_path, ignore_errors=True)
 
 
+@pytest.mark.skip_global_cleanup
 class TestMultiConnectorStats:
     """Tests for MultiConnector stats reconstruction and operations."""
 
@@ -804,6 +805,23 @@ class TestMultiConnectorStats:
         metrics.observe(payload, engine_idx=2)
 
         child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
+
+    @pytest.mark.parametrize("with_exporter", [False, True])
+    def test_prom_metrics_skips_stats_only_connectors(self, with_exporter):
+        """Stats-only children must not prevent supported metrics from exporting."""
+        child_metrics = MagicMock()
+        metrics = object.__new__(MultiKVConnectorPromMetrics)
+        metrics._prom_metrics = (
+            {"MooncakeStoreConnector": child_metrics} if with_exporter else {}
+        )
+        payload = {"MooncakeConnector": {"bytes_transferred": [1024]}}
+        if with_exporter:
+            payload["MooncakeStoreConnector"] = {"load_get_bytes": [2048]}
+
+        metrics.observe(payload, engine_idx=2)
+
+        if with_exporter:
+            child_metrics.observe.assert_called_once_with({"load_get_bytes": [2048]}, 2)
 
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""
