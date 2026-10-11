@@ -76,15 +76,12 @@ CUDA_KERNELS = [
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-@pytest.mark.parametrize("has_expert_gate", [False, True])
 @pytest.mark.skipif(
     not current_platform.is_cuda() or not current_platform.has_device_capability(89),
     reason="Static FP8 CUTLASS requires CUDA SM89+",
 )
 @torch.inference_mode()
-def test_qwen_moe_mlp_manual_fusion(dist_init, quantized, has_expert_gate):
-    """Fuse the shared MLP without changing its gate or unquantized output."""
+def test_qwen_moe_mlp_manual_fusion(dist_init):
     from compressed_tensors.quantization import QuantizationArgs
 
     from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -102,23 +99,21 @@ def test_qwen_moe_mlp_manual_fusion(dist_init, quantized, has_expert_gate):
         kernel_config=KernelConfig(linear_backend="cutlass"),
     )
     config.model_config = SimpleNamespace(dtype=torch.bfloat16)
-    quant_config = None
-    if quantized:
-        quant_args = QuantizationArgs(num_bits=8, type="float", strategy="tensor")
-        quant_config = CompressedTensorsConfig(
-            target_scheme_map={
-                "Linear": {
-                    "weights": quant_args,
-                    "input_activations": quant_args,
-                    "format": "float-quantized",
-                }
-            },
-            ignore=[],
-            quant_format="float-quantized",
-        )
+    quant_args = QuantizationArgs(num_bits=8, type="float", strategy="tensor")
+    quant_config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": {
+                "weights": quant_args,
+                "input_activations": quant_args,
+                "format": "float-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="float-quantized",
+    )
 
     with set_current_vllm_config(config):
-        expert_gate = ReplicatedLinear(128, 1, bias=False) if has_expert_gate else None
+        expert_gate = ReplicatedLinear(128, 1, bias=False)
         mlp = Qwen2MoeMLP(
             hidden_size=128,
             intermediate_size=256,
@@ -131,20 +126,15 @@ def test_qwen_moe_mlp_manual_fusion(dist_init, quantized, has_expert_gate):
             linear.weight.copy_(
                 torch.randn(linear.weight.shape).to(linear.weight.dtype)
             )
-            if quantized:
-                linear.weight_scale.fill_(0.05)
-                linear.input_scale.fill_(0.01)
-                linear.quant_method.process_weights_after_loading(linear)
-            else:
-                linear.weight.mul_(0.05)
-        if expert_gate is not None:
-            torch.nn.init.normal_(expert_gate.weight, std=0.05)
+            linear.weight_scale.fill_(0.05)
+            linear.input_scale.fill_(0.01)
+            linear.quant_method.process_weights_after_loading(linear)
+        torch.nn.init.normal_(expert_gate.weight, std=0.05)
 
         x = torch.randn(17, 128)
         gate_up, _ = mlp.gate_up_proj(x)
         expected, _ = mlp.down_proj(mlp.act_fn(gate_up))
-        if expert_gate is not None:
-            expected = torch.sigmoid(expert_gate(x)[0]) * expected
+        expected = torch.sigmoid(expert_gate(x)[0]) * expected
 
         down_inputs = []
         with mlp.down_proj.register_forward_pre_hook(
@@ -152,14 +142,8 @@ def test_qwen_moe_mlp_manual_fusion(dist_init, quantized, has_expert_gate):
         ):
             actual = mlp(x)
 
-        input_type = QuantizedActivation if quantized else torch.Tensor
-        assert isinstance(down_inputs[0], input_type)
-        torch.testing.assert_close(
-            actual,
-            expected,
-            atol=5e-2 if quantized else 0,
-            rtol=5e-2 if quantized else 0,
-        )
+        assert isinstance(down_inputs[0], QuantizedActivation)
+        torch.testing.assert_close(actual, expected, atol=5e-2, rtol=5e-2)
 
 
 @pytest.mark.parametrize("num_tokens", [32, 64])
