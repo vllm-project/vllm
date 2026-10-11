@@ -100,6 +100,9 @@ def test_uno_forces_probabilistic_draft_sampling(uno_config_factory):
         ({"uno_mask_token_id": 129}, "target vocabulary size"),
         ({"model": "other-model"}, "shares the target"),
         ({"target_model_config": None}, "target model"),
+        # SpeculativeConfig's own check keeps a heterogeneous vocabulary to
+        # draft_model; Uno shares the target vocabulary.
+        ({"use_heterogeneous_vocab": True}, "only works with method='draft_model'"),
     ],
 )
 def test_uno_config_rejects_invalid_fields(uno_config_factory, overrides, message):
@@ -111,9 +114,11 @@ def test_uno_config_rejects_invalid_fields(uno_config_factory, overrides, messag
     ("overrides", "message"),
     [
         ({"draft_tensor_parallel_size": 2}, "target's tensor_parallel_size"),
-        ({"rejection_sample_method": "synthetic"}, "standard"),
+        (
+            {"rejection_sample_method": "synthetic", "synthetic_acceptance_length": 2},
+            "standard",
+        ),
         ({"num_speculative_tokens_per_batch_size": [(1, 8, 4)]}, "fixed"),
-        ({"use_heterogeneous_vocab": True}, "target vocabulary"),
         ({"use_local_argmax_reduction": True}, "local argmax"),
         ({"enable_adaptive_verification": True}, "Adaptive verification"),
     ],
@@ -271,7 +276,6 @@ def test_uno_uses_native_async_v2_and_reserves_k_lookahead(
     assert config.speculative_config.max_num_new_slots_for_drafting == 7
     assert config.num_lookahead_tokens == 8
     assert config.uniform_decode_query_len == 9
-    validate_uno_config(config)
 
 
 def test_uno_rejects_forced_v1_runner(uno_config_factory, monkeypatch):

@@ -48,8 +48,6 @@ def validate_uno_config(vllm_config: VllmConfig) -> None:
         raise ValueError("Uno requires a fixed num_speculative_tokens")
     if speculative_config.rejection_sample_method != "standard":
         raise ValueError("Uno requires rejection_sample_method='standard'")
-    if speculative_config.use_heterogeneous_vocab:
-        raise ValueError("Uno shares the target vocabulary")
     if speculative_config.use_local_argmax_reduction:
         raise ValueError("Uno requires full draft logits; local argmax is unsupported")
     if speculative_config.enable_adaptive_verification:
