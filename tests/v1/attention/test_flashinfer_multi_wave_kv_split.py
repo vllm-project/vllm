@@ -6,6 +6,11 @@ import os
 
 import pytest
 
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda():
+    pytest.skip("FlashInfer backend requires a CUDA platform.", allow_module_level=True)
+
 from vllm.v1.attention.backends.flashinfer import (
     FLASHINFER_MULTI_WAVE_KV_SPLIT_ENV,
     FlashInferDecodeKernel,
