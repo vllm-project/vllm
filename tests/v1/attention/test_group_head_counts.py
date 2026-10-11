@@ -147,7 +147,7 @@ def _request_group(
     ("query_len", "seq_len", "scheduler_options", "expected_group"),
     [
         pytest.param(4, 8192, {}, 4, id="q4-self"),
-        pytest.param(4, 8192, {"is_cross_attention": True}, 1, id="q4-cross"),
+        pytest.param(4, 8192, {"is_cross_attention": True}, 4, id="q4-cross"),
         pytest.param(1, 128, {}, 4, id="q1-decode"),
         pytest.param(16, 128, {}, 1, id="q16-mha-more-spans"),
         pytest.param(40, 8192, {}, 1, id="large-query-mha"),
@@ -183,8 +183,8 @@ def _request_group(
             4,
             128,
             {"head_size": 80, "isa_hint": "amx", "enable_kv_split": False},
-            1,
-            id="amx-hint-head80",
+            4,
+            id="amx-hint-head80-vec16",
         ),
     ],
 )

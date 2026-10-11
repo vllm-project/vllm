@@ -442,7 +442,6 @@ class AttentionScheduler {
     const int32_t original_q_head_per_kv =
         input.num_heads_q / input.num_heads_kv;
     const bool supports_gqa = original_q_head_per_kv <= max_num_q_per_iter;
-    const bool is_amx = input.isa == ISA::AMX || input.isa == ISA::AMX_FP8;
     const int32_t min_split_kv_len =
         ((max_num_q_per_iter * 8 + kv_len_alignment - 1) / kv_len_alignment) *
         kv_len_alignment;
@@ -464,7 +463,7 @@ class AttentionScheduler {
       }
       // Keep long prefill on MHA. Divisible groups fill short-query iterations;
       // other groups pack only one iteration to offset unused query rows.
-      if (is_amx && request_causal(req_id) && q_tokens <= max_num_q_per_iter &&
+      if (q_tokens <= max_num_q_per_iter &&
           (max_num_q_per_iter % original_q_head_per_kv == 0 ||
            q_tokens <= max_num_q_per_iter / original_q_head_per_kv)) {
         return group;

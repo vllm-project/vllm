@@ -52,7 +52,7 @@ SEQ_LENS = [  # (q_len, kv_len)
 _FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
 _FP8_RTOL = 0.1
 ENCODER_SEQ_LENS = [
-    [1, 678, 2367, 145, 4162, 36, 7812],
+    [1, 4, 678, 2367, 145, 4162, 36, 7812],
 ]
 # Uniform (dense zentorch_sdpa call) and ragged (per-sequence loop).
 ZEN_ENCODER_SEQ_LENS = [
