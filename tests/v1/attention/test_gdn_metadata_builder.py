@@ -246,6 +246,7 @@ def test_update_block_table_matches_build(
         "spec_state_indices_tensor",
         "non_spec_state_indices_tensor",
         "prefill_state_indices",
+        "prefill_state_indices_int64",
     )
     source_indices = [getattr(source, f) for f in fields]
     source_indices = [t if t is None else t.clone() for t in source_indices]
@@ -275,6 +276,27 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state is not None
     # req0 has context_lens = 65 - 1 = 64 > 0, so has_initial_state[0] = True
     assert meta.has_initial_state[0].item() is True
+
+
+@pytest.mark.parametrize(
+    "test_case", GDN_BUILD_TEST_CASES.values(), ids=GDN_BUILD_TEST_CASES.keys()
+)
+def test_prefill_state_indices_int64_matches_prefill_state_indices(
+    test_case: GDNBuildTestCase,
+):
+    """The int64 copy (for index_copy_) holds the same prefill state indices."""
+    builder = _create_gdn_builder(test_case.num_speculative_tokens)
+    batch = BatchSpec(seq_lens=test_case.seq_lens, query_lens=test_case.query_lens)
+    meta = _build(builder, batch, test_case.num_decode_draft_tokens)
+
+    if meta.prefill_state_indices is None:
+        assert meta.prefill_state_indices_int64 is None
+        return
+    assert meta.prefill_state_indices_int64 is not None
+    assert meta.prefill_state_indices_int64.dtype == torch.int64
+    assert torch.equal(
+        meta.prefill_state_indices_int64, meta.prefill_state_indices.to(torch.int64)
+    )
 
 
 @pytest.mark.parametrize(

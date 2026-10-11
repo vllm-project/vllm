@@ -226,6 +226,9 @@ def test_forward_core_split_matches_unified(
         # Unified path: the chunk kernel processes the full non-spec batch.
         prefill_query_start_loc=meta_split.non_spec_query_start_loc,
         prefill_state_indices=meta_split.non_spec_state_indices_tensor,
+        prefill_state_indices_int64=meta_split.non_spec_state_indices_tensor.to(
+            torch.int64
+        ),
         prefill_has_initial_state=meta_split.has_initial_state,
         prefill_no_initial_state_mask=~meta_split.has_initial_state.view(-1, 1, 1, 1),
     )

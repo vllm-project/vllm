@@ -1770,7 +1770,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             # kernel are precomputed by the metadata builder (the prefill tail
             # when decodes are peeled off, else the full non-spec batch), so they
             # don't need to be re-derived per layer.
-            prefill_state_indices = attn_metadata.prefill_state_indices
+            # index_copy_ needs int64 indices; the builder casts them once.
+            prefill_state_indices = attn_metadata.prefill_state_indices_int64
             no_initial_state_mask = attn_metadata.prefill_no_initial_state_mask
             assert prefill_state_indices is not None
             assert no_initial_state_mask is not None
