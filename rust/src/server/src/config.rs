@@ -65,7 +65,7 @@ pub struct ApiServerOptions {
     pub sse_keep_alive_interval: Option<Duration>,
 }
 
-/// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
+/// CORS settings mirroring Python's `CORSMiddleware`; origins are denied by default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CorsConfig {
     /// Allowed origins. `["*"]` allows any origin.
@@ -81,7 +81,7 @@ pub struct CorsConfig {
 impl Default for CorsConfig {
     fn default() -> Self {
         Self {
-            allow_origins: vec!["*".to_string()],
+            allow_origins: Vec::new(),
             allow_methods: vec!["*".to_string()],
             allow_headers: vec!["*".to_string()],
             allow_credentials: false,
