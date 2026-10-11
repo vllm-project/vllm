@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any
@@ -856,7 +855,10 @@ class AsyncLLM(EngineClient):
                         outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
-                            outputs_slice, outputs.timestamp, iteration_stats
+                            outputs_slice,
+                            outputs.timestamp,
+                            iteration_stats,
+                            weight_version=outputs.weight_version,
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
@@ -944,7 +946,6 @@ class AsyncLLM(EngineClient):
         self,
         *,
         mode: PauseMode = "abort",
-        wait_for_inflight_requests: bool | None = None,
         clear_cache: bool = True,
     ) -> None:
         """Pause generation to allow model weight updates.
@@ -960,20 +961,10 @@ class AsyncLLM(EngineClient):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED: use mode argument.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
 
         """
-        if wait_for_inflight_requests:
-            warnings.warn(
-                "The `wait_for_inflight_requests` parameter in "
-                "`AsyncLLM.pause_generation()` is deprecated. "
-                "Please use `mode` argument instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            mode = "wait"
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
