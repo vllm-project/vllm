@@ -13,9 +13,11 @@ import pytest
 def sampled_trace_prompts(tmp_path_factory):
     trace = tmp_path_factory.mktemp("timed-trace") / "trace.jsonl"
     entries = [
-        {"ts": 0, "input_length": 12, "output_length": 3, "hash_ids": [7, 11]},
-        {"ts": 1, "input_length": 16, "output_length": 3, "hash_ids": [7, 19]},
-        {"ts": 2, "input_length": 16, "output_length": 3, "hash_ids": [7, 11]},
+        {"ts": 0, "input_length": 24, "output_length": 3, "hash_ids": [7, 11]},
+        {"ts": 1, "input_length": 32, "output_length": 3, "hash_ids": [7, 19]},
+        {"ts": 2, "input_length": 32, "output_length": 3, "hash_ids": [7, 11]},
+        {"ts": 3, "input_length": 16, "output_length": 3, "hash_ids": [69235]},
+        {"ts": 4, "input_length": 16, "output_length": 3, "hash_ids": [95303]},
     ]
     trace.write_text(
         "\n".join(json.dumps(entry) for entry in entries), encoding="utf-8"
@@ -26,24 +28,24 @@ def sampled_trace_prompts(tmp_path_factory):
         import sys
         from tokenizers import Tokenizer, models
         from transformers import TokenizersBackend
-        from vllm.benchmarks.datasets.datasets import TimedTrace
+        from vllm.benchmarks.datasets import add_dataset_parser, get_samples
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
 
         tokenizer = TokenizersBackend(
             tokenizer_object=Tokenizer(models.WordLevel(
-                {"[UNK]": 0, **{str(i): i for i in range(1, 100)}},
+                {"[UNK]": 0, **{str(i): i for i in range(1, 128)}},
                 unk_token="[UNK]",
             )),
             unk_token="[UNK]",
         )
-        dataset = TimedTrace(
-            dataset_path=sys.argv[1], random_seed=42,
-            timed_trace_chunk_hash_size=8,
-            timed_trace_label_timestamp="ts",
-            timed_trace_label_input_length="input_length",
-            timed_trace_label_output_length="output_length",
-            timed_trace_label_hash_ids="hash_ids",
-        )
-        samples = dataset.sample(tokenizer, num_requests=3)
+        parser = FlexibleArgumentParser()
+        add_dataset_parser(parser)
+        args = parser.parse_args([
+            "--dataset-name", "timed_trace", "--dataset-path", sys.argv[1],
+            "--num-prompts", "5", "--timed-trace-label-timestamp", "ts",
+            "--seed", "42",
+        ])
+        samples = get_samples(args, tokenizer)
         print(json.dumps([sample.prompt for sample in samples]))
         """
     )
@@ -66,7 +68,12 @@ def test_timed_trace_prompts_are_independent_of_python_hash_seed(sampled_trace_p
 
 def test_timed_trace_partial_chunk_shares_full_prefix(sampled_trace_prompts):
     prompts = sampled_trace_prompts[0]
-    assert [len(prompt) for prompt in prompts] == [12, 16, 16]
-    assert prompts[0] == prompts[2][:12]
-    assert prompts[0][:8] == prompts[1][:8]
-    assert prompts[1][8:] != prompts[2][8:]
+    assert [len(prompt) for prompt in prompts] == [24, 32, 32, 16, 16]
+    assert prompts[0] == prompts[2][:24]
+    assert prompts[0][:16] == prompts[1][:16]
+    assert prompts[1][16:] != prompts[2][16:]
+
+
+def test_timed_trace_distinct_hashes_do_not_share_truncated_seed(sampled_trace_prompts):
+    prompts = sampled_trace_prompts[0]
+    assert prompts[3] != prompts[4]

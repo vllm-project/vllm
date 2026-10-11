@@ -1499,7 +1499,7 @@ class TimedTrace(BenchmarkDataset):
             if key not in self._expanded_generated_prompts:
                 # Seed by chunk identity so partial chunks retain the same prefix.
                 chunk_seed = int.from_bytes(
-                    hashlib.sha256(str(h).encode()).digest()[:4], "big"
+                    hashlib.sha256(str(h).encode()).digest(), "big"
                 )
                 self._expanded_generated_prompts[key] = self._sample_token(
                     expanded_size, tokenizer, seed=chunk_seed
