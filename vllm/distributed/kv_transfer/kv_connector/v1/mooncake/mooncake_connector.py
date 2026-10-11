@@ -1336,6 +1336,7 @@ class MooncakeConnectorWorker:
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
+        self._bound_raw_submissions = protocol == "tcp"
         device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "device_name", ""
         )
@@ -2017,6 +2018,11 @@ class MooncakeConnectorWorker:
         batch_start = 0
         total_descriptors = len(lengths)
         completed_batches = 0
+        if not self._bound_raw_submissions:
+            ret_value = self.engine.batch_transfer_sync_write(
+                remote_session, src_ptrs, dst_ptrs, lengths
+            )
+            batch_start = total_descriptors
         while batch_start < total_descriptors:
             batch_end = batch_start
             batch_bytes = 0

@@ -16,6 +16,7 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from .config import MooncakeCompressionConfig
+from .cpp_backend import enabled as cpp_backend_enabled
 from .layout import ALIGNMENT, CompressionLayout, build_compression_layout
 from .scores import HeadSelection, _load_scores, build_head_selection
 
@@ -27,10 +28,24 @@ _workspace_lock = threading.RLock()
 _workspace_allocators: dict[int, Callable[[int, Any], Any]] = {}
 
 
+class _ExternalAllocation:
+    def __init__(self, nbytes: int, stream: Any):
+        cuda_stream = torch.cuda.ExternalStream(stream.ptr, device=stream.device)
+        with torch.cuda.stream(cuda_stream):
+            self.tensor = torch.empty(
+                nbytes, dtype=torch.uint8, device=cuda_stream.device
+            )
+        self.ptr = self.tensor.data_ptr()
+
+
 def _allocate_workspace(nbytes: int, stream: Any) -> Any:
     with _workspace_lock:
-        allocator = _workspace_allocators[stream.ptr]
-    return allocator(nbytes, stream)
+        allocator = _workspace_allocators.get(stream.ptr)
+    return (
+        allocator(nbytes, stream)
+        if allocator is not None
+        else _ExternalAllocation(nbytes, stream)
+    )
 
 
 def register_workspace_allocators(
@@ -125,17 +140,16 @@ def _probe_operators(
     hadamard_input = hadamard_output = None
     try:
         if warm_hadamard:
-            from humming.ops import hadamard_transform
+            from humming.ops import process_input
 
             head_size = layout.layer_parts[0].head_size
             hadamard_input = torch.empty(
                 (1, head_size), dtype=torch.bfloat16, device=device
             )
             hadamard_output = torch.empty_like(hadamard_input)
-            hadamard_transform(
+            process_input(
                 hadamard_input,
-                head_size,
-                scale=1.0,
+                hadamard_block_size=head_size,
                 outputs=hadamard_output,
             )
 
@@ -266,7 +280,7 @@ def build_memory_plan(
             layout,
             torch.device("cuda"),
             layout.packed_bytes_by_part,
-            transformer,
+            transformer and not cpp_backend_enabled(),
         )
         if codec_enabled
         else (0, (0, 0), 0)

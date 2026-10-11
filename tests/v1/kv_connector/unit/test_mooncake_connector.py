@@ -67,6 +67,23 @@ from .utils import (
 )
 
 
+@pytest.mark.parametrize("bounded,submissions", [(True, 2), (False, 1)])
+def test_only_tcp_raw_submissions_are_bounded(bounded, submissions):
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker._bound_raw_submissions = bounded
+    worker.engine = MagicMock()
+    worker.engine.batch_transfer_sync_write.return_value = 0
+    worker.xfer_stats = MagicMock()
+    addresses = list(range(1025))
+    lengths = [1] * len(addresses)
+    assert worker._send_blocks("peer", addresses, addresses, lengths) == 0
+    assert worker.engine.batch_transfer_sync_write.call_count == submissions
+    calls = worker.engine.batch_transfer_sync_write.call_args_list
+    assert [length for call in calls for length in call.args[3]] == lengths
+    if not bounded:
+        assert calls[0].args[1] is addresses
+
+
 @pytest.mark.parametrize(
     ("remote_tp_size", "expected_dst_offsets"),
     [

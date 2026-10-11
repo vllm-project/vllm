@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GPU cache restoration, wire compatibility and workspace lifetime tests."""
 
+import importlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -68,10 +70,16 @@ def make_manager(monkeypatch):
         if raw_aggregate is not None:
             extra["raw_aggregate"] = raw_aggregate
         config = MooncakeCompressionConfig.from_extra_config(extra)
+        dependencies = []
         if config.uses_codec:
-            pytest.importorskip("nvidia.nvcomp")
+            dependencies.append("nvidia.nvcomp")
         if config.uses_transformer and not cpp_backend.enabled():
-            pytest.importorskip("humming.ops")
+            dependencies.append("humming.ops")
+        for dependency in dependencies:
+            if os.environ.get("VLLM_TEST_REQUIRE_MOONCAKE_COMPRESSION") == "1":
+                importlib.import_module(dependency)
+            else:
+                pytest.importorskip(dependency)
         monkeypatch.setattr(
             worker_utils,
             "select_common_block_size",
@@ -383,6 +391,27 @@ def test_probe_and_shutdown_preserve_other_manager_workspace(make_manager, monke
         ).synchronize()
         assert torch.equal(target[0, :, :, :8], source)
         assert used == {manager.workspace_allocators[0].buffer.data_ptr()}
+
+
+def test_external_nvcomp_stream_survives_manager_shutdown(make_manager):
+    from nvidia import nvcomp
+
+    manager, _ = make_manager({"pipeline": ["codec"]})
+    stream = torch.cuda.Stream()
+    codec = nvcomp.Codec(algorithm="ANS", cuda_stream=stream.cuda_stream)
+    for active in (True, False):
+        if not active:
+            manager.shutdown()
+        with torch.cuda.stream(stream):
+            source = torch.randint(0, 256, (65536,), device="cuda", dtype=torch.uint8)
+            encoded = codec.encode(
+                nvcomp.as_array(source, cuda_stream=stream.cuda_stream)
+            )
+            decoded = torch.as_tensor(codec.decode(encoded), device="cuda").view(
+                torch.uint8
+            )
+        stream.synchronize()
+        assert torch.equal(decoded, source)
 
 
 def test_transform_matches_independent_reference(make_manager):

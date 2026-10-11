@@ -207,6 +207,7 @@ def _bare_worker() -> MooncakeConnectorWorker:
     test are populated; role flags and async_zmq_ctx keep __del__'s shutdown
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker._bound_raw_submissions = False
     worker.xfer_stats = MooncakeKVConnectorStats()
     worker.engine = MagicMock()
     worker.async_zmq_ctx = MagicMock()

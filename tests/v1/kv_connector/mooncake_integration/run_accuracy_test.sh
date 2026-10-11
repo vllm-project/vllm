@@ -37,7 +37,11 @@ fi
 MOONCAKE_DEVICE_NAME=${MOONCAKE_DEVICE_NAME-mlx5_12}
 kv_config() {
   printf '{"kv_connector":"MooncakeConnector","kv_role":"%s",' "$1"
-  printf '"kv_connector_extra_config":{"device_name":"%s"}}' "${MOONCAKE_DEVICE_NAME}"
+  printf '"kv_connector_extra_config":{"device_name":"%s"' "${MOONCAKE_DEVICE_NAME}"
+  if [[ -n "${MOONCAKE_COMPRESSION_CONFIG:-}" ]]; then
+    printf ',"compression":%s' "${MOONCAKE_COMPRESSION_CONFIG}"
+  fi
+  printf '}}'
 }
 KV_CONFIG_P=$(kv_config kv_producer)
 KV_CONFIG_D=$(kv_config kv_consumer)

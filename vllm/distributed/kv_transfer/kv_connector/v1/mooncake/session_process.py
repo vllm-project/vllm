@@ -23,7 +23,7 @@ import multiprocessing
 import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
 import httpx
@@ -57,6 +57,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.session_ipc import (
     EngineToHelper,
     FinalEvent,
     HelperFailed,
+    HelperHeartbeat,
     HelperJob,
     HelperReady,
     HelperToEngine,
@@ -77,6 +78,9 @@ _STARTUP_TIMEOUT_S = 300.0
 _SWEEP_INTERVAL_S = 0.1
 _POLL_INTERVAL_S = 0.05
 _PENDING_REQ_EXPIRY_S = _ABORT_TIMEOUT_S + 60.0
+_HEARTBEAT_INTERVAL_S = 1.0
+_HEARTBEAT_TIMEOUT_S = 30.0
+_SHUTDOWN_TIMEOUT_S = 5.0
 
 
 class _SendState:
@@ -193,7 +197,7 @@ class _SessionService:
         self._stopping = False
         self._ready = False
         self._next_job_id = 0
-        self._pending_jobs: dict[int, asyncio.Future] = {}
+        self._pending_jobs: dict[int, tuple[HelperJob, asyncio.Future]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._side_channel_port = 0
 
@@ -270,13 +274,13 @@ class _SessionService:
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
         elif isinstance(message, JobDone):
-            future = self._pending_jobs.pop(message.job_id, None)
-            if future is None:
+            pending = self._pending_jobs.pop(message.job_id, None)
+            if pending is None:
                 logger.warning(
                     "Session helper: completion for unknown job %s", message.job_id
                 )
-            elif not future.done():
-                future.set_result(message)
+            elif not pending[1].done():
+                pending[1].set_result(message)
         else:
             logger.warning("Session helper: unexpected message %r", message)
 
@@ -304,7 +308,7 @@ class _SessionService:
     async def _submit(self, job: HelperJob) -> JobDone:
         assert self._loop is not None
         future: asyncio.Future = self._loop.create_future()
-        self._pending_jobs[job.job_id] = future
+        self._pending_jobs[job.job_id] = job, future
         self._to_engine(job)
         # Only JobDone retires an engine job. Cancelling its waiter cannot
         # cancel a queued CPU job, a CUDA kernel or a Mooncake write.
@@ -316,8 +320,21 @@ class _SessionService:
             self._stopping = True
             self._to_engine(HelperFailed(reason=reason))
 
-    async def _drain_jobs(self) -> None:
-        pending = tuple(self._pending_jobs.values())
+    async def _drain_jobs(self, operation_key=None, slot_ids=None) -> None:
+        pending = tuple(
+            future
+            for job, future in self._pending_jobs.values()
+            if (
+                operation_key is None
+                or (
+                    getattr(job, "transfer_id", None),
+                    getattr(job, "d_req_id", None),
+                    getattr(job, "nonce", None),
+                )
+                == operation_key
+            )
+            and (slot_ids is None or getattr(job, "slot_id", None) in slot_ids)
+        )
         if pending:
             await asyncio.wait_for(
                 asyncio.shield(asyncio.gather(*pending)), self._abort_timeout
@@ -328,7 +345,7 @@ class _SessionService:
             return
         # First join engine jobs, including their synchronous network writes.
         # A stream event alone does not cover a queued job or remote DMA.
-        await self._drain_jobs()
+        await self._drain_jobs(slot_ids=slot_ids)
         job = DrainSlotsJob(job_id=self._alloc_job(), slot_ids=list(slot_ids))
         result = await self._submit(job)
         if result.error is not None:
@@ -587,7 +604,7 @@ class _SessionService:
         except (Exception, asyncio.CancelledError) as exc:
             if send_target_claimed:
                 try:
-                    await self._drain_jobs()
+                    await self._drain_jobs(operation_key)
                 except Exception:
                     self._fail_worker("Could not drain producer open job")
                 if self._fatal_error is None:
@@ -814,7 +831,7 @@ class _SessionService:
                     await asyncio.sleep(0.001)
 
             await asyncio.wait_for(drain(), self._abort_timeout)
-            await self._drain_jobs()
+            await self._drain_jobs(operation_key)
             error = self._fatal_error
         except TimeoutError:
             error = "Producer could not drain aborted session."
@@ -1249,6 +1266,11 @@ class _SessionService:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    async def _heartbeat(self) -> None:
+        while not self._stopping:
+            self._to_engine(HelperHeartbeat())
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._stop_event = asyncio.Event()
@@ -1266,6 +1288,9 @@ class _SessionService:
                 self._slot_tail.append(address.tail)
         self._ready = True
         self._to_engine(HelperReady(side_channel_port=self._side_channel_port))
+        heartbeat = asyncio.create_task(self._heartbeat())
+        self._tasks.add(heartbeat)
+        heartbeat.add_done_callback(self._tasks.discard)
         await self._stop_event.wait()
         await self._shutdown()
 
@@ -1332,6 +1357,8 @@ class SessionProcess:
         self._failed = threading.Event()
         self._failure_reason: str | None = None
         self._state_lock = threading.RLock()
+        self._last_heartbeat = float("inf")
+        self._jobs: set[Future] = set()
 
         context = multiprocessing.get_context("spawn")
         self._conn, child_conn = context.Pipe(duplex=True)
@@ -1381,6 +1408,12 @@ class SessionProcess:
         self.check_health()
 
     def check_health(self) -> None:
+        if (
+            not self._failed.is_set()
+            and not self._shutdown
+            and time.monotonic() - self._last_heartbeat > _HEARTBEAT_TIMEOUT_S
+        ):
+            self._mark_failed("helper heartbeat timed out")
         if self._failed.is_set():
             raise RuntimeError(
                 "Mooncake compression session helper failed; worker must stop: "
@@ -1440,7 +1473,10 @@ class SessionProcess:
                 continue
             if isinstance(message, HelperReady):
                 self.side_channel_port = message.side_channel_port
+                self._last_heartbeat = time.monotonic()
                 self._ready.set()
+            elif isinstance(message, HelperHeartbeat):
+                self._last_heartbeat = time.monotonic()
             elif isinstance(message, FinalEvent):
                 self._handle_final_event(message)
             elif isinstance(message, RecvDone):
@@ -1458,7 +1494,9 @@ class SessionProcess:
             ):
                 with self._state_lock:
                     if not self._failed.is_set():
-                        self._pool.submit(self._run_job, message)
+                        future = self._pool.submit(self._run_job, message)
+                        self._jobs.add(future)
+                        future.add_done_callback(self._job_finished)
             else:
                 logger.warning("Unexpected session helper message %r", message)
 
@@ -1494,25 +1532,41 @@ class SessionProcess:
             result = JobDone(job_id=job.job_id, error=str(exc))
         self._send(result)
 
+    def _job_finished(self, future: Future) -> None:
+        with self._state_lock:
+            self._jobs.discard(future)
+
     def shutdown(self) -> None:
         if self._shutdown:
             return
         self._shutdown = True
+        deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_S
         with contextlib.suppress(Exception):
             self.publish(EngineStop())
-        stopped = self._stopped.wait(30.0) if not self._failed.is_set() else False
+        stopped = (
+            self._stopped.wait(_SHUTDOWN_TIMEOUT_S)
+            if not self._failed.is_set()
+            else False
+        )
         if not stopped:
             self._mark_failed("Helper stopped without proving memory quiescence")
         self._out.put(None)
-        if self._writer_thread is not None:
-            self._writer_thread.join(5.0)
-        self._pool.shutdown(wait=True, cancel_futures=True)
-        self._process.join(5.0)
+        self._pool.shutdown(wait=False, cancel_futures=True)
+        with self._state_lock:
+            running = tuple(future for future in self._jobs if not future.done())
+        if running:
+            _, pending = wait(running, timeout=max(0.0, deadline - time.monotonic()))
+            if pending:
+                self._mark_failed("Engine jobs did not quiesce before shutdown")
+        self._process.join(max(0.0, deadline - time.monotonic()))
         if self._process.is_alive():
             self._process.terminate()
             self._process.join(2.0)
         if self._process.is_alive():
             self._process.kill()
+            self._process.join(2.0)
         with contextlib.suppress(OSError):
             self._conn.close()
+        if self._writer_thread is not None:
+            self._writer_thread.join(0.1)
         self.check_health()
