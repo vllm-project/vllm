@@ -2292,11 +2292,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     aux_hidden_states,
                     attn_metadata,
                     slot_mappings_by_layer,
+                    draft_num_rejected,
                 ) = hidden_state_handoff.prepare_drafting(
-                    fwd_batch, draft_hidden_states, aux_hidden_states, input_batch
+                    fwd_batch,
+                    draft_hidden_states,
+                    aux_hidden_states,
+                    input_batch,
+                    num_rejected,
                 )
             else:
                 draft_batch = input_batch
+                draft_num_rejected = num_rejected
                 spec_hidden_states = get_drafter_hidden_states(
                     self.model, draft_hidden_states
                 )
@@ -2312,7 +2318,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     spec_hidden_states,
                     aux_hidden_states,
                     num_sampled,
-                    num_rejected,
+                    draft_num_rejected,
                     self.req_states.last_sampled_tokens,
                     self.req_states.next_prefill_tokens,
                     self.sampler.sampling_states.temperature.gpu,

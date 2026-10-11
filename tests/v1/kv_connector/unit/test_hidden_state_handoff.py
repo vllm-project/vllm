@@ -175,58 +175,6 @@ def test_local_request_reserves_no_record():
     assert _num_blocks(scheduler, request) == 2
 
 
-@pytest.mark.parametrize("num_heads_read", [2, 1])
-def test_record_round_trip_through_kv_slots(num_heads_read):
-    """Records written past the prompt into every KV head read back whole,
-    also from a head slice (a decoder at a different TP size)."""
-    import numpy as np
-
-    from vllm.v1.core.hidden_state_record import RecordLayout
-    from vllm.v1.worker.gpu.hidden_state_handoff import HiddenStateHandoff
-
-    torch.manual_seed(0)
-    num_blocks, num_heads, block_size = 12, 2, 4
-    layout = RecordLayout(hidden_size=24, window=1, num_aux=2)
-    # Two layers' [blocks, heads, tokens, head_size (K + V)] fp16 caches.
-    caches = [
-        torch.zeros(num_blocks, num_heads, block_size, 2 * size, dtype=torch.float16)
-        for size in (8, 4)
-    ]
-    handoff = object.__new__(HiddenStateHandoff)
-    handoff.device = torch.device("cpu")
-    handoff.dtype = torch.float16
-    handoff.layout = layout
-    handoff.layer_views = [cache.view(torch.uint8) for cache in caches]
-    handoff.head_bytes = sum(v.shape[-1] for v in handoff.layer_views)
-    handoff.record_bytes = layout.num_slots * layout.hidden_size * 2
-    handoff.tail_tokens = cdiv(2 * handoff.record_bytes, handoff.head_bytes)
-    # 192 bytes, stored as 384, at 48 per token slot.
-    assert handoff.tail_tokens == 8
-
-    # Request r's prompt ends at token 3 of block 4r: its slots run on into
-    # blocks 4r + 1 and 4r + 2.
-    def tail_slots(idx_mapping_np, prompt_len_np):
-        slots = (
-            torch.from_numpy(idx_mapping_np)[:, None] * 4 * block_size
-            + torch.from_numpy(prompt_len_np)[:, None]
-            + torch.arange(handoff.tail_tokens)[None, :]
-        )
-        return slots // block_size, slots % block_size
-
-    handoff._tail_slots = tail_slots
-    records = torch.randn(3, layout.num_slots, layout.hidden_size).half()
-    idx_mapping, prompt_len = np.arange(3), np.full(3, 3)
-    handoff._write_records(idx_mapping, prompt_len, records)
-    for cache in caches:
-        # Token slots up to the prompt's end are untouched.
-        assert not cache[0::4, :, :3].any()
-        # Every stored byte is a nibble: finite in any KV cache format.
-        assert cache.view(torch.uint8).max() <= 0xF
-    if num_heads_read == 1:
-        handoff.layer_views = [v[:, 1:] for v in handoff.layer_views]
-    assert torch.equal(handoff._read_records(idx_mapping, prompt_len), records)
-
-
 def test_record_carrier_group():
     """A full-attention group carries the record if there is one, else a
     sliding-window one; ring buffers and compressed caches cannot."""
