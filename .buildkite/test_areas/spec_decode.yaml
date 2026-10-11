@@ -245,7 +245,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Uno"
   key: spec-decode-uno
-  # The 7-case greedy matrix took 2,377 s on an RTX 3090 (sm_86); not yet
+  # The 7-case greedy matrix took 2,206 s on an RTX 3090 (sm_86); not yet
   # timed on H200 MIG. The suite skips off CUDA, so there is no AMD mirror.
   timeout_in_minutes: 60
   device: h200_35gb
@@ -262,7 +262,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Uno Nightly"
   key: spec-decode-uno-nightly
-  # Edge: 377 s, survivor: 189 s on an RTX 3090.
+  # Edge: 363 s, survivor: 189 s on an RTX 3090.
   timeout_in_minutes: 30
   device: h200_35gb
   optional: true
@@ -271,7 +271,7 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/test_uno.py -k "max_model_len or survivor"
+    - pytest -v -s v1/e2e/spec_decode/test_uno.py -k "max_model_len or survivor or prebuilt"
 
 - label: ":nvidia: (B200) Spec Decode Speculators + MTP Nightly"
   key: spec-decode-speculators-mtp-nightly-b200

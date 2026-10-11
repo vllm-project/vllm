@@ -321,10 +321,6 @@ def _uno_execution_state(worker) -> dict:
 def _disable_uno_adapter_for_control(worker) -> None:
     """Use identical noise and sampling, with base weights on every draft row."""
     from vllm.lora.layers import LoRAMapping
-    from vllm.v1.worker.gpu.spec_decode.uno_lora import (
-        base_lora_mapping,
-        base_prompt_mapping,
-    )
 
     runner = worker.model_runner
     proposer = runner.speculator
@@ -332,13 +328,10 @@ def _disable_uno_adapter_for_control(worker) -> None:
     def base_only(shape):
         if shape is not None:
             _num_reqs, num_tokens = shape
+            # Every draft row on base weights: id 0 is "no adapter".
             runner.lora_manager.set_active_adapters(
                 {proposer.lora_request},
-                LoRAMapping(
-                    base_lora_mapping(num_tokens),
-                    base_prompt_mapping(num_tokens),
-                    is_prefill=True,
-                ),
+                LoRAMapping((0,) * num_tokens, (0,) * num_tokens, is_prefill=True),
             )
 
     proposer.set_lora_hook(base_only)
@@ -422,8 +415,8 @@ class _MixedPhase:
     rendered into the assertion message by ``_render_receipt``. It must not be
     left in ``print`` output: the survivor case is ``pytest.mark.forked``, and a
     forked child's stdout reaches neither the log nor the JUnit attachment even
-    under ``-s`` -- which is why the first two GPU runs of this gate could only
-    report that nothing was observed, never why.
+    under ``-s``, so a run that printed could only report that nothing was
+    observed, never why.
     """
 
     # Final greedy token IDs per finish peer, keyed by EXTERNAL request id.
@@ -448,7 +441,7 @@ class _MixedPhase:
     min_free_blocks: int | None = None
     # Generated-token count per finish peer at every step, reduced to the
     # largest gap ever seen between the fastest and the slowest peer. This is
-    # the receipt for the failure class the peer redesign closed: peers that
+    # the receipt for one failure class: peers that
     # drift apart never hold their footprints at the same time, so a
     # grow-together budget is never crossed (see `worst_case_crossing_tokens`).
     max_generation_lag: int = 0
@@ -692,7 +685,7 @@ def _drive_mixed_phase(
             # which is NOT the id passed above unless request-id randomization
             # is disabled. Resolve it here, fail here if it cannot be resolved,
             # and use the resolved key for every read below: polling by the
-            # external id is what left two GPU runs with an empty receipt.
+            # external id would leave the receipt empty.
             resolved, problems = _internal_request_ids(engine, scheduler, finish_ids)
             internal.update(resolved)
             external_of.update({key: value for value, key in resolved.items()})
@@ -878,9 +871,8 @@ def test_uno_continuous_batching_survivor_matches_solo(
     )
     # The CPU suite checks this geometry from literals because it has no hub;
     # those literals are only worth anything if they are what the tokenizer
-    # actually produces. An earlier copied value (265 for the finish peers) was
-    # eight tokens off and put the CPU-side crossings 15 tokens below the ones
-    # two GPU receipts printed.
+    # actually produces: a value eight tokens off would put the CPU-side
+    # crossings 15 tokens below the ones a GPU run prints.
     assert tuple(prompt_tokens) == SURVIVOR_PROMPT_TOKENS, (
         "the survivor prompts no longer tokenise to the lengths the CPU suite "
         f"pins: runtime {tuple(prompt_tokens)} vs SURVIVOR_PROMPT_TOKENS "
@@ -945,7 +937,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
         "SURVIVOR_KV_HEADROOM_BLOCKS rather than accepting a non-firing run"
     )
     # The pair growing together must also cross well before the cap; this is
-    # the best case and is reported for continuity with the earlier receipts.
+    # the best case, reported beside the worst case above.
     assert crossing_tokens < finish_sampling.max_tokens, (
         "the two long peers together cross the KV pool only after "
         f"{crossing_tokens} generated tokens, at or past the "
@@ -1609,7 +1601,7 @@ def test_uno_greedy_matches_base_model(
             f"control_divergences={format_divergences(control_batch)}"
         )
         # Every candidate divergence prints the reference's top-2 raw-logit gap
-        # and the bf16 step at its top logit, excused or not.
+        # and the bf16 step at its runner-up logit, excused or not.
         for prompt, position in uno_divergences:
             ranked = reference_ranked[prompt] if prompt < len(reference_ranked) else []
             has_two = position < len(ranked) and len(ranked[position]) > 1
@@ -1618,7 +1610,7 @@ def test_uno_greedy_matches_base_model(
                 if has_two
                 else float("nan")
             )
-            step = bf16_step(ranked[position][0][1]) if has_two else float("nan")
+            step = bf16_step(ranked[position][1][1]) if has_two else float("nan")
             print(
                 f"{context}: divergence p{prompt}/t{position} "
                 f"reference logit_gap={gap:.6f} bf16_step={step:g}"
@@ -1882,3 +1874,252 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
     print(f"uno max_model_len edge (text): {verdict.text_reason}")
     assert verdict.ok, verdict.reason
     assert verdict.text_ok, verdict.text_reason
+
+
+def _uno_adapter_id(worker) -> int:
+    return int(worker.model_runner.speculator.lora_request.lora_int_id)
+
+
+def _write_random_qwen3_lora(directory: Path, seed: int = 0, rank: int = 8) -> str:
+    """A small seeded PEFT LoRA on q_proj/v_proj of the pinned Qwen3-8B."""
+    import json
+
+    from safetensors.torch import save_file
+
+    config = AutoConfig.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
+    head_dim = getattr(config, "head_dim", None) or (
+        config.hidden_size // config.num_attention_heads
+    )
+    outputs = {
+        "q_proj": config.num_attention_heads * head_dim,
+        "v_proj": config.num_key_value_heads * head_dim,
+    }
+    generator = torch.Generator().manual_seed(seed)
+    tensors = {}
+    for layer in range(config.num_hidden_layers):
+        for proj, out_features in outputs.items():
+            prefix = f"base_model.model.model.layers.{layer}.self_attn.{proj}"
+            tensors[f"{prefix}.lora_A.weight"] = (
+                torch.randn(rank, config.hidden_size, generator=generator) * 0.02
+            ).to(torch.bfloat16)
+            tensors[f"{prefix}.lora_B.weight"] = (
+                torch.randn(out_features, rank, generator=generator) * 0.02
+            ).to(torch.bfloat16)
+    directory.mkdir(parents=True)
+    save_file(tensors, str(directory / "adapter_model.safetensors"))
+    (directory / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "peft_type": "LORA",
+                "task_type": "CAUSAL_LM",
+                "base_model_name_or_path": MODEL_ID,
+                "r": rank,
+                "lora_alpha": 2 * rank,
+                "lora_dropout": 0.0,
+                "bias": "none",
+                "target_modules": list(outputs),
+            }
+        )
+    )
+    return str(directory)
+
+
+def _generate_prebuilt(llm, prompt_token_ids, sampling, lora_request):
+    """Serve each prompt as a prebuilt ``EngineCoreRequest``.
+
+    ``LLMEngine.add_request`` accepts a prebuilt request and skips the input
+    processor, including its refusal of request-specific LoRA, so this is the
+    one path on which a request reaches Uno's worker carrying an adapter.
+    """
+    engine = llm.llm_engine
+    outputs = []
+    for index, token_ids in enumerate(prompt_token_ids):
+        request = engine.input_processor.process_inputs(
+            f"prebuilt-{index}",
+            {"prompt_token_ids": list(token_ids)},
+            sampling,
+            engine.get_supported_tasks(),
+        )
+        request.lora_request = lora_request
+        engine.add_request(request.request_id, request, sampling)
+        finished = []
+        while engine.has_unfinished_requests():
+            finished.extend(output for output in engine.step() if output.finished)
+        assert len(finished) == 1, finished
+        outputs.append(finished[0])
+    return outputs
+
+
+def test_uno_prebuilt_lora_request_never_selects_unos_adapter(
+    vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
+    uno_adapter_path: str,
+    tmp_path: Path,
+):
+    """A prebuilt request carrying an adapter gets that adapter, never Uno's.
+
+    The frontends refuse request-specific LoRA with Uno, but a prebuilt
+    ``EngineCoreRequest`` skips that check. A request reusing the id Uno's
+    adapter is registered under must still get its own adapter on its target
+    rows: Uno moves its adapter to another id, so the outputs equal a plain
+    engine serving the same prebuilt requests. An ordinary adapter id gets the
+    same comparison, and the engine keeps serving base requests afterwards.
+    """
+    from vllm.lora.request import LoRARequest
+    from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    user_path = _write_random_qwen3_lora(tmp_path / "user-adapter")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
+    questions = [
+        "Natalia sold clips to 48 of her friends in April, and then she sold half "
+        "as many clips in May. How many clips did Natalia sell altogether?",
+        "Weng earns 12 dollars an hour for babysitting. Yesterday, she just did "
+        "50 minutes of babysitting. How much did she earn?",
+    ]
+    prompt_token_ids = [
+        tokenizer.encode(
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": question}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            ),
+            add_special_tokens=False,
+        )
+        for question in questions
+    ]
+    sampling = SamplingParams(
+        temperature=0, max_tokens=32, ignore_eos=True, seed=0, logprobs=2
+    )
+    total_memory = torch.cuda.get_device_properties(0).total_memory
+    common = dict(
+        revision=MODEL_REVISION,
+        dtype="bfloat16",
+        trust_remote_code=False,
+        enforce_eager=False,
+        compilation_config={"cudagraph_capture_sizes": [8, 16, 32, 64]},
+        async_scheduling=True,
+        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
+        max_model_len=1024,
+        max_num_seqs=4,
+        max_num_batched_tokens=256,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=min(0.9, 24 * 1024**3 / total_memory),
+        kv_cache_memory_bytes=MATRIX_KV_BUDGET_BYTES,
+        enable_lora=True,
+        max_lora_rank=128,
+        max_loras=2,
+        max_cpu_loras=4,
+        disable_log_stats=False,
+        logprobs_mode="raw_logits",
+    )
+    user_at_7 = LoRARequest("user-7", 7, user_path)
+    user_at_uno_id = LoRARequest("user-at-uno-id", UNO_LORA_ID, user_path)
+    uno_weights = LoRARequest("uno-weights", 11, uno_adapter_path)
+
+    def _ids(outputs):
+        return [list(output.outputs[0].token_ids) for output in outputs]
+
+    def _ranked(outputs):
+        return [
+            [
+                sorted(
+                    ((token_id, value.logprob) for token_id, value in entry.items()),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                for entry in output.outputs[0].logprobs or []
+            ]
+            for output in outputs
+        ]
+
+    arms = {
+        "base": None,
+        "user_at_7": user_at_7,
+        "user_at_uno_id": user_at_uno_id,
+    }
+    with vllm_runner("Qwen/Qwen3-8B", **common) as plain:
+        reference = {
+            name: _generate_prebuilt(plain.llm, prompt_token_ids, sampling, lora)
+            for name, lora in arms.items()
+        }
+        repeat = {
+            name: _generate_prebuilt(plain.llm, prompt_token_ids, sampling, lora)
+            for name, lora in arms.items()
+        }
+        unos_weights_on_target = _generate_prebuilt(
+            plain.llm, prompt_token_ids, sampling, uno_weights
+        )
+
+    # Power: the user adapter changes the output, and target rows on Uno's
+    # weights (the defect) would differ from target rows on the user adapter.
+    assert _ids(reference["user_at_uno_id"]) != _ids(reference["base"]), (
+        "the user adapter does not change the greedy output; no power"
+    )
+    assert _ids(unos_weights_on_target) != _ids(reference["user_at_uno_id"]), (
+        "Uno's adapter and the user adapter give the same output; no power"
+    )
+
+    with vllm_runner(
+        "Qwen/Qwen3-8B",
+        **common,
+        speculative_config={
+            "method": "uno",
+            "uno_lora_path": uno_adapter_path,
+            "uno_mask_token_id": 151669,
+            "num_speculative_tokens": 8,
+        },
+    ) as speculative:
+        before = speculative.llm.llm_engine.collective_rpc(_uno_adapter_id)
+        candidate = {
+            name: _generate_prebuilt(speculative.llm, prompt_token_ids, sampling, lora)
+            for name, lora in (
+                ("user_at_uno_id", user_at_uno_id),
+                ("user_at_7", user_at_7),
+                ("base", None),
+            )
+        }
+        after = speculative.llm.llm_engine.collective_rpc(_uno_adapter_id)
+        metrics = speculative.llm.get_metrics()
+
+    draft_tokens = get_spec_decode_metric_value(
+        metrics, "vllm:spec_decode_num_draft_tokens"
+    )
+    print(
+        f"uno prebuilt lora: Uno adapter id before={before} after={after}, "
+        f"draft tokens={draft_tokens}, "
+        f"acceptance length={compute_acceptance_len(metrics):.3f}"
+    )
+    assert draft_tokens > 0, "Uno did not draft"
+    assert before == [UNO_LORA_ID], before
+    assert all(adapter_id != UNO_LORA_ID for adapter_id in after), after
+
+    for name in arms:
+        control = token_agreement(_ids(reference[name]), _ids(repeat[name]))[1]
+        matched, divergences = token_agreement(
+            _ids(reference[name]), _ids(candidate[name])
+        )
+        _text_matched, text = text_agreement(
+            [output.outputs[0].text for output in reference[name]],
+            [output.outputs[0].text for output in candidate[name]],
+        )
+        verdict = matrix_verdicts(
+            control,
+            {name: MatrixArm(divergences, _ids(candidate[name]), text)},
+            len(prompt_token_ids),
+            _ids(reference[name]),
+            _ranked(reference[name]),
+        )[name]
+        print(
+            f"uno prebuilt lora {name}: exact tokens {matched}/"
+            f"{len(prompt_token_ids)}, floor={format_divergences(control)}, "
+            f"{verdict.reason}"
+        )
+        assert verdict.ok, f"{name}: {verdict.reason}"
+        assert verdict.text_ok, f"{name}: {verdict.text_reason}"

@@ -33,13 +33,6 @@ def draft_lora_mapping(
     return per_request * batch_size + (0,) * (num_input_tokens - actual)
 
 
-def base_lora_mapping(num_input_tokens: int) -> tuple[int, ...]:
-    """Return an all base token mapping of the requested length."""
-    if num_input_tokens < 0:
-        raise ValueError("base mapping length must be nonnegative")
-    return (0,) * num_input_tokens
-
-
 def base_prompt_mapping(num_requests: int) -> tuple[int, ...]:
     """Return an all base prompt/sampler mapping."""
     if num_requests < 0:
@@ -48,7 +41,6 @@ def base_prompt_mapping(num_requests: int) -> tuple[int, ...]:
 
 
 __all__ = [
-    "base_lora_mapping",
     "base_prompt_mapping",
     "draft_lora_mapping",
 ]

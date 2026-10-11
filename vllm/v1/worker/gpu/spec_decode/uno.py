@@ -195,18 +195,37 @@ class UnoSpeculator(DraftModelSpeculator):
         step, so the native Punica metadata is rebuilt in place and a captured
         draft graph reads it on replay. The mapping is not restored after the
         draft: the runner installs the next target step's own mapping, and the
-        manager rebuilds it because it differs from the draft mapping. Requests
-        carrying a LoRA adapter are refused before they are queued, so target
-        rows never carry an adapter and only Uno's adapter is activated here.
+        manager rebuilds it because it differs from the draft mapping.
+
+        No request may select Uno's adapter for its target rows. The frontends
+        refuse request-specific LoRA, but a prebuilt ``EngineCoreRequest``
+        skips that check and can carry any adapter id, Uno's included. So the
+        target-side ``set_active_adapters`` is wrapped: when a target batch
+        asks for the id Uno's adapter is registered under, Uno first moves its
+        adapter to a fresh id through the manager's public calls. The request's
+        own adapter then loads under the id it asked for, and its target rows
+        use exactly the weights a plain engine would give them.
         """
-        uno_id = self.lora_request.lora_int_id
-        lora_manager.set_active_adapters({self.lora_request}, None)
+        set_active_adapters = lora_manager.set_active_adapters
+        set_active_adapters({self.lora_request}, None)
+
+        def set_target_adapters(requests: set[Any], mapping: Any) -> None:
+            uno_id = self.lora_request.lora_int_id
+            if any(
+                request.lora_int_id == uno_id and request is not self.lora_request
+                for request in requests
+            ):
+                self._move_adapter_off(lora_manager, requests)
+            set_active_adapters(requests, mapping)
+
+        lora_manager.set_active_adapters = set_target_adapters
 
         def set_draft_mapping(shape: tuple[int, int] | None) -> None:
             if shape is None:
                 return
             num_reqs, num_tokens = shape
-            lora_manager.set_active_adapters(
+            uno_id = self.lora_request.lora_int_id
+            set_active_adapters(
                 {self.lora_request},
                 LoRAMapping(
                     draft_lora_mapping(num_tokens, num_reqs, self.k, uno_id),
@@ -216,6 +235,26 @@ class UnoSpeculator(DraftModelSpeculator):
             )
 
         self.set_lora_hook(set_draft_mapping)
+
+    def _move_adapter_off(self, lora_manager: Any, requests: set[Any]) -> None:
+        """Re-register Uno's adapter under an id no current request carries."""
+        taken = {request.lora_int_id for request in requests}
+        taken |= set(lora_manager.list_adapters())
+        old_id = self.lora_request.lora_int_id
+        new_id = max(taken | {old_id}) + 1
+        moved = LoRARequest(
+            self.lora_request.lora_name, new_id, self.lora_request.lora_path
+        )
+        lora_manager.add_adapter(moved)
+        lora_manager.remove_adapter(old_id)
+        self.lora_request = moved
+        logger.warning(
+            "A request asked for LoRA adapter id %d, which Uno's adapter was "
+            "registered under; Uno's adapter now uses id %d so the request "
+            "gets its own adapter.",
+            old_id,
+            new_id,
+        )
 
     def set_lora_hook(self, hook: Callable[[tuple[int, int] | None], None]) -> None:
         self._lora_hook = hook

@@ -73,7 +73,6 @@ SURVIVOR_FINISH_MAX_TOKENS = 640
 # one-word abort tag, measured on a Blackwell (sm_121) and an Ampere (sm_86)
 # GPU run, which both print `worst_case_crossing_tokens=544` and
 # `growth_blocks=151`.
-# The earlier 265 was a copied literal that no receipt ever supported.
 SURVIVOR_PROMPT_TOKENS = (171, 257, 257, 249)
 
 # The K-matrix engine keeps upstream's 4096 context on a 2 GiB budget, far above
@@ -520,10 +519,11 @@ def classify_ties(
     reference's top-ranked token is the token the reference emitted (otherwise
     the ranked list does not describe this run and nothing is excused), the
     candidate emitted the reference's runner-up, and the reference's top two
-    RAW LOGITS differ by at most one bfloat16 step of the top logit
+    RAW LOGITS differ by at most one bfloat16 step at the runner-up's logit
     (``bf16_step``). The evidence comes from the reference run only, never from
     the candidate. A candidate token outside the reference's top two is never a
     tie, and a runner-up more than one step behind is a real divergence.
+    ``matrix_verdicts`` excuses at most ONE tied prompt per batch.
 
     Each divergence is the first differing position of its prompt
     (``token_agreement``), so an excused tie ends the comparison for that
@@ -576,7 +576,9 @@ def _tie_row(
         # diagnostics is exactly the failure this rule is meant to prevent.
         return None
     margin = float(top_logit) - float(second_logit)
-    step = bf16_step(top_logit)
+    # The runner-up's spacing: at a power of two the spacing doubles above it,
+    # so the top logit's step would excuse 32.0 over 31.75, two steps of 0.125.
+    step = bf16_step(second_logit)
     if candidate_ids[prompt][token] != second_id or margin > step:
         return None
     return TieRow(prompt, token, top_id, second_id, margin, step)
@@ -624,6 +626,12 @@ def matrix_verdicts(
             arm.token_ids,
             reference_ranked,
         )
+        # At most one excused prompt per batch. A real error whose first
+        # effect in every prompt were a one-step runner-up would otherwise pass
+        # every prompt; past the first tie, further ties count as divergences.
+        ties = sorted(ties, key=lambda tie: (tie.prompt, tie.token))
+        real = sorted(real + [(tie.prompt, tie.token) for tie in ties[1:]])
+        ties = ties[:1]
         ok, reason = exact_token_verdict(control_divergences, real, total)
         tie_prompts = {tie.prompt for tie in ties}
         real_prompts = {prompt for prompt, _ in real}
@@ -658,9 +666,8 @@ def resolve_internal_request_ids(
     ``add_request`` with ``f"{external}-{random_uuid():.8}"`` unless
     ``VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`` is set, and ``Request`` keeps only
     that internal id. Looking a request up by the id the test supplied
-    therefore returns ``None`` on every step -- which is why two GPU runs
-    reported an empty per-request receipt while the scheduler's own pool
-    reported 100% occupancy.
+    therefore returns ``None`` on every step, leaving the per-request receipt
+    empty even while the scheduler's own pool reports 100% occupancy.
 
     Returns ``(resolved, problems)``: ``resolved`` maps each external id whose
     internal id was unambiguous, ``problems`` maps the rest to the candidates

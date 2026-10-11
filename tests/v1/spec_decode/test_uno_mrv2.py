@@ -1331,8 +1331,7 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     # replaced is the negative control: an 81-block pool (80 allocatable) with a
     # 512-token cap cannot force a crossing once the peers drift apart, because
     # a leader at its cap plus a stalled twin is 67 of 80 blocks. The worst-case
-    # helper must refuse it, and the two GPU receipts that skipped on it are the
-    # field evidence.
+    # helper must refuse it.
     replaced_pool = budget.allocatable_blocks(81)
     replaced_worst_case = budget.worst_case_crossing_tokens(
         prompt_tokens[1], [prompt_tokens[2]], replaced_pool
@@ -1340,7 +1339,7 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     assert replaced_worst_case > 512, (
         "the replaced 81-block/512-token configuration would now pass the "
         f"worst-case pre-gate ({replaced_worst_case} tokens vs a 512 cap), so "
-        "this gate no longer rejects the geometry that skipped on two cards"
+        "this gate no longer rejects a geometry that cannot force a crossing"
     )
 
 
@@ -1361,7 +1360,7 @@ def test_survivor_resident_blocks_track_the_speculative_width():
     # cdiv(257 + 0 + 1 + 16, 16) = cdiv(274, 16) = 18: K is really read.
     assert budget.min_resident_blocks(257, 16) == 18
     # cdiv(257 + 640 + 1 + 8, 16) = cdiv(906, 16) = 57 blocks at the cap, which
-    # is what a solo peer occupied on both GPU receipts (83.8% of 68).
+    # is what a solo peer occupies in a GPU run (83.8% of 68).
     assert budget.resident_blocks(257, budget.SURVIVOR_FINISH_MAX_TOKENS) == 57
 
     budget_blocks = budget.survivor_kv_budget() // budget.kv_bytes_per_block()
@@ -1405,8 +1404,8 @@ def test_survivor_memory_override_refuses_what_the_engine_would(raw):
 def test_survivor_receipt_is_written_where_the_evidence_lives(tmp_path, monkeypatch):
     """The receipt must not depend on a forked child's stdout.
 
-    Two GPU runs lost every printed receipt line because the survivor case is
-    ``pytest.mark.forked``. The receipt now goes to the path the environment
+    Printed receipt lines are lost because the survivor case is
+    ``pytest.mark.forked``. The receipt goes to the path the environment
     names, else beside the JUnit file the run was invoked with, so a GPU run
     keeps it with its results.
     """
@@ -1676,6 +1675,61 @@ def test_matrix_verdicts_fail_a_runner_up_two_steps_behind():
     assert not verdict.ok and not verdict.text_ok
     assert verdict.ties == []
     assert "p2/t3" in verdict.reason
+
+
+def test_matrix_verdicts_measure_the_step_at_the_runner_up():
+    """At a power of two the step doubles above it; use the runner-up's step.
+
+    32.0 and 31.75 are two bfloat16 steps apart (0.125 each below 32), though
+    the step at 32.0 itself is 0.25. Reading the step from the top logit would
+    excuse two steps; reading it from the runner-up does not.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
+    candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
+    ranked = _ranked_at(2, 3, [(13, 32.0), (99, 31.75)])
+    verdicts = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
+    )
+    assert not verdicts["uno"].ok
+    assert verdicts["uno"].ties == []
+
+    # One step below 32.0 (31.875) is still a tie.
+    ranked = _ranked_at(2, 3, [(13, 32.0), (99, 31.875)])
+    verdicts = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
+    )
+    assert verdicts["uno"].ok
+    assert verdicts["uno"].ties[0].step == 0.125
+
+
+def test_matrix_verdicts_excuse_at_most_one_prompt_per_batch():
+    """The limit: one excused tie per batch, the rest are divergences.
+
+    A real error whose first effect in every prompt were a one-step runner-up
+    would pass every prompt if each tie were excused. Only the first tied
+    prompt of a batch is excused; a second one fails the batch.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
+    candidate = [list(ids) for ids in reference]
+    candidate[1][3] = 99
+    candidate[2][3] = 99
+    ranked = _ranked_at(1, 3, [(13, 44.75), (99, 44.50)])
+    ranked[2][3] = [(13, 44.75), (99, 44.50)]
+
+    one = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
+    )
+    assert one["uno"].ok
+    two = budget.matrix_verdicts(
+        [], {"uno": _arm([(1, 3), (2, 3)], candidate, [1, 2])}, 4, reference, ranked
+    )
+    assert not two["uno"].ok
+    assert [(tie.prompt, tie.token) for tie in two["uno"].ties] == [(1, 3)]
+    assert "p2/t3" in two["uno"].reason
 
 
 def test_matrix_verdicts_fail_a_real_error_before_a_tie():
