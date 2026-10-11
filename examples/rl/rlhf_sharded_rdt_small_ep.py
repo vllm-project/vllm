@@ -88,6 +88,8 @@ MODEL_NAME = os.environ.get("RDT_MODEL", "Qwen/Qwen1.5-MoE-A2.7B")
 RAY_NAMESPACE = "sharded_rdt_small_ep_example"
 VLLM_PORT = int(os.environ.get("RDT_VLLM_PORT", "8100"))
 VLLM_ENDPOINT = f"http://127.0.0.1:{VLLM_PORT}"
+STAGING_DEVICE = os.environ.get("RDT_STAGING_DEVICE", "gpu")
+STAGES_IN_FLIGHT = int(os.environ.get("RDT_STAGES_IN_FLIGHT", "1"))
 
 FSDP_WORLD_SIZE = 2
 INFERENCE_TP_SIZE = 1
@@ -126,7 +128,12 @@ class FSDPTrainWorker:
     def get_rank(self):
         return self.rank
 
-    def setup_engine(self, vllm_endpoint: str):
+    def setup_engine(
+        self,
+        vllm_endpoint: str,
+        staging_device: str,
+        stages_in_flight: int,
+    ):
         self.engine = WeightTransferTrainerFactory.trainer_init(
             ShardedRDTTrainerInitInfo(
                 rank=self.rank,
@@ -134,6 +141,8 @@ class FSDPTrainWorker:
                 trainer_actor_namespace=RAY_NAMESPACE,
                 num_rdt_buffers=int(os.environ.get("NUM_RDT_BUFFERS", "2")),
                 buffer_presize_gb=float(os.environ.get("RDT_BUFFER_PRESIZE_GB", "0")),
+                staging_device=staging_device,
+                stages_in_flight=stages_in_flight,
             ),
             client=HTTPVLLMWeightSyncClient(vllm_endpoint),
             source=CheckpointNameSource(self.model),
@@ -173,7 +182,8 @@ def main():
 
     print(
         f"[init] model {MODEL_NAME}, {FSDP_WORLD_SIZE} trainer + "
-        f"{INFERENCE_DP_SIZE} inference GPUs"
+        f"{INFERENCE_DP_SIZE} inference GPUs, staging={STAGING_DEVICE}, "
+        f"stages_in_flight={STAGES_IN_FLIGHT}"
     )
 
     # Reserve the trainer's GPUs BEFORE launching the server, so the server's DP
@@ -230,7 +240,16 @@ def main():
 
         print("[sync] building trainer engines (bake on the sender)...")
         t0 = time.perf_counter()
-        ray.get([w.setup_engine.remote(VLLM_ENDPOINT) for w in workers])
+        ray.get(
+            [
+                w.setup_engine.remote(
+                    VLLM_ENDPOINT,
+                    STAGING_DEVICE,
+                    STAGES_IN_FLIGHT,
+                )
+                for w in workers
+            ]
+        )
         print(f"[sync] engine setup (incl. bake) took {time.perf_counter() - t0:.2f}s")
 
         pause_generation(VLLM_ENDPOINT)
