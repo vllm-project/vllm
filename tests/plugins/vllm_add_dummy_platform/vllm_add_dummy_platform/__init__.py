@@ -4,7 +4,7 @@
 
 def dummy_platform_plugin() -> str | None:
     # Real platform plugins often import vLLM modules while registering.
-    import vllm.utils.torch_utils  # noqa: F401
+    from vllm.utils.torch_utils import direct_register_custom_op  # noqa: F401
 
     return "vllm_add_dummy_platform.dummy_platform.DummyPlatform"
 

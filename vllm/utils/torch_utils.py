@@ -78,20 +78,10 @@ if TYPE_CHECKING:
 
 
 def __getattr__(name: str) -> Any:
-    # Computed on first access: evaluating it at import time would resolve
-    # current_platform (and load platform plugins) during `import vllm`.
+    # Lazy so that importing this module does not resolve current_platform.
     if name == "PIN_MEMORY":
-        value = is_pin_memory_available()
-        globals()["PIN_MEMORY"] = value
-        return value
+        return is_pin_memory_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def _pin_memory() -> bool:
-    # Honors PIN_MEMORY if it was materialized or overridden.
-    if "PIN_MEMORY" in globals():
-        return globals()["PIN_MEMORY"]
-    return __getattr__("PIN_MEMORY")
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
@@ -736,13 +726,15 @@ def async_tensor_h2d(
         data = torch.from_numpy(data)
     if isinstance(data, torch.Tensor):
         t = data
-        if _pin_memory() and not t.is_pinned():
+        if is_pin_memory_available() and not t.is_pinned():
             # Stage in pinned, contiguous buffer to ensure fully async copy.
             t = torch.empty(
                 t.shape, dtype=dtype or t.dtype, device="cpu", pin_memory=True
             ).copy_(t)
     else:
-        t = torch.tensor(data, dtype=dtype, pin_memory=_pin_memory(), device="cpu")
+        t = torch.tensor(
+            data, dtype=dtype, pin_memory=is_pin_memory_available(), device="cpu"
+        )
     assert t.is_cpu
 
     if out is not None:
@@ -754,7 +746,7 @@ def async_tensor_h2d(
 
 def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
     t = torch.from_numpy(array)
-    return t.pin_memory() if _pin_memory() else t
+    return t.pin_memory() if is_pin_memory_available() else t
 
 
 def make_ndarray_with_pad(

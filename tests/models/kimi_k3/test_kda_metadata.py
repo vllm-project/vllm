@@ -153,7 +153,7 @@ def _make_builder(
 
 def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
     """Exercise KDA RecoverSSM startup without loading Kimi-K3 weights."""
-    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    monkeypatch.setattr("vllm.utils.torch_utils.is_pin_memory_available", lambda: False)
     monkeypatch.setattr("vllm.v1.attention.backends.utils.PIN_MEMORY", False)
     layout_config = SimpleNamespace(
         model_config=SimpleNamespace(
