@@ -338,6 +338,8 @@ def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
     [
         ({"num_frames": [8, 16]}, [{"num_frames": 8}, {"num_frames": 16}]),
         ({"fps": [2.0, 4.0]}, [{"fps": 2.0}, {"fps": 4.0}]),
+        ({"num_frames": [8, 16, 32]}, [{"num_frames": 8}, {"num_frames": 16}]),
+        ({"fps": [2.0, 4.0, 8.0]}, [{"fps": 2.0}, {"fps": 4.0}]),
     ],
 )
 @pytest.mark.parametrize("model_kwargs", [False, True])
@@ -414,6 +416,57 @@ def test_processor_multi_video_list_kwargs(
         assert cached_only["prompt_token_ids"] == actual["prompt_token_ids"]
         assert cached_only["mm_kwargs"] == actual["mm_kwargs"]
     assert hf_mm_kwargs == hf_mm_kwargs_before
+
+
+@pytest.mark.parametrize(("key", "value"), [("fps", 2.0), ("num_frames", 8)])
+@pytest.mark.parametrize("length", [0, 1])
+@pytest.mark.parametrize("use_cache", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_processor_rejects_short_per_video_options(
+    key: str, value: float | int, length: int, use_cache: bool, scoped: bool
+) -> None:
+    """Reject malformed option lists with and without a warm processor cache."""
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"image": 0, "video": 2},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    cache = MultiModalProcessorOnlyCache(ctx.model_config) if use_cache else None
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>" * 2
+    videos = _build_video_mm_data(num_frames=32, original_fps=8.0)["video"] * 2
+
+    def process(values: list[float | int]) -> None:
+        kwargs = {key: values}
+        processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data({"video": videos}),
+            hf_processor_mm_kwargs={"videos_kwargs": kwargs} if scoped else kwargs,
+            cache=cache,
+        )
+
+    if use_cache:
+        process([value, value])
+
+    with pytest.raises(ValueError, match=f"{key} must have at least 2 entries"):
+        process([value] * length)
+
+
+@pytest.mark.parametrize("kwargs", [{"fps": [2.0, 4.0]}, {"num_frames": [8, 16]}])
+def test_processor_profiles_fewer_videos_than_configured_options(
+    kwargs: dict[str, list[float] | list[int]],
+) -> None:
+    """Profiling may use fewer videos than the configured per-video list."""
+    ctx = build_model_context(
+        MODEL_ID,
+        limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_kwargs=kwargs,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    profiled = processor.get_dummy_mm_inputs({"video": 1})
+
+    assert len(profiled["mm_placeholders"]["video"]) == 1
+    assert profiled["mm_kwargs"].get_data()["video_grid_thw"].shape[0] == 1
 
 
 def _build_video_embeds_mm_data(

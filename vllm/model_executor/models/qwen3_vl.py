@@ -1345,18 +1345,29 @@ def _replace_video_token_placeholders(
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
     def _get_per_video_kwargs(
-        self, kwargs: Mapping[str, object]
+        self, kwargs: Mapping[str, object], num_videos: int | None = None
     ) -> dict[str, list[Any]]:
         merged = self.info._merge_and_resolve_mm_processor_kwargs(kwargs)
-        return {
+        per_video_kwargs = {
             key: value
             for key, value in merged.get("videos_kwargs", {}).items()
             if key in ("fps", "num_frames") and isinstance(value, list)
         }
+        if num_videos:
+            for key, values in per_video_kwargs.items():
+                if len(values) < num_videos:
+                    raise ValueError(
+                        f"{key} must have at least {num_videos} entries "
+                        "(one per video); "
+                        f"got {len(values)}."
+                    )
+        return per_video_kwargs
 
     def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
         hashes = dict(super()._get_mm_hashes(inputs))
-        per_video_kwargs = self._get_per_video_kwargs(inputs.hf_processor_mm_kwargs)
+        per_video_kwargs = self._get_per_video_kwargs(
+            inputs.hf_processor_mm_kwargs, len(hashes.get("video", []))
+        )
         if per_video_kwargs and "video" in hashes:
             algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
             hashes["video"] = [
@@ -1374,7 +1385,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         inputs: ProcessorInputs,
         mm_is_cached: Mapping[str, list[bool]],
     ) -> Mapping[str, object]:
-        per_video_kwargs = self._get_per_video_kwargs(inputs.hf_processor_mm_kwargs)
+        per_video_kwargs = self._get_per_video_kwargs(
+            inputs.hf_processor_mm_kwargs, len(mm_is_cached.get("video", []))
+        )
         if not per_video_kwargs or "video" not in mm_is_cached:
             return inputs.hf_processor_mm_kwargs
         kwargs = self.info._merge_and_resolve_mm_processor_kwargs(
@@ -1462,6 +1475,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         video_input_ids_lst: list[list[int]] = []
         if videos := hf_data.pop("videos", []):
             assert isinstance(videos, list)
+            self._get_per_video_kwargs(hf_kwargs, len(videos))
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             timestamps_per_video = []
