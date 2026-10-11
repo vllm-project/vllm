@@ -582,8 +582,8 @@ def test_pynvvideocodec_failed_rebuild_retires_decoder_slot(
 
         assert events == [
             ("reconfigure", "unsupported-8k.mp4"),
-            ("stop", "valid.mp4"),
             ("synchronize", "cuda-stream"),
+            ("stop", "valid.mp4"),
             ("construct", "unsupported-8k.mp4"),
             ("synchronize", "cuda-stream"),
         ]
@@ -697,7 +697,7 @@ def test_pynvvideocodec_rejects_unsupported_decoder_caps():
         )
 
 
-def test_pynvvideocodec_uses_hardware_decoder_bounds():
+def test_pynvvideocodec_uses_source_dimensions_by_default():
     class FakeDemuxer:
         def Width(self):
             return 1920
@@ -732,7 +732,7 @@ def test_pynvvideocodec_uses_hardware_decoder_bounds():
 
     assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
         "valid.mp4", FakeNvc
-    ) == (8192, 8192)
+    ) == (1920, 1080)
 
 
 def test_pynvvideocodec_validates_configured_decoder_bounds():
@@ -786,16 +786,53 @@ def test_pynvvideocodec_validates_configured_decoder_bounds():
             max_height=720,
         )
 
-    with pytest.raises(
-        ValueError,
-        match="outside the hardware decoder limits",
-    ):
-        PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
-            "valid.mp4",
-            FakeNvc,
-            max_width=16384,
-            max_height=16384,
-        )
+    assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+        "valid.mp4",
+        FakeNvc,
+        max_width=16384,
+        max_height=16384,
+    ) == (8192, 8192)
+
+
+def test_pynvvideocodec_clamps_configured_bounds_per_codec():
+    class FakeDemuxer:
+        def Width(self):
+            return 1920
+
+        def Height(self):
+            return 1080
+
+        def GetNvCodecId(self):
+            return "h264"
+
+        def ChromaFormat(self):
+            return "420"
+
+        def BitDepth(self):
+            return 8
+
+    class FakeNvc:
+        @staticmethod
+        def CreateDemuxer(file_path):
+            return FakeDemuxer()
+
+        @staticmethod
+        def GetDecoderCaps(device_index, codec, chroma_format, bit_depth):
+            return {
+                "supported": 1,
+                "width_min": 48,
+                "width_max": 4096,
+                "height_min": 16,
+                "height_max": 4096,
+                "mb_num_max": 65536,
+            }
+
+    assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+        "h264.mp4",
+        FakeNvc,
+        max_width=7680,
+        max_height=4320,
+    ) == (4096, 4096)
 
 
 @pytest.mark.parametrize(
@@ -1068,8 +1105,8 @@ def test_pynvvideocodec_decoder_slot_rebuilds_for_larger_bounds():
     assert second is not first
     assert events == [
         ("create", "720p.mp4", 1920, 1080),
-        ("stop",),
         ("synchronize",),
+        ("stop",),
         ("create", "4k.mp4", 4096, 4096),
     ]
 
@@ -1099,7 +1136,7 @@ def test_pynvvideocodec_decodes_frames_in_bounded_batches(
 
         def synchronize(self):
             self.sync_count += 1
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
     class FakeSlot:
         def __init__(self):

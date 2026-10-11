@@ -284,8 +284,9 @@ class VideoBackend(VideoLoader):
                   positive integer.
                 - ``max_width`` / ``max_height`` (PyNvVideoCodec): optional
                   maximum input dimensions configured for each decoder. Both
-                  must be positive integers and set together. By default, the
-                  current GPU's hardware decoder limits are used.
+                  must be positive integers and set together. Values are
+                  clamped to each codec's hardware limits. By default, each
+                  decoder is sized to the current input.
                 - ``pool_size`` / ``timeout_sec`` (DeepStream): decoder pool
                   size and pool acquisition timeout in seconds.
 

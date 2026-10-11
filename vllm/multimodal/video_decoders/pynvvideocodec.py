@@ -56,7 +56,7 @@ class PyNvVideoCodecSourceMetadata(NamedTuple):
     height: int
 
 
-# Per-decoder upper bound reserved for persistent PyNvVideoCodec surfaces.
+# Per-decoder baseline reserved for persistent PyNvVideoCodec surfaces.
 PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
 PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
 # Bound native frame surfaces retained by each batch decode call.
@@ -93,6 +93,22 @@ def validate_pynvvideocodec_max_dimensions(
     ):
         raise ValueError("max_height must be a positive integer")
     return max_width, max_height
+
+
+def get_pynvvideocodec_decoder_gpu_memory_bytes(
+    max_width: object,
+    max_height: object,
+) -> int:
+    max_width, max_height = validate_pynvvideocodec_max_dimensions(
+        max_width, max_height
+    )
+    if max_width is None or max_height is None:
+        return PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+
+    configured_surface_bytes = (
+        max_width * max_height * 3 * PYNVVIDEOCODEC_DECODER_CACHE_SIZE
+    )
+    return max(PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES, configured_surface_bytes)
 
 
 def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
@@ -142,20 +158,23 @@ class PyNvVideoCodecDecoderSlot:
             with suppress(Exception):
                 decoder.stop()
 
-    def recover(self) -> None:
-        """Release decoder resources and drain work after a failed request."""
-        self.invalidate()
-        gc.collect()
-
+    def reset(self) -> None:
+        """Rebuild this slot after draining only its CUDA stream."""
         with suppress(Exception):
             self.stream.synchronize()
+        self.invalidate()
+
+    def recover(self) -> None:
+        """Release decoder resources and drain work after a failed request."""
+        self.reset()
+        gc.collect()
 
         with suppress(Exception):
             import torch
 
-            with torch.cuda.device(self.stream.device):
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
+            with torch.accelerator.device_index(self.stream.device.index):
+                torch.accelerator.synchronize()
+                torch.accelerator.empty_cache()
 
     def _construct(
         self,
@@ -193,7 +212,7 @@ class PyNvVideoCodecDecoderSlot:
             self._construct(file_path, nvc, device_index, max_width, max_height)
         elif self.source_path != file_path:
             if max_width > self.max_width or max_height > self.max_height:
-                self.recover()
+                self.reset()
                 self._construct(file_path, nvc, device_index, max_width, max_height)
             else:
                 try:
@@ -201,7 +220,7 @@ class PyNvVideoCodecDecoderSlot:
                     self.source_path = file_path
                 except Exception:
                     # reconfigure unsupported/unsafe for this source -> rebuild.
-                    self.recover()
+                    self.reset()
                     self._construct(file_path, nvc, device_index, max_width, max_height)
         return self.decoder
 
@@ -347,23 +366,19 @@ class PyNvVideoCodecVideoBackendMixin:
             raise ValueError("Invalid or unsupported video file.")
 
         if max_width is None or max_height is None:
-            return width_max, height_max
+            return width, height
 
-        configured_mb_count = ((max_width + 15) // 16) * ((max_height + 15) // 16)
-        if (
-            max_width < width_min
-            or max_width > width_max
-            or max_height < height_min
-            or max_height > height_max
-            or configured_mb_count > mb_num_max
-        ):
-            raise ValueError(
-                "Configured PyNvVideoCodec max_width and max_height are "
-                "outside the hardware decoder limits"
-            )
-        if width > max_width or height > max_height:
+        decoder_max_width = min(max_width, width_max)
+        decoder_max_height = min(max_height, height_max)
+        decoder_mb_count = ((decoder_max_width + 15) // 16) * (
+            (decoder_max_height + 15) // 16
+        )
+        if decoder_mb_count > mb_num_max:
+            decoder_max_width = width
+            decoder_max_height = height
+        if width > decoder_max_width or height > decoder_max_height:
             raise ValueError("Invalid or unsupported video file.")
-        return max_width, max_height
+        return decoder_max_width, decoder_max_height
 
     @classmethod
     def _read_source_metadata(
