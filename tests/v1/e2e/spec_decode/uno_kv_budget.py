@@ -7,13 +7,14 @@ admission rule enforces and below what the mixed phase's concurrent requests
 need. Both e2e budgets are derived here from the pinned model geometry, and
 ``tests/v1/spec_decode/test_uno_mrv2.py`` checks them against the engine floor
 on CPU, so a model-pin, block-size or ``max_model_len`` change fails without a
-GB10.
+GPU.
 
 The geometry is pinned as literals so the CPU suite stays hub-free; the e2e
 module, which already requires the model, cross-checks the literals against
 ``AutoConfig`` for ``MODEL_REVISION``.
 """
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import combinations
 from typing import Any, NamedTuple
@@ -60,7 +61,7 @@ SURVIVOR_NUM_SPECULATIVE_TOKENS = 8
 # stalled at its admission footprint the leader crosses at 551. A 640-token cap
 # leaves five block-groups of margin in the worst case, so no peer can finish
 # before the scheduler has to preempt one; both crossings are pinned by
-# test_uno_mrv2 and printed by each round's geometry probe. The abort peer is
+# test_uno_mrv2 and printed by each run's geometry probe. The abort peer is
 # retired after two tokens and holds only its own prompt blocks while it runs.
 SURVIVOR_FINISH_MAX_TOKENS = 640
 
@@ -69,8 +70,9 @@ SURVIVOR_FINISH_MAX_TOKENS = 640
 # check the geometry without the hub, and they are only allowed to be what a
 # GPU receipt shows. The finish peers are 257 -- eight tokens more than the
 # abort peer, which is the per-repeat cost of the two-word peer tag against the
-# one-word abort tag, proved by the contract16 (GB10) and r3 (Ampere) receipts,
-# which both print `worst_case_crossing_tokens=544` and `growth_blocks=151`.
+# one-word abort tag, measured on a Blackwell (sm_121) and an Ampere (sm_86)
+# GPU run, which both print `worst_case_crossing_tokens=544` and
+# `growth_blocks=151`.
 # The earlier 265 was a copied literal that no receipt ever supported.
 SURVIVOR_PROMPT_TOKENS = (171, 257, 257, 249)
 
@@ -264,7 +266,7 @@ def resolve_attention_config(raw: str | None) -> dict[str, object]:
     its own tests. The backend stays pinned -- Uno requires FlashAttention and
     a test that silently ran on another backend would be measuring something
     else -- while the version follows the platform: FA3 on Hopper, FA4 on
-    SM100, FA2 elsewhere, so Ampere and the GB10 keep the behaviour they were
+    SM100, FA2 elsewhere, so Ampere and sm_121 keep the behaviour they were
     validated with.
 
     ``VLLM_UNO_TEST_FA_VERSION`` pins a version back for a reproducibility
@@ -316,8 +318,8 @@ def token_agreement(
     whose token ids are identical and each divergence is
     ``(prompt_index, first differing token index)`` -- the length of the shorter
     output when one is a prefix of the other. ``format_divergences`` renders
-    them as ``p<i>/t<j>``, the coordinate the GPU lane receipts use, so a test
-    failure and a lane receipt can be compared by eye.
+    them as ``p<i>/t<j>``, the coordinate the GPU tests print, so a test
+    failure and a printed matrix line can be compared by eye.
     """
     assert len(reference) == len(candidate), (
         f"output counts differ: {len(reference)} vs {len(candidate)}"
@@ -445,30 +447,31 @@ def text_verdict(
     return _containment_reason(extra, control_text, candidate_text, total, "text")
 
 
-# The margin below which a greedy divergence is the card's rounding rather
-# than a different computation. bfloat16 carries 8 significand bits, so its
-# relative resolution is 2**-8; a log-probability gap smaller than that cannot
-# survive a change in reduction order inside the forward, which is what a
-# different query length, a different attention split or a different process
-# produces. This is an order-of-magnitude stand-in, not a derivation: the
-# accumulated error through 36 layers is not a single rounding. It is therefore
-# used only to EXCUSE a divergence that is already the reference's runner-up,
-# every candidate divergence prints its measured margin whether it is excused
-# or not, and `VLLM_UNO_TIE_MARGIN_NATS` overrides it once a card's real
-# margins are known. On an RTX 3090 (sm_86) in CUDA-graph mode the plain engine
-# flips prompt 2 token 31 between two whitespace tokens about one process in
-# three; that coordinate is what this rule exists to classify.
-TIE_MARGIN_NATS = 2.0**-8
+def bf16_step(value: float) -> float:
+    """The bfloat16 spacing at ``value``: one unit in the last place.
+
+    bfloat16 keeps 7 explicit significand bits, so representable numbers in
+    ``[2**e, 2**(e + 1))`` are ``2**(e - 7)`` apart: 0.25 for a logit of 44.75.
+    The model's logits are bfloat16, so two logits one step apart are adjacent
+    values, and a change in reduction order (a different query length,
+    attention split or process) can move either one by that much.
+    """
+    magnitude = abs(float(value))
+    if magnitude == 0.0 or not math.isfinite(magnitude):
+        return 0.0
+    _mantissa, exponent = math.frexp(magnitude)
+    return math.ldexp(1.0, exponent - 1 - 7)
 
 
 class TieRow(NamedTuple):
-    """One divergence classified as the reference's own near-tie."""
+    """One divergence classified as the reference's own bfloat16 tie."""
 
     prompt: int
     token: int
     reference_id: int
     candidate_id: int
     margin: float
+    step: float
 
 
 class MatrixArm(NamedTuple):
@@ -499,7 +502,8 @@ def format_ties(ties: Sequence[TieRow]) -> list[str]:
     """Render ties with their measured margins, for the receipt."""
     return [
         f"p{tie.prompt}/t{tie.token} ref={tie.reference_id} "
-        f"candidate={tie.candidate_id} margin={tie.margin:.6f}"
+        f"candidate={tie.candidate_id} logit_gap={tie.margin:.6f} "
+        f"bf16_step={tie.step:g}"
         for tie in ties
     ]
 
@@ -509,23 +513,27 @@ def classify_ties(
     reference_ids: Sequence[Sequence[int]],
     candidate_ids: Sequence[Sequence[int]],
     reference_ranked: Sequence[Sequence[Sequence[tuple[int, float]]]] | None,
-    margin_nats: float = TIE_MARGIN_NATS,
 ) -> tuple[list[tuple[int, int]], list[TieRow]]:
-    """Split divergences into real ones and the reference's own near-ties.
+    """Split divergences into real ones and the reference's own bfloat16 ties.
 
     A divergence is a TIE only when all three hold at that position: the
-    reference's top-ranked alternative is the token the reference actually
-    emitted (otherwise the ranked list does not describe this run and nothing
-    is excused), the candidate emitted the reference's runner-up, and the gap
-    between the two is at most ``margin_nats``. A candidate token outside the
-    reference's top two is never a tie however small the gap, and a runner-up
-    at a wide margin is a real divergence: both are a different computation,
-    not a different rounding.
+    reference's top-ranked token is the token the reference emitted (otherwise
+    the ranked list does not describe this run and nothing is excused), the
+    candidate emitted the reference's runner-up, and the reference's top two
+    RAW LOGITS differ by at most one bfloat16 step of the top logit
+    (``bf16_step``). The evidence comes from the reference run only, never from
+    the candidate. A candidate token outside the reference's top two is never a
+    tie, and a runner-up more than one step behind is a real divergence.
+
+    Each divergence is the first differing position of its prompt
+    (``token_agreement``), so an excused tie ends the comparison for that
+    prompt: past it the two continuations legitimately differ. A divergence at
+    a non-tie position earlier in a prompt is the one reported, and it fails.
 
     ``reference_ranked`` is per prompt, per position, ranked
-    ``(token_id, logprob)`` pairs. Missing or short ranked data classifies
-    nothing, so a run without logprobs behaves exactly as before this rule
-    existed.
+    ``(token_id, raw_logit)`` pairs, from an engine run with
+    ``logprobs_mode="raw_logits"``. Missing or short ranked data classifies
+    nothing.
     """
     if isinstance(divergences, int) or isinstance(reference_ids, int):
         raise TypeError(
@@ -534,9 +542,7 @@ def classify_ties(
     real: list[tuple[int, int]] = []
     ties: list[TieRow] = []
     for prompt, token in divergences:
-        tie = _tie_row(
-            prompt, token, reference_ids, candidate_ids, reference_ranked, margin_nats
-        )
+        tie = _tie_row(prompt, token, reference_ids, candidate_ids, reference_ranked)
         if tie is None:
             real.append((prompt, token))
         else:
@@ -550,7 +556,6 @@ def _tie_row(
     reference_ids: Sequence[Sequence[int]],
     candidate_ids: Sequence[Sequence[int]],
     reference_ranked: Sequence[Sequence[Sequence[tuple[int, float]]]] | None,
-    margin_nats: float,
 ) -> TieRow | None:
     if reference_ranked is None or prompt >= len(reference_ranked):
         return None
@@ -564,16 +569,17 @@ def _tie_row(
         return None
     if prompt >= len(candidate_ids) or token >= len(candidate_ids[prompt]):
         return None
-    (top_id, top_logprob), (second_id, second_logprob) = ranked[0], ranked[1]
+    (top_id, top_logit), (second_id, second_logit) = ranked[0], ranked[1]
     if top_id != reference_ids[prompt][token]:
         # The ranked list does not describe the tokens this run emitted, so it
         # cannot license an exception. Excusing a divergence on mismatched
         # diagnostics is exactly the failure this rule is meant to prevent.
         return None
-    margin = float(top_logprob) - float(second_logprob)
-    if candidate_ids[prompt][token] != second_id or margin > margin_nats:
+    margin = float(top_logit) - float(second_logit)
+    step = bf16_step(top_logit)
+    if candidate_ids[prompt][token] != second_id or margin > step:
         return None
-    return TieRow(prompt, token, top_id, second_id, margin)
+    return TieRow(prompt, token, top_id, second_id, margin, step)
 
 
 def matrix_verdicts(
@@ -582,7 +588,6 @@ def matrix_verdicts(
     total: int,
     reference_ids: Sequence[Sequence[int]] | None = None,
     reference_ranked: Sequence[Sequence[Sequence[tuple[int, float]]]] | None = None,
-    margin_nats: float = TIE_MARGIN_NATS,
 ) -> dict[str, ArmVerdict]:
     """Judge every candidate for one batch against ONE completed floor.
 
@@ -618,7 +623,6 @@ def matrix_verdicts(
             reference_ids if reference_ids is not None else [],
             arm.token_ids,
             reference_ranked,
-            margin_nats,
         )
         ok, reason = exact_token_verdict(control_divergences, real, total)
         tie_prompts = {tie.prompt for tie in ties}

@@ -227,7 +227,7 @@ def _prepare_uno_inputs_kernel(
     )
 
     # Per-request sequence lengths and query starts are padded through the
-    # entire persistent buffers.  Every request has one lane (row == req) that
+    # entire persistent buffers.  Every request has one row (row == req) that
     # computes the same post-rejection first position without any host readback.
     request_row = row
     request_valid = request_row < num_reqs

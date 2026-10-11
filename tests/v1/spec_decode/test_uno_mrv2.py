@@ -13,15 +13,22 @@ import textwrap
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, create_autospec
 
 import pytest
 import torch
+import torch.nn as nn
 
 from tests.v1.spec_decode.uno_reference import prepare_uno_inputs_reference
+from vllm.config import VllmConfig
+from vllm.model_executor.offloader.base import BaseOffloader
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID, UnoSpeculator
 from vllm.v1.worker.gpu.spec_decode.uno_lora import draft_lora_mapping
+from vllm.v1.worker.utils import AttentionGroup
 
 
 def _block_tables_stub(**attrs) -> SimpleNamespace:
@@ -186,9 +193,9 @@ def test_native_sampling_handoff_uses_persistent_slots_and_columns(monkeypatch):
     proposer.seeds = torch.arange(4)
     proposer.draft_logits = torch.empty(4, 2, 7)
     proposer.draft_tokens = torch.zeros(2, 2, dtype=torch.int64)
-    proposer.model = Mock(return_value=torch.randn(4, 8))
+    proposer.model = Mock(spec=nn.Module, return_value=torch.randn(4, 8))
     proposer.sample_draft = Mock(return_value=torch.tensor([11, 12, 13, 14]))  # type: ignore[method-assign]
-    proposer.vllm_config = Mock()
+    proposer.vllm_config = Mock(spec=VllmConfig)
     from contextlib import nullcontext
 
     monkeypatch.setattr(
@@ -229,14 +236,14 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
         input_block_tables=[torch.ones((4, 8), dtype=torch.int32)],
         block_sizes=[4],
     )
-    proposer.kv_cache_config = Mock()
+    proposer.kv_cache_config = Mock(spec=KVCacheConfig)
     desc = BatchExecutionDescriptor(
         CUDAGraphMode.FULL if full_graph else CUDAGraphMode.NONE, 8, 4
     )
     events = []
     captured_attn = {"layer": object()}
     proposer._graph_attn_metadata = {desc: captured_attn}
-    group = Mock(kv_cache_group_id=0)
+    group = Mock(spec=AttentionGroup, kv_cache_group_id=0)
     group.map_to_kernel_block_table.side_effect = lambda table: events.append(
         ("map", table)
     )
@@ -244,7 +251,7 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
         ("refresh", metadata)
     )
     proposer.attn_groups = [[group]]
-    proposer.cudagraph_manager = Mock()
+    proposer.cudagraph_manager = Mock(spec=CudaGraphManager)
     proposer.cudagraph_manager.dispatch.return_value = desc
     proposer.cudagraph_manager.run_fullgraph.side_effect = lambda _: events.append(
         ("replay", None)
@@ -254,7 +261,7 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
     proposer._generate_draft = Mock()  # type: ignore[method-assign]
     proposer.set_lora_hook(lambda mapping: events.append(("lora", mapping)))
     fused_prepare = Mock()
-    slot_builder = Mock(return_value={})
+    slot_builder = create_autospec(build_slot_mappings_by_layer, return_value={})
     monkeypatch.setattr(f"{module}.prepare_uno_inputs_fused", fused_prepare)
     monkeypatch.setattr(f"{module}.build_slot_mappings_by_layer", slot_builder)
     batch = SimpleNamespace(num_reqs=3, idx_mapping=torch.tensor([2, 0, 1]))
@@ -322,9 +329,9 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
         input_block_tables=[torch.ones((4, 8), dtype=torch.int32)],
         block_sizes=[4],
     )
-    proposer.kv_cache_config = Mock()
+    proposer.kv_cache_config = Mock(spec=KVCacheConfig)
     desc = BatchExecutionDescriptor(CUDAGraphMode.NONE, count, n)
-    proposer.cudagraph_manager = Mock()
+    proposer.cudagraph_manager = Mock(spec=CudaGraphManager)
     proposer.cudagraph_manager.dispatch.return_value = desc
     proposer._copy_request_inputs = Mock()  # type: ignore[method-assign]
     proposer._generate_draft = Mock()  # type: ignore[method-assign]
@@ -350,7 +357,10 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
     proposer._build_uniform_attn_metadata = fake_build  # type: ignore[method-assign]
     proposer.set_lora_hook(lambda mapping: None)
     monkeypatch.setattr(f"{module}.prepare_uno_inputs_fused", Mock())
-    monkeypatch.setattr(f"{module}.build_slot_mappings_by_layer", Mock(return_value={}))
+    monkeypatch.setattr(
+        f"{module}.build_slot_mappings_by_layer",
+        create_autospec(build_slot_mappings_by_layer, return_value={}),
+    )
     batch = SimpleNamespace(
         num_reqs=n,
         idx_mapping=torch.tensor([2, 0, 1]),
@@ -456,12 +466,12 @@ def _cpu_uno_proposer(
         input_block_tables=[torch.ones((max_num_seqs, 8), dtype=torch.int32)],
         block_sizes=[4],
     )
-    proposer.kv_cache_config = Mock()
+    proposer.kv_cache_config = Mock(spec=KVCacheConfig)
     proposer._copy_request_inputs = Mock()  # type: ignore[method-assign]
     proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})  # type: ignore[method-assign]
     proposer._generate_draft = Mock()  # type: ignore[method-assign]
     proposer.set_lora_hook(lambda mapping: None)
-    proposer.attn_groups = [[Mock(kv_cache_group_id=0)]]
+    proposer.attn_groups = [[Mock(spec=AttentionGroup, kv_cache_group_id=0)]]
     return proposer
 
 
@@ -479,7 +489,7 @@ def _cpu_graph_manager_patches(monkeypatch):
         "get_global_graph_pool",
         lambda: object(),
     )
-    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: Mock())
+    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: Mock(spec=BaseOffloader))
 
 
 def _captured_draft_rows(proposer) -> list[int]:
@@ -495,7 +505,7 @@ def _captured_draft_rows(proposer) -> list[int]:
 @pytest.mark.parametrize(
     ("k", "max_num_seqs", "capture_sizes", "expected_rows", "expected_uncovered"),
     [
-        # The H100 serving shape the TTFT lane measured: every request count
+        # The measured H100 serving shape: every request count
         # from 1 to 16 has a graph, and the top draft batch (128 rows) is
         # captured rather than dropped.
         (8, 16, [1, 2, 4, 8, 16, 32, 64, 128, 144], [8, 16, 32, 64, 128], []),
@@ -522,8 +532,8 @@ def test_draft_graph_coverage_is_derived_from_k_seqs_and_capture_sizes(
 ):
     """Which request counts get a draft graph follows from all three inputs.
 
-    The H100 TTFT lane proposed that a 16-request batch at K=8 falls back to
-    eager drafting because 128 draft rows exceed the largest capture size. It
+    A plausible reading is that a 16-request batch at K=8 on an H100 falls back
+    to eager drafting because 128 draft rows exceed the largest capture size. It
     does not: with the default capture list, 128 is captured and the batch
     replays a graph. The gap is real for other shapes, though, and it is
     silent -- K=3 on the same server leaves 12 or more concurrent requests
@@ -555,7 +565,7 @@ def test_draft_dispatch_pads_up_to_the_next_captured_size(monkeypatch):
     requests need 24 rows and five need 40. Dispatch pads up to the next
     captured descriptor, so those still replay a graph. If dispatch ever
     required an exact match, this test fails for every n outside the captured
-    set, which is the regression the H100 lane suspected had already happened.
+    set.
     """
     from vllm.config.compilation import CUDAGraphMode
 
@@ -649,7 +659,7 @@ def test_startup_coverage_is_logged_for_both_outcomes(monkeypatch, caplog):
     manager = covered.cudagraph_manager
     assert manager is not None
     for desc in manager._capture_descs[CUDAGraphMode.FULL]:
-        manager.graphs[desc] = Mock()
+        manager.graphs[desc] = Mock(spec=torch.cuda.CUDAGraph)
     with caplog.at_level(logging.INFO, logger="vllm.v1.worker.gpu.spec_decode.uno"):
         covered._log_draft_graph_coverage()
     assert "cover every request count" in caplog.text
@@ -661,7 +671,7 @@ def test_startup_coverage_is_logged_for_both_outcomes(monkeypatch, caplog):
     manager = gapped.cudagraph_manager
     assert manager is not None
     for desc in manager._capture_descs[CUDAGraphMode.FULL]:
-        manager.graphs[desc] = Mock()
+        manager.graphs[desc] = Mock(spec=torch.cuda.CUDAGraph)
     with caplog.at_level(logging.INFO, logger="vllm.v1.worker.gpu.spec_decode.uno"):
         gapped._log_draft_graph_coverage()
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -703,8 +713,8 @@ def test_warmup_proposals_do_not_consume_the_serving_counters(monkeypatch):
     # The dummy_run call dispatches into a graph, so give it one to replay.
     desc = manager.dispatch(2, 2 * 8, 8, 2)
     proposer._graph_attn_metadata[desc] = {"layer": object()}
-    manager.graphs[desc] = Mock()
-    manager.run_fullgraph = Mock()  # type: ignore[method-assign]
+    manager.graphs[desc] = Mock(spec=torch.cuda.CUDAGraph)
+    manager.run_fullgraph = create_autospec(manager.run_fullgraph)  # type: ignore[method-assign]
     batch = SimpleNamespace(
         num_reqs=2,
         idx_mapping=torch.arange(2),
@@ -890,7 +900,7 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
 
 
 def test_attention_config_leaves_the_version_to_the_platform():
-    """Unset means the platform chooses, which is the whole point of round 21.
+    """Unset means the platform chooses the FlashAttention version.
 
     Both e2e engines pinned FlashAttention 2, so the module could never
     exercise FA3: the platform prefers FA3 on SM90 only while the version is
@@ -974,7 +984,7 @@ def test_survivor_receipt_names_the_attention_kernel():
     """The survivor gate is forked, so this can only live in the receipt.
 
     A printed line never reaches the log or the JUnit attachment from a forked
-    child, which is the failure the round-10 receipt work closed. The kernel
+    child, so the receipt is the only place it survives. The kernel
     the gate validated belongs with the rest of the evidence.
     """
     from tests.v1.e2e.spec_decode.test_uno import _MixedPhase, _render_receipt
@@ -1021,7 +1031,7 @@ def test_draft_graph_engagement_follows_the_k_rule(
         "get_global_graph_pool",
         lambda: object(),
     )
-    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: Mock())
+    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: Mock(spec=BaseOffloader))
 
     module = "vllm.v1.worker.gpu.spec_decode.uno"
     proposer = _cpu_uno_proposer(k)
@@ -1042,7 +1052,7 @@ def test_draft_graph_engagement_follows_the_k_rule(
         desc = manager.dispatch(4, 4 * k, k, expected_active_loras)
         assert desc.cg_mode == CUDAGraphMode.FULL, desc
         proposer._graph_attn_metadata[desc] = {"layer": object()}
-        manager.graphs[desc] = Mock()
+        manager.graphs[desc] = Mock(spec=torch.cuda.CUDAGraph)
     else:
         assert not manager.needs_capture(), manager._capture_descs
 
@@ -1118,7 +1128,7 @@ def test_survivor_kv_budget_clears_the_engine_admission_floor():
 
     A `kv_cache_memory_bytes` below the floor makes `get_kv_cache_configs`
     raise before the engine starts, which is exactly how the survivor e2e test
-    failed on the GB10. The floor here is the engine's own admission rule fed a
+    once failed on a GPU. The floor here is the engine's own admission rule fed a
     full-attention spec built from the pinned Qwen3-8B geometry, so a change to
     the model pin, block size or context fails on CPU instead of only on a GPU.
     """
@@ -1319,13 +1329,13 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     # a leader at its cap plus a stalled twin is 67 of 80 blocks. The worst-case
     # helper must refuse it, and the two GPU receipts that skipped on it are the
     # field evidence.
-    round8_pool = budget.allocatable_blocks(81)
-    round8_worst_case = budget.worst_case_crossing_tokens(
-        prompt_tokens[1], [prompt_tokens[2]], round8_pool
+    replaced_pool = budget.allocatable_blocks(81)
+    replaced_worst_case = budget.worst_case_crossing_tokens(
+        prompt_tokens[1], [prompt_tokens[2]], replaced_pool
     )
-    assert round8_worst_case > 512, (
+    assert replaced_worst_case > 512, (
         "the replaced 81-block/512-token configuration would now pass the "
-        f"worst-case pre-gate ({round8_worst_case} tokens vs a 512 cap), so "
+        f"worst-case pre-gate ({replaced_worst_case} tokens vs a 512 cap), so "
         "this gate no longer rejects the geometry that skipped on two cards"
     )
 
@@ -1378,7 +1388,7 @@ def test_survivor_memory_override_accepts_a_fraction_or_nothing(raw, expected):
 def test_survivor_memory_override_refuses_what_the_engine_would(raw):
     """A blank or out-of-range value must name the variable, not float('').
 
-    The lane's own runbook exports this variable, and a shell that expands it to
+    A GPU run that exports this variable from a shell that expands it to
     nothing used to reach ``float('')`` and abort the run with a ValueError
     mentioning neither the variable nor how to fix it.
     """
@@ -1393,8 +1403,8 @@ def test_survivor_receipt_is_written_where_the_evidence_lives(tmp_path, monkeypa
 
     Two GPU runs lost every printed receipt line because the survivor case is
     ``pytest.mark.forked``. The receipt now goes to the path the environment
-    names, else beside the JUnit file the run was invoked with, which is what a
-    lease lane commits.
+    names, else beside the JUnit file the run was invoked with, so a GPU run
+    keeps it with its results.
     """
     from tests.v1.e2e.spec_decode.test_uno import _write_receipt
 
@@ -1418,7 +1428,7 @@ def test_survivor_receipt_is_written_where_the_evidence_lives(tmp_path, monkeypa
 
 
 def test_token_agreement_counts_prompts_and_locates_the_first_divergence():
-    """The matrix receipt's coordinates must match the lane receipts' (p/t)."""
+    """The matrix receipt's coordinates are the printed p<i>/t<j> pairs."""
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     matched, divergences = budget.token_agreement([[1, 2, 3]], [[1, 2, 3]])
@@ -1604,37 +1614,38 @@ def test_matrix_verdicts_refuse_a_bare_divergence_list():
         budget.matrix_verdicts([(2, 31)], {"uno": [(2, 31)]}, 4)  # type: ignore[dict-item]
 
 
-def test_matrix_verdicts_excuse_the_reference_own_near_tie():
-    """A runner-up within the margin is the card's rounding, not a divergence.
+def _ranked_at(prompt, position, pairs, prompts=4, positions=4):
+    ranked: list[list[list[tuple[int, float]]]] = [
+        [[] for _ in range(positions)] for _ in range(prompts)
+    ]
+    ranked[prompt][position] = pairs
+    return ranked
 
-    The candidate emits the reference's second-ranked token at a gap far below
-    the threshold. Nothing about that outcome distinguishes the two arms'
-    arithmetic, so the containment failure it would otherwise cause is
-    excused -- in the token view and in the text view together, since the
-    tokens really do differ and the prompt's text differs with them.
+
+def test_matrix_verdicts_excuse_a_one_step_bf16_tie():
+    """A runner-up one bfloat16 step behind is the card's rounding.
+
+    The reference's top two RAW logits are adjacent bfloat16 values (44.75 and
+    44.50, one step of 0.25 apart at that magnitude) and the candidate emitted
+    the runner-up. Both views excuse it together, since the tokens and the text
+    really differ.
     """
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     reference = _four_prompts()
     candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
-    ranked: list[list[list[tuple[int, float]]]] = [
-        [[] for _ in range(4)] for _ in range(4)
-    ]
-    ranked[2][3] = [(13, -0.2000), (99, -0.2004)]
+    ranked = _ranked_at(2, 3, [(13, 44.75), (99, 44.50)])
 
     verdicts = budget.matrix_verdicts(
-        [],
-        {"uno": _arm([(2, 3)], candidate, [2])},
-        4,
-        reference,
-        ranked,
+        [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
     )
     verdict = verdicts["uno"]
     assert verdict.ok and verdict.text_ok, verdict.reason
     assert [(tie.prompt, tie.token) for tie in verdict.ties] == [(2, 3)]
     assert verdict.ties[0].reference_id == 13
     assert verdict.ties[0].candidate_id == 99
-    assert verdict.ties[0].margin == pytest.approx(0.0004, abs=1e-9)
+    assert verdict.ties[0].margin == pytest.approx(0.25)
+    assert verdict.ties[0].step == 0.25
     assert "ties excused" in verdict.reason
     assert "ties excused" in verdict.text_reason
     # The detokenisation check still reads the unfiltered divergences, so an
@@ -1642,22 +1653,17 @@ def test_matrix_verdicts_excuse_the_reference_own_near_tie():
     assert verdict.detokenisation_only == []
 
 
-def test_matrix_verdicts_keep_a_runner_up_at_a_wide_margin():
-    """The right token rank is not enough; the gap has to be unresolvable.
+def test_matrix_verdicts_fail_a_runner_up_two_steps_behind():
+    """The right token rank is not enough; the gap must be one step at most.
 
-    A candidate that picks the runner-up where the reference preferred it by a
-    wide margin has computed something different, not rounded something
-    differently. Excusing it would let the tie rule absorb real defects, which
-    is the only way this rule can do harm.
+    Two bfloat16 steps (0.5 at 44.75) is a different computation, not a
+    different rounding, so the divergence stays real and fails.
     """
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     reference = _four_prompts()
     candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
-    ranked: list[list[list[tuple[int, float]]]] = [
-        [[] for _ in range(4)] for _ in range(4)
-    ]
-    ranked[2][3] = [(13, -0.2), (99, -3.7)]
+    ranked = _ranked_at(2, 3, [(13, 44.75), (99, 44.25)])
 
     verdicts = budget.matrix_verdicts(
         [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
@@ -1668,21 +1674,37 @@ def test_matrix_verdicts_keep_a_runner_up_at_a_wide_margin():
     assert "p2/t3" in verdict.reason
 
 
-def test_matrix_verdicts_keep_a_token_outside_the_reference_top_two():
-    """A small gap between the top two says nothing about a third token.
+def test_matrix_verdicts_fail_a_real_error_before_a_tie():
+    """The comparison stops at a prompt's FIRST divergence, tie or not.
 
-    The reference's own top two are a hair apart, but the candidate emitted
-    neither of them. That is a different continuation, and the margin between
-    tokens it did not choose cannot excuse it.
+    The candidate breaks token 1, where the reference was confident, and only
+    later reaches a tied position. The first divergence is the one judged, so
+    the later tie cannot excuse the earlier error.
     """
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     reference = _four_prompts()
+    candidate = [list(ids) for ids in reference]
+    candidate[2] = [10, 77, 12, 99]
+    ranked = _ranked_at(2, 3, [(13, 44.75), (99, 44.50)])
+    ranked[2][1] = [(11, 44.75), (77, 30.0)]
+
+    _matched, divergences = budget.token_agreement(reference, candidate)
+    assert divergences == [(2, 1)]
+    verdicts = budget.matrix_verdicts(
+        [], {"uno": _arm(divergences, candidate, [2])}, 4, reference, ranked
+    )
+    assert not verdicts["uno"].ok
+    assert verdicts["uno"].ties == []
+
+
+def test_matrix_verdicts_keep_a_token_outside_the_reference_top_two():
+    """A tie between the top two says nothing about a third token."""
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
     candidate = _four_prompts(diverge_at=(2, 3), replacement=7)
-    ranked: list[list[list[tuple[int, float]]]] = [
-        [[] for _ in range(4)] for _ in range(4)
-    ]
-    ranked[2][3] = [(13, -0.2000), (99, -0.2001)]
+    ranked = _ranked_at(2, 3, [(13, 44.75), (99, 44.75)])
 
     verdicts = budget.matrix_verdicts(
         [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
@@ -1693,21 +1715,12 @@ def test_matrix_verdicts_keep_a_token_outside_the_reference_top_two():
 
 
 def test_matrix_verdicts_do_not_excuse_on_mismatched_diagnostics():
-    """Ranked data that disagrees with the emitted token licenses nothing.
-
-    If the top-ranked alternative is not the token the reference actually
-    produced, the ranked list does not describe this run. Excusing a divergence
-    on diagnostics that do not match the run is exactly the failure mode the
-    tie rule must not introduce.
-    """
+    """Ranked data that disagrees with the emitted token licenses nothing."""
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     reference = _four_prompts()
     candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
-    ranked: list[list[list[tuple[int, float]]]] = [
-        [[] for _ in range(4)] for _ in range(4)
-    ]
-    ranked[2][3] = [(55, -0.2000), (99, -0.2001)]
+    ranked = _ranked_at(2, 3, [(55, 44.75), (99, 44.50)])
 
     verdicts = budget.matrix_verdicts(
         [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
@@ -1716,101 +1729,63 @@ def test_matrix_verdicts_do_not_excuse_on_mismatched_diagnostics():
     assert verdicts["uno"].ties == []
 
 
-def test_matrix_verdicts_replay_the_ampere_p2_t31_coordinate():
-    """The r5 failure, replayed: a whitespace tie with an empty control floor.
-
-    On an RTX 3090 (sm_86) in CUDA-graph mode the K=8 case failed because Uno
-    diverged at prompt 2 token 31 while three in-process plain arms happened to
-    agree. Round 3's fresh-process plain control showed the plain engine itself
-    flipping that coordinate between token 18611 and token 2303 in one process
-    of three, and round 4's token dump identifies both as whitespace. The token
-    ids here are round 4's; the margin is synthetic, because no run has
-    recorded one yet. With the margin small, the coordinate is excused and the
-    case passes; the control stays empty, so nothing else is weakened.
-    """
+@pytest.mark.parametrize(
+    ("position", "reference_id", "candidate_id", "top", "second"),
+    [
+        # Measured raw logits on an RTX 3090 (sm_86), CUDA graphs: the plain
+        # engine itself flips these two coordinates across processes.
+        (31, 18611, 2303, 38.75, 38.50),
+        (55, 36, 54745, 44.75, 44.75),
+        # The same p2/t55 tie read one step apart in another process.
+        (55, 36, 54745, 44.75, 44.50),
+    ],
+)
+def test_matrix_verdicts_replay_the_measured_sm86_ties(
+    position, reference_id, candidate_id, top, second
+):
+    """The ties a 3090 produced are excused; the same tokens two steps apart are not."""
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
-    prefix = [
-        18315,
-        295,
-        748,
-        77778,
-        10962,
-        220,
-        16,
-        21,
-        18805,
-        817,
-        1899,
-        13,
-        2303,
-        7941,
-        49677,
-        220,
-        18,
-        18805,
-        369,
-        17496,
-        13,
-        2303,
-        7941,
-        5711,
-        220,
-        19,
-        18805,
-        369,
-        54304,
-        1330,
-        13,
-    ]
-    reference = [[1, 2], [3, 4], prefix + [18611], [5, 6]]
-    candidate = [[1, 2], [3, 4], prefix + [2303], [5, 6]]
-    assert len(reference[2]) == 32 and reference[2][31] == 18611
-    assert candidate[2][31] == 2303
-    ranked: list[list[list[tuple[int, float]]]] = [
-        [[] for _ in range(32)] for _ in range(4)
-    ]
-    ranked[2][31] = [(18611, -1.250000), (2303, -1.250122)]
-
+    reference = [[1, 2], [3, 4], [5] * position + [reference_id], [6, 7]]
+    candidate = [[1, 2], [3, 4], [5] * position + [candidate_id], [6, 7]]
+    ranked = _ranked_at(
+        2, position, [(reference_id, top), (candidate_id, second)], positions=56
+    )
     verdicts = budget.matrix_verdicts(
-        [], {"uno": _arm([(2, 31)], candidate, [2])}, 4, reference, ranked
+        [], {"uno": _arm([(2, position)], candidate, [2])}, 4, reference, ranked
     )
     verdict = verdicts["uno"]
     assert verdict.ok and verdict.text_ok, verdict.reason
     assert budget.format_ties(verdict.ties) == [
-        "p2/t31 ref=18611 candidate=2303 margin=0.000122"
+        f"p2/t{position} ref={reference_id} candidate={candidate_id} "
+        f"logit_gap={top - second:.6f} bf16_step=0.25"
     ]
 
-    # The same coordinate at a wide margin is still a finding on that card.
-    ranked[2][31] = [(18611, -1.25), (2303, -2.75)]
+    ranked[2][position] = [(reference_id, top), (candidate_id, top - 0.5)]
     wide = budget.matrix_verdicts(
-        [], {"uno": _arm([(2, 31)], candidate, [2])}, 4, reference, ranked
+        [], {"uno": _arm([(2, position)], candidate, [2])}, 4, reference, ranked
     )
     assert not wide["uno"].ok
 
 
-def test_tie_margin_default_is_the_bfloat16_resolution():
-    """The default threshold is a stated quantity, not a tuned one.
-
-    bfloat16 carries 8 significand bits, so 2**-8 is its relative resolution
-    and the scale below which a reduction-order change cannot be distinguished.
-    It is a stand-in rather than a derivation, which is why every divergence
-    prints its measured margin and the environment can override the default
-    once a card has reported real numbers.
-    """
+def test_bf16_step_is_the_spacing_of_adjacent_bfloat16_values():
+    """``bf16_step`` agrees with torch's own bfloat16 rounding."""
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
-    assert budget.TIE_MARGIN_NATS == 2.0**-8
-    assert pytest.approx(0.00390625) == budget.TIE_MARGIN_NATS
+    for value in (44.75, 38.75, 1.0, -3.0, 0.0078125, 300.0):
+        step = budget.bf16_step(value)
+        x = torch.tensor([value], dtype=torch.bfloat16)
+        assert float(x) == value
+        up = (x.float() + step).to(torch.bfloat16)
+        assert float(up) == value + step, value
+        # Anything below half a step rounds back to the same bfloat16 value.
+        assert float((x.float() + step * 0.49).to(torch.bfloat16)) == value
+    assert budget.bf16_step(44.75) == 0.25
+    assert budget.bf16_step(0.0) == 0.0
 
 
-def test_classify_ties_without_logprobs_changes_nothing():
-    """A run that requested no alternatives behaves as it did before the rule.
-
-    The tie rule is an exception granted on evidence. With no ranked data there
-    is no evidence, so every divergence stays a divergence rather than being
-    excused by default.
-    """
+def test_classify_ties_without_logits_changes_nothing():
+    """With no ranked data there is no evidence, so nothing is excused."""
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     reference = _four_prompts()

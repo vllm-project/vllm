@@ -4,7 +4,7 @@
 
 Exact-token equality against a plain engine is this module's main instrument,
 and it is only valid where the plain engine reproduces itself. It does not
-everywhere: on a rented RTX 3090 (sm_86) in graph mode, two plain engines built
+everywhere: on an RTX 3090 (sm_86) in graph mode, two plain engines built
 from the same config and given the same prompts agreed on 3 of 4 prompts,
 diverging at prompt 2 token 31 -- the same coordinate at which the Uno arms
 diverged -- while the eager and reordered arms were 4 of 4. The matrix case
@@ -17,9 +17,8 @@ claim for that card and mode; it only rules out Uno being worse than the
 baseline's own spread. Closing that gap needs a sampled gate this module does
 not have: fixed seeds, N independent samples per arm at a temperature above
 zero, and a distributional comparison (per position, plain-vs-plain as the null)
-rather than a token-by-token identity. The fork carries such a gate outside the
-test suite; bringing it in is what would let a non-deterministic card produce a
-positive result rather than a bounded one.
+rather than a token-by-token identity. Such a gate is what would let a
+non-deterministic card produce a positive result rather than a bounded one.
 """
 
 import os
@@ -50,9 +49,9 @@ from .uno_kv_budget import (
     SURVIVOR_NUM_SPECULATIVE_TOKENS,
     SURVIVOR_PROMPT_TOKENS,
     TEST_FA_VERSION_ENV,
-    TIE_MARGIN_NATS,
     MatrixArm,
     allocatable_blocks,
+    bf16_step,
     engine_minimum_kv_bytes,
     format_attention_receipt,
     format_divergences,
@@ -101,10 +100,6 @@ _RECEIPT_ENV = "VLLM_UNO_SURVIVOR_RECEIPT"
 # Set to "2" to run the greedy matrix's separate-plain-engine control on every
 # case instead of only the representative one; see the matrix case's comment.
 _CONTROL_ENGINES_ENV = "VLLM_UNO_GREEDY_CONTROL_ENGINES"
-# Overrides the near-tie margin once a card's real margins have been measured.
-# Every candidate divergence prints its margin, tie or not, so the first run on
-# a new card supplies the number this would be set from.
-_TIE_MARGIN_ENV = "VLLM_UNO_TIE_MARGIN_NATS"
 
 
 def _gpu_memory_utilization_from_env(
@@ -136,7 +131,7 @@ def _gpu_memory_utilization_from_env(
             f"{_GPU_MEMORY_ENV} {problem}. Unset it to use the engine default, "
             "or set it to the fraction of the device this run may request "
             "(the survivor KV pool stays pinned by num_gpu_blocks_override "
-            "either way; see the contract16 command block, step 0)."
+            "either way)."
         )
     return value
 
@@ -145,8 +140,8 @@ def _write_receipt(receipt: str, request) -> str | None:
     """Put the receipt where the evidence lives; return the path, if any.
 
     `VLLM_UNO_SURVIVOR_RECEIPT` wins; otherwise the receipt lands next to the
-    JUnit file the run was invoked with, which is the artifact a GPU lease lane
-    commits. A failure to write must not mask the verdict the receipt explains.
+    JUnit file the run was invoked with, so a GPU run keeps it with its results.
+    A failure to write must not mask the verdict the receipt explains.
     """
     target = os.environ.get(_RECEIPT_ENV)
     if not target:
@@ -453,7 +448,7 @@ class _MixedPhase:
     min_free_blocks: int | None = None
     # Generated-token count per finish peer at every step, reduced to the
     # largest gap ever seen between the fastest and the slowest peer. This is
-    # the receipt for the failure class the round-9 redesign closed: peers that
+    # the receipt for the failure class the peer redesign closed: peers that
     # drift apart never hold their footprints at the same time, so a
     # grow-together budget is never crossed (see `worst_case_crossing_tokens`).
     max_generation_lag: int = 0
@@ -1266,11 +1261,11 @@ def test_uno_greedy_matches_base_model(
     batches = [prompts]
     if enable_prefix_caching:
         batches.append(list(reversed(prompts)))
-    # logprobs=2 on EVERY arm, reference and candidate alike: the tie rule
-    # reads the reference's runner-up, and configuring only one side would
-    # make the two engines differ in their request as well as their method.
-    # Greedy selection is unaffected -- the ranked list is read from the same
-    # logits the argmax comes from.
+    # logprobs=2 with logprobs_mode="raw_logits" on EVERY arm, reference and
+    # candidate alike: the tie rule reads the reference's top two RAW logits,
+    # and configuring only one side would make the engines differ in more than
+    # their method. Greedy selection is unaffected -- the ranked list is read
+    # from the same logits the argmax comes from.
     sampling = SamplingParams(
         temperature=0, max_tokens=64, ignore_eos=True, seed=0, logprobs=2
     )
@@ -1312,6 +1307,7 @@ def test_uno_greedy_matches_base_model(
         max_loras=2,
         max_cpu_loras=2,
         disable_log_stats=False,
+        logprobs_mode="raw_logits",
     )
     chat_kwargs = dict(
         sampling_params=sampling,
@@ -1385,7 +1381,6 @@ def test_uno_greedy_matches_base_model(
             ranked.append(positions)
         return ranked
 
-    tie_margin = float(os.environ.get(_TIE_MARGIN_ENV, TIE_MARGIN_NATS))
     batch_ties: list[list] = [[] for _ in batches]
 
     adapter_off_divergences: list[tuple[int, int]] | None = None
@@ -1419,7 +1414,7 @@ def test_uno_greedy_matches_base_model(
             f"{[format_divergences(sorted(batch)) for batch in control_divergences]}"
             f", prompts_per_batch={[len(batch) for batch in ref_outputs]}"
             f", attention={attention_line[0]}"
-            f", tie_margin_nats={tie_margin:g}"
+            ", tie_rule=reference top-2 raw logits within one bf16 step"
             f", ties={[format_ties(batch) for batch in batch_ties]}"
         )
 
@@ -1520,9 +1515,9 @@ def test_uno_greedy_matches_base_model(
         print(f"Uno execution state: {states}")
 
     if second_control_engine:
-        # Built AFTER the Uno engine on purpose. In round 13 the plain control
-        # was engine 2 and Uno engine 3, so whatever build-order state exists in
-        # a process was charged to Uno alone; here Uno is engine 2 and the plain
+        # Built AFTER the Uno engine on purpose. Were the plain control engine 2
+        # and Uno engine 3, whatever build-order state exists in
+        # a process would be charged to Uno alone; here Uno is engine 2 and the plain
         # control engine 3, so the asymmetry runs the other way. The in-engine
         # repeats above carry no build-order component at all.
         with vllm_runner("Qwen/Qwen3-8B", **common) as plain_second:
@@ -1538,11 +1533,10 @@ def test_uno_greedy_matches_base_model(
 
     print(instrument_receipt())
     # Its own line, so a reader grepping a Hopper log for the kernel does not
-    # have to parse the receipt: the module pinned FlashAttention 2 until
-    # round 21 and therefore never exercised FA3 on any card.
+    # have to parse the receipt.
     print(f"uno greedy instrument: {attention_line[0]}")
     if any(control_divergences):
-        # Not a skip: acceptance, graph state, the LoRA plan cache and the
+        # Not a skip: acceptance, graph state and the
         # adapter-disabled arm are still evidence. Only the exact-token
         # comparison is bounded, and it is still run.
         print(
@@ -1600,7 +1594,6 @@ def test_uno_greedy_matches_base_model(
             len(ref_batch),
             _ids(ref_batch),
             reference_ranked,
-            tie_margin,
         )
         for verdict in verdicts.values():
             batch_ties[batch_index].extend(verdict.ties)
@@ -1615,19 +1608,20 @@ def test_uno_greedy_matches_base_model(
             f"uno_text_divergences={[f'p{p}' for p in uno_text]}, "
             f"control_divergences={format_divergences(control_batch)}"
         )
-        # Every candidate divergence prints its measured margin, excused or
-        # not, so a run on a new card reports the numbers a threshold would be
-        # set from instead of only its own verdict.
+        # Every candidate divergence prints the reference's top-2 raw-logit gap
+        # and the bf16 step at its top logit, excused or not.
         for prompt, position in uno_divergences:
             ranked = reference_ranked[prompt] if prompt < len(reference_ranked) else []
+            has_two = position < len(ranked) and len(ranked[position]) > 1
             gap = (
                 ranked[position][0][1] - ranked[position][1][1]
-                if position < len(ranked) and len(ranked[position]) > 1
+                if has_two
                 else float("nan")
             )
+            step = bf16_step(ranked[position][0][1]) if has_two else float("nan")
             print(
                 f"{context}: divergence p{prompt}/t{position} "
-                f"reference margin={gap:.6f}"
+                f"reference logit_gap={gap:.6f} bf16_step={step:g}"
             )
         for name, verdict in verdicts.items():
             print(f"{name}: {verdict.reason}")
@@ -1774,6 +1768,8 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
         max_loras=2,
         max_cpu_loras=2,
         disable_log_stats=False,
+        # The tie rule reads the reference's raw logits (see the matrix case).
+        logprobs_mode="raw_logits",
     )
     chat_kwargs = dict(
         sampling_params=sampling,
