@@ -11,7 +11,6 @@ members = [
     "src/metrics",
     "src/mock-engine",
     "src/parser",
-    "src/parser/python",
     "src/server",
     "src/text",
     "src/tokenizer",
@@ -79,8 +78,6 @@ prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
 prost-types = "0.14.3"
 protox = "0.9.1"
-pyo3 = "0.29.0"
-pythonize = "0.29.0"
 rand = "0.9.3"
 rand_distr = "0.5.1"
 rayon = "1.11.0"
@@ -158,7 +155,7 @@ vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
 xgrammar-structural-tag = "0.4.1"
-zeromq = { version = "0.6.0", default-features = false, features = [
+zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "67dcba97559ebe8e8206dab753710d8b9cb07591", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
 ] }

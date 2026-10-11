@@ -503,6 +503,12 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_config == AttentionConfig()
 
+    args = parser.parse_args(
+        ["--attention-config", '{"tokenspeed_mla_min_split_kv": 8}']
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config.tokenspeed_mla_min_split_kv == 8
+
     # set backend via dot notation
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
     assert args is not None
@@ -857,13 +863,14 @@ def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
 
 
 class TestDeviceIds:
-    def test_device_ids_with_cvd_out_of_range(self, monkeypatch):
+    @pytest.mark.parametrize("device_ids", [[0, 2], [-1]])
+    def test_device_ids_with_cvd_out_of_range(self, monkeypatch, device_ids):
         """--device-ids index beyond the CVD set raises ValueError."""
         from vllm.platforms import current_platform
 
         key = current_platform.device_control_env_var
         monkeypatch.setenv(key, "4,5")
-        args = EngineArgs(model="m", device_ids=[0, 2])
+        args = EngineArgs(model="m", device_ids=device_ids)
         with pytest.raises(ValueError, match="out of range"):
             args._resolve_device_ids()
 

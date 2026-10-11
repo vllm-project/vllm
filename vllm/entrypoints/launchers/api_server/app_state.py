@@ -7,7 +7,6 @@ from typing import cast
 from starlette.datastructures import State
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launchers.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -16,6 +15,7 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
+from vllm.renderers.chat_utils import load_chat_template
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import FALLBACK_SUPPORTED_TASKS, POOLING_TASKS, SupportedTask

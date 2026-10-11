@@ -45,6 +45,7 @@ def test_mixed_warmup_disables_watermarking():
         ),
         vllm_config=SimpleNamespace(num_lookahead_tokens=0),
         max_model_len=128,
+        num_speculative_steps=0,
         model_state=SimpleNamespace(max_encoder_len=0),
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
     )
