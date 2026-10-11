@@ -11,12 +11,10 @@ import ast
 import inspect
 import textwrap
 from contextlib import nullcontext
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
-import numpy as np
 import pytest
 import torch
 
@@ -1880,5 +1878,3 @@ def test_survivor_usage_percentages_are_read_against_the_pinned_pool():
         1 - 1 / 68, 5
     )
     assert round(budget.usage_with_free_blocks(81, 1), 5) == round(1 - 1 / 80, 5)
-
-

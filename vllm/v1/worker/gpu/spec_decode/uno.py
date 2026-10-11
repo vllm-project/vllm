@@ -42,6 +42,7 @@ UNO_LORA_ID = 1_000_003
 def validate_uno_config(vllm_config: VllmConfig) -> None:
     """Refuse configurations Uno does not support, before anything is built."""
     speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
     model_config = vllm_config.model_config
     parallel_config = vllm_config.parallel_config
     if speculative_config.num_speculative_tokens_per_batch_size is not None:
