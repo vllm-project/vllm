@@ -262,7 +262,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Uno Nightly"
   key: spec-decode-uno-nightly
-  # Edge: 363 s, survivor: 189 s on an RTX 3090.
+  # This command took 939 s on an RTX 3090 (edge alone: 363 s).
   timeout_in_minutes: 30
   device: h200_35gb
   optional: true
