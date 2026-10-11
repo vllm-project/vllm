@@ -17,13 +17,22 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, ClassVar, TypeVar
 
+import numpy as np
+
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.label_reads import next_token_label_reads
 from vllm.inputs import EngineInput, MultiModalInput, TokensPrompt, tokens_input
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector, MediaIO
+from vllm.multimodal.media import (
+    MEDIA_CONNECTOR_REGISTRY,
+    ImageMediaIO,
+    MediaConnector,
+    MediaIO,
+    VideoMediaIO,
+)
 from vllm.pooling_params import PoolingParams
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -32,13 +41,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 
-from .media import (
-    AUDIO_SAMPLE_RATE,
-    VIDEO_FPS,
-    DecodedMediaIO,
-    decode_audio_clip,
-    decode_video,
-)
 from .protocol import ReadPromptRequest
 from .question_types import (
     LABELS,
@@ -49,6 +51,8 @@ from .question_types import (
 )
 
 _M = TypeVar("_M")
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -399,6 +403,10 @@ class JointSchemaStrategy(ReadStrategy):
         "video": "<|vision_start|><|video_pad|><|vision_end|>\n",
     }
     IMAGE_SIZE = {"shortest_edge": 65_536, "longest_edge": 1_048_576}
+    #: The reference samples videos at 2 fps, up to its processor's
+    #: ``max_frames``.
+    VIDEO_FPS = 2.0
+    MAX_VIDEO_FRAMES = 768
 
     def __init__(self, context: ReadContext):
         super().__init__(context)
@@ -457,6 +465,16 @@ class JointSchemaStrategy(ReadStrategy):
             )
         )
 
+    async def _soundtrack(
+        self, video_url: str
+    ) -> tuple[np.ndarray, int | float] | None:
+        """The video's soundtrack, or None when it has no decodable one."""
+        try:
+            return await self._connector.fetch_audio_async(video_url)
+        except ValueError as e:
+            logger.debug("no decodable soundtrack in %s: %s", video_url, e)
+            return None
+
     async def _render_media(
         self, media: Mapping[str, Sequence[str]], cache_salt: str | None
     ) -> MultiModalInput:
@@ -464,27 +482,29 @@ class JointSchemaStrategy(ReadStrategy):
         expanded. A video's soundtrack is heard with it when every video has
         one."""
         connector = self._connector
-        audio_io = DecodedMediaIO(
-            decode_audio_clip, envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB * 2**20 or None
-        )
+        video_io = VideoMediaIO(ImageMediaIO(), num_frames=-1, fps=self.VIDEO_FPS)
         try:
-            images, audio, videos = await asyncio.gather(
+            images, audio, videos, tracks = await asyncio.gather(
                 asyncio.gather(
                     *map(connector.fetch_image_async, media.get("image", ()))
                 ),
-                self._fetch(
-                    media.get("audio", ()), audio_io, envs.VLLM_AUDIO_FETCH_TIMEOUT
+                asyncio.gather(
+                    *map(connector.fetch_audio_async, media.get("audio", ()))
                 ),
                 self._fetch(
-                    media.get("video", ()),
-                    DecodedMediaIO(decode_video),
-                    envs.VLLM_VIDEO_FETCH_TIMEOUT,
+                    media.get("video", ()), video_io, envs.VLLM_VIDEO_FETCH_TIMEOUT
                 ),
+                asyncio.gather(*map(self._soundtrack, media.get("video", ()))),
             )
         except ValueError as e:
             raise StructuredDecisionError(f"media: {e}") from e
+        for frames, _ in videos:
+            if frames.shape[0] > self.MAX_VIDEO_FRAMES:
+                raise StructuredDecisionError(
+                    "media: video is longer than "
+                    f"{self.MAX_VIDEO_FRAMES / self.VIDEO_FPS:.0f} seconds"
+                )
 
-        tracks = [track for _, track in videos]
         audio_in_video = bool(videos) and all(t is not None for t in tracks)
         if audio_in_video and audio:
             raise StructuredDecisionError(
@@ -496,17 +516,16 @@ class JointSchemaStrategy(ReadStrategy):
             + self.PLACEHOLDERS["video"] * len(videos)
         )
         if audio_in_video:
-            audio = tracks
+            audio = [track for track in tracks if track is not None]
         mm_data: dict[str, Any] = {}
         if images:
             mm_data["image"] = images
         if audio:
-            mm_data["audio"] = [(samples, AUDIO_SAMPLE_RATE) for samples in audio]
+            mm_data["audio"] = audio
         if videos:
-            mm_data["video"] = [frames for frames, _ in videos]
+            mm_data["video"] = videos
         mm_kwargs: dict[str, Any] = {"images_kwargs": {"size": self.IMAGE_SIZE}}
         if videos:
-            mm_kwargs["videos_kwargs"] = {"fps": VIDEO_FPS, "do_sample_frames": False}
             mm_kwargs["use_audio_in_video"] = audio_in_video
         prompt = TokensPrompt(
             prompt_token_ids=self.prefix + self._tokens(text),

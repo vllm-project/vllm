@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
 import pybase64 as base64
 import pytest
 import torch
@@ -47,7 +48,7 @@ from vllm.entrypoints.serve.exception_handling.register import (
 )
 from vllm.inputs import mm_input
 from vllm.logprobs import Logprob
-from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media import MediaConnector, MediaWithBytes
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -506,3 +507,69 @@ async def test_joint_schema_reads_media_before_the_state(joint_schema, monkeypat
     assert tokenizer.decode(ids[expanded:]) == state_and_questions
     assert response.answers["team"]["choice"] == "billing"
     assert response.usage.input_tokens == len(ids)
+
+
+@pytest.mark.asyncio
+async def test_joint_schema_hears_video_soundtracks(joint_schema, monkeypatch):
+    serving, engine, tokenizer = joint_schema
+    strategy = serving.strategy
+    video = MediaWithBytes(
+        (np.zeros((4, 8, 8, 3), np.uint8), {"fps": 2.0}), b"video-bytes"
+    )
+    track = (np.zeros(160, np.float32), 16000)
+    rendered: dict[str, Any] = {}
+
+    class FakeConnector:
+        async def fetch_image_async(self, url):
+            raise AssertionError("no images in this test")
+
+        async def load_from_url_async(self, url, media_io, *, fetch_timeout=None):
+            return video
+
+        async def fetch_audio_async(self, url):
+            if url == "https://example.org/silent.mp4":
+                raise ValueError("No audio stream found.")
+            return track
+
+    strategy.__dict__["_connector"] = FakeConnector()
+
+    async def process_for_engine_async(prompt, arrival_time):
+        rendered.clear()
+        rendered.update(prompt)
+        return mm_input(prompt["prompt_token_ids"], {}, {}, {})
+
+    renderer = strategy.context.online_renderer.renderer
+    monkeypatch.setattr(renderer, "process_for_engine_async", process_for_engine_async)
+
+    response = await serving.create_decision(
+        StructuredDecisionRequest(
+            **JOINT_SCHEMA_REQUEST, videos=["https://example.org/talking.mp4"]
+        )
+    )
+    assert isinstance(response, StructuredDecisionResponse)
+    assert rendered["multi_modal_data"] == {"video": [video], "audio": [track]}
+    assert rendered["mm_processor_kwargs"] == {
+        "images_kwargs": {"size": strategy.IMAGE_SIZE},
+        "use_audio_in_video": True,
+    }
+
+    # A video without a decodable soundtrack is watched silently.
+    response = await serving.create_decision(
+        StructuredDecisionRequest(
+            **JOINT_SCHEMA_REQUEST, videos=["https://example.org/silent.mp4"]
+        )
+    )
+    assert isinstance(response, StructuredDecisionResponse)
+    assert rendered["multi_modal_data"] == {"video": [video]}
+    assert rendered["mm_processor_kwargs"]["use_audio_in_video"] is False
+
+    # Audio clips cannot be read with videos that have soundtracks.
+    response = await serving.create_decision(
+        StructuredDecisionRequest(
+            **JOINT_SCHEMA_REQUEST,
+            videos=["https://example.org/talking.mp4"],
+            audio=["https://example.org/clip.wav"],
+        )
+    )
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400

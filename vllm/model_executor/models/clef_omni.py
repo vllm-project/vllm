@@ -233,18 +233,22 @@ def parse_joint_schema(
     try:
         types = [int(t) for t in schema["question_types"]]
         counts = [int(c) for c in schema["option_counts"]]
-        spans = [
+        question_spans = [
             (int(start) + prompt_len, int(end) + prompt_len)
-            for start, end in itertools.chain(
-                schema["question_spans"], schema["option_spans"]
-            )
+            for start, end in schema["question_spans"]
+        ]
+        option_spans = [
+            (int(start) + prompt_len, int(end) + prompt_len)
+            for start, end in schema["option_spans"]
         ]
     except (KeyError, TypeError, ValueError):
         return None
+    spans = question_spans + option_spans
     if (
         not types
         or len(counts) != len(types)
-        or len(spans) != len(types) + sum(counts)
+        or len(question_spans) != len(types)
+        or len(option_spans) != sum(counts)
         or any(not 0 <= t < NUM_QUESTION_TYPES for t in types)
         or any(c < 1 for c in counts)
         or any(not 0 <= start < end <= prompt_len for start, end in spans)
