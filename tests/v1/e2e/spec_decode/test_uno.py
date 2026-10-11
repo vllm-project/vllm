@@ -1688,8 +1688,14 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
     longest_prompt = max(
         len(
-            tokenizer.apply_chat_template(
-                prompt, add_generation_prompt=True, enable_thinking=False
+            tokenizer.encode(
+                tokenizer.apply_chat_template(
+                    prompt,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                ),
+                add_special_tokens=False,
             )
         )
         for prompt in prompts
