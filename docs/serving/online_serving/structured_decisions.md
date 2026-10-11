@@ -3,10 +3,10 @@
 The `/v1/systemone` endpoint answers a set of typed questions about a state and
 returns a probability for every allowed answer.
 
-The endpoint is available by default on generation models and on
-[Clef-Omni](#clef-omni). Models without a supported read strategy return 501.
-Supported generation models require `--logprobs-mode raw_logprobs` or
-`processed_logprobs`, since `label_mass` needs log probabilities.
+The endpoint is available by default on generation models. Models without a
+supported read strategy return 501. Supported architectures require
+`--logprobs-mode raw_logprobs` or `processed_logprobs`, since `label_mass` needs
+log probabilities.
 
 ## How it works
 
