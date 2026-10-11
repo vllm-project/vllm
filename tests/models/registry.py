@@ -1121,6 +1121,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV4_7ForConditionalGeneration": _HfExamplesInfo(
         "openbmb/MiniCPM-V-4_7",
         min_transformers_version="5.18.0",
+        is_available_online=False,
     ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
