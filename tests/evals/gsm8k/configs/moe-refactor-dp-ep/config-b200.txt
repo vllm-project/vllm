@@ -11,3 +11,5 @@ Qwen3-30B-A3B-Fp8-CT-Block-deepgemm-deepep-ll.yaml
 Qwen3-30B-A3B-Fp8-CT-Block-deepgemm.yaml
 Qwen3-30B-A3B-BF16-triton.yaml
 Qwen3-30B-A3B-BF16-moonep.yaml
+Qwen3-30B-A3B-BF16-nixl_ep_v2.yaml
+Qwen3-30B-A3B-BF16-nixl_ep_v2-expand.yaml
