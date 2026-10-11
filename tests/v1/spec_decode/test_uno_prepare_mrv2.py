@@ -8,9 +8,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.spec_decode.uno_reference import prepare_uno_inputs_reference
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.spec_decode.uno import prepare_uno_inputs_reference
 from vllm.v1.worker.gpu.spec_decode.uno_prepare import (
     _target_input_lengths,
     prepare_uno_inputs_fused,
@@ -412,6 +412,53 @@ def test_uno_prepare_specialization_ignores_dynamic_target_view_lengths(
         'do_not_specialize_on_alignment=["num_sampled_ptr", "num_rejected_ptr"]'
         in inspect.getsource(uno_prepare)
     )
+
+
+def test_uno_prepare_specialization_is_shared_by_every_batch_size():
+    """A new batch size must not compile a new prepare kernel in serving.
+
+    The startup warmup that used to compile each request count is gone, so the
+    request count and the draft row count are runtime scalars: the compile-time
+    key is the same for every batch size the persistent buffers can hold.
+    """
+    from vllm.v1.worker.gpu.spec_decode.uno_prepare import (
+        UNO_PREPARE_RUNTIME_SCALARS,
+    )
+
+    device = torch.device("cpu")
+    max_num_reqs, k = 16, 8
+    buffers = InputBuffers(max_num_reqs, max_num_reqs * k, device)
+    slot_mapping = torch.empty(max_num_reqs * k, dtype=torch.int64, device=device)
+    sample_idx_mapping = torch.empty(max_num_reqs * k, dtype=torch.int64)
+    block_table = torch.empty((max_num_reqs, 256), dtype=torch.int32)
+    keys = set()
+    for num_reqs in range(1, max_num_reqs + 1):
+        batch = SimpleNamespace(
+            query_start_loc=torch.empty(num_reqs + 1, dtype=torch.int32),
+            positions=torch.empty(num_reqs * (k + 1), dtype=torch.int64),
+        )
+        keys.add(
+            prepare_uno_launch_key(
+                buffers,
+                slot_mapping,
+                sample_idx_mapping,
+                batch,
+                torch.empty(num_reqs, dtype=torch.int32),
+                torch.empty(num_reqs, dtype=torch.int32),
+                block_table,
+                num_reqs=num_reqs,
+                k=k,
+                state_capacity=max_num_reqs,
+                block_size=16,
+                max_model_len=4096,
+                noise_seed=0,
+                noise_high=151_669,
+                has_rejected=True,
+                block=256,
+            )
+        )
+    assert len(keys) == 1
+    assert {"num_reqs", "count"} <= set(UNO_PREPARE_RUNTIME_SCALARS)
 
 
 def test_fused_uno_rejects_non_native_last_sampled_layout_on_cpu():

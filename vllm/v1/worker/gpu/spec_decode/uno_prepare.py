@@ -8,9 +8,10 @@ performs the complete preparation in one Triton launch.  The launch owns the
 full persistent buffers, including their CUDA-graph padding, so a replay never
 observes values left by a differently sized request batch.
 
-``step`` is a runtime scalar.  The kernel uses it in the same integer hash as
-``vllm.v1.spec_decode.uno_noise.fill_uno_noise``.  Uno preparation runs before
-the captured draft forward, so the live step must remain a launch argument.
+``step`` is a runtime scalar.  The kernel uses it in the released Uno noise
+hash (the eager reference in ``tests/v1/spec_decode/uno_reference.py``
+reimplements it).  Uno preparation runs before the captured draft forward, so
+the live step must remain a launch argument.
 """
 
 from __future__ import annotations
@@ -23,12 +24,15 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 # Keep this contract shared with the CPU launch-key test.  These arguments
-# describe live target views rather than a Triton program shape, so changing
-# them must never create a distinct specialization.
+# describe the live batch and target views rather than a Triton program shape,
+# so changing them (a new batch size included) must never compile a new
+# specialization.
 UNO_PREPARE_RUNTIME_SCALARS = (
     "step",
     "target_query_len",
     "target_position_len",
+    "num_reqs",
+    "count",
 )
 
 
@@ -64,10 +68,10 @@ def _prepare_uno_inputs_kernel(
     step,
     target_query_len,
     target_position_len,
+    num_reqs,
+    count,
     # Shape and arithmetic constants.
-    NUM_REQS: tl.constexpr,
     K: tl.constexpr,
-    COUNT: tl.constexpr,
     INPUT_CAP: tl.constexpr,
     POSITION_CAP: tl.constexpr,
     SLOT_CAP: tl.constexpr,
@@ -101,10 +105,10 @@ def _prepare_uno_inputs_kernel(
 
     pid = tl.program_id(0).to(tl.int64)
     row = pid * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
-    active = row < COUNT
+    active = row < count
     req = row // K
     offset = row % K
-    req_valid = req < NUM_REQS
+    req_valid = req < num_reqs
 
     state_idx = tl.load(
         idx_mapping_ptr + req,
@@ -226,7 +230,7 @@ def _prepare_uno_inputs_kernel(
     # entire persistent buffers.  Every request has one lane (row == req) that
     # computes the same post-rejection first position without any host readback.
     request_row = row
-    request_valid = request_row < NUM_REQS
+    request_valid = request_row < num_reqs
     request_end = tl.load(
         target_query_start_loc_ptr + request_row + 1,
         mask=request_valid & ((request_row + 1) < target_query_len),
@@ -259,7 +263,7 @@ def _prepare_uno_inputs_kernel(
         tl.where(request_valid, request_seq_len, 0).to(tl.int32),
         mask=request_row < SEQ_CAP,
     )
-    query_start = tl.where(request_row <= NUM_REQS, request_row * K, COUNT)
+    query_start = tl.where(request_row <= num_reqs, request_row * K, count)
     tl.store(
         out_query_start_loc_ptr + request_row,
         query_start.to(tl.int32),
@@ -281,7 +285,6 @@ def _prepare_uno_specialization_kwargs(
     sample_idx_mapping: torch.Tensor,
     block_table: torch.Tensor,
     *,
-    num_reqs: int,
     k: int,
     state_capacity: int,
     block_size: int,
@@ -293,15 +296,13 @@ def _prepare_uno_specialization_kwargs(
 ) -> dict[str, int | bool]:
     """Build the complete compile-time Uno preparation specialization.
 
-    Target input views are deliberately absent.  Their logical lengths are
-    passed as runtime scalars because both dummy warmup and real serving use
-    the same persistent output buffers but legitimately have different
-    target-view lengths.
+    The batch size and target input views are deliberately absent.  The
+    request count, the draft row count and the views' logical lengths are
+    runtime scalars, so every batch size reuses one compiled kernel over the
+    same persistent output buffers.
     """
     return {
-        "NUM_REQS": num_reqs,
         "K": k,
-        "COUNT": num_reqs * k,
         "INPUT_CAP": buffers.input_ids.numel(),
         "POSITION_CAP": buffers.positions.numel(),
         "SLOT_CAP": slot_mapping.numel(),
@@ -366,7 +367,6 @@ def prepare_uno_launch_key(
                 slot_mapping,
                 sample_idx_mapping,
                 block_table,
-                num_reqs=num_reqs,
                 k=k,
                 state_capacity=state_capacity,
                 block_size=block_size,
@@ -406,7 +406,8 @@ def prepare_uno_inputs_fused(
     be the batch-local table returned by ``BlockTables.gather_block_tables``.
 
     The launch is parity-checked against the eager CPU
-    ``prepare_uno_inputs_reference`` oracle in ``uno.py``;
+    ``prepare_uno_inputs_reference`` oracle in
+    ``tests/v1/spec_decode/uno_reference.py``;
     both paths must preserve the same request-state layouts and row ordering.
 
     ``step`` and the logical target-view lengths are runtime scalars rather
@@ -525,6 +526,8 @@ def prepare_uno_inputs_fused(
         int(step),
         target_query_len,
         target_position_len,
+        num_reqs,
+        count,
         **launch_kwargs,
     )
 

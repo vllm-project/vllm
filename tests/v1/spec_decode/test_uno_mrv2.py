@@ -18,12 +18,9 @@ from unittest.mock import MagicMock, Mock
 import pytest
 import torch
 
+from tests.v1.spec_decode.uno_reference import prepare_uno_inputs_reference
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.spec_decode.uno import (
-    UNO_LORA_ID,
-    UnoSpeculator,
-    prepare_uno_inputs_reference,
-)
+from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID, UnoSpeculator
 from vllm.v1.worker.gpu.spec_decode.uno_lora import draft_lora_mapping
 
 
@@ -694,9 +691,10 @@ def test_warmup_proposals_do_not_consume_the_serving_counters(monkeypatch):
     assert manager is not None
     manager._graphs_captured = True
 
+    prepared_steps: list[int] = []
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.spec_decode.uno.prepare_uno_inputs_fused",
-        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: prepared_steps.append(args[-1]),
     )
     monkeypatch.setattr(
         "vllm.v1.worker.gpu.spec_decode.uno.build_slot_mappings_by_layer",
@@ -732,6 +730,12 @@ def test_warmup_proposals_do_not_consume_the_serving_counters(monkeypatch):
     proposer.propose(batch, dummy_run=True, **common)
     assert (proposer.num_eager_proposals, proposer.num_graph_replays) == (0, 0)
     assert proposer.num_warmup_proposals == 2
+
+    # Startup proposals leave the noise step alone: the first served proposal
+    # draws step 1 whatever startup ran before it.
+    proposer.propose(batch, **common)
+    assert prepared_steps == [0, 0, 1]
+    assert proposer._step == 1
 
 
 def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):

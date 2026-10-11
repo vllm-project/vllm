@@ -320,20 +320,31 @@ def _uno_execution_state(worker) -> dict:
         "draft_graph_replays": proposer.num_graph_replays,
         "draft_graphs": len(proposer.cudagraph_manager.graphs),
         "draft_eager_proposals": proposer.num_eager_proposals,
-        "lora_plan_hits": proposer.uno_lora_state.plan_cache.hits,
-        "lora_plan_misses": proposer.uno_lora_state.plan_cache.misses,
-        "lora_plan_bypasses": proposer.uno_lora_state.plan_cache.bypasses,
     }
 
 
 def _disable_uno_adapter_for_control(worker) -> None:
     """Use identical noise and sampling, with base weights on every draft row."""
-    proposer = worker.model_runner.speculator
+    from vllm.lora.layers import LoRAMapping
+    from vllm.v1.worker.gpu.spec_decode.uno_lora import (
+        base_lora_mapping,
+        base_prompt_mapping,
+    )
+
+    runner = worker.model_runner
+    proposer = runner.speculator
 
     def base_only(shape):
         if shape is not None:
             _num_reqs, num_tokens = shape
-            proposer.uno_lora_state.install_base(num_tokens, num_tokens)
+            runner.lora_manager.set_active_adapters(
+                {proposer.lora_request},
+                LoRAMapping(
+                    base_lora_mapping(num_tokens),
+                    base_prompt_mapping(num_tokens),
+                    is_prefill=True,
+                ),
+            )
 
     proposer.set_lora_hook(base_only)
 
@@ -1499,24 +1510,6 @@ def test_uno_greedy_matches_base_model(
         )
         states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
         assert all(state["shared_model"] for state in states)
-        assert all(
-            state["lora_plan_hits"]
-            + state["lora_plan_misses"]
-            + state["lora_plan_bypasses"]
-            > 0
-            for state in states
-        ), f"Uno LoRA plan cache did not observe any installs: {states}"
-        assert all(
-            state["lora_plan_hits"]
-            / (
-                state["lora_plan_hits"]
-                + state["lora_plan_misses"]
-                + state["lora_plan_bypasses"]
-            )
-            >= 0.8
-            for state in states
-        ), f"Uno LoRA plans are rebuilding too often: {states}"
-        assert all(state["lora_plan_bypasses"] == 0 for state in states), states
         if expect_graphs:
             assert all(state["draft_graphs"] > 0 for state in states), states
             assert all(state["draft_graph_replays"] > 0 for state in states), states
@@ -1661,21 +1654,70 @@ def test_uno_greedy_matches_base_model(
     print(instrument_receipt())
 
 
+def _install_draft_slot_audit(worker) -> None:
+    """Check every draft KV slot Uno's preparation writes, in the worker.
+
+    After each serving proposal the expected slot of every draft row is derived
+    independently from the batch: its position is the row after the last
+    verified token plus its offset, and it may only be written when that
+    position is below max_model_len and inside the request's own block-table
+    row; every other row must be PAD. A mismatch is a draft KV write at or past
+    the context limit or into another request's blocks.
+    """
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+    from vllm.v1.worker.gpu.spec_decode import uno as uno_module
+
+    prepare = uno_module.prepare_uno_inputs_fused
+    audit = {"proposals": 0, "rows_at_or_past_limit": 0, "bad_slots": 0}
+    worker.uno_draft_slot_audit = audit
+
+    def audited(*args):
+        prepare(*args)
+        slot_mapping, input_batch, num_rejected = args[1], args[3], args[5]
+        block_table, block_size, k, max_model_len = args[9:13]
+        n = input_batch.num_reqs
+        end = input_batch.query_start_loc[1 : n + 1].long()
+        if num_rejected is not None:
+            end = end - num_rejected[:n].long()
+        first = input_batch.positions[end - 1].long() + 1
+        positions = first[:, None] + torch.arange(k, device=first.device)
+        blocks = positions // block_size
+        columns = block_table.shape[1]
+        block_ids = block_table[:n].gather(1, blocks.clamp(max=columns - 1)).long()
+        writable = (positions < max_model_len) & (blocks < columns) & (block_ids > 0)
+        expected = torch.where(
+            writable, block_ids * block_size + positions % block_size, PAD_SLOT_ID
+        )
+        written = slot_mapping[: n * k].view(n, k).long()
+        audit["proposals"] += 1
+        audit["rows_at_or_past_limit"] += int((positions >= max_model_len).sum())
+        audit["bad_slots"] += int((written != expected).sum())
+
+    uno_module.prepare_uno_inputs_fused = audited
+
+
+def _read_draft_slot_audit(worker) -> dict:
+    return dict(worker.uno_draft_slot_audit)
+
+
 def test_uno_greedy_matches_base_model_to_max_model_len(
     vllm_runner,
     monkeypatch: pytest.MonkeyPatch,
     uno_adapter_path: str,
 ):
-    """Serve every request to max_model_len at K=8 with exact greedy parity.
+    """Serve every request to max_model_len at K=8: no boundary KV write.
 
     Uno has no scheduler tail policy. Near the limit the scheduler's own
     per-request cap trims the scheduled drafts, allocate_slots caps the K
     lookahead slots at max_model_len, and Uno's input preparation writes PAD
     slots for draft rows at or past it. max_model_len ends one token short of
     a block boundary, so the last proposals of each request place draft rows
-    past the final column of its block-table row; four requests decode
-    together, so a draft KV write that escaped that row would land in a
-    neighbour's KV and show up here as a divergence or a crash.
+    past the final column of its block-table row. The slot audit checks every
+    draft row of every proposal for that write; greedy parity with the plain
+    engine (against its own repeat floor) checks the outputs. The prompts are
+    the few-shot GSM8K ones and each request generates only ~100-150 tokens:
+    the long repetition prompts produced reference ties that flipped across
+    processes.
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", True)
@@ -1684,7 +1726,12 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     k = 8
-    prompts = get_test_prompts(mm_enabled=False, num_prompts=4)
+    prompts = [
+        prompt
+        for prompt in get_test_prompts(mm_enabled=False, num_prompts=8)
+        if "repeat the word" not in prompt[0]["content"]
+    ]
+    assert len(prompts) == 4
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
     longest_prompt = max(
         len(
@@ -1776,9 +1823,22 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
             "num_speculative_tokens": k,
         },
     ) as speculative:
+        speculative.llm.llm_engine.collective_rpc(_install_draft_slot_audit)
         spec_outputs = speculative.llm.chat(prompts, **chat_kwargs)
         metrics = speculative.llm.get_metrics()
         states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
+        audits = speculative.llm.llm_engine.collective_rpc(_read_draft_slot_audit)
+    print(f"uno max_model_len edge: draft slot audit {audits}")
+    for audit in audits:
+        assert audit["proposals"] > 0, audits
+        assert audit["rows_at_or_past_limit"] > 0, (
+            f"no draft row reached max_model_len, so the edge was not exercised: "
+            f"{audits}"
+        )
+        assert audit["bad_slots"] == 0, (
+            f"draft rows wrote KV slots at or past max_model_len or outside "
+            f"their request's block-table row: {audits}"
+        )
     _assert_reached_limit(spec_outputs, "uno")
     draft_tokens = get_spec_decode_metric_value(
         metrics, "vllm:spec_decode_num_draft_tokens"
@@ -1810,5 +1870,7 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
         f"mean acceptance length={acceptance_len:.3f}, states={states}"
     )
     verdict = verdicts["uno"]
+    print(f"uno max_model_len edge: {verdict.reason}")
+    print(f"uno max_model_len edge (text): {verdict.text_reason}")
     assert verdict.ok, verdict.reason
     assert verdict.text_ok, verdict.text_reason

@@ -14,13 +14,13 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
-from vllm.v1.spec_decode.uno_noise import fill_uno_noise
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -32,7 +32,10 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.uno_lora import UnoLoRAState
+from vllm.v1.worker.gpu.spec_decode.uno_lora import (
+    base_prompt_mapping,
+    draft_lora_mapping,
+)
 from vllm.v1.worker.gpu.spec_decode.uno_prepare import prepare_uno_inputs_fused
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -40,8 +43,8 @@ logger = init_logger(__name__)
 UNO_LORA_ID = 1_000_003
 UNO_USER_LORA_ERROR = (
     "Uno does not support user LoRA adapters yet: --enable-lora serves only "
-    "Uno's own adapter, so --lora-modules, runtime LoRA loading, default "
-    "multimodal LoRAs and request-specific LoRA requests are refused"
+    "Uno's own adapter, so runtime LoRA loading and default multimodal LoRAs "
+    "are refused (request-specific LoRA requests are refused before queueing)"
 )
 
 
@@ -132,74 +135,6 @@ def validate_uno_config(vllm_config: VllmConfig) -> None:
         )
 
 
-def prepare_uno_inputs_reference(
-    buffers: InputBuffers,
-    slot_mapping: torch.Tensor,
-    sample_idx_mapping: torch.Tensor,
-    input_batch: InputBatch,
-    num_sampled: torch.Tensor,
-    num_rejected: torch.Tensor,
-    last_sampled: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    seeds: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    k: int,
-    max_model_len: int,
-    noise_seed: int,
-    noise_high: int,
-    step: int,
-) -> None:
-    """CPU reference oracle for the fused seed/noise preparation kernel.
-
-    Temporary suffix KV starts after the last verified row. The target overwrites
-    it on verification; neither request progress nor prefix ownership advances here.
-    """
-    n = input_batch.num_reqs
-    count = n * k
-    state_idx = input_batch.idx_mapping.long()
-    valid_end = input_batch.query_start_loc[1 : n + 1] - num_rejected
-    first_pos = input_batch.positions[valid_end.long() - 1] + 1
-    offsets = torch.arange(k, dtype=torch.int64, device=buffers.device)
-    positions = first_pos[:, None] + offsets
-    seed_tokens = torch.where(
-        num_sampled > 0,
-        last_sampled.reshape(-1)[state_idx],
-        next_prefill_tokens.reshape(-1, seeds.shape[0])[0, state_idx],
-    )
-    buffers.input_ids[:count].copy_(seed_tokens.repeat_interleave(k))
-    is_noise = (offsets != 0).repeat(n)
-    req_seeds = (seeds[state_idx] + noise_seed).repeat_interleave(k)
-    fill_uno_noise(buffers.input_ids[:count], is_noise, req_seeds, step, 1, noise_high)
-    # Keep unused, out-of-context rows in range for the model. Their KV writes
-    # are suppressed below; native verification bounds usable candidates.
-    buffers.positions[:count].copy_(positions.clamp(max=max_model_len - 1).flatten())
-    buffers.seq_lens[:n].copy_((first_pos + k).clamp(max=max_model_len))
-    buffers.seq_lens[n:].zero_()
-    torch.arange(n + 1, out=buffers.query_start_loc[: n + 1])
-    buffers.query_start_loc[: n + 1].mul_(k)
-    buffers.query_start_loc[n + 1 :].fill_(count)
-    buffers.input_ids[count:].zero_()
-    buffers.positions[count:].zero_()
-    sample_idx_mapping[:count].copy_(state_idx.repeat_interleave(k))
-    sample_idx_mapping[count:].fill_(-1)
-
-    block_numbers = positions // block_size
-    block_ids = (
-        block_table[:n]
-        .gather(1, block_numbers.clamp(max=block_table.shape[1] - 1))
-        .long()
-    )
-    valid = (
-        (positions < max_model_len)
-        & (block_numbers < block_table.shape[1])
-        & (block_ids > 0)
-    )
-    slots = block_ids * block_size + positions % block_size
-    slot_mapping[:count].copy_(torch.where(valid, slots, PAD_SLOT_ID).flatten())
-    slot_mapping[count:].fill_(PAD_SLOT_ID)
-
-
 def uncovered_draft_request_counts(
     captured_token_counts: Sequence[int],
     k: int,
@@ -253,46 +188,34 @@ class UnoSpeculator(DraftModelSpeculator):
         self.num_warmup_proposals = 0
 
     def set_lora_manager(self, lora_manager: Any) -> None:
-        """Install the Uno adapter mapping around each draft pass.
+        """Route the draft rows through Uno's adapter with the public LoRA API.
 
-        The target pass keeps the runner's own request mapping: every draft
-        install clears the manager's mapping cache, so the next target step
-        rebuilds its mapping.
+        Each draft pass installs its mapping through the worker manager's
+        ``set_active_adapters``, the call the runner makes for every target
+        step, so the native Punica metadata is rebuilt in place and a captured
+        draft graph reads it on replay. The mapping is not restored after the
+        draft: the runner installs the next target step's own mapping, and the
+        manager rebuilds it because it differs from the draft mapping. Requests
+        carrying a LoRA adapter are refused before they are queued, so target
+        rows never carry an adapter and only Uno's adapter is activated here.
         """
-        self._refuse_user_adapters(lora_manager)
-        self.uno_lora_state = UnoLoRAState(lora_manager, self.lora_request)
-        self.uno_lora_state.ensure_adapter()
-        active_shape = (0, 0)
+        uno_id = self.lora_request.lora_int_id
+        lora_manager.set_active_adapters({self.lora_request}, None)
 
         def set_draft_mapping(shape: tuple[int, int] | None) -> None:
-            nonlocal active_shape
             if shape is None:
-                num_reqs, num_model_tokens = active_shape
-                self.uno_lora_state.install_base(num_model_tokens, num_reqs * self.k)
                 return
-            active_shape = shape
-            num_reqs, num_model_tokens = shape
-            self.uno_lora_state.install_draft(num_model_tokens, num_reqs, self.k)
+            num_reqs, num_tokens = shape
+            lora_manager.set_active_adapters(
+                {self.lora_request},
+                LoRAMapping(
+                    draft_lora_mapping(num_tokens, num_reqs, self.k, uno_id),
+                    base_prompt_mapping(num_tokens),
+                    is_prefill=True,
+                ),
+            )
 
         self.set_lora_hook(set_draft_mapping)
-
-    def _refuse_user_adapters(self, lora_manager: Any) -> None:
-        """Let only Uno's adapter be loaded through the worker LoRA manager.
-
-        --lora-modules, runtime loading and request-specific LoRA all load
-        their adapter through ``add_adapter``. Warmup's dummy adapters are
-        registered beforehand through ``add_dummy_lora`` and stay allowed.
-        """
-        add_adapter = lora_manager.add_adapter
-        uno_id = self.lora_request.lora_int_id
-
-        def add_uno_adapter_only(lora_request: Any) -> bool:
-            lora_id = lora_request.lora_int_id
-            if lora_id != uno_id and lora_id not in lora_manager.list_adapters():
-                raise ValueError(UNO_USER_LORA_ERROR)
-            return add_adapter(lora_request)
-
-        lora_manager.add_adapter = add_uno_adapter_only
 
     def set_lora_hook(self, hook: Callable[[tuple[int, int] | None], None]) -> None:
         self._lora_hook = hook
@@ -541,7 +464,10 @@ class UnoSpeculator(DraftModelSpeculator):
                 self._generate_draft(n, count, None, {})
             return self.draft_tokens[:n]
 
-        self._step += 1
+        if not (dummy_run or is_profile):
+            # Startup and DP dummy proposals must not move the noise step the
+            # first served proposal starts from.
+            self._step += 1
         assert self.speculative_config.uno_mask_token_id is not None
         prepare_uno_inputs_fused(
             self.input_buffers,

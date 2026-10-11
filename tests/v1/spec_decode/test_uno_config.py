@@ -17,7 +17,11 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
-from vllm.v1.worker.gpu.spec_decode.uno import validate_uno_config
+from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
+from vllm.lora.request import LoRARequest
+from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID, validate_uno_config
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -253,6 +257,32 @@ def test_uno_refuses_user_lora_serving(uno_config_factory, monkeypatch):
     )
     with pytest.raises(ValueError, match="does not support user LoRA adapters"):
         validate_uno_config(config)
+
+
+@pytest.mark.parametrize("lora_int_id", [1, UNO_LORA_ID])
+def test_uno_refuses_request_lora_before_queueing(uno_config_factory, lora_int_id):
+    """A request carrying a LoRA adapter is refused in process_inputs.
+
+    This covers a user adapter that reuses Uno's reserved id: no request with
+    a LoRA reaches the engine, so target rows never carry an adapter and Uno's
+    adapter is unreachable from requests. The refusal is a validation error
+    for that request, not an engine failure.
+    """
+    processor = object.__new__(InputProcessor)
+    processor.speculative_config = uno_config_factory()
+    processor.lora_config = LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16)
+    processor.renderer = SimpleNamespace(tokenizer=None)
+    processor._validate_params = lambda params, tasks: None
+    request = LoRARequest("user", lora_int_id, "/user/adapter")
+
+    with pytest.raises(VLLMValidationError, match="request-specific LoRA"):
+        processor.process_inputs("req-0", "hello", SamplingParams(), (), lora_request=request)
+
+    # Without Uno the same request passes LoRA validation and goes on to the
+    # rest of preprocessing (which this stub processor does not have).
+    processor.speculative_config = None
+    with pytest.raises(AttributeError, match="vllm_config"):
+        processor.process_inputs("req-0", "hello", SamplingParams(), (), lora_request=request)
 
 
 def _make_vllm_uno_config(uno_config_factory):
