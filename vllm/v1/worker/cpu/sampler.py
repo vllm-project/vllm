@@ -17,9 +17,14 @@ import torch
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.worker.cpu.kernels.gumbel import gumbel_noise
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.cpu.kernels.gumbel import gumbel_argmax, gumbel_noise
+from vllm.v1.worker.cpu.logits_processors import (
+    CPUBadWords,
+    CPULogitBias,
+    CPUPenalties,
+)
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.states import SamplingStates
 
 NUM_CANDIDATES = 1024
 
@@ -73,9 +78,21 @@ def _sample_candidates(
     return sampled, covered
 
 
+def gumbel_sample(
+    logits: torch.Tensor,
+    req: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    pos: torch.Tensor,
+    use_fp64: bool,
+) -> torch.Tensor:
+    """Full-vocab Gumbel-max with already temperature-scaled logits."""
+    return gumbel_argmax(logits, temperature[req], seeds[req], pos, False, use_fp64)[1]
+
+
 def sample_top_k_top_p(
     logits: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
+    req: torch.Tensor,
     temperature: torch.Tensor,
     seeds: torch.Tensor,
     pos: torch.Tensor,
@@ -84,7 +101,6 @@ def sample_top_k_top_p(
     use_fp64: bool,
 ) -> torch.Tensor:
     """Same tokens as `apply_top_k_top_p` followed by `gumbel_sample`."""
-    req = expanded_idx_mapping.long()
     sampled, covered = _sample_candidates(
         logits.float(), top_k, top_p, temperature[req], seeds[req], pos, use_fp64
     )
@@ -96,19 +112,41 @@ def sample_top_k_top_p(
             None if top_p is None else top_p[rows],
         )
         sampled[rows] = gumbel_sample(
-            fallback_logits,
-            expanded_idx_mapping[rows],
-            temperature,
-            seeds,
-            pos[rows],
-            apply_temperature=False,
-            is_drafting=False,
-            use_fp64=use_fp64,
+            fallback_logits, req[rows], temperature, seeds, pos[rows], use_fp64
         )
     return sampled
 
 
+class CPUSamplingStates(SamplingStates):
+    def apply_temperature(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        temp = self.temperature.gpu[expanded_idx_mapping].unsqueeze(1)
+        # Greedy rows (temperature 0) are left unscaled.
+        logits.div_(torch.where(temp == 0.0, 1.0, temp))
+
+    def apply_min_p(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        if np.all(self.min_p.np[idx_mapping_np] == 0.0):
+            return
+        min_p = self.min_p.gpu[expanded_idx_mapping].unsqueeze(1)
+        threshold = logits.amax(dim=1, keepdim=True) + min_p.log()
+        logits.masked_fill_((min_p != 0.0) & (logits < threshold), float("-inf"))
+
+
 class CPUSampler(Sampler):
+    sampling_states_cls = CPUSamplingStates
+    logit_bias_cls = CPULogitBias
+    penalties_cls = CPUPenalties
+    bad_words_cls = CPUBadWords
+
     def sample(
         self,
         logits: torch.Tensor,
@@ -121,23 +159,6 @@ class CPUSampler(Sampler):
         seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # The candidate path never materializes the top-k/top-p masked logits.
-        needs_masked_logits = self.return_sampling_mask or (
-            return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES
-        )
-        if needs_masked_logits:
-            return super().sample(
-                logits,
-                expanded_idx_mapping,
-                idx_mapping,
-                idx_mapping_np,
-                pos,
-                input_ids,
-                expanded_local_pos,
-                seq_lens_upper_bound_np,
-                return_logprobs,
-            )
-
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -152,25 +173,21 @@ class CPUSampler(Sampler):
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np
         )
-        if top_k is None and top_p is None:
-            return self._sample_random(
-                processed_logits,
-                expanded_idx_mapping,
-                idx_mapping_np,
-                pos,
-                top_k=None,
-                top_p=None,
-                use_fused_sampler=False,
-            )
-
-        sampled = sample_top_k_top_p(
-            processed_logits,
-            expanded_idx_mapping,
+        args = (
+            expanded_idx_mapping.long(),
             self.sampling_states.temperature.gpu,
             self.sampling_states.seeds.gpu,
             pos,
-            top_k,
-            top_p,
-            self.use_fp64_gumbel,
         )
+        # The candidate path never materializes the top-k/top-p masked logits.
+        needs_masked_logits = self.return_sampling_mask or (
+            return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        )
+        if top_k is None and top_p is None or needs_masked_logits:
+            processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+            sampled = gumbel_sample(processed_logits, *args, self.use_fp64_gumbel)
+        else:
+            sampled = sample_top_k_top_p(
+                processed_logits, *args, top_k, top_p, self.use_fp64_gumbel
+            )
         return sampled, processed_logits

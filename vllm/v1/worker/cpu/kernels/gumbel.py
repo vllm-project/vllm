@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Torch implementations of the `gpu/sample/gumbel.py` Triton kernels.
+"""Torch Gumbel-max sampling, bit-compatible with `gpu/sample/gumbel.py`.
 
-The noise is bit-compatible with the Triton kernels: the same seed, position
+The noise matches the Triton kernels: the same seed, position
 and token draw the same uniform. uint32 arithmetic is done in int32, whose
 multiplication wraps identically; right shifts are masked to be logical.
 """
 
 import torch
-
-_DRAFT_NOISE_SALT = 1 << 30
 
 
 def _i32(c: int) -> int:
@@ -98,75 +96,4 @@ def _gumbel_argmax(
     return logits.max(dim=1)
 
 
-_gumbel_argmax_compiled = torch.compile(_gumbel_argmax, dynamic=True, fullgraph=True)
-
-
-def apply_temperature(
-    logits_ptr: torch.Tensor,
-    logits_stride: int,
-    expanded_idx_mapping_ptr: torch.Tensor,
-    temperature_ptr: torch.Tensor,
-    vocab_size: int,
-    BLOCK_SIZE: int,
-) -> None:
-    num_tokens = logits_ptr.shape[0]
-    temp = temperature_ptr[expanded_idx_mapping_ptr[:num_tokens].long()]
-    temp = temp.to(torch.float32)
-    # Temperatures 0 and 1 leave the logits untouched.
-    temp = torch.where((temp == 0.0) | (temp == 1.0), 1.0, temp)
-    logits = logits_ptr[:, :vocab_size]
-    logits.copy_(logits.to(torch.float32) / temp.unsqueeze(1))
-
-
-def gumbel_sample(
-    local_argmax_ptr: torch.Tensor,
-    local_argmax_stride: int,
-    local_max_ptr: torch.Tensor,
-    local_max_stride: int,
-    logits_cache_ptr: torch.Tensor | None,
-    logits_cache_stride_0: int,
-    logits_cache_stride_1: int,
-    logits_cache_col_ptr: torch.Tensor | None,
-    logits_cache_source_ptr: torch.Tensor | None,
-    logits_cache_source_stride: int,
-    logits_ptr: torch.Tensor,
-    logits_stride: int,
-    expanded_idx_mapping_ptr: torch.Tensor,
-    seeds_ptr: torch.Tensor,
-    pos_ptr: torch.Tensor,
-    temp_ptr: torch.Tensor,
-    vocab_size: int,
-    BLOCK_SIZE: int,
-    IS_DRAFTING: bool,
-    APPLY_TEMPERATURE: bool,
-    USE_FP64: bool,
-    PER_TOKEN_COL: bool,
-) -> None:
-    num_tokens = logits_ptr.shape[0]
-    req = expanded_idx_mapping_ptr[:num_tokens].long()
-    is_valid_req = req >= 0
-    req = req.clamp_min(0)
-    temp = torch.where(is_valid_req, temp_ptr[req].to(torch.float32), 0.0)
-    seed = torch.where(is_valid_req, seeds_ptr[req].long(), 0)
-    pos = pos_ptr[:num_tokens].long()
-    if IS_DRAFTING:
-        pos = pos + _DRAFT_NOISE_SALT
-
-    if logits_cache_ptr is not None:
-        assert logits_cache_source_ptr is not None
-        assert logits_cache_col_ptr is not None
-        # Cache the logits before temperature; the rejection sampler divides
-        # by the same temperature on load.
-        col = logits_cache_col_ptr.long().expand(num_tokens)
-        valid = is_valid_req.nonzero().squeeze(1)
-        source = logits_cache_source_ptr[valid, :vocab_size]
-        logits_cache_ptr[req[valid], col[valid], :vocab_size] = source
-
-    value, idx = _gumbel_argmax_compiled(
-        logits_ptr[:, :vocab_size], temp, seed, pos, APPLY_TEMPERATURE, USE_FP64
-    )
-    # The caller reduces over the per-block partials; a single winning block
-    # gives the same result.
-    local_max_ptr.fill_(float("-inf"))
-    local_max_ptr[:, 0] = value
-    local_argmax_ptr[:, 0] = idx
+gumbel_argmax = torch.compile(_gumbel_argmax, dynamic=True, fullgraph=True)

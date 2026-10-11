@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.logger import init_logger
+from vllm.v1.worker.cpu.block_table import CPUBlockTables
 from vllm.v1.worker.cpu.sampler import CPUSampler
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -10,6 +11,7 @@ logger = init_logger(__name__)
 
 class CPUModelRunner(GPUModelRunner):
     sampler_cls = CPUSampler
+    block_tables_cls = CPUBlockTables
 
     # TBD: Whether need to move this to Worker?
     def warming_up_model(self) -> None:

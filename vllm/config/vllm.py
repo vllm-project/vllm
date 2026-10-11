@@ -3138,9 +3138,12 @@ class VllmConfig:
         ):
             unsupported.append("pipeline parallelism with external_launcher")
 
+        # The CPU runner has no Triton-free speculators, rejection sampler or
+        # sampling-mask compaction yet.
+        model_config = self.model_config
+        if not HAS_TRITON and model_config and model_config.return_sampling_mask:
+            unsupported.append("return_sampling_mask without Triton")
         if speculative_config is not None:
-            # The CPU torch kernels do not cover the speculators or the
-            # rejection sampler yet.
             if not HAS_TRITON:
                 unsupported.append("speculative decoding without Triton")
             if speculative_config.method in (

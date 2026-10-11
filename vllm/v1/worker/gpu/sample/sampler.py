@@ -40,6 +40,11 @@ from vllm.v1.worker.gpu.states import RequestState
 
 
 class Sampler:
+    sampling_states_cls: type[SamplingStates] = SamplingStates
+    logit_bias_cls: type[LogitsProcessor] = LogitBiasState
+    penalties_cls: type[LogitsProcessor] = PenaltiesState
+    bad_words_cls: type[LogitsProcessor] = BadWordsState
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -59,12 +64,12 @@ class Sampler:
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
-        self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
+        self.sampling_states = self.sampling_states_cls(max_num_reqs, vocab_size)
 
         lp_req_state = LogitsProcRequestState.from_request_state(req_states)
-        self.penalties_state = PenaltiesState(vllm_config, lp_req_state)
-        logit_bias_state = LogitBiasState(vllm_config, lp_req_state)
-        bad_words_state = BadWordsState(vllm_config, lp_req_state)
+        self.penalties_state = self.penalties_cls(vllm_config, lp_req_state)
+        logit_bias_state = self.logit_bias_cls(vllm_config, lp_req_state)
+        bad_words_state = self.bad_words_cls(vllm_config, lp_req_state)
 
         # List order is pipeline order: bias adds, penalties scale, so the
         # two do not commute.

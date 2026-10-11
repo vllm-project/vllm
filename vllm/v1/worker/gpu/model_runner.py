@@ -187,6 +187,7 @@ logger = init_logger(__name__)
 
 class GPUModelRunner(LoRAModelRunnerMixin):
     sampler_cls: type[Sampler] = Sampler
+    block_tables_cls: type[BlockTables] = BlockTables
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -684,7 +685,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
         )
 
-        self.block_tables = BlockTables(
+        self.block_tables = self.block_tables_cls(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
@@ -1676,7 +1677,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         output_bin_counts = None
         if self.is_last_pp_rank:
             assert self.sampler is not None
-            output_bin_counts = self.sampler.penalties_state.output_bin_counts
+            # None when the penalties processor keeps no device bin counts.
+            output_bin_counts = getattr(
+                self.sampler.penalties_state, "output_bin_counts", None
+            )
         post_update(
             idx_mapping,
             self.req_states.num_computed_tokens.gpu,

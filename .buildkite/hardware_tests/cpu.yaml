@@ -121,10 +121,11 @@ steps:
   - vllm/platforms/cpu.py
   - tests/v1/e2e/test_cpu_model_runner_v2.py
   - tests/v1/worker/test_cpu_sampler.py
+  - tests/v1/worker/test_gpu_block_table.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
-      pytest -x -v -s tests/v1/worker/test_cpu_sampler.py tests/v1/e2e/test_cpu_model_runner_v2.py"
+      pytest -x -v -s tests/v1/worker/test_cpu_sampler.py tests/v1/worker/test_gpu_block_table.py tests/v1/e2e/test_cpu_model_runner_v2.py"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
