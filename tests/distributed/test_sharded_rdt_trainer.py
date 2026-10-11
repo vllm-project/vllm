@@ -471,6 +471,10 @@ class TestSyncIndexPlumbing:
         engine._proc_error = None
         engine._pending_frees = []
         engine._cached_plan = _CallPlan(chunks=[], pre_free=[0, 1])
+        engine._completed_syncs = 0
+        engine._ring_depth = 1
+        engine._lanes = 1
+        engine._lane_cursors = [0]
         engine._router = SimpleNamespace(
             free_group=lambda group_idx, sync_idx: (
                 calls.append((group_idx, sync_idx)) or []
