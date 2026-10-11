@@ -39,6 +39,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+from vllm.tool_parsers.utils import get_function_tools, require_function_tools
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -78,25 +79,65 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
     }
 )
 VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
-    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "plamo3"}
+    {"glm_4_7", "hermes", "hy_v4", "kimi_k3", "longcat", "plamo3"}
 )
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
 
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
+_BUILTIN_TOOL_STRUCTURAL_TAG_MODELS: set[str] = set()
 
 
 def register_vllm_structural_tag(
     model: str,
+    *,
+    builtin_tools: bool = False,
 ) -> Callable[[StructuralTagBuilder], StructuralTagBuilder]:
-    """Register a vLLM-owned structural tag builder."""
+    """Register a vLLM-owned structural tag builder.
+
+    Args:
+        model: Structural tag model key.
+        builtin_tools: Whether the model can call non-function tools, so its
+            builder receives every request tool instead of only the function
+            tools from ``get_function_tools``.
+
+    """
 
     def decorator(func: StructuralTagBuilder) -> StructuralTagBuilder:
         _VLLM_STRUCTURAL_TAG_REGISTRY[model] = func
+        if builtin_tools:
+            _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS.add(model)
         return func
 
     return decorator
+
+
+def get_structural_tag_tools(
+    model: str,
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+    tool_choice: ToolChoice,
+) -> Sequence[ChatCompletionToolsParam | ResponsesTool]:
+    """Return the tools a structural tag for ``model`` lets the model call.
+
+    Most models are only shown function tools, so their grammar must cover
+    exactly those: a tool missing from the prompt cannot be called, and one
+    missing from the grammar is shown but blocked.
+
+    Raises:
+        VLLMValidationError: ``tool_choice`` requires a call, but the model
+            has no tool it can call.
+
+    """
+    if model in _BUILTIN_TOOL_STRUCTURAL_TAG_MODELS:
+        return tools
+    if (
+        tool_choice is None
+        or tool_choice == "auto"
+        or getattr(tool_choice, "mode", None) == "auto"
+    ):
+        return get_function_tools(tools)
+    return require_function_tools(tools)
 
 
 def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
@@ -164,6 +205,9 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
+    tools = get_structural_tag_tools(model, tools, tool_choice)
+    if not tools:
+        return None
     tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None
@@ -302,15 +346,19 @@ def get_function_parameters(function) -> dict[str, Any] | bool:
     return function.parameters if function.parameters is not None else True
 
 
-def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
+def _hermes_tool_tags(
+    tools: list[FunctionToolParam],
+    start_tag: str,
+    end_tag: str,
+) -> list[TagFormat]:
     arguments_field_prefix = '", "arguments": '
     formats = [
         # <tool_call>
         # {"name": "t1", "arguments": {"q": "v"}}
         # </tool_call>
-        ('<tool_call>\n{"name": "', "}\n</tool_call>"),
+        (start_tag + '\n{"name": "', "}\n" + end_tag),
         # <tool_call>{"name": "t1", "arguments": {"q": "v"}}</tool_call>
-        ('<tool_call>{"name": "', "}</tool_call>"),
+        (start_tag + '{"name": "', "}" + end_tag),
     ]
 
     return [
@@ -326,6 +374,36 @@ def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
     ]
 
 
+def _hermes_style_structural_tag(
+    tools: list[FunctionToolParam],
+    tool_choice: SimplifiedToolChoice,
+    start_tag: str,
+    end_tag: str,
+) -> StructuralTag:
+    tags = _hermes_tool_tags(tools, start_tag, end_tag)
+    if tool_choice == "auto":
+        suffix_tag = (
+            TriggeredTagsFormat(triggers=[start_tag], tags=tags)
+            if tags
+            else AnyTextFormat()
+        )
+    elif tool_choice == "forced":
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=True,
+        )
+    else:
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+        )
+
+    return StructuralTag(format=suffix_tag)
+
+
 @register_vllm_structural_tag("hermes")
 def get_hermes_structural_tag(
     tools: list[FunctionToolParam],
@@ -335,31 +413,23 @@ def get_hermes_structural_tag(
     token_suffix: str = "",
 ) -> StructuralTag:
     del builtin_tools, reasoning, token_suffix
+    return _hermes_style_structural_tag(
+        tools, tool_choice, "<tool_call>", "</tool_call>"
+    )
 
-    tool_call_trigger = "<tool_call>"
 
-    if tool_choice == "auto":
-        tags = _hermes_tool_tags(tools)
-        suffix_tag = (
-            TriggeredTagsFormat(triggers=[tool_call_trigger], tags=tags)
-            if tags
-            else AnyTextFormat()
-        )
-    elif tool_choice == "forced":
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=_hermes_tool_tags(tools),
-            separator="",
-            at_least_one=True,
-            stop_after_first=True,
-        )
-    else:
-        suffix_tag = TagsWithSeparatorFormat(
-            tags=_hermes_tool_tags(tools),
-            separator="",
-            at_least_one=True,
-        )
-
-    return StructuralTag(format=suffix_tag)
+@register_vllm_structural_tag("longcat")
+def get_longcat_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    del builtin_tools, reasoning, token_suffix
+    return _hermes_style_structural_tag(
+        tools, tool_choice, "<longcat_tool_call>", "</longcat_tool_call>"
+    )
 
 
 def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:

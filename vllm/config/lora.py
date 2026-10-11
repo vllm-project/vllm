@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from typing_extensions import Self
 
 from vllm import envs
 from vllm.config.utils import config
@@ -81,8 +80,9 @@ class LoRAConfig:
     """If True, load MoE expert adapters in the "shared-outer" layout, where the
     gate/up (`w1`/`w3`) lora_A and the down (`w2`) lora_B are shared across all
     experts (stored once with expert-dim 1) instead of per-expert. The shared
-    factors are broadcast to the expert count at kernel time. Only meaningful for
-    MoE models whose adapters use this layout; ignored otherwise."""
+    factors are broadcast to the expert count at kernel time. 3D-weight MoE
+    models use `FusedMoEWithLoRA` for this layout. Only meaningful for MoE
+    models whose adapters use this layout; ignored otherwise."""
     max_lora_cls_labels: int | None = Field(default=None, ge=1)
     """Maximum output size for LoRA classification heads. Defaults to the
     base classification head size."""

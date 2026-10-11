@@ -54,19 +54,20 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
     StopParam,
+    TopLogprobsParam,
     validate_cache_salt,
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -158,6 +159,51 @@ def _default_input_image_details(value: Any) -> Any:
     return {**value, "content": new_content} if changed else value
 
 
+def _tool_field(tool: Any, field: str) -> Any:
+    return tool.get(field) if isinstance(tool, dict) else getattr(tool, field, None)
+
+
+def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
+    """Resolve a named tool choice to the flat ``<namespace>__<name>`` form."""
+    from vllm.tool_parsers.utils import flat_namespace_tool_name
+
+    exact_names: set[str] = set()
+    local_names: dict[str, list[str]] = {}
+    for tool in tools:
+        if _tool_field(tool, "type") == "namespace":
+            namespace = _tool_field(tool, "name")
+            namespaced_tools = _tool_field(tool, "tools")
+            if not isinstance(namespaced_tools, list) or not isinstance(namespace, str):
+                return tool_name
+            for namespaced_tool in namespaced_tools:
+                local_name = _tool_field(namespaced_tool, "name")
+                if not isinstance(local_name, str):
+                    continue
+                flat_name = flat_namespace_tool_name(namespace, local_name)
+                exact_names.add(flat_name)
+                local_names.setdefault(local_name, []).append(flat_name)
+        else:
+            name = _tool_field(tool, "name")
+            if isinstance(name, str):
+                exact_names.add(name)
+    if tool_name in exact_names:
+        return tool_name
+    candidates = local_names.get(tool_name, [])
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise VLLMValidationError(
+            f"Tool choice '{tool_name}' is ambiguous: it is defined in more "
+            f"than one namespace ({', '.join(candidates)}). Select it by its "
+            "full '<namespace>__<name>' name.",
+            parameter="tool_choice",
+        )
+    raise VLLMValidationError(
+        "Tool choice 'function' not found in 'tools' parameter.",
+        parameter="tool_choice",
+    )
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -210,9 +256,10 @@ class ResponsesRequest(OpenAIBaseModel):
     text: ResponseTextConfig | None = None
     tool_choice: ToolChoice = "auto"
     tools: list[Tool] = Field(default_factory=list)
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     top_p: float | None = None
     top_k: int | None = None
+    min_p: float | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True
@@ -245,7 +292,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
-    watermarking: bool = True
+    watermarking: bool | None = None
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
@@ -283,6 +330,17 @@ class ResponsesRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
+        ),
+    )
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
@@ -317,6 +375,7 @@ class ResponsesRequest(OpenAIBaseModel):
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []
+    stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -397,6 +456,7 @@ class ResponsesRequest(OpenAIBaseModel):
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
+        "min_p": 0.0,
     }
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -447,6 +507,10 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k = default_sampling_params.get(
                 "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
             )
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
 
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
@@ -472,9 +536,11 @@ class ResponsesRequest(OpenAIBaseModel):
             watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
+            stop_token_ids=self.stop_token_ids,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
@@ -661,31 +727,14 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         elif is_named_tool_choice and tools is not None:
             tool_name = tool_choice.get("name")
-            tool_names = set()
-            for tool in tools:
-                if isinstance(tool, dict):
-                    if tool.get("type") == "namespace":
-                        namespace = tool.get("name")
-                        namespaced_tools = tool.get("tools")
-                        if not isinstance(namespaced_tools, list):
-                            return data
-                        for namespaced_tool in namespaced_tools:
-                            namespaced_name = (
-                                namespaced_tool.get("name")
-                                if isinstance(namespaced_tool, dict)
-                                else getattr(namespaced_tool, "name", None)
-                            )
-                            tool_names.add(namespaced_name)
-                            tool_names.add(f"{namespace}__{namespaced_name}")
-                    else:
-                        tool_names.add(tool.get("name"))
-                else:
-                    tool_names.add(getattr(tool, "name", None))
-            if not tool_name or tool_name not in tool_names:
+            if not tool_name:
                 raise VLLMValidationError(
                     "Tool choice 'function' not found in 'tools' parameter.",
                     parameter="tool_choice",
                 )
+            resolved = _resolve_named_tool_choice(tool_name, tools)
+            if resolved != tool_name:
+                data["tool_choice"] = {**tool_choice, "name": resolved}
 
         return data
 
