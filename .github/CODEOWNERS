@@ -45,13 +45,9 @@
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/common @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
-/vllm/entrypoints/scale_out/token_in_token_out @aoshen02
-/vllm/entrypoints/scale_out/factories.py @aoshen02
 
 # Rust Frontend
 /rust/ @BugenZhao @njhill
-/rust/src/server/src/routes.rs @BugenZhao @njhill @aoshen02
-/rust/src/server/src/routes/inference @BugenZhao @njhill @aoshen02
 /rust/src/bench @esmeetu
 /tools/build_rust.sh @BugenZhao @njhill
 /rust-toolchain.toml @BugenZhao @njhill
