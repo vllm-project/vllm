@@ -6,6 +6,8 @@ import pytest
 import torch
 
 import vllm.lora.ops.triton_ops as triton_ops
+import vllm.lora.ops.triton_ops.lora_shrink_op as shrink_op
+import vllm.lora.ops.triton_ops.utils as lora_utils
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
@@ -414,6 +416,57 @@ test_params = {
 DTYPES = [torch.float16, torch.bfloat16]
 DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize(
+    "batches,hidden_size,nslices,expected_grid_m",
+    [
+        (32, 255, 1, 1),  # One masked K block; direct store.
+        (32, 256, 3, 1),  # One full K block; direct store.
+        (32, 257, 3, 2),  # Two splits with a masked tail.
+        (32, 4096, 1, 16),
+        (32, 14337, 1, 57),  # Non-power-of-two split count.
+        (32, 16384, 1, 64),  # All configured splits contribute.
+        (32, 32768, 1, 64),  # Multiple K iterations per split.
+        (128, 4096, 1, 32),  # Larger-batch config: four M blocks, eight splits.
+    ],
+)
+def test_lora_shrink_split_k_boundaries(
+    monkeypatch, batches, hidden_size, nslices, expected_grid_m, dtype, device
+):
+    """Launch only useful K splits while preserving the matmul result."""
+    monkeypatch.setattr(shrink_op, "is_batch_invariant", False)
+    monkeypatch.setattr(lora_utils, "is_batch_invariant", False)
+    monkeypatch.setattr(lora_utils, "load_lora_op_config", lambda *args: None)
+    monkeypatch.setattr(
+        shrink_op, "get_lora_op_configs", lora_utils.get_lora_op_configs.__wrapped__
+    )
+    kernel, grids = shrink_op._lora_shrink_kernel, []
+
+    class RecordShrink:
+        def __getitem__(self, grid):
+            grids.append(grid)
+            return kernel[grid]
+
+    monkeypatch.setattr(shrink_op, "_lora_shrink_kernel", RecordShrink())
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(0)
+    check_lora_shrink_kernel(
+        batches=batches,
+        num_loras=4,
+        rank=16,
+        hidden_size=hidden_size,
+        nslices=nslices,
+        dtype=dtype,
+        device=device,
+        seq_length=1,
+        scaling=0.5,
+    )
+    assert len(grids) == 1
+    assert grids[0][:2] == (expected_grid_m, nslices)
 
 
 @pytest.mark.parametrize("batches", test_params["batches"])
