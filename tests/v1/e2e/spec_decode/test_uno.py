@@ -1823,6 +1823,18 @@ def test_uno_greedy_matches_base_model_to_max_model_len(
             "num_speculative_tokens": k,
         },
     ) as speculative:
+        # A request carrying a LoRA adapter, here one reusing Uno's own id, is
+        # refused before it is queued and the engine keeps serving.
+        from vllm.exceptions import VLLMValidationError
+        from vllm.lora.request import LoRARequest
+        from vllm.v1.worker.gpu.spec_decode.uno import UNO_LORA_ID
+
+        with pytest.raises(VLLMValidationError, match="request-specific LoRA"):
+            speculative.llm.chat(
+                prompts[:1],
+                **chat_kwargs,
+                lora_request=LoRARequest("user", UNO_LORA_ID, uno_adapter_path),
+            )
         speculative.llm.llm_engine.collective_rpc(_install_draft_slot_audit)
         spec_outputs = speculative.llm.chat(prompts, **chat_kwargs)
         metrics = speculative.llm.get_metrics()
