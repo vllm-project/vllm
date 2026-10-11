@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """One GLM-5.3-Flash MoE layer's tensors, as views of vLLM's loaded parameters
-(the router excepted: it is packed once into the kernel's bf16 tiles)."""
+(the router and a shared expert stored apart from the routed ones excepted: they
+are packed once into the kernel's layouts)."""
 
 from __future__ import annotations
 
@@ -47,8 +48,9 @@ def experts_backend_reason(layer: nn.Module) -> str | None:
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
 
     mlp = layer.mlp
-    if not getattr(mlp, "is_fused_shared_expert_enabled", False):
-        return "needs VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1"
+    fused = getattr(mlp, "is_fused_shared_expert_enabled", False)
+    if not fused and getattr(mlp, "shared_experts", None) is None:
+        return "needs a shared expert"
     routed = getattr(getattr(mlp, "experts", None), "routed_experts", None)
     if routed is None:
         return "needs a routed MoE"
@@ -56,6 +58,34 @@ def experts_backend_reason(layer: nn.Module) -> str | None:
     if backend != Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         return f"needs the AITER_MXFP4_MXFP4 MoE backend, not {backend}"
     return None
+
+
+def _mxfp4_rows(name: str, linear: nn.Module, rows: int, k: int):
+    """A Quark MXFP4 linear in the AITER Triton GEMM layout (weight ``[rows, K/2]``,
+    scale stored ``[K/32, rows]``); returns the weight and a ``[rows, K/32]`` scale."""
+    w, sc = linear.weight, getattr(linear, "weight_scale", None)
+    if (
+        sc is None
+        or w.element_size() != 1
+        or sc.element_size() != 1
+        or tuple(w.shape) != (rows, k // 2)
+        or tuple(sc.shape) != (k // 32, rows)
+    ):
+        got = None if sc is None else tuple(sc.shape)
+        raise ValueError(
+            f"needs shared_experts.{name} as row-major MXFP4 {(rows, k // 2)} with a "
+            f"{(k // 32, rows)} scale (VLLM_ROCM_USE_AITER_FP4_ASM_GEMM off), got "
+            f"{w.dtype} {tuple(w.shape)} and scale {got}"
+        )
+    return w.view(torch.uint8), sc.view(torch.uint8).T.contiguous()
+
+
+def _shared_expert(mlp: nn.Module, inter: int):
+    from vllm.models.glm5next.amd.ops.mono.packing import pack_shared_expert
+
+    gate_up = _mxfp4_rows("gate_up_proj", mlp.gate_up_proj, 2 * inter, HIDDEN)
+    down = _mxfp4_rows("down_proj", mlp.down_proj, HIDDEN, inter)
+    return pack_shared_expert(*gate_up, *down)
 
 
 def layer_weights(layer: nn.Module, inter: int) -> FlashFfnWeights:
@@ -67,7 +97,8 @@ def layer_weights(layer: nn.Module, inter: int) -> FlashFfnWeights:
         raise ValueError(why)
     mlp = layer.mlp
     routed = mlp.experts.routed_experts
-    E = N_EXPERTS + 1
+    fused = mlp.is_fused_shared_expert_enabled
+    E = N_EXPERTS + 1 if fused else N_EXPERTS
     w_ug = _bytes("w13_weight", routed.w13_weight, (E, 2 * inter, HIDDEN // 2))
     s_ug = _bytes(
         "w13_weight_scale", routed.w13_weight_scale, (E, 2 * inter, HIDDEN // 32)
@@ -77,6 +108,10 @@ def layer_weights(layer: nn.Module, inter: int) -> FlashFfnWeights:
     for name, t in (("w13_weight", routed.w13_weight), ("w2_weight", routed.w2_weight)):
         if not getattr(t, "is_shuffled", False):
             raise ValueError(f"needs {name} in AITER's shuffled layout")
+    if fused:
+        shared = (w_ug[N_EXPERTS], s_ug[N_EXPERTS], w_dn[N_EXPERTS], s_dn[N_EXPERTS])
+    else:
+        shared = _shared_expert(mlp.shared_experts, inter)
     gate = _need(
         "gate.weight",
         mlp.gate.weight,
@@ -99,6 +134,10 @@ def layer_weights(layer: nn.Module, inter: int) -> FlashFfnWeights:
         s_ug=s_ug,
         w_dn=w_dn,
         s_dn=s_dn,
+        w_sh_ug=shared[0],
+        s_sh_ug=shared[1],
+        w_sh_dn=shared[2],
+        s_sh_dn=shared[3],
         hc_fn=_need(
             "hc_ffn_fn", layer.hc_ffn_fn, (N_MIX, HC_MULT * HIDDEN), (torch.float32,)
         ),

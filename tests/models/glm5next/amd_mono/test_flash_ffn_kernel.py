@@ -126,6 +126,13 @@ class _Layer:
             s2[:, :, lo // 32 : hi // 32].contiguous().view(E * HIDDEN, -1)
         ).view(E, HIDDEN, -1)
         self.k_wr = pack_bf16(self.w_r)
+        # the shared expert as vLLM stores it apart: row-major, scale per row
+        self.sh_rows = (
+            rows(q13)[N_EXPERTS],
+            rows(s13)[N_EXPERTS],
+            q2[N_EXPERTS, :, lo // 2 : hi // 2].contiguous(),
+            s2[N_EXPERTS, :, lo // 32 : hi // 32].contiguous(),
+        )
         nmix = HC_MULT * (2 + HC_MULT)
         self.fn = torch.randn(nmix, HC_MULT * HIDDEN, generator=g, device=device) * 0.01
         self.scale = torch.rand(3, generator=g, device=device) + 0.5
@@ -135,16 +142,28 @@ class _Layer:
         ).bfloat16()
         self.g = g
 
-    def weights(self):
+    def weights(self, separate: bool = False):
+        from vllm.models.glm5next.amd.ops.mono.config import N_EXPERTS
         from vllm.models.glm5next.amd.ops.mono.ffn.op import FlashFfnWeights
+        from vllm.models.glm5next.amd.ops.mono.packing import pack_shared_expert
 
+        routed = (self.k_w13, self.k_s13, self.k_w2, self.k_s2)
+        if separate:
+            shared = pack_shared_expert(*self.sh_rows)
+            routed = tuple(t[:N_EXPERTS].contiguous() for t in routed)
+        else:
+            shared = tuple(t[N_EXPERTS] for t in routed)
         return FlashFfnWeights(
             w_r=self.k_wr,
             bias=self.bias,
-            w_ug=self.k_w13,
-            s_ug=self.k_s13,
-            w_dn=self.k_w2,
-            s_dn=self.k_s2,
+            w_ug=routed[0],
+            s_ug=routed[1],
+            w_dn=routed[2],
+            s_dn=routed[3],
+            w_sh_ug=shared[0],
+            s_sh_ug=shared[1],
+            w_sh_dn=shared[2],
+            s_sh_dn=shared[3],
             hc_fn=self.fn,
             hc_scale=self.scale,
             hc_base=self.base,
@@ -200,7 +219,7 @@ def _runtime(width, rank, tp, poll_limit, launches=1):
     )
 
 
-def _check(rank: int, tp: int, device) -> None:
+def _check(rank: int, tp: int, device, separate: bool) -> None:
     import torch.distributed as dist
 
     from vllm.distributed import get_tp_group
@@ -209,9 +228,10 @@ def _check(rank: int, tp: int, device) -> None:
 
     lay = _Layer(rank, tp, device)
     group = get_tp_group().cpu_group
-    for S in ROWS:
+    # 16 TP2 rows overflow the down stage's LDS
+    for S in ROWS if tp > 2 else ROWS[:-1]:
         rt = _runtime(S, rank, tp, 20_000_000)
-        op = FlashFfnOp(rt, lay.weights(), 0)
+        op = FlashFfnOp(rt, lay.weights(separate), 0)
         g = lay.g
         parts = [
             torch.randn(S, HIDDEN, generator=g, device=device).bfloat16()
@@ -253,6 +273,17 @@ def _check(rank: int, tp: int, device) -> None:
         routed = sel.view(S, MOE_SLOTS)[:, 1:].sort(-1).values
         assert torch.equal(routed, order.int().sort(-1).values), f"S={S}: routing"
         assert _rel(x, ref) < 5e-3, f"S={S}: MoE {_rel(x, ref)}"
+
+        # the packed shared expert computes exactly what the fused slot does
+        if separate:
+            dist.barrier(group)
+            rt.advance_step()
+            fused = FlashFfnOp(rt, lay.weights(), 0)
+            y = [t.clone() for t in fused.launch(parts[rank], res, post, comb)]
+            torch.accelerator.synchronize()
+            assert all(torch.equal(a, b) for a, b in zip(y, (x, r, p, c))), (
+                f"S={S}: packed shared expert differs from the fused one"
+            )
 
         # a non-finite padding row stays in its own row
         bad = parts[rank].clone()
@@ -319,7 +350,7 @@ def _check_fault(rank: int, tp: int, device) -> None:
     rt.close()
 
 
-def _worker(check):
+def _worker(check, *args):
     @ray.remote(num_gpus=1, max_calls=1)
     def run(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         with monkeypatch.context() as m:
@@ -330,18 +361,20 @@ def _worker(check):
                 tp_size, pp_size, rank, distributed_init_port
             )
             ensure_model_parallel_initialized(tp_size, pp_size)
-            check(rank, tp_size, device)
+            check(rank, tp_size, device, *args)
 
     return run
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
-@pytest.mark.parametrize("tp", [4, 8])
-def test_ffn_layer_matches_vllm_ops(monkeypatch: pytest.MonkeyPatch, tp: int):
+@pytest.mark.parametrize("tp, separate", [(2, True), (4, False), (4, True), (8, False)])
+def test_ffn_layer_matches_vllm_ops(
+    monkeypatch: pytest.MonkeyPatch, tp: int, separate: bool
+):
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
-    multi_process_parallel(monkeypatch, tp, 1, _worker(_check))
+    multi_process_parallel(monkeypatch, tp, 1, _worker(_check, separate))
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the Flash MonoKernel targets CDNA4")
