@@ -921,6 +921,110 @@ def _w8a8_triton_block_scaled_mm(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
+_W8A8_PER_TOKEN_FP8_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs")
+
+
+def get_w8a8_per_token_fp8_config_filename(
+    N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> str:
+    return (
+        f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8_per_token,"
+        f"input_dtype={str(input_dtype).removeprefix('torch.')},"
+        f"out_dtype={str(out_dtype).removeprefix('torch.')}.json"
+    )
+
+
+@functools.lru_cache
+def get_w8a8_per_token_fp8_configs(
+    N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> dict[int, dict[str, int]] | None:
+    """Load measured W8A8 per-token configs from the shared tuning directory."""
+    path = os.path.join(
+        _W8A8_PER_TOKEN_FP8_CONFIG_DIR,
+        get_w8a8_per_token_fp8_config_filename(
+            N, K, device_name, input_dtype, out_dtype
+        ),
+    )
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        logger.info("Using configuration from %s for W8A8 per-token FP8 kernel.", path)
+        return {int(m): config for m, config in json.load(f).items()}
+
+
+def get_w8a8_per_token_fp8_config(
+    M: int, N: int, K: int, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> dict[str, int] | None:
+    configs = get_w8a8_per_token_fp8_configs(
+        N, K, get_device_name_as_file_name(), input_dtype, out_dtype
+    )
+    # Partial decode tuning must not override unmeasured prefill sizes.
+    if not configs or not min(configs) <= M <= max(configs):
+        return None
+    config = configs[min(configs, key=lambda m: abs(m - M))]
+    if M not in configs:
+        # Scheduling choices were measured only at their exact M, unlike tiles.
+        config = {
+            key: value
+            for key, value in config.items()
+            if key not in ("GROUP_M", "N_STRIPE", "UNMASKED_LOADS")
+        }
+    return config
+
+
+def w8a8_triton_per_token_scaled_mm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.bfloat16,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Apply per-token/per-channel FP8 scales to A[M,K] @ B[K,N]."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
+        triton_scaled_mm,
+    )
+
+    config = None
+    if A.stride(1) == 1 and B.stride(0) == 1:
+        config = get_w8a8_per_token_fp8_config(
+            A.size(0), B.size(1), A.size(1), A.dtype, output_dtype
+        )
+    if config is None:
+        return triton_scaled_mm(A, B, As, Bs, output_dtype, bias)
+
+    # Configs select the device/dtypes; retain the measured scale/bias contract.
+    group_m, n_stripe, unmasked_loads = 1, 0, False
+    if As.dtype == Bs.dtype == torch.float32:
+        n_stripe = config.get("N_STRIPE", 0)
+        unmasked_loads = bool(config.get("UNMASKED_LOADS", False))
+        if (
+            bias is None
+            and As.numel() != 1
+            and Bs.numel() != 1
+            and As.is_contiguous()
+            and Bs.is_contiguous()
+        ):
+            group_m = config.get("GROUP_M", 1)
+    return triton_scaled_mm(
+        A,
+        B,
+        As,
+        Bs,
+        output_dtype,
+        bias,
+        use_heuristic=False,
+        block_size_m=config["BLOCK_SIZE_M"],
+        block_size_n=config["BLOCK_SIZE_N"],
+        block_size_k=config["BLOCK_SIZE_K"],
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+        group_m=group_m,
+        n_stripe=n_stripe,
+        unmasked_loads=unmasked_loads,
+    )
+
+
 @functools.lru_cache
 def get_w8a8_block_fp8_configs(
     N: int, K: int, block_n: int, block_k: int
