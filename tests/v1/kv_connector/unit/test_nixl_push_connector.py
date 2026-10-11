@@ -972,7 +972,6 @@ class TestPushWriterNotifs:
         notif = producer._completion_notif("p-req", "d:req")
 
         consumer = _StubWriterWorker.fresh()
-        consumer.transfer_topo = MagicMock()
         consumer._recving_metadata["d:req"] = MagicMock(pp_size=1)
         consumer._pending_completion_notifs.put(notif)
         consumer._get_new_notifs()
