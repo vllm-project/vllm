@@ -84,6 +84,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.models.common import mono
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_reduce_scatter,
@@ -113,6 +114,8 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
     assert kpool is not None
     return round_up(topk + kpool - 1, 128)
 
+
+MONO_SPEC = "vllm.models.glm5next.amd.mono.spec:MONO_SPEC"
 
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
@@ -770,6 +773,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        self.mono: mono.MonoModel | None = None
+        mono.configure(vllm_config, MONO_SPEC)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -832,8 +837,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 if self.is_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual, post, comb = layer(
-                positions, hidden_states, residual, post, comb
+            hidden_states, residual, post, comb = mono.forward_layer(
+                self.mono, idx, layer, positions, hidden_states, residual, post, comb
             )
 
         if not get_pp_group().is_last_rank:
@@ -1144,8 +1149,16 @@ class Glm5NextForCausalLM(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        mono.after_step(self.model.mono)
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def process_weights_after_loading(self) -> None:
+        if self.model.mono is not None:
+            raise ValueError(
+                "VLLM_ROCM_MONO_DECODE: reloading weights is not supported"
+            )
+        self.model.mono = mono.attach(self.model, self.vllm_config, MONO_SPEC)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -1250,6 +1263,9 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
