@@ -6,7 +6,12 @@
 
 """Compile-time storage layout and CTA schedule of the GLM-5.3-Flash FFN launch."""
 
-from vllm.models.glm5next.amd.ops.mono.config import HIDDEN, MOE_SLOTS, N_EXPERTS
+from vllm.models.glm5next.amd.ops.mono.config import (
+    HC_MULT,
+    HIDDEN,
+    MOE_SLOTS,
+    N_EXPERTS,
+)
 from vllm.models.glm5next.amd.ops.mono.layout import (
     BLOCKS,
     ROUTER_TILE,
@@ -16,9 +21,12 @@ from vllm.models.glm5next.amd.ops.mono.layout import (
 )
 
 # Stages a bounded mailbox poll can expire in, one error word each.
-POLL_STAGES = ("seam", "router", "ug", "down")
+POLL_STAGES = ("seam", "gate", "router", "ug", "down")
 
 N_ROW_TILES = HIDDEN // ROW_TILE
+# mix projection outputs (pre, post, comb) plus one sum of squares a tile
+N_MIX = HC_MULT * (2 + HC_MULT)
+PMIX = N_MIX + 1
 N_ROUTER = N_EXPERTS // ROUTER_TILE
 XQ_BLOCKS = HIDDEN // 128
 XQ_GROUPS = HIDDEN // 32
@@ -57,6 +65,8 @@ def layout(samples: int, npes: int, inter: int):
     """Byte offsets of the per-rank scratch and the symmetric peer buffer."""
     pair_bytes = 8
     items = [
+        ("rnew", samples * HC_MULT * HIDDEN // 2 * pair_bytes),
+        ("pmix", samples * N_ROW_TILES * PMIX * pair_bytes),
         ("a", samples * HIDDEN // 2 * pair_bytes),
         ("scores", samples * N_EXPERTS * pair_bytes),
         ("xq", samples * HIDDEN // 4 * pair_bytes),
@@ -77,11 +87,12 @@ def layout(samples: int, npes: int, inter: int):
     part = npes * samples * HIDDEN * pair_bytes
     region = 2 * part
     symmetric = {
-        "ffn": 0,
+        "attn": 0,
+        "ffn": region,
         "_part_stride": part,
         # one word per source rank, set on rank 0 by a rank whose poll expired
-        "poll_xrank": region,
-        "_bytes": region + _align(4 * npes),
+        "poll_xrank": 2 * region,
+        "_bytes": 2 * region + _align(4 * npes),
     }
     return scratch, symmetric
 
@@ -90,6 +101,7 @@ def stage_tasks(samples: int, inter: int):
     """``(stage name, task count)`` pairs in execution order."""
     return [
         ("seam", N_ROW_TILES),
+        ("gate", samples),
         ("router", samples * N_ROUTER),
         (
             "ug",
