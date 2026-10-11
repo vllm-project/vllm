@@ -343,17 +343,6 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
-        """Positions a later request replaying this prompt can resume at.
-
-        See ``replay_boundaries``.
-        """
-        return replay_boundaries(
-            request.num_prompt_tokens,
-            self.scheduler_block_size,
-            use_eagle=bool(self.eagle_group_ids),
-        )
-
     def get_num_cacheable_tokens(
         self, num_computed_tokens: int, kv_cache_group_id: int
     ) -> int:
@@ -372,7 +361,11 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
 
         """
-        boundaries = self.get_replay_boundaries(request)
+        boundaries = replay_boundaries(
+            request.num_prompt_tokens,
+            self.scheduler_block_size,
+            use_eagle=bool(self.eagle_group_ids),
+        )
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue

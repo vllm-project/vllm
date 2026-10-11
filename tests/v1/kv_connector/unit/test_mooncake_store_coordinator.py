@@ -425,7 +425,7 @@ def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
 
 def test_store_mask_retention_interval_zero_eagle_keeps_lookup_tail():
     """With EAGLE the replay boundary sits one scheduler block lower, as in
-    core's ``get_replay_boundaries``: the lookup matches that block and drops
+    core's ``replay_boundaries``: the lookup matches that block and drops
     back from it. The retained SWA tail must span the ``need`` contiguous
     blocks the lookup requires (cdiv(8 - 1, 8) + 1 = 2 here); the non-EAGLE
     boundary leaves only one of them inside the saved prefix."""
