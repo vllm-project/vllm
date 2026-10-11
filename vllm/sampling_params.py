@@ -641,9 +641,7 @@ class SamplingParams(
             "stream_interval",
         ):
             value = getattr(self, name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int)
-            ):
+            if value is not None and type(value) is not int:
                 raise VLLMValidationError(
                     f"{name} must be an int, got {type(value).__name__}.",
                     parameter=name,
