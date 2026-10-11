@@ -51,6 +51,40 @@ class AuxOutputSchedulerConnector:
         self._finished_requests: dict[str, PackedBlockHashes | None] = {}
         self._generation = 0
 
+    @staticmethod
+    def _model_prompt_tokens(request: Request) -> int:
+        """Return the decoder's token count for a possibly multimodal prompt.
+
+        ``Request.num_prompt_tokens`` counts the prompt token ids supplied by
+        the client.  Some multimodal processors replace one placeholder id
+        with a longer decoder placeholder range; the worker captures routing
+        for that expanded range, while the scheduler request still retains
+        the original count.  Keep the ordinary path unchanged and account for
+        expanded ranges only when their positions prove that the request is
+        still using the compact count.
+        """
+        prompt_tokens = request.num_prompt_tokens
+        if not request.mm_features:
+            return prompt_tokens
+
+        max_placeholder_end = max(
+            feature.mm_position.offset + feature.mm_position.length
+            for feature in request.mm_features
+        )
+        if max_placeholder_end <= prompt_tokens:
+            return prompt_tokens
+
+        # Multimodal placeholders are represented by one client-side token;
+        # their decoder ranges are the model-side spans captured by the worker.
+        expanded = prompt_tokens + sum(
+            max(0, feature.mm_position.length - 1) for feature in request.mm_features
+        )
+        return max(expanded, max_placeholder_end)
+
+    @classmethod
+    def _model_num_tokens(cls, request: Request) -> int:
+        return cls._model_prompt_tokens(request) + request.num_output_tokens
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -71,9 +105,11 @@ class AuxOutputSchedulerConnector:
             scheduled_requests[request_id] = max(
                 min(
                     request.sampling_params.routed_experts_prompt_start,
-                    request.num_prompt_tokens,
+                    self._model_prompt_tokens(request),
                 ),
-                0 if request.num_output_tokens == 0 else request.num_tokens - 1,
+                0
+                if request.num_output_tokens == 0
+                else self._model_num_tokens(request) - 1,
             )
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
@@ -113,7 +149,7 @@ class AuxOutputSchedulerConnector:
             f"auxiliary output worker output is missing {request_id}"
         )
         request_output = output[request_id]
-        token_end = request.num_tokens - 1
+        token_end = self._model_num_tokens(request) - 1
         local_end = token_end - request_output.token_start
         if local_end < 0:
             assert not request.is_finished(), (

@@ -32,6 +32,7 @@ from vllm.distributed.aux_output_connector.store import (
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
 )
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
@@ -92,6 +93,7 @@ class _SchedulerRequest:
     num_computed_tokens: int = 0
     num_in_flight_tokens: int = 0
     finished: bool = False
+    mm_features: list[SimpleNamespace] = field(default_factory=list)
     sampling_params: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(routed_experts_prompt_start=0)
     )
@@ -1420,6 +1422,29 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     routing = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
     output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
+    np.testing.assert_array_equal(connector.take_output(request, output), routing)
+
+
+def test_scheduler_connector_uses_expanded_multimodal_prompt_length():
+    connector = _make_connector()
+    request = _scheduler_request(
+        "multimodal",
+        [],
+        num_tokens=78,  # compact prompt (77) + one generated token
+        num_output_tokens=1,
+    )
+    request.mm_features = [
+        SimpleNamespace(mm_position=PlaceholderRange(offset=0, length=194))
+    ]
+
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [270]),
+        {request.request_id: request},
+    )
+    assert metadata.requests == {request.request_id: 270}
+
+    routing = np.arange(270 * 3 * 2, dtype=np.uint8).reshape(270, 3, 2)
+    output = {request.request_id: AuxRequestOutput(0, routing)}
     np.testing.assert_array_equal(connector.take_output(request, output), routing)
 
 
