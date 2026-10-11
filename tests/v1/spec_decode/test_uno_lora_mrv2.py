@@ -544,9 +544,14 @@ def test_speculator_refuses_user_adapters_after_binding():
 
     loaded: list[int] = []
     registered = {7}
+
+    def add_adapter(request) -> bool:
+        loaded.append(request.lora_int_id)
+        return True
+
     worker = SimpleNamespace(
         list_adapters=lambda: set(registered) | set(loaded),
-        add_adapter=lambda request: loaded.append(request.lora_int_id) or True,
+        add_adapter=add_adapter,
     )
     proposer = object.__new__(UnoSpeculator)
     proposer.lora_request = SimpleNamespace(lora_int_id=UNO_LORA_ID)
@@ -566,19 +571,24 @@ def test_set_lora_manager_installs_the_user_adapter_refusal():
 
     wrapper = FakePunicaWrapper()
     adapters: set[int] = set()
+
+    def add_adapter(request) -> bool:
+        adapters.add(request.lora_int_id)
+        return True
+
     manager = SimpleNamespace(
         lora_index_to_id=[None, None],
         lora_slots=2,
         vocab_size=16,
         _get_punica_wrapper=lambda _: wrapper,
         list_adapters=lambda: adapters,
-        add_adapter=lambda request: adapters.add(request.lora_int_id),
+        add_adapter=add_adapter,
         activate_adapter=lambda adapter_id: None,
     )
     worker = SimpleNamespace(
         _adapter_manager=manager,
         list_adapters=lambda: adapters,
-        add_adapter=lambda request: adapters.add(request.lora_int_id) or True,
+        add_adapter=add_adapter,
     )
     proposer = object.__new__(UnoSpeculator)
     proposer.k = 4
