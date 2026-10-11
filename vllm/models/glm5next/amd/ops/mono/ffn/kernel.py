@@ -122,6 +122,8 @@ def build_flash_ffn_kernel(
     into this rank's flag on rank 0 (``poll_xrank_addr``), then continues, so a
     stalled peer finishes the launch with wrong values instead of hanging. With
     ``poll_early_out`` every later wait of the same step returns at its first retry.
+    The shared expert is read from ``w_sh_*`` (one expert each), not the routed
+    tensors, so it may be fused into them or stored apart.
     """
     assert 2 <= S <= 16 and 1 <= launches_per_step <= LAYER_SLOTS
     assert poll_limit is None or poll_limit > 0
@@ -184,6 +186,10 @@ def build_flash_ffn_kernel(
         s_ug: Int64,
         w_dn: Int64,
         s_dn: Int64,
+        w_sh_ug: Int64,
+        s_sh_ug: Int64,
+        w_sh_dn: Int64,
+        s_sh_dn: Int64,
         scratch: Int64,
         sym: Int64,
         peers: Int64,
@@ -1120,20 +1126,20 @@ def build_flash_ffn_kernel(
                 w_rg = ((lane % 16) // 8) * (expert_inter // 16) + c // 2
                 w_ln = (lane & -16) | ((c % 2) * 8 + lane % 8)
 
-                def ug8_units(e, sample, live=None):
-                    if const_expr(live is None):
+                def ug8_units(e, sample, shared_live=None):
+                    if const_expr(shared_live is None):
                         rw = _rsrc(w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES))
                         rs = _rsrc(s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES))
                     else:
                         rw = bo.create_buffer_resource_from_addr(
-                            w_ug + fx.Int64(e) * fx.Int64(UG_W_BYTES),
-                            num_records_bytes=live.select(
+                            w_sh_ug,
+                            num_records_bytes=shared_live.select(
                                 fx.Int32(UG_W_BYTES), fx.Int32(0)
                             ),
                         )
                         rs = bo.create_buffer_resource_from_addr(
-                            s_ug + fx.Int64(e) * fx.Int64(UG_S_BYTES),
-                            num_records_bytes=live.select(
+                            s_sh_ug,
+                            num_records_bytes=shared_live.select(
                                 fx.Int32(UG_S_BYTES), fx.Int32(0)
                             ),
                         )
@@ -1191,7 +1197,7 @@ def build_flash_ffn_kernel(
                             lds_ld(dnw, sn * MOE_SLOTS + sl),
                         )
 
-                shared_pre = ug8_units(fx.Int32(SHARED), None, has_sh)
+                shared_pre = ug8_units(None, None, has_sh)
                 cur = ug8_units(_uniform(lds_ld(keys, slot)), 0)
                 if has_sh:
                     reduce_rows(
@@ -1248,8 +1254,9 @@ def build_flash_ffn_kernel(
                 s_q = q // (MOE_SLOTS * DN_NKC)
                 slot_q = (q // DN_NKC) % MOE_SLOTS
                 e = _uniform(lds_ld(keys, s_q * MOE_SLOTS + slot_q))
+                is_sh = e == SHARED
                 wb = bo.create_buffer_resource_from_addr(
-                    w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES),
+                    is_sh.select(w_sh_dn, w_dn + fx.Int64(e) * fx.Int64(DN_W_BYTES)),
                     num_records_bytes=(
                         None
                         if DN_NU % DN_WPR == 0
@@ -1257,7 +1264,7 @@ def build_flash_ffn_kernel(
                     ),
                 )
                 sb = bo.create_buffer_resource_from_addr(
-                    s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES),
+                    is_sh.select(s_sh_dn, s_dn + fx.Int64(e) * fx.Int64(DN_S_BYTES)),
                     num_records_bytes=(
                         None
                         if DN_NU % DN_WPR == 0
@@ -1340,6 +1347,10 @@ def build_flash_ffn_kernel(
         s_ug: Int64,
         w_dn: Int64,
         s_dn: Int64,
+        w_sh_ug: Int64,
+        s_sh_ug: Int64,
+        w_sh_dn: Int64,
+        s_sh_dn: Int64,
         scratch: Int64,
         sym: Int64,
         peers: Int64,
@@ -1367,6 +1378,10 @@ def build_flash_ffn_kernel(
             s_ug,
             w_dn,
             s_dn,
+            w_sh_ug,
+            s_sh_ug,
+            w_sh_dn,
+            s_sh_dn,
             scratch,
             sym,
             peers,
