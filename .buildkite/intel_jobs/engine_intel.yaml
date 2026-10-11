@@ -20,7 +20,7 @@ steps:
   - vllm/compilation/
   - vllm/config/
   - vllm/engine/
-  - vllm/entrypoints/logger.py
+  - vllm/entrypoints/serve/utils/request_logger.py
   - vllm/envs.py
   - vllm/logger.py
   - vllm/logging_utils/
@@ -57,7 +57,7 @@ steps:
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/
-    - tests/test_config/
+    - tests/test_config.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh

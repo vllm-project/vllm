@@ -70,7 +70,6 @@ steps:
       - "!vllm/model_inspection.py"
       - "!vllm/outputs.py"
       - "!vllm/scalar_type.py"
-      - "!vllm/scripts.py"
       - "!vllm/version.py"
       - "!vllm/assets/"
       - "!vllm/benchmarks/"
