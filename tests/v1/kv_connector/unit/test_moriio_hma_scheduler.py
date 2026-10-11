@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import RequestStatus
 
 moriio_connector = importlib.import_module(
@@ -308,6 +309,9 @@ def _glm5_next_mtp_kv_cache_config() -> KVCacheConfig:
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         parallel_config=SimpleNamespace(pipeline_parallel_size=1),
         speculative_config=None,
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
     )
     groups = get_kv_cache_groups(vllm_config, specs)
     return KVCacheConfig(num_blocks=64, kv_cache_tensors=[], kv_cache_groups=groups)
@@ -331,13 +335,14 @@ def test_scheduler_accepts_glm5_next_groups_with_mtp():
     scheduler = _glm5_next_mtp_scheduler()
     groups = scheduler.kv_cache_config.transfer_groups
 
+    assert all(isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in groups)
     # The MTP layer shares the target's MLA and tail groups.
-    assert {"layers.6.attn", "layers.6.indexer"} <= set(groups[0].layer_names)
-    assert "layers.6.tail" in groups[1].layer_names
-    assert scheduler._attn_group_ids == [0, 1]
-    assert scheduler._mamba_group_ids == [2, 3]
+    assert {"layers.6.attn", "layers.6.indexer"} <= set(groups[1].layer_names)
+    assert "layers.6.tail" in groups[2].layer_names
+    assert scheduler._attn_group_ids == [1, 2]
+    assert scheduler._mamba_group_ids == [0]
     assert scheduler._attn_group_is_state == [False, True]
-    assert scheduler.blocks_per_sw == [0, 0, 0, 0]
+    assert scheduler.blocks_per_sw == [0, 0, 0]
     assert scheduler._num_ssm_scratch_blocks == 1
     # 1 recomputed token + 1 padded spec row + 1 drafter lookahead slot.
     assert scheduler._max_decode_tail_blocks == 1
@@ -353,34 +358,33 @@ def test_glm5_next_mtp_read_pairs_every_group(external_tokens):
         kv_transfer_params={"do_remote_decode": True, "transfer_id": "tx"},
         status=RequestStatus.FINISHED_LENGTH_CAPPED,
     )
-    # Mamba groups: [running state, MTP scratch slot].
-    p_blocks = ([10, 11], [50], [90, 91], [80, 81])
+    # KDA group: [running state, MTP scratch slot].
+    p_blocks = ([90, 91], [10, 11], [50])
     delay_free, p_params = _FakeConnector(producer).request_finished_all_groups(
         p_request, p_blocks
     )
     assert delay_free is True
-    assert p_params["remote_block_ids"] == [[10, 11], [50], [90], [80]]
+    assert p_params["remote_block_ids"] == [[10, 11], [50], [90]]
 
     consumer = _glm5_next_mtp_scheduler()
     d_request = _make_read_request(p_params["remote_block_ids"])
     # The decode's MLA group holds one extra local block for the spec tail.
-    d_blocks = _FakeBlocks(([100, 101, 102], [300], [200, 201], [210, 211]))
+    d_blocks = _FakeBlocks(([200, 201], [100, 101, 102], [300]))
     consumer.update_state_after_alloc(
         d_request, d_blocks, num_external_tokens=external_tokens
     )
 
     local = consumer._reqs_need_recv["req"][1]
     if external_tokens:
-        assert local == [[100, 101], [300], [200], [210]]
+        assert local == [[100, 101], [300], [200]]
         assert consumer._req_kv_params["req"]["remote_block_ids"] == [
             [10, 11],
             [50],
             [90],
-            [80],
         ]
     else:
         # A full local MLA hit still reads the kpool tail ring and KDA state.
-        assert local == [[], [300], [200], [210]]
+        assert local == [[], [300], [200]]
 
     output = SchedulerOutput.make_empty()
     output.new_block_ids_to_zero = [100, 101, 102, 300]

@@ -98,6 +98,7 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
     get_kv_cache_spec_sliding_window,
@@ -264,7 +265,7 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self.mode = get_moriio_mode(self.kv_transfer_config)
         self._transfers_mamba_state = any(
-            group.enable_kv_transfer and isinstance(group.kv_cache_spec, MambaSpec)
+            group.enable_kv_transfer and _is_mamba_group_spec(group.kv_cache_spec)
             for group in kv_cache_config.kv_cache_groups
         )
         if role == KVConnectorRole.SCHEDULER:
@@ -443,11 +444,19 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             return False
 
 
+def _is_mamba_group_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """True if every layer spec in the group is a MambaSpec."""
+    layer_specs = iter_layer_specs(kv_cache_spec)
+    return len(layer_specs) > 0 and all(
+        isinstance(spec, MambaSpec) for spec in layer_specs
+    )
+
+
 def _split_kv_cache_group_kinds(
     kv_cache_config: "KVCacheConfig",
 ) -> tuple[list[int], list[int]]:
     """Classify kv_cache_groups into (attention_group_indices,
-    mamba_group_indices) by whether each group's spec is a MambaSpec.
+    mamba_group_indices) by whether each group's layers are MambaSpecs.
 
     Groups that opt out of external transfer are absent from
     ``KVCacheConfig.transfer_groups``. Returned indices address that filtered
@@ -456,7 +465,7 @@ def _split_kv_cache_group_kinds(
     attn: list[int] = []
     mamba: list[int] = []
     for gi, group in enumerate(kv_cache_config.transfer_groups):
-        if isinstance(group.kv_cache_spec, MambaSpec):
+        if _is_mamba_group_spec(group.kv_cache_spec):
             mamba.append(gi)
         else:
             attn.append(gi)
@@ -512,8 +521,11 @@ class MoRIIOConnectorScheduler:
                     "MoRIIO hybrid READ requires a transferable attention group"
                 )
             mamba_specs = [
-                cast(MambaSpec, kv_cache_config.transfer_groups[group_id].kv_cache_spec)
+                cast(MambaSpec, spec)
                 for group_id in self._mamba_group_ids
+                for spec in iter_layer_specs(
+                    kv_cache_config.transfer_groups[group_id].kv_cache_spec
+                )
             ]
             mamba_spec = _validate_mamba_specs(mamba_specs)
             if self.mode != MoRIIOMode.READ:
