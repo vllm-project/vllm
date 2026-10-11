@@ -41,6 +41,10 @@ VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-1.7B \
     --attention-config.backend TRITON_ATTN
 ```
 
+### FP8 KV Cache on Blackwell
+
+In batch-invariant mode the `FLASH_ATTN` backend uses FlashAttention 2 instead of FlashAttention 4 on SM100, and FlashAttention 2 does not support an FP8 KV cache. For checkpoints that enable an FP8 KV cache by default (for example the `nvidia/*-FP4` ModelOpt checkpoints), leave the attention backend on automatic selection, which picks `TRITON_ATTN`, or select `TRITON_ATTN` explicitly; an explicit `FLASH_ATTN` or `FLEX_ATTENTION` request is rejected at startup.
+
 ## Enabling Batch Invariance
 
 Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:
@@ -140,6 +144,7 @@ Batch invariance has been tested and verified on the following models:
 - **ERNIE 4.5**: `baidu/ERNIE-4.5-0.3B-PT`
 - **SmolLM2**: `HuggingFaceTB/SmolLM2-1.7B-Instruct`
 - **PLaMo3**: `pfnet/plamo-3-nict-2b-base`
+- **NVFP4 (ModelOpt, Blackwell)**: `nvidia/Llama-3.1-8B-Instruct-FP4`, `nvidia/Qwen3-30B-A3B-FP4`
 
 Hybrid Gated DeltaNet models (for example, Qwen3-Next and Qwen3.5) are not currently supported in batch-invariant mode; see [issue #42960](https://github.com/vllm-project/vllm/issues/42960). MXFP4 MoE models such as `openai/gpt-oss-20b` and `openai/gpt-oss-120b` are not currently supported either, because no MXFP4 MoE kernel supports batch invariance.
 
