@@ -87,7 +87,6 @@ steps:
       - "!benchmarks/"
       - "!docs/"
       - "!examples/"
-      - "!scripts/"
       - "!vllm/model_executor/layers/quantization/auto_awq.py"
       - "!vllm/model_executor/layers/quantization/auto_gptq.py"
       - "!vllm/model_executor/layers/quantization/inc/"
