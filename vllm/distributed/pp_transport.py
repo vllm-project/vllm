@@ -23,8 +23,12 @@ class PPTransportDataType(str, Enum):
     HIDDEN_STATES = "hidden_states"
     RESIDUAL = "residual"
     TOPK_INDICES = "pp_transport.topk_indices"
+    DEEPSTACK_EMBEDDINGS = "pp_transport.deepstack_embeddings"
     MULTIMODAL_EMBEDDINGS = "pp_transport.multimodal_embeddings"
     MULTIMODAL_MASK = "pp_transport.multimodal_mask"
+
+    def key(self, index: int) -> str:
+        return f"{self.value}.{index}"
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,9 @@ PP_TRANSPORT_REGISTRY: Mapping[PPTransportDataType, PPTransportDataSpec] = (
                 model_input=True, all_gather=None
             ),
             PPTransportDataType.TOPK_INDICES: PPTransportDataSpec(model_input=True),
+            PPTransportDataType.DEEPSTACK_EMBEDDINGS: PPTransportDataSpec(
+                model_input=True, all_gather=None, indexed=True
+            ),
             PPTransportDataType.MULTIMODAL_EMBEDDINGS: PPTransportDataSpec(
                 indexed=True, companions=(PPTransportDataType.MULTIMODAL_MASK,)
             ),
@@ -80,6 +87,8 @@ class PPTransportTensor:
     buffer: torch.Tensor | None = None
     receive: bool = True
     send: bool = True
+    zero_if_missing: bool = False
+    clone_on_send: bool = False
 
     def __post_init__(self):
         if self.buffer is not None:
@@ -92,25 +101,40 @@ class PPTransportTensor:
             object.__setattr__(self, "shape", tuple(self.buffer.shape[1:]))
             object.__setattr__(self, "dtype", self.buffer.dtype)
 
+    def make_empty(
+        self, num_tokens: int, dtype: torch.dtype, device: torch.device
+    ) -> torch.Tensor:
+        return torch.zeros(
+            (num_tokens, *self.shape), dtype=self.dtype or dtype, device=device
+        )
+
 
 class PPTransport:
     """Per-model selection of registered model inputs and graph-external payloads."""
 
     def __init__(
         self,
-        tensors: Mapping[PPTransportDataType, PPTransportTensor] | None = None,
+        tensors: Mapping[
+            PPTransportDataType | tuple[PPTransportDataType, int], PPTransportTensor
+        ]
+        | None = None,
         *,
         payload_types: Sequence[PPTransportDataType] = (),
     ):
         receive = []
         send = []
-        for data_type, tensor in (tensors or {}).items():
-            if not PP_TRANSPORT_REGISTRY[data_type].model_input:
+        for field, tensor in (tensors or {}).items():
+            data_type, index = field if isinstance(field, tuple) else (field, None)
+            spec = PP_TRANSPORT_REGISTRY[data_type]
+            if not spec.model_input:
                 raise ValueError(f"{data_type.value} belongs in a PP payload")
+            if spec.indexed != (index is not None) or (index is not None and index < 0):
+                raise ValueError(f"Invalid index for PP field: {field}")
+            key = data_type.value if index is None else data_type.key(index)
             if tensor.receive:
-                receive.append((data_type.value, tensor))
+                receive.append((key, tensor))
             if tensor.send:
-                send.append((data_type.value, tensor))
+                send.append((key, tensor))
         self._receive = tuple(receive)
         self._send = tuple(send)
         selected = set(payload_types)
@@ -126,11 +150,7 @@ class PPTransport:
     ) -> IntermediateTensors:
         return IntermediateTensors(
             {
-                key: torch.zeros(
-                    (batch_size, *tensor.shape),
-                    dtype=tensor.dtype or dtype,
-                    device=device,
-                )
+                key: tensor.make_empty(batch_size, dtype, device)
                 for key, tensor in self._receive
             }
         )
@@ -141,22 +161,46 @@ class PPTransport:
                 _copy_to_buffer(key, tensors[key], binding.buffer)
 
     def make_intermediate_tensors(
-        self, num_tokens: int, **tensors: torch.Tensor
+        self,
+        num_tokens: int,
+        *,
+        side_inputs: IntermediateTensors | None = None,
+        **tensors: torch.Tensor,
     ) -> IntermediateTensors:
         output = {}
         for key, binding in self._send:
-            if binding.buffer is None:
-                output[key] = tensors[key]
-            else:
+            if binding.buffer is not None:
                 if num_tokens > binding.buffer.shape[0]:
                     raise ValueError(f"PP send exceeds buffer capacity: {key}")
                 output[key] = binding.buffer[:num_tokens]
+            elif key in tensors:
+                output[key] = tensors[key]
+            elif side_inputs is not None and key in side_inputs.tensors:
+                output[key] = side_inputs[key]
+            elif binding.zero_if_missing:
+                reference = tensors[PPTransportDataType.HIDDEN_STATES.value]
+                output[key] = binding.make_empty(
+                    num_tokens, reference.dtype, reference.device
+                )
+                continue
+            else:
+                raise KeyError(f"Missing PP model input: {key}")
+            if binding.clone_on_send:
+                # Some producers clear their feature cache before the worker sends.
+                output[key] = output[key].clone()
         return IntermediateTensors(output)
 
     def new_payload(
         self, tensors: Mapping[str, torch.Tensor] | None = None
     ) -> "PPTransportPayload":
         return PPTransportPayload(self._payload_types, tensors)
+
+
+def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
+    """Compatibility entry point for models with token-major base tensors."""
+    return PPTransport(
+        {PPTransportDataType(key): PPTransportTensor((hidden_size,)) for key in keys}
+    ).make_empty_intermediate_tensors
 
 
 class PPTransportAllGatherPolicy(dict[str, bool]):
