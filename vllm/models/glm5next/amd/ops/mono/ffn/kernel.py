@@ -123,7 +123,7 @@ def build_flash_ffn_kernel(
     stalled peer finishes the launch with wrong values instead of hanging. With
     ``poll_early_out`` every later wait of the same step returns at its first retry.
     """
-    assert 2 <= S <= 8 and 1 <= launches_per_step <= LAYER_SLOTS
+    assert 2 <= S <= 16 and 1 <= launches_per_step <= LAYER_SLOTS
     assert poll_limit is None or poll_limit > 0
     assert inter % 128 == 0
     W = npes
@@ -136,7 +136,14 @@ def build_flash_ffn_kernel(
     N_DN_TILES = HIDDEN // DN_TILE
     RED_WORDS = WAVES * 64 * 4
     LDS_KEYS = S * MOE_SLOTS
-    X_WORDS = max(S * HIDDEN // 2, down_x_words(S, expert_inter))
+    # LDS X users: one router row (bf16), every row's MXFP8 FFN input (ug), the
+    # seam tile (x_attn + R'), every row's MXFP8 mid (down)
+    X_WORDS = max(
+        HIDDEN // 2,
+        S * HIDDEN // 4,
+        S * ROW_TILE * (1 + HC_MULT),
+        down_x_words(S, expert_inter),
+    )
     MISC_OFF = X_WORDS
     MISC_WORDS = max(8 + S * XQ_GROUPS, S * MOE_SLOTS * (expert_inter // 32))
     KEYS_OFF = MISC_OFF + MISC_WORDS
@@ -772,6 +779,32 @@ def build_flash_ffn_kernel(
         XA = 0
         RN = S * ROW_TILE
         NPAIR = S * ROW_TILE // 2
+
+        def seam_post(item, col0):
+            """R'[j] for one (row, stream, column pair) item of a seam tile."""
+            s = item // (HC_MULT * (ROW_TILE // 2))
+            j = (item // (ROW_TILE // 2)) % HC_MULT
+            c = (item % (ROW_TILE // 2)) * 2
+            pj = ld_f32(r_post, s * HC_MULT + j)
+            acc0 = fx.Float32(0.0)
+            acc1 = fx.Float32(0.0)
+            for i in range_constexpr(HC_MULT):
+                cij = ld_f32(r_comb, (s * HC_MULT + i) * HC_MULT + j)
+                r0, r1 = ld_pair(r_res, (s * HC_MULT + i) * HIDDEN + col0 + c)
+                acc0 = acc0 + cij * r0
+                acc1 = acc1 + cij * r1
+            n0 = bf16_round(acc0 + pj * lds_ld(xs, XA + s * ROW_TILE + c))
+            n1 = bf16_round(acc1 + pj * lds_ld(xs, XA + s * ROW_TILE + c + 1))
+            elem = (s * HC_MULT + j) * HIDDEN + col0 + c
+            bo.buffer_store(
+                fx.Vector.from_elements([n0, n1], fx.Float32).to(fx.BFloat16),
+                _rsrc(res_out),
+                elem,
+            )
+            put(mb("rnew"), elem // 2, bf16_pair(n0, n1))
+            lds_st(xs, RN + (s * HC_MULT + j) * ROW_TILE + c, n0)
+            lds_st(xs, RN + (s * HC_MULT + j) * ROW_TILE + c + 1, n1)
+
         for t in range(start("seam"), N_ROW_TILES, G):
             t = fx.Int32(t)
             stamp("seam")
@@ -825,29 +858,11 @@ def build_flash_ffn_kernel(
                 lds_st(xs, XA + s * ROW_TILE + c, v0)
                 lds_st(xs, XA + s * ROW_TILE + c + 1, v1)
             gpu.barrier()
-            if tid < S * HC_MULT * (ROW_TILE // 2):
-                s = tid // (HC_MULT * (ROW_TILE // 2))
-                j = (tid // (ROW_TILE // 2)) % HC_MULT
-                c = (tid % (ROW_TILE // 2)) * 2
-                pj = ld_f32(r_post, s * HC_MULT + j)
-                acc0 = fx.Float32(0.0)
-                acc1 = fx.Float32(0.0)
-                for i in range_constexpr(HC_MULT):
-                    cij = ld_f32(r_comb, (s * HC_MULT + i) * HC_MULT + j)
-                    r0, r1 = ld_pair(r_res, (s * HC_MULT + i) * HIDDEN + col0 + c)
-                    acc0 = acc0 + cij * r0
-                    acc1 = acc1 + cij * r1
-                n0 = bf16_round(acc0 + pj * lds_ld(xs, XA + s * ROW_TILE + c))
-                n1 = bf16_round(acc1 + pj * lds_ld(xs, XA + s * ROW_TILE + c + 1))
-                elem = (s * HC_MULT + j) * HIDDEN + col0 + c
-                bo.buffer_store(
-                    fx.Vector.from_elements([n0, n1], fx.Float32).to(fx.BFloat16),
-                    _rsrc(res_out),
-                    elem,
-                )
-                put(mb("rnew"), elem // 2, bf16_pair(n0, n1))
-                lds_st(xs, RN + (s * HC_MULT + j) * ROW_TILE + c, n0)
-                lds_st(xs, RN + (s * HC_MULT + j) * ROW_TILE + c + 1, n1)
+            RN_ITEMS = S * HC_MULT * (ROW_TILE // 2)
+            for rn_i in range_constexpr((RN_ITEMS + THREADS - 1) // THREADS):
+                item = tid + rn_i * THREADS
+                if item < RN_ITEMS:
+                    seam_post(item, col0)
             gpu.barrier()
             if tid < S * PMIX:
                 s = tid // PMIX
