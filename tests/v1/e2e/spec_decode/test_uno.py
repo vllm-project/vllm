@@ -1659,3 +1659,150 @@ def test_uno_greedy_matches_base_model(
     # before the loop cannot carry the tie count, and the tie count is what
     # says whether this card needed the exception at all.
     print(instrument_receipt())
+
+
+def test_uno_greedy_matches_base_model_to_max_model_len(
+    vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
+    uno_adapter_path: str,
+):
+    """Serve every request to max_model_len at K=8 with exact greedy parity.
+
+    Uno has no scheduler tail policy. Near the limit the scheduler's own
+    per-request cap trims the scheduled drafts, allocate_slots caps the K
+    lookahead slots at max_model_len, and Uno's input preparation writes PAD
+    slots for draft rows at or past it. max_model_len ends one token short of
+    a block boundary, so the last proposals of each request place draft rows
+    past the final column of its block-table row; four requests decode
+    together, so a draft KV write that escaped that row would land in a
+    neighbour's KV and show up here as a divergence or a crash.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    k = 8
+    prompts = get_test_prompts(mm_enabled=False, num_prompts=4)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
+    longest_prompt = max(
+        len(
+            tokenizer.apply_chat_template(
+                prompt, add_generation_prompt=True, enable_thinking=False
+            )
+        )
+        for prompt in prompts
+    )
+    max_model_len = (longest_prompt // BLOCK_SIZE + 6) * BLOCK_SIZE + BLOCK_SIZE - 1
+    assert max_model_len % BLOCK_SIZE == BLOCK_SIZE - 1
+    # max_tokens=None runs each request until it reaches max_model_len.
+    sampling = SamplingParams(
+        temperature=0, max_tokens=None, ignore_eos=True, seed=0, logprobs=2
+    )
+    total_memory = torch.cuda.get_device_properties(0).total_memory
+    common = dict(
+        revision=MODEL_REVISION,
+        dtype="bfloat16",
+        trust_remote_code=False,
+        enforce_eager=False,
+        compilation_config={"cudagraph_capture_sizes": [8, 16, 32, 64]},
+        async_scheduling=True,
+        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
+        max_model_len=max_model_len,
+        max_num_seqs=4,
+        max_num_batched_tokens=256,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=min(0.9, 24 * 1024**3 / total_memory),
+        kv_cache_memory_bytes=MATRIX_KV_BUDGET_BYTES,
+        enable_lora=True,
+        max_lora_rank=128,
+        max_loras=2,
+        max_cpu_loras=2,
+        disable_log_stats=False,
+    )
+    chat_kwargs = dict(
+        sampling_params=sampling,
+        chat_template_kwargs={"enable_thinking": False},
+        use_tqdm=False,
+    )
+
+    def _ids(outputs):
+        return [list(output.outputs[0].token_ids) for output in outputs]
+
+    def _ranked(outputs):
+        return [
+            [
+                sorted(
+                    ((token_id, value.logprob) for token_id, value in entry.items()),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                for entry in output.outputs[0].logprobs or []
+            ]
+            for output in outputs
+        ]
+
+    def _assert_reached_limit(outputs, arm):
+        for index, output in enumerate(outputs):
+            length = len(output.prompt_token_ids) + len(output.outputs[0].token_ids)
+            assert length == max_model_len, (
+                f"{arm} p{index}: {length} tokens, expected {max_model_len}"
+            )
+            assert output.outputs[0].finish_reason == "length", (arm, index)
+
+    with vllm_runner("Qwen/Qwen3-8B", **common) as reference:
+        ref_outputs = reference.llm.chat(prompts, **chat_kwargs)
+        repeat_outputs = [reference.llm.chat(prompts, **chat_kwargs) for _ in range(2)]
+    _assert_reached_limit(ref_outputs, "reference")
+    control: set[tuple[int, int]] = set()
+    for outputs in repeat_outputs:
+        control.update(token_agreement(_ids(ref_outputs), _ids(outputs))[1])
+
+    with vllm_runner(
+        "Qwen/Qwen3-8B",
+        **common,
+        speculative_config={
+            "method": "uno",
+            "uno_lora_path": uno_adapter_path,
+            "uno_mask_token_id": 151669,
+            "num_speculative_tokens": k,
+        },
+    ) as speculative:
+        spec_outputs = speculative.llm.chat(prompts, **chat_kwargs)
+        metrics = speculative.llm.get_metrics()
+        states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
+    _assert_reached_limit(spec_outputs, "uno")
+    draft_tokens = get_spec_decode_metric_value(
+        metrics, "vllm:spec_decode_num_draft_tokens"
+    )
+    assert draft_tokens > 0, "Uno did not verify any draft candidates"
+    assert all(state["draft_graph_replays"] > 0 for state in states), states
+    acceptance_len = compute_acceptance_len(metrics)
+
+    uno_matched, uno_divergences = token_agreement(
+        _ids(ref_outputs), _ids(spec_outputs)
+    )
+    _text_matched, uno_text = text_agreement(
+        [output.outputs[0].text for output in ref_outputs],
+        [output.outputs[0].text for output in spec_outputs],
+    )
+    verdicts = matrix_verdicts(
+        sorted(control),
+        {"uno": MatrixArm(uno_divergences, _ids(spec_outputs), uno_text)},
+        len(ref_outputs),
+        _ids(ref_outputs),
+        _ranked(ref_outputs),
+    )
+    print(
+        f"uno max_model_len edge: K={k}, max_model_len={max_model_len}, "
+        f"prompt_tokens={[len(o.prompt_token_ids) for o in ref_outputs]}, "
+        f"exact tokens uno={uno_matched}/{len(ref_outputs)}, "
+        f"uno_divergences={format_divergences(uno_divergences)}, "
+        f"control_divergences={format_divergences(sorted(control))}, "
+        f"mean acceptance length={acceptance_len:.3f}, states={states}"
+    )
+    verdict = verdicts["uno"]
+    assert verdict.ok, verdict.reason
+    assert verdict.text_ok, verdict.text_reason
