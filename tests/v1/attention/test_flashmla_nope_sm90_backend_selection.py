@@ -279,6 +279,7 @@ def test_sm90_nope_fp8_ds_mla_resolves_to_flashmla():
         assert not backend_cls.supports_kv_cache_dtype("fp8_ds_mla"), name
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA backends")
 def test_sm100_576_bf16_low_heads_falls_back_from_fa4(monkeypatch):
     """With FA4 unusable, low-head bf16 selection lands on FlashInfer."""
     import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
