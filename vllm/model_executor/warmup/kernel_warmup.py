@@ -316,9 +316,6 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
-_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
-
-
 def _flashinfer_deferred_moe_token_counts(
     runner: "GPUModelRunner",
 ) -> tuple[int, ...]:
@@ -339,19 +336,10 @@ def _flashinfer_deferred_moe_token_counts(
     return tuple(dict.fromkeys(token_counts))
 
 
-def _flashinfer_autotune_token_counts(
-    runner: "GPUModelRunner", *, include_bf16: bool = True
-) -> tuple[int, ...]:
+def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
     token_counts = [max_tokens]
-    linear_backend = runner.vllm_config.kernel_config.linear_backend
-    if (
-        include_bf16
-        and linear_backend == "flashinfer_cutedsl"
-        and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    ):
-        token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
     token_counts.extend(_flashinfer_deferred_moe_token_counts(runner))
     return tuple(dict.fromkeys(token_counts))
 
@@ -362,14 +350,33 @@ def _run_flashinfer_autotune_dummy_runs(
     import vllm.utils.flashinfer as fi_utils
 
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
-    for num_tokens in _flashinfer_autotune_token_counts(runner, include_bf16=False):
-        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
+    for num_tokens in _flashinfer_autotune_token_counts(runner):
+        # The drafter may use more tokens than this pass in the same dummy run.
+        # Include its max M when building the autotune buckets.
+        max_tuning_tokens = num_tokens
+        speculator = getattr(runner, "speculator", None)
+        if speculator is not None:
+            num_query_per_req = speculator.num_query_per_req
+            num_draft_reqs = min(
+                num_tokens,
+                runner.max_num_reqs,
+                runner.max_num_tokens // num_query_per_req,
+            )
+            max_tuning_tokens = max(
+                max_tuning_tokens, num_draft_reqs * num_query_per_req
+            )
+
+        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
+            max_tuning_tokens
+        )
         logger.info(
             "Running FlashInfer autotune with %d tokens and token buckets %s.",
             num_tokens,
             tuning_buckets,
         )
-        with fi_utils.autotune(tuning_buckets=tuning_buckets):
+        # Round M up to match serving-time bucket selection for non-bucket M.
+        # See https://github.com/flashinfer-ai/flashinfer/issues/5450
+        with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
             runner._dummy_run(
                 num_tokens=num_tokens,
                 skip_eplb=True,
@@ -377,36 +384,6 @@ def _run_flashinfer_autotune_dummy_runs(
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
-
-
-def _run_flashinfer_bf16_autotune_dummy_run(
-    runner: "GPUModelRunner",
-    *,
-    skip_ops: set[str] | None = None,
-    skip_attn: bool = False,
-) -> None:
-    import vllm.utils.flashinfer as fi_utils
-
-    if (
-        runner.vllm_config.kernel_config.linear_backend != "flashinfer_cutedsl"
-        or runner.scheduler_config.max_num_batched_tokens
-        <= _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    ):
-        return
-
-    num_tokens = _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
-    logger.info("Running FlashInfer BF16-only autotune with %d tokens.", num_tokens)
-    # Other ops execute from their existing cache or fallback, without the
-    # BF16 bucket cap. No full-model autotune context may enclose this pass.
-    with fi_utils.autotune_bf16_only(tuning_buckets, skip_ops=skip_ops):
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            randomize_inputs=True,
-            **({"skip_attn": True} if skip_attn else {}),
-        )
 
 
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
@@ -429,7 +406,7 @@ def _all_ranks_have_matching_cache(path: Path, group) -> bool:
     return fingerprint is not None and all(f == fingerprint for f in gathered)
 
 
-def flashinfer_autotune(runner: "GPUModelRunner") -> None:
+def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
@@ -437,6 +414,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     future calls to FlashInfer will use the best implementation.
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
+
+    Args:
+        runner: The model runner to tune.
+        skip_attn: Additionally skip attention in the tuning dummy runs.
 
     With PP > 1, stages run different layers and may profile different ops,
     so each stage's TP group tunes separately with its own cache file;
@@ -448,6 +429,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     rank. A rank with a cache hit skips the per-tactic reduce the others block
     in, so ranks keep loaded configs only if every rank in the tuning group
     has a matching file and successfully loads it.
+
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
@@ -508,17 +490,14 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             hisparse_enabled = (
                 runner.vllm_config.attention_config.hisparse_config is not None
             )
+            skip_attn = skip_attn or hisparse_enabled
             if hisparse_enabled:
                 # HiSparse hot-buffer attention is bounded by decode batch
                 # size, not the prefill-sized batch used for the full model.
                 autotune_hisparse_flashinfer_attention(runner)
-            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=hisparse_enabled)
+            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
-        with torch.inference_mode():
-            _run_flashinfer_bf16_autotune_dummy_run(
-                runner, skip_ops=skip_ops, skip_attn=hisparse_enabled
-            )
     finally:
         set_autotune_process_group(None)
 

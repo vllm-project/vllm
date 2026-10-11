@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ToolCall,
@@ -42,6 +41,7 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
@@ -640,12 +640,6 @@ class OnlineDerenderer:
                     if tc.index < len(last_tool_call_ids):
                         # Pin: reuse the ID already recorded for this index
                         # rather than one a from scratch replay regenerated.
-                        # Real trigger not just defensive with
-                        # tool_choice="required",
-                        # extract_required_tool_call_streaming resets
-                        # function_name_returned to False whenever the
-                        # partial JSON transiently fails to parse which
-                        # re-emits id+name for the same index on replay.
                         tc.id = last_tool_call_ids[tc.index]
                     else:
                         last_tool_call_ids.append(tc.id)

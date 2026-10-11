@@ -19,11 +19,6 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    has_non_text_content,
-)
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaMessage,
@@ -44,6 +39,11 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    has_non_text_content,
+)
 from vllm.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,
@@ -455,6 +455,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "prompt string produced by chat templating. In streaming mode it "
             "is sent only on the first chunk. This is useful for inspecting "
             "exactly what was fed into the model."
+        ),
+    )
+
+    return_mm_kwargs: bool = Field(
+        default=True,
+        description=(
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
         ),
     )
 
@@ -1093,7 +1105,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     model: str | None = None
 
     # Shared sampling / generation fields — mirror ChatCompletionRequest.
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
     top_logprobs: TopLogprobsParam = 0
@@ -1108,7 +1120,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     n: int | None = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = Field(default_factory=list)

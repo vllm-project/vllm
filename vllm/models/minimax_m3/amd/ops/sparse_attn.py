@@ -139,15 +139,15 @@ def _gqa_sparse_fwd_kernel(
         off_t = tl.arange(0, BLOCK_SIZE_T)
         topk_idx = tl.load(t_ptr_j + off_t * stride_tk, mask=off_t < max_topk, other=-1)
         real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
-        q_ptrs = tl.make_block_ptr(
+        q_desc = tl.make_tensor_descriptor(
             base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_qn, stride_qh, stride_qd),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+            shape=[q_len, gqa_group_size, head_dim],
+            strides=[stride_qn, stride_qh, stride_qd],
+            block_shape=[BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D],
+            padding_option="zero",
         )
-        q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+
+        q = q_desc.load([pid_q_j * BLOCK_SIZE_Q, 0, 0])
         m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
@@ -228,15 +228,17 @@ def _gqa_sparse_fwd_kernel(
                 lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
-        o_ptrs = tl.make_block_ptr(
+        o_desc = tl.make_tensor_descriptor(
             base=o_ptr + q_start * stride_on + pid_h * stride_oh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_on, stride_oh, stride_od),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+            shape=[q_len, gqa_group_size, head_dim],
+            strides=[stride_on, stride_oh, stride_od],
+            block_shape=[BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D],
         )
-        tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1, 2))
+
+        o_desc.store(
+            offsets=[pid_q_j * BLOCK_SIZE_Q, 0, 0],
+            value=acc_o.to(o_ptr.dtype.element_ty),
+        )
 
 
 @torch.no_grad()
