@@ -2615,7 +2615,10 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         {"raw_aggregate": True},
     ],
 )
-def test_compression_rejects_kv_both_before_slot_allocation(extra_config):
+def test_compression_rejects_kv_both_before_slot_allocation(monkeypatch, extra_config):
+    monkeypatch.setattr(
+        mooncake_connector, "get_compression_config", lambda extra: True
+    )
     config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_both")
     config.kv_transfer_config.kv_connector_extra_config = extra_config
     with (
@@ -2631,6 +2634,9 @@ def test_compression_rejects_kv_both_before_slot_allocation(extra_config):
     [{"compression": {"enable-compression-pipeline": True}}, {"raw_aggregate": True}],
 )
 def test_compression_rejects_retired_inprocess_backend(monkeypatch, extra_config):
+    monkeypatch.setattr(
+        mooncake_connector, "get_compression_config", lambda extra: True
+    )
     monkeypatch.setenv("KVSERVE_SESSION_PROCESS", "0")
     config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
     config.kv_transfer_config.kv_connector_extra_config = extra_config

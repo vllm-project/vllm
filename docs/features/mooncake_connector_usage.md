@@ -111,21 +111,21 @@ The compression pipeline requires the connector's `LBHNC` (`HND`) layout;
 Backend-specific K/V packing (such as B12x planes) and pooled token/state
 layouts are rejected. Padding and strided layer views of dense K/V are supported.
 
-Keep vLLM's installed `humming-kernels` version and CUDA extra; the Python
-Hadamard stage uses this existing dependency. ANS additionally needs NVIDIA's
-nvCOMP Python bindings. Install the wheel matching the CUDA major version:
+The compression runtime, algorithms, Python/CUDA backends and kernel tests are
+maintained in [KVServe](https://github.com/hpdps-group/KVServe), outside vLLM.
+vLLM adapts cache geometry and retains Mooncake transfer and session ownership.
+The adapter requires runtime API version 1. Install the same pinned KVServe
+revision on both endpoints; version 0.2.0 has not yet been published on PyPI.
 
 ```bash
-# CUDA 13 (use nvidia-nvcomp-cu12 for CUDA 12)
-uv pip install nvidia-nvcomp-cu13==5.3.0.16
+# CUDA 13; use runtime-cu12 for CUDA 12. Keep the installed vLLM/Torch versions.
+uv pip install 'kvserve_v1[runtime,runtime-cu13] @ git+https://github.com/hpdps-group/KVServe.git@7482d69a07165022812af0643991655b0f97011b'
 ```
 
-nvCOMP 5.3 exposes only a process-global allocator. While compression is active,
-KVServe owns that callback: its streams use reserved workspace, and ordinary
-external codecs on other streams use separate PyTorch allocations. Installing
-another custom nvCOMP allocator before or during this lifetime is unsupported;
-the SDK cannot retrieve or restore it. The last manager resets the SDK allocator
-to its default. External codec allocations are not part of KVServe's budget.
+See KVServe's [runtime API and compatibility guide](https://github.com/hpdps-group/KVServe/blob/7482d69a07165022812af0643991655b0f97011b/docs/compression-runtime.md)
+for buffer/event ownership and backend requirements. Both endpoints must use the
+same wire-profile version; this runtime uses version 2 and rejects the older
+vendored implementation's profile. Disabled compression imports no KVServe code.
 
 The fixed-profile configuration below must be used on both workers, retaining
 `kv_role=kv_producer` on P and `kv_role=kv_consumer` on D:

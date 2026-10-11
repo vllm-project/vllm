@@ -83,98 +83,50 @@ _HEARTBEAT_TIMEOUT_S = 30.0
 _SHUTDOWN_TIMEOUT_S = 5.0
 
 
+@dataclass(slots=True)
 class _SendState:
-    """Producer-side mirror of one ``SendBlockMeta``."""
+    transfer_id: str
+    p_req_id: str = ""
+    local_block_ids: list[list[int]] | None = None
+    num_tokens: int | None = None
+    ready: bool = False
+    event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    expire_time: float = float("inf")
+    need_send: int = 0
+    sent: int = 0
+    sending: int = 0
 
-    __slots__ = (
-        "transfer_id",
-        "p_req_id",
-        "local_block_ids",
-        "num_tokens",
-        "ready",
-        "event",
-        "expire_time",
-        "need_send",
-        "sent",
-        "sending",
-    )
-
-    def __init__(
-        self,
-        transfer_id: str,
-        p_req_id: str = "",
-        local_block_ids: list[list[int]] | None = None,
-        num_tokens: int | None = None,
-        ready: bool = False,
-    ):
-        self.transfer_id = transfer_id
-        self.p_req_id = p_req_id
-        self.local_block_ids = local_block_ids or []
-        self.num_tokens = num_tokens
-        self.ready = ready
-        self.event = asyncio.Event()
-        if ready:
+    def __post_init__(self):
+        self.local_block_ids = self.local_block_ids or []
+        if self.ready:
             self.event.set()
-        self.expire_time = float("inf")
-        self.need_send = 0
-        self.sent = 0
-        self.sending = 0
 
 
+@dataclass(slots=True, kw_only=True)
 class _ProducerSession:
-    __slots__ = (
-        "identity",
-        "transfer_id",
-        "d_req_id",
-        "nonce",
-        "remote_session",
-        "local_block_ids",
-        "valid_tokens_by_group",
-        "logical_block_count",
-        "total_chunks",
-        "completed_chunks",
-        "inflight_chunks",
-        "state",
-        "send_state",
-        "last_activity",
-        "seen_chunks",
-    )
-
-    def __init__(
-        self,
-        *,
-        identity: bytes,
-        transfer_id: str,
-        d_req_id: str,
-        nonce: str,
-        remote_session: str,
-        local_block_ids: list[list[int]],
-        valid_tokens_by_group: dict[int, int],
-        logical_block_count: int,
-        total_chunks: int,
-        send_state: _SendState,
-    ):
-        self.identity = identity
-        self.transfer_id = transfer_id
-        self.d_req_id = d_req_id
-        self.nonce = nonce
-        self.remote_session = remote_session
-        self.local_block_ids = local_block_ids
-        self.valid_tokens_by_group = valid_tokens_by_group
-        self.logical_block_count = logical_block_count
-        self.total_chunks = total_chunks
-        self.completed_chunks = 0
-        self.inflight_chunks = 0
-        self.state = "ACTIVE"
-        self.send_state = send_state
-        self.last_activity = time.monotonic()
-        self.seen_chunks: set[int] = set()
+    identity: bytes
+    transfer_id: str
+    d_req_id: str
+    nonce: str
+    remote_session: str
+    local_block_ids: list[list[int]]
+    valid_tokens_by_group: dict[int, int]
+    logical_block_count: int
+    total_chunks: int
+    send_state: _SendState
+    completed_chunks: int = 0
+    inflight_chunks: int = 0
+    state: str = "ACTIVE"
+    last_activity: float = field(default_factory=time.monotonic)
+    seen_chunks: set[int] = field(default_factory=set)
 
 
-@dataclass
-class _PendingRecv:
-    requests: list[ConsumerRequest] = field(default_factory=list)
-    failures: set[int] = field(default_factory=set)
+async def _cancel_tasks(*tasks):
+    pending = [task for task in tasks if task is not None]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 class _SessionService:
@@ -195,7 +147,6 @@ class _SessionService:
         self._stop_event: asyncio.Event | None = None
         self._fatal_error: str | None = None
         self._stopping = False
-        self._ready = False
         self._next_job_id = 0
         self._pending_jobs: dict[int, tuple[HelperJob, asyncio.Future]] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -560,22 +511,9 @@ class _SessionService:
                 transfer_id=transfer_id,
                 d_req_id=d_req_id,
                 nonce=request.nonce,
-                remote_hostname=metadata.remote_hostname,
-                remote_port=metadata.remote_port,
-                remote_tp_size=metadata.remote_tp_size,
-                remote_tp_rank=metadata.remote_tp_rank,
-                remote_pp_size=metadata.remote_pp_size,
+                metadata=metadata,
                 local_block_ids=state.local_block_ids,
-                remote_block_ids=remote_block_ids,
                 num_tokens=state.num_tokens,
-                kv_caches_base_addr=metadata.kv_caches_base_addr,
-                block_lens=metadata.block_lens,
-                kv_block_lens=metadata.kv_block_lens,
-                registered_layer_names=metadata.registered_layer_names,
-                registered_layer_indices=metadata.registered_layer_indices,
-                registered_group_indices=metadata.registered_group_indices,
-                registered_shared_group_ids=metadata.registered_shared_group_ids,
-                registered_row_offsets=metadata.registered_row_offsets,
             )
             result = await self._submit(job)
             if result.error is not None:
@@ -639,7 +577,6 @@ class _SessionService:
                 chunk_id=request.chunk_id,
                 data_bytes=0,
                 payload_bytes=0,
-                aux_bytes=0,
                 error="Unknown or completed compression session.",
             )
         if (
@@ -649,7 +586,6 @@ class _SessionService:
         ):
             return CompressionChunkReady(
                 request.chunk_id,
-                0,
                 0,
                 0,
                 error="Invalid or duplicate compression chunk",
@@ -709,7 +645,6 @@ class _SessionService:
                 chunk_id=request.chunk_id,
                 data_bytes=result.u8_bytes,
                 payload_bytes=result.codec_bytes,
-                aux_bytes=result.aux_bytes,
             )
         except Exception as exc:
             session.state = "FAILED"
@@ -723,7 +658,6 @@ class _SessionService:
                 chunk_id=request.chunk_id,
                 data_bytes=0,
                 payload_bytes=0,
-                aux_bytes=0,
                 error=str(exc),
             )
         finally:
@@ -1069,7 +1003,6 @@ class _SessionService:
                             transfer_id=request.transfer_id,
                             d_req_id=request.d_req_id,
                             chunk_id=chunk_id,
-                            slot_id=slot_id,
                             payload_addr=self._slot_payload[slot_id],
                             aux_addr=self._slot_aux[slot_id],
                             tail_addr=self._slot_tail[slot_id],
@@ -1144,8 +1077,7 @@ class _SessionService:
                             decode_tasks.discard(task)
                             task.result()
                             decoded_count += 1
-                recv_task.cancel()
-                await asyncio.gather(recv_task, return_exceptions=True)
+                await _cancel_tasks(recv_task)
                 recv_task = None
                 if decode_tasks:
                     await asyncio.gather(*tuple(decode_tasks))
@@ -1158,14 +1090,8 @@ class _SessionService:
                 request.transfer_id,
             )
             try:
-                if issue_task is not None:
-                    issue_task.cancel()
-                    await asyncio.gather(issue_task, return_exceptions=True)
-                    issue_task = None
-                if recv_task is not None:
-                    recv_task.cancel()
-                    await asyncio.gather(recv_task, return_exceptions=True)
-                    recv_task = None
+                await _cancel_tasks(issue_task, recv_task)
+                issue_task = recv_task = None
                 if open_attempted:
                     await self._send_abort(sock, request, nonce, str(exc))
             except Exception:
@@ -1179,13 +1105,7 @@ class _SessionService:
                 raise
             return self._all_blocks(request.local_block_ids)
         finally:
-            if issue_task is not None:
-                issue_task.cancel()
-                await asyncio.gather(issue_task, return_exceptions=True)
-            if recv_task is not None:
-                recv_task.cancel()
-                await asyncio.gather(recv_task, return_exceptions=True)
-                recv_task = None
+            await _cancel_tasks(issue_task, recv_task)
             if decode_tasks:
                 results = await asyncio.gather(
                     *tuple(decode_tasks), return_exceptions=True
@@ -1286,7 +1206,6 @@ class _SessionService:
                 self._slot_payload.append(address.payload)
                 self._slot_aux.append(address.aux)
                 self._slot_tail.append(address.tail)
-        self._ready = True
         self._to_engine(HelperReady(side_channel_port=self._side_channel_port))
         heartbeat = asyncio.create_task(self._heartbeat())
         self._tasks.add(heartbeat)
