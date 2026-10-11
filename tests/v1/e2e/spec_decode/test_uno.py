@@ -2009,6 +2009,7 @@ def test_uno_prebuilt_lora_request_never_selects_unos_adapter(
         max_model_len=1024,
         max_num_seqs=4,
         max_num_batched_tokens=256,
+        enable_chunked_prefill=True,
         enable_prefix_caching=False,
         gpu_memory_utilization=min(0.9, 24 * 1024**3 / total_memory),
         kv_cache_memory_bytes=MATRIX_KV_BUDGET_BYTES,
