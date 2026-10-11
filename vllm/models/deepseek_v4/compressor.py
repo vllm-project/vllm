@@ -61,6 +61,10 @@ class CompressorBackend(AttentionBackend):
     def __init__(self):
         super().__init__()
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return current_platform.is_cuda()
+
     @staticmethod
     def get_name() -> str:
         return "CompressorBackend"

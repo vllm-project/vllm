@@ -298,6 +298,10 @@ class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
 
 
 class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return current_platform.is_cuda()
+
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_SPARSE_DSV4"
