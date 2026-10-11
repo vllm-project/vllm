@@ -526,6 +526,14 @@ def build_flash_ffn_kernel(
                         )
                 if const_expr(coef is None):
                     acc = [acc[e] + c[e] for e in range(4)]
+                elif const_expr(isinstance(coef, tuple)):
+                    # (column mask, factor): a select, so a non-finite row stays
+                    # in its own column
+                    mask, factor = coef
+                    acc = [
+                        acc[e] + mask.select(c[e] * factor, fx.Float32(0.0))
+                        for e in range(4)
+                    ]
                 else:
                     acc = [acc[e] + c[e] * coef for e in range(4)]
             return acc
@@ -1243,9 +1251,9 @@ def build_flash_ffn_kernel(
                 )
 
                 def route_coef():
-                    return (lane % 16 == s_q).select(
+                    return (
+                        lane % 16 == s_q,
                         _uniform_f32(lds_ld(dnw, s_q * MOE_SLOTS + slot_q)),
-                        fx.Float32(0.0),
                     )
 
                 return unit_native_mxfp4(
