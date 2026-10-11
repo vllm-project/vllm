@@ -8,11 +8,13 @@ into a ``GemmaRMSNorm`` that adds the residual and normalizes. flashinfer ships 
 kernel that fuses all-reduce + residual-add + RMSNorm into a single launch; this
 helper drives it directly (no torch.compile pass) for models that run eager.
 
-Scope: attention output only, no quantization. When the flashinfer fast path is
-not applicable (TP==1, flashinfer/NVSwitch unavailable, unsupported dtype, or an
-oversize batch) it falls back to ``all_reduce`` + ``GemmaRMSNorm``, which is
-numerically identical to the unfused model path.
+No quantization. On ROCm it uses AITER's one-stage custom all-reduce for
+decode sizes and, with FlyDSL QuickReduce enabled, the INT4 QuickReduce fused
+kernel for prefill sizes. Otherwise it falls back to ``all_reduce`` +
+``GemmaRMSNorm``, which is numerically identical to the unfused model path.
 """
+
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -24,6 +26,11 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.quick_all_reduce import (
+        QuickAllReduce,
+    )
 
 MiB = 1024 * 1024
 
@@ -136,6 +143,21 @@ def _can_use_aiter_fused_ar_rms(hidden_states: torch.Tensor) -> bool:
     return aiter_ar.use_1stage_fused_ar_rms(hidden_states)
 
 
+def _get_flydsl_qr_fused_rms(
+    hidden_states: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
+) -> "QuickAllReduce | None":
+    """QuickReduce communicator if its FlyDSL INT4 kernel can fuse these
+    operands (prefill sizes; needs FlyDSL INT4 QuickReduce enabled)."""
+    if not current_platform.is_rocm():
+        return None
+    device_comm = get_tp_group().device_communicator
+    qr_comm = getattr(device_comm, "qr_comm", None)
+    should_fuse = getattr(qr_comm, "should_fused_allreduce_rmsnorm", None)
+    if should_fuse is None or not should_fuse(hidden_states, residual, weight):
+        return None
+    return qr_comm
+
+
 def fused_allreduce_gemma_rms_norm(
     hidden_states: torch.Tensor,
     residual: torch.Tensor,
@@ -182,6 +204,16 @@ def fused_allreduce_gemma_rms_norm(
             residual=residual,
             weight=norm.weight,
             epsilon=norm.variance_epsilon,
+            gemma_norm=True,
+        )
+
+    qr_comm = _get_flydsl_qr_fused_rms(hidden_states, residual, norm.weight)
+    if qr_comm is not None:
+        return qr_comm.fused_allreduce_rmsnorm(
+            hidden_states,
+            residual,
+            norm.weight,
+            norm.variance_epsilon,
             gemma_norm=True,
         )
 

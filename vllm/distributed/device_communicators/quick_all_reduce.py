@@ -260,6 +260,8 @@ class QuickAllReduce:
             )
         self.create_shared_buffer()
         self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
+        if self._flydsl_int4 is not None:
+            self._prepare_flydsl_rmsnorm()
         self.disabled = False
 
     def _init_flydsl_int4(self, vllm_config) -> Any:
@@ -283,15 +285,6 @@ class QuickAllReduce:
             "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
             "payloads use the HIP QuickReduce kernels."
         )
-        if (
-            vllm_config is not None
-            and vllm_config.compilation_config.pass_config.fuse_allreduce_rms
-        ):
-            logger.warning_once(
-                "fuse_allreduce_rms is on, but FlyDSL QuickReduce has no fused "
-                "kernels yet: the payloads it takes run all-reduce plus a "
-                "separate RMSNorm, so the fusion does nothing for them."
-            )
         return flydsl_int4
 
     @staticmethod
@@ -368,6 +361,21 @@ class QuickAllReduce:
                 self.qr_quant_level.value
             ]
         return inp_size <= self.qr_max_size and inp_size >= min_size
+
+    def _prepare_flydsl_rmsnorm(self) -> None:
+        """Build the fused-RMSNorm engines for the model's hidden size.
+
+        Wide-tile hidden sizes (6144) build their engines with a collective;
+        doing it at init keeps it out of profiling and CUDA graph capture.
+        """
+        prepare = getattr(self._flydsl_int4, "prepare_rmsnorm", None)
+        vllm_config = get_current_vllm_config_or_none()
+        model_config = getattr(vllm_config, "model_config", None)
+        if prepare is None or model_config is None:
+            return
+        hidden = model_config.get_hidden_size()
+        if self._flydsl_int4.supports_rmsnorm(hidden, 0):
+            prepare(hidden)
 
     def should_fused_allreduce_rmsnorm(
         self, inp: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
