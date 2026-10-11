@@ -12,7 +12,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-        - exit_status: 1  # Transient upstream fetch failure; image builds run no tests
+        - exit_status: 1  # Transient Docker/BuildKit failure
           limit: 1
 
   - label: ":docker: :smoking: Non-root smoke tests"
@@ -82,7 +82,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-        - exit_status: 1  # Transient upstream fetch failure; image builds run no tests
+        - exit_status: 1  # Transient Docker/BuildKit failure
           limit: 1
 
   - label: ":docker: Build HPU image"
@@ -114,7 +114,7 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-        - exit_status: 1  # Transient upstream fetch failure; image builds run no tests
+        - exit_status: 1  # Transient Docker/BuildKit failure
           limit: 1
 
   - label: ":docker: Build arm64 image"
@@ -134,5 +134,5 @@ steps:
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
-        - exit_status: 1  # Transient upstream fetch failure; image builds run no tests
+        - exit_status: 1  # Transient Docker/BuildKit failure
           limit: 1
