@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 TP_SIZES = (2, 4, 8)
 WIDTHS = (2, 4, 8)
+# wider steps at these TP sizes are slower than vLLM's path
+TP_MAX_WIDTH = {2: 4}
 STEP_TOKENS = (1, 2, 4, 8)
 GRID = 256
 STAGES = ("seam", "gate", "router", "ug", "down")
@@ -98,5 +100,10 @@ MONO_SPEC = MonoSpec(
     eligible=_model_side("eligible"),
     build=_model_side("build"),
     metadata_names=_model_side("metadata_names"),
-    options={"tokens": STEP_TOKENS, "mode": "ffn layer", "numerics": NUMERICS},
+    options={
+        "tokens": STEP_TOKENS,
+        "tp_max_width": TP_MAX_WIDTH,
+        "mode": "ffn layer",
+        "numerics": NUMERICS,
+    },
 )
