@@ -65,7 +65,10 @@ impl UnifiedParser for CombinedParser {
     where
         Self: Sized + 'static,
     {
-        Err(UnifiedParserError::CombinedParserConstructor)
+        Err(UnifiedParserError::NoNamedConstructor {
+            parser: "combined",
+            built_from: "split parser instances",
+        })
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
@@ -194,6 +197,7 @@ mod tests {
                 },
             }),
             strict: None,
+            defer_loading: None,
         }]
     }
 

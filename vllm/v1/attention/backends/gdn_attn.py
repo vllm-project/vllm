@@ -7,7 +7,12 @@ from typing import Literal
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointBuilder,
+    MambaPrefillCheckpointMetadata,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -48,6 +53,7 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
 
+    checkpoint: MambaPrefillCheckpointMetadata | None = None
     has_initial_state: torch.Tensor | None = None
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
@@ -74,6 +80,7 @@ class GDNAttentionMetadata:
     prefill_query_start_loc: torch.Tensor | None = None
     prefill_state_indices: torch.Tensor | None = None
     prefill_has_initial_state: torch.Tensor | None = None
+    aiter_prefill_metadata: object | None = None
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
@@ -97,12 +104,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
+        self.checkpoint_builder = MambaPrefillCheckpointBuilder(
+            vllm_config, kv_cache_spec
+        )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
         )
 
-        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
+        self.gdn_prefill_backend: Literal[
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl"
+        ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+        self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -176,6 +189,32 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             (self.decode_cudagraph_max_bs,),
             dtype=torch.int32,
             device=device,
+        )
+
+    @staticmethod
+    def _check_chunk_metadata_override(
+        builder_cls: type["GDNAttentionMetadataBuilder"], backend: str
+    ) -> None:
+        """Reject a subclass whose chunk metadata the AITER path would skip.
+
+        AITER brings its own varlen prefill metadata and never calls
+        ``_build_chunk_metadata``, so a builder that overrides it would lose
+        that override without a word. No in-tree subclass can get here --
+        ``_resolve_gdn_prefill_backend`` only selects this backend for models
+        with 128-dim GDN key and value heads, which the KDA builders are not --
+        but a future one should be told rather than quietly ignored.
+        """
+        if backend != "aiter_flydsl":
+            return
+        if (
+            builder_cls._build_chunk_metadata
+            is GDNAttentionMetadataBuilder._build_chunk_metadata
+        ):
+            return
+        raise RuntimeError(
+            f"{builder_cls.__name__} builds its own FLA chunk metadata, which "
+            "the 'aiter_flydsl' GDN prefill backend does not use. Select a "
+            "different gdn_prefill_backend for this model."
         )
 
     def _build_chunk_metadata(
@@ -252,11 +291,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         else:
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
-            if (
-                num_spec_decodes == 0
-                or num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
-                == 0
-            ):
+            # A batch whose rows all drafted nothing still has to run the
+            # speculative path: that is the only path that applies each row's
+            # accepted-token offset to the recurrent state.
+            if num_spec_decodes == 0:
                 num_spec_decodes = 0
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
@@ -353,9 +391,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_token_indx = torch.empty(
                     0, dtype=torch.int32, device=query_start_loc.device
                 )
-                # Filter by spec_sequence_masks to exclude padded sequences
+                # Padded sequences trail the spec decodes, so slice them off
+                # rather than gather with the host mask (an H2D copy + a kernel).
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.num_spec + 1
+                    :num_spec_decodes, : self.num_spec + 1
                 ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
@@ -413,13 +452,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
             assert num_accepted_tokens is not None
-            num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+            if num_prefills == 0 and num_decodes == 0:
+                num_accepted_tokens = num_accepted_tokens[:num_spec_decodes]
+            else:
+                num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
         chunk_indices: torch.Tensor | None = None
         chunk_offsets: torch.Tensor | None = None
         prefill_query_start_loc: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        aiter_prefill_metadata: object | None = None
         if num_prefills > 0:
             # In a mixed non-spec batch, decodes are peeled off to the recurrent
             # kernel (decode-first front slice), so build chunk metadata from the
@@ -441,11 +484,23 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
 
-            chunk_indices, chunk_offsets = self._build_chunk_metadata(
-                prefill_query_start_loc,
-                prefill_query_start_loc_cpu,
-                query_start_loc.device,
-            )
+            if self.gdn_prefill_backend == "aiter_flydsl":
+                # AITER carries its own reusable varlen metadata and has no use
+                # for FLA's chunk indices, so it replaces them rather than
+                # extending what _build_chunk_metadata returns.
+                assert prefill_query_start_loc_cpu is not None
+                aiter_prefill_metadata = (
+                    rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
+                        torch.diff(prefill_query_start_loc_cpu).tolist(),
+                        cu_seqlens=prefill_query_start_loc,
+                    )
+                )
+            else:
+                chunk_indices, chunk_offsets = self._build_chunk_metadata(
+                    prefill_query_start_loc,
+                    prefill_query_start_loc_cpu,
+                    query_start_loc.device,
+                )
 
         if num_prefills > 0:
             context_lens_tensor = m.compute_num_computed_tokens()
@@ -465,6 +520,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_has_initial_state = has_initial_state
         else:
             has_initial_state = None
+
+        checkpoint: MambaPrefillCheckpointMetadata | None = None
+        if num_prefills > 0:
+            request_rows = list(range(m.num_reqs))
+            if spec_sequence_masks_cpu is not None:
+                request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
+            checkpoint = self.checkpoint_builder.build(m, request_rows)
 
         # Function code counted on either presency non-spec decode or spec decode,
         # but not both.
@@ -543,12 +605,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
+            checkpoint=checkpoint,
             has_initial_state=has_initial_state,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
+            aiter_prefill_metadata=aiter_prefill_metadata,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,
@@ -601,6 +665,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         """Re-gather this group's state indices. The other fields are
         batch-level and stay shared with ``metadata``."""
         m = metadata
+        checkpoint = (
+            m.checkpoint.regather_state_indices(blk_table)
+            if m.checkpoint is not None
+            else None
+        )
         if self.vllm_config.cache_config.mamba_cache_mode == "align":
             assert self.mamba_aligned_state_indices is not None
             blk_table = self.mamba_aligned_state_indices
@@ -610,10 +679,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_indices = blk_table[:, 0]
             if m.num_prefills > 0:
                 prefill_indices = non_spec_indices[m.num_decodes :]
+        elif m.num_prefills == 0:
+            # Same as build(): padded sequences trail the spec decodes.
+            spec_indices = blk_table[: m.num_spec_decodes, : self.num_spec + 1]
         else:
             spec_indices = blk_table[masks, : self.num_spec + 1]
-            if m.num_prefills > 0:
-                non_spec_indices = prefill_indices = blk_table[~masks, 0]
+            non_spec_indices = prefill_indices = blk_table[~masks, 0]
 
         if self._stage_spec_decode(
             m.num_prefills, m.num_decodes, m.num_spec_decodes, m.num_spec_decode_tokens
@@ -640,6 +711,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_state_indices_tensor=spec_indices,
             non_spec_state_indices_tensor=non_spec_indices,
             prefill_state_indices=prefill_indices,
+            checkpoint=checkpoint,
         )
 
     def build_for_cudagraph_capture(

@@ -350,10 +350,10 @@ def test_decode_threshold_only_applies_when_every_rank_is_a_uniform_decode():
 
 def test_microbatching_pads_all_ranks_to_the_largest():
     """Ranks must run the same token count so microbatch sizes line up."""
-    desc, dp_sync = _sync_dp([200, 256])
+    desc, dp_sync_state = _sync_dp([200, 256])
     assert desc.num_tokens == 256
-    assert dp_sync is not None
-    assert dp_sync.num_tokens_across_dp.tolist() == [256, 256]
+    assert dp_sync_state is not None
+    assert dp_sync_state.num_tokens_across_dp.tolist() == [256, 256]
 
 
 def test_microbatching_survives_a_rank_that_cannot_fill_it():
@@ -959,7 +959,7 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.num_ubatches == 2
 
     # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
-    desc, dp_sync = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
+    desc, dp_sync_state = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
-    assert dp_sync is not None and dp_sync.eager
+    assert dp_sync_state is not None and dp_sync_state.eager
