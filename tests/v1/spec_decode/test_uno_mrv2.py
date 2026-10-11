@@ -489,7 +489,9 @@ def _cpu_graph_manager_patches(monkeypatch):
         "get_global_graph_pool",
         lambda: object(),
     )
-    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: Mock(spec=BaseOffloader))
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "get_offloader", lambda: Mock(spec=BaseOffloader)
+    )
 
 
 def _captured_draft_rows(proposer) -> list[int]:
@@ -1031,7 +1033,9 @@ def test_draft_graph_engagement_follows_the_k_rule(
         "get_global_graph_pool",
         lambda: object(),
     )
-    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: Mock(spec=BaseOffloader))
+    monkeypatch.setattr(
+        gpu_cudagraph_utils, "get_offloader", lambda: Mock(spec=BaseOffloader)
+    )
 
     module = "vllm.v1.worker.gpu.spec_decode.uno"
     proposer = _cpu_uno_proposer(k)
