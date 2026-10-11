@@ -261,13 +261,14 @@ def test_v41_pcp_swa_cache_matches_non_pcp_writer(kv_mxfp8, monkeypatch):
 )
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("fuse_cache", [False, True])
 @pytest.mark.parametrize(
     "lengths",
     [(1, 5, 13), (1, 1, 1), (1, 2, 0), (7, 8, 8), (2, 3, 3)],
     ids=["prefill", "decode", "empty", "wrap_threshold", "packed_boundary"],
 )
 def test_v41_fused_save_compress_and_insert(
-    compress_ratio: int, use_graph: bool, lengths: tuple[int, ...]
+    compress_ratio: int, use_graph: bool, fuse_cache: bool, lengths: tuple[int, ...]
 ):
     """Ring states: a group boundary whose previous token is outside the chunk
     pools the ring row that chunk left behind, even when this chunk overwrites
@@ -279,6 +280,8 @@ def test_v41_fused_save_compress_and_insert(
     a Torch reference with BF16 rounding before RoPE. Replays change both
     inputs and history so stale scratch/cache values cannot satisfy the test.
     """
+    if fuse_cache and not current_platform.is_cuda():
+        pytest.skip("fused cache insertion is CUDA only")
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         fused_save_compress_norm,
         rope_quant_insert,
@@ -334,10 +337,20 @@ def test_v41_fused_save_compress_and_insert(
             1e-20,
             compress_ratio,
             latent,
+            **(
+                dict(
+                    cos_sin_cache=cos_sin,
+                    kv_cache=cache,
+                    cache_slot_mapping=cache_slots,
+                )
+                if fuse_cache
+                else {}
+            ),
         )
-        rope_quant_insert(
-            latent, positions, cos_sin, cache, cache_slots, compress_ratio
-        )
+        if not fuse_cache:
+            rope_quant_insert(
+                latent, positions, cos_sin, cache, cache_slots, compress_ratio
+            )
 
     state_backing.normal_()
     run()
