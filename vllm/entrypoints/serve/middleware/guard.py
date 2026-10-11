@@ -57,6 +57,10 @@ def _build_guard_config() -> "SecurityConfig":
         "enable_redis": False,
         "passive_mode": envs.VLLM_GUARD_PASSIVE_MODE,
         "enable_rate_limit_auto_ban": envs.VLLM_GUARD_RATE_LIMIT_AUTO_BAN,
+        # Inference input is data, not commands the server executes:
+        # signature-scanning bodies false-positives on ordinary prompts.
+        # URL, query, and header screening stays on.
+        "detection_scan_body": envs.VLLM_GUARD_SCAN_BODY,
         "blacklist": _csv(envs.VLLM_GUARD_BLOCKED_IPS),
         "blocked_user_agents": list(_csv(envs.VLLM_GUARD_BLOCKED_USER_AGENTS)),
         "trusted_proxies": _csv(envs.VLLM_GUARD_TRUSTED_PROXIES),

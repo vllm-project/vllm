@@ -34,14 +34,25 @@ if TYPE_CHECKING:
     VLLM_GUARD_AUTO_BAN_THRESHOLD: int = 10
     VLLM_GUARD_AUTO_BAN_DURATION: int = 300
     VLLM_GUARD_PASSIVE_MODE: bool = False
-    VLLM_GUARD_RATE_LIMIT_AUTO_BAN: bool = False
+    # On by default: repeated rate-limit violations feed the ban engine (the
+    # advertised auto-ban behavior). Set VLLM_GUARD_RATE_LIMIT_AUTO_BAN=0
+    # for 429-only enforcement.
+    VLLM_GUARD_RATE_LIMIT_AUTO_BAN: bool = True
     VLLM_GUARD_TRUST_X_FORWARDED_PROTO: bool = False
     VLLM_GUARD_BLOCKED_IPS: str | None = None
     VLLM_GUARD_ALLOWED_IPS: str | None = None
     VLLM_GUARD_BLOCKED_USER_AGENTS: str | None = None
-    VLLM_GUARD_TRUSTED_PROXIES: str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    # Empty by default on purpose: trusting private-range proxies would let
+    # any private-network peer spoof X-Forwarded-For past the blocklist and
+    # rate limits. Behind a reverse proxy, list the proxy addresses here.
+    VLLM_GUARD_TRUSTED_PROXIES: str = ""
     VLLM_GUARD_TRUSTED_PROXY_DEPTH: int = 1
     VLLM_GUARD_EXCLUDED_PATHS: str = "/health,/metrics,/docs"
+    # Request bodies are inference input (prompts, tokens), not commands the
+    # server executes: signature-scanning them false-positives on ordinary
+    # content. URL, query, and header screening stays on; body scanning is
+    # opt-in.
+    VLLM_GUARD_SCAN_BODY: bool = False
     VLLM_GUARD_SECURITY_HEADERS: bool = False
     VLLM_GUARD_ENFORCE_HTTPS: bool = False
     VLLM_GUARD_BLOCKED_COUNTRIES: str | None = None
@@ -863,7 +874,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_GUARD_PASSIVE_MODE", "False").lower() == "true"
     ),
     "VLLM_GUARD_RATE_LIMIT_AUTO_BAN": lambda: (
-        os.environ.get("VLLM_GUARD_RATE_LIMIT_AUTO_BAN", "False").lower() == "true"
+        os.environ.get("VLLM_GUARD_RATE_LIMIT_AUTO_BAN", "True").lower() == "true"
     ),
     "VLLM_GUARD_TRUST_X_FORWARDED_PROTO": lambda: (
         os.environ.get("VLLM_GUARD_TRUST_X_FORWARDED_PROTO", "False").lower() == "true"
@@ -874,7 +885,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_GUARD_BLOCKED_USER_AGENTS", None
     ),
     "VLLM_GUARD_TRUSTED_PROXIES": lambda: os.environ.get(
-        "VLLM_GUARD_TRUSTED_PROXIES", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+        "VLLM_GUARD_TRUSTED_PROXIES", ""
+    ),
+    "VLLM_GUARD_SCAN_BODY": lambda: (
+        os.environ.get("VLLM_GUARD_SCAN_BODY", "False").lower() == "true"
     ),
     "VLLM_GUARD_TRUSTED_PROXY_DEPTH": lambda: int(
         os.environ.get("VLLM_GUARD_TRUSTED_PROXY_DEPTH", "1")

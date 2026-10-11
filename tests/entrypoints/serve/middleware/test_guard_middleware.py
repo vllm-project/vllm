@@ -101,3 +101,27 @@ def test_passive_mode_never_blocks(monkeypatch):
         assert response.status_code == 200
 
     _run(scenario, blocked)
+
+
+def test_zero_trust_and_safe_defaults(monkeypatch):
+    """No proxy is trusted unless explicitly listed, bodies are not
+    signature-scanned by default (inference input is data, not commands
+    the server executes), and rate-limit violations feed the ban engine
+    (the advertised auto-ban behavior)."""
+    from vllm.entrypoints.serve.middleware.guard import _build_guard_config
+
+    monkeypatch.delenv("VLLM_GUARD_TRUSTED_PROXIES", raising=False)
+    monkeypatch.delenv("VLLM_GUARD_SCAN_BODY", raising=False)
+    monkeypatch.delenv("VLLM_GUARD_RATE_LIMIT_AUTO_BAN", raising=False)
+    config = _build_guard_config()
+    assert config.trusted_proxies == ()
+    assert config.detection_scan_body is False
+    assert config.enable_rate_limit_auto_ban is True
+
+    monkeypatch.setenv("VLLM_GUARD_TRUSTED_PROXIES", "10.0.0.1,10.0.0.2")
+    monkeypatch.setenv("VLLM_GUARD_SCAN_BODY", "True")
+    monkeypatch.setenv("VLLM_GUARD_RATE_LIMIT_AUTO_BAN", "0")
+    config = _build_guard_config()
+    assert config.trusted_proxies == ("10.0.0.1", "10.0.0.2")
+    assert config.detection_scan_body is True
+    assert config.enable_rate_limit_auto_ban is False
