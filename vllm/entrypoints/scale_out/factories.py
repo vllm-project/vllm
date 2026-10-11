@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from argparse import Namespace
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.logger import init_logger
 from vllm.tasks import SupportedTask
 
@@ -73,9 +76,35 @@ def register_scale_out_api_routers(
     dedicated_mode = "render" in supported_tasks or getattr(args, "tokens_only", False)
     enabled = dedicated_mode or getattr(args, "enable_scale_out", False)
     if not enabled:
-        logger.info(
-            "Scale-out endpoints are disabled. Set --enable-scale-out to enable them."
+        message = (
+            "Scale-out endpoints are disabled. Restart vllm serve with "
+            "--enable-scale-out to enable them."
         )
+        logger.warning(message)
+
+        async def disabled_scale_out() -> JSONResponse:
+            error = ErrorResponse(
+                error=ErrorInfo(
+                    message=message,
+                    type="PermissionDeniedError",
+                    code=HTTPStatus.FORBIDDEN,
+                )
+            )
+            return JSONResponse(error.model_dump(), status_code=HTTPStatus.FORBIDDEN)
+
+        for path in (
+            "/v1/chat/completions/render",
+            "/v1/chat/completions/derender",
+            "/v1/completions/render",
+            "/v1/completions/derender",
+            "/v1/messages/render",
+            "/v1/responses/render",
+            "/inference/v1/generate",
+            "/inference/v1/abort_requests",
+        ):
+            app.add_api_route(
+                path, disabled_scale_out, methods=["POST"], include_in_schema=False
+            )
         return
 
     from .render.api_router import router as render_render

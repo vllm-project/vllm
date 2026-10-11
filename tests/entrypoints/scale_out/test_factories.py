@@ -3,11 +3,17 @@
 
 from argparse import Namespace
 
+import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from vllm.entrypoints.launchers.api_server.routers import register_api_routers
+from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 from vllm.entrypoints.scale_out.token_in_token_out.api_router import attach_router
-from vllm.entrypoints.serve.middleware.authenticate import GUARDED_PREFIX
+from vllm.entrypoints.serve.middleware.authenticate import (
+    GUARDED_PREFIX,
+    AuthenticationMiddleware,
+)
 from vllm.tasks import SupportedTask
 
 RENDER_PATHS = {
@@ -41,14 +47,26 @@ def registered_paths(
     return {route.path for route in app.routes}
 
 
-def test_scale_out_routes_are_disabled_by_default():
-    paths = registered_paths(("generate",))
+@pytest.mark.parametrize("path", sorted(SCALE_OUT_PATHS))
+@pytest.mark.parametrize("authorized", [False, True])
+def test_disabled_scale_out_routes_explain_opt_in_without_parsing(path, authorized):
+    app = FastAPI()
+    register_scale_out_api_routers(app, ("generate",))
+    app.add_middleware(AuthenticationMiddleware, tokens=["secret"])
+    headers = {"Authorization": "Bearer secret"} if authorized else {}
+    client = TestClient(app)
+    response = client.post(path, content="not JSON", headers=headers)
 
-    assert SCALE_OUT_PATHS.isdisjoint(paths)
+    assert response.status_code == (403 if authorized else 401)
+    if authorized:
+        assert "--enable-scale-out" in response.json()["error"]["message"]
+        assert response.json()["error"]["type"] == "PermissionDeniedError"
+        assert path not in app.openapi()["paths"]
+        assert client.post("/unknown", headers=headers).status_code == 404
 
 
 def test_disabled_scale_out_routes_are_logged(caplog):
-    with caplog.at_level("INFO", logger="vllm.entrypoints.scale_out.factories"):
+    with caplog.at_level("WARNING", logger="vllm.entrypoints.scale_out.factories"):
         registered_paths(("generate",))
 
     assert any("--enable-scale-out" in record.message for record in caplog.records)

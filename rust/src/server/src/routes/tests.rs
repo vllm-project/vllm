@@ -781,13 +781,22 @@ async fn scale_out_generate_route_is_disabled_by_default() {
                 .method("POST")
                 .uri("/inference/v1/generate")
                 .header("content-type", "application/json")
-                .body(Body::from("{}"))
+                .body(Body::from("not JSON"))
                 .expect("build request"),
         )
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read response");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode error");
+    assert_eq!(error["error"]["type"], "PermissionDeniedError");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("--enable-scale-out")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
