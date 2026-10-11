@@ -78,7 +78,7 @@ llm.wake_up(tags=["kv_cache"])
 
 Set `sleep_preserve_parameter_names` (CLI: `--sleep-preserve-parameter-names`)
 to runtime parameter-name glob
-patterns for weights that stay frozen during training. Each pattern must match
+patterns for weights that stay frozen during training. Target patterns match
 `model.named_parameters()`; checkpoint names and `requires_grad` are not used.
 
 Level-2 sleep backs up selected GPU parameters to pageable CPU memory; weights
@@ -87,7 +87,20 @@ copy. Allow enough host memory for backups. Level-1 behavior is unchanged.
 
 The trainer must omit these parameters from updates, and reload/post-processing
 must preserve their values and storage (including avoiding replacement with meta
-tensors). This option does not filter updates and applies only to the target model.
+tensors). This option does not filter updates.
+
+To retain a frozen drafter while updating only target weights, use `draft.*`:
+
+```bash
+VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3.8-27B --enable-sleep-mode \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+    --sleep-preserve-parameter-names 'draft.*'
+```
+
+vLLM selects all draft-private parameters internally; you do not need to list
+them individually. Use `draft.<name>` to select specific draft parameters.
+Parameters shared with the target are excluded from the draft selection, so
+target updates remain authoritative. An empty `draft.*` selection is valid.
 
 #### Release only KV cache memory
 
