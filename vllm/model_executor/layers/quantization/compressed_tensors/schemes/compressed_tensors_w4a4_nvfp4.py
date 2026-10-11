@@ -97,18 +97,15 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.weight = layer.weight_packed
         del layer.weight_packed
 
-        # Check for mismatched weight global scales
-        if torch.unique(layer.weight_global_scale).numel() != 1:
-            logger.warning_once(
-                "In NVFP4 linear, the weight global scale is different"
-                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
-                " will likely result in reduced accuracy. Please verify the model"
-                " accuracy. Consider using a checkpoint with a shared global NVFP4"
-                " scale for fused layers."
-            )
-
-        # Process weight global scale (CT stores as divisors, i.e. 1/scale)
-        weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
+        # Process weight global scale (CT stores as divisors, i.e. 1/scale).
+        # Fused layers (e.g. qkv_proj, gate_up_proj) run one GEMM with the
+        # largest divisor; output columns of shards quantized with a smaller
+        # divisor are rescaled by their exact ratio in apply_weights.
+        shard_divisors = layer.weight_global_scale.to(torch.float32)
+        weight_global_scale = shard_divisors.max()
+        layer.shard_output_scales = _shard_output_scales(
+            layer.logical_widths, shard_divisors.tolist(), weight_global_scale.item()
+        )
         layer.weight_global_scale = Parameter(
             1.0 / weight_global_scale, requires_grad=False
         )
@@ -146,4 +143,30 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        if not layer.shard_output_scales:
+            return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+        out = self.kernel.apply_weights(layer=layer, x=x)
+        for start, end, scale in layer.shard_output_scales:
+            out[..., start:end] *= scale
+        if bias is not None:
+            out += bias
+        return out
+
+
+def _shard_output_scales(
+    logical_widths: list[int], shard_divisors: list[float], divisor: float
+) -> list[tuple[int, int, float]]:
+    """Column ranges [start, end) whose shard divisor differs from `divisor`,
+    with the factor that restores their own global scale."""
+    ranges: list[tuple[int, int, float]] = []
+    start = 0
+    for width, shard_divisor in zip(logical_widths, shard_divisors):
+        end = start + width
+        if shard_divisor != divisor:
+            scale = divisor / shard_divisor
+            if ranges and ranges[-1][1] == start and ranges[-1][2] == scale:
+                ranges[-1] = (ranges[-1][0], end, scale)
+            else:
+                ranges.append((start, end, scale))
+        start = end
+    return ranges
