@@ -549,6 +549,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_resize_size_config: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Load video from an HTTP or base64 data URL."""
         image_io = ImageMediaIO(
@@ -559,6 +560,8 @@ class MediaConnector:
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):
             video_io_kwargs["video_backend"] = video_backend
+        if video_resize_size_config and "_resize_size_config" not in video_io_kwargs:
+            video_io_kwargs["_resize_size_config"] = video_resize_size_config
         video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return self.load_from_url(
@@ -573,6 +576,7 @@ class MediaConnector:
         *,
         image_mode: str | None = "RGB",
         video_processor: str | None = None,
+        video_resize_size_config: dict[str, Any] | None = None,
     ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         """Asynchronously load video from an HTTP or base64 data URL.
 
@@ -588,6 +592,8 @@ class MediaConnector:
             video_backend := get_video_loader_backend_for_processor(video_processor)
         ):
             video_io_kwargs["video_backend"] = video_backend
+        if video_resize_size_config and "_resize_size_config" not in video_io_kwargs:
+            video_io_kwargs["_resize_size_config"] = video_resize_size_config
         video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return await self.load_from_url_async(
