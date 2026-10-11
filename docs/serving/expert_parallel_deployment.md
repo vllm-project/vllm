@@ -157,6 +157,8 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
+| `enable_migration_batching` | Limit concurrent expert transfers during async EPLB | `false` |
+| `migration_max_peers` | Concurrent peer transfers per rank when batching is enabled; sends and receives both count | `1` |
 
 For example:
 
