@@ -254,16 +254,28 @@ class Worker(WorkerBase):
             )
         return self._sleep_mode_backend
 
+    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
+        parameters = dict(model.named_parameters())
+        draft = self.get_draft_model()
+        if draft is not None:
+            shared = {id(parameter) for parameter in parameters.values()}
+            parameters.update(
+                (f"draft.{name}", parameter)
+                for name, parameter in draft.named_parameters()
+                if id(parameter) not in shared
+            )
+        return parameters
+
     def _save_sleep_parameters(self, model: nn.Module) -> None:
         patterns = self.model_config.sleep_preserve_parameter_names
         if not patterns:
             self._sleep_saved_parameters = {}
             return
-        parameters = dict(model.named_parameters())
+        parameters = self._get_sleep_parameters(model)
         names: set[str] = set()
         for pattern in patterns:
             matches = fnmatch_filter(parameters, pattern)
-            if not matches:
+            if not matches and pattern != "draft.*":
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
             names.update(matches)
         self._sleep_saved_parameters = {
@@ -274,8 +286,9 @@ class Worker(WorkerBase):
 
     @torch.no_grad()
     def _restore_sleep_parameters(self, model: nn.Module) -> None:
+        parameters = self._get_sleep_parameters(model)
         for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
+            parameters[name].copy_(value)
         self._sleep_saved_parameters.clear()
 
     def sleep(self, level: int = 1) -> None:
