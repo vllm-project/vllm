@@ -8,11 +8,11 @@ import torch.multiprocessing as mp
 
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.distributed.pp_transport import (
+    PP_TRANSPORT_REGISTRY,
+    PPTransport,
     PPTransportAllGatherPolicy,
     PPTransportDataType,
-    PPTransportPayload,
-    add_pp_transport_tensor,
-    copy_pp_transport_tensor,
+    PPTransportTensor,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -26,10 +26,26 @@ def _run_transport_stage(rank: int, init_method: str):
         use_device_communicator=False,
     )
     policy = PPTransportAllGatherPolicy()
+    buffer = torch.full((8, 2), -1, dtype=torch.int32)
+    transport = PPTransport(
+        {
+            PPTransportDataType.HIDDEN_STATES: PPTransportTensor(shape=(4,)),
+            PPTransportDataType.TOPK_INDICES: PPTransportTensor(
+                buffer=buffer, receive=rank > 0, send=rank < 2
+            ),
+        },
+        payload_types=(
+            PPTransportDataType.MULTIMODAL_EMBEDDINGS,
+            PPTransportDataType.TARGET_EMBEDDINGS,
+        ),
+    )
     try:
         for step in range(2):
             if rank == 0:
-                payload = PPTransportPayload()
+                payload = transport.new_payload()
+                payload.set_tensor(
+                    PPTransportDataType.TARGET_EMBEDDINGS, torch.full((4, 4), step)
+                )
                 if step == 0:
                     embedding = torch.arange(15).reshape(3, 5)[:, :4]
                     embedding.modality = "image"
@@ -44,17 +60,16 @@ def _run_transport_stage(rank: int, init_method: str):
                     handle.wait()
                 for callback in postprocess:
                     callback()
-                payload = PPTransportPayload(tensors)
+                payload = transport.new_payload(tensors)
+                transport.restore_buffers(IntermediateTensors(tensors))
                 torch.testing.assert_close(
-                    tensors[PPTransportDataType.TOPK_INDICES.value],
+                    buffer[:4],
                     torch.full((4, 2), rank - 1, dtype=torch.int32),
                 )
             if rank < 2:
-                output = IntermediateTensors({"hidden_states": torch.zeros(4, 4)})
-                add_pp_transport_tensor(
-                    output,
-                    PPTransportDataType.TOPK_INDICES,
-                    torch.full((4, 2), rank, dtype=torch.int32),
+                buffer.fill_(rank)
+                output = transport.make_intermediate_tensors(
+                    4, hidden_states=torch.zeros(4, 4)
                 )
                 handles = group.isend_tensor_dict(
                     payload.relay(output).tensors, all_gather_tensors=policy
@@ -62,6 +77,10 @@ def _run_transport_stage(rank: int, init_method: str):
                 for handle in handles:
                     handle.wait()
             else:
+                torch.testing.assert_close(
+                    payload.get_tensor(PPTransportDataType.TARGET_EMBEDDINGS),
+                    torch.full((4, 4), step),
+                )
                 result = payload.get_multimodal_embeddings()
                 if step == 0:
                     assert result is not None
@@ -90,18 +109,26 @@ def test_multihop_multimodal_payload():
     audio = torch.ones(2, 4)
     audio.modality = "audio"
     mask = torch.tensor([False, True, True, True, False, True, True])
-    payload = PPTransportPayload()
+    transport = PPTransport(
+        payload_types=(
+            PPTransportDataType.MULTIMODAL_EMBEDDINGS,
+            PPTransportDataType.TARGET_EMBEDDINGS,
+        )
+    )
+    payload = transport.new_payload()
     payload.set_multimodal_embeddings([image, audio], mask)
-    payload.set_target_embeddings(torch.ones(7, 4))
+    payload.set_tensor(PPTransportDataType.TARGET_EMBEDDINGS, torch.ones(7, 4))
 
     for stage in range(3):
-        output = IntermediateTensors({"hidden_states": torch.full((7, 4), stage)})
-        add_pp_transport_tensor(
-            output, PPTransportDataType.TOPK_INDICES, torch.full((7, 2), stage)
+        output = IntermediateTensors(
+            {
+                "hidden_states": torch.full((7, 4), stage),
+                PPTransportDataType.TOPK_INDICES.value: torch.full((7, 2), stage),
+            }
         )
         # Tensor-dict transport sends values, not Python tensor attributes.
         received = {key: value.clone() for key, value in payload.relay(output).items()}
-        payload = PPTransportPayload(received)
+        payload = transport.new_payload(received)
         assert PPTransportDataType.TOPK_INDICES.value not in payload.tensors
         assert "hidden_states" not in payload.tensors
         torch.testing.assert_close(received["hidden_states"], output["hidden_states"])
@@ -113,10 +140,12 @@ def test_multihop_multimodal_payload():
     assert [embedding.modality for embedding in embeddings] == ["image", "audio"]
     assert received_mask.device.type == "cpu"
     torch.testing.assert_close(received_mask, mask)
-    torch.testing.assert_close(payload.get_target_embeddings(), torch.ones(7, 4))
+    torch.testing.assert_close(
+        payload.get_tensor(PPTransportDataType.TARGET_EMBEDDINGS), torch.ones(7, 4)
+    )
     # A subsequent text-only batch must not reuse the preceding batch's images.
     assert (
-        PPTransportPayload(
+        transport.new_payload(
             {"hidden_states": torch.zeros(2, 4)}
         ).get_multimodal_embeddings()
         is None
@@ -124,7 +153,9 @@ def test_multihop_multimodal_payload():
 
 
 def test_payload_replacement_and_invalid_multimodal_layout():
-    payload = PPTransportPayload()
+    payload = PPTransport(
+        payload_types=(PPTransportDataType.MULTIMODAL_EMBEDDINGS,)
+    ).new_payload()
     payload.set_multimodal_embeddings(
         [torch.ones(2, 4), torch.zeros(2, 4)], torch.ones(4, dtype=torch.bool)
     )
@@ -147,19 +178,27 @@ def test_payload_replacement_and_invalid_multimodal_layout():
 def test_topk_copy_preserves_buffer_address(compiled):
     buffer = torch.full((8, 4), -1, dtype=torch.int32)
     address = buffer.data_ptr()
+    transport = PPTransport(
+        {
+            PPTransportDataType.HIDDEN_STATES: PPTransportTensor(shape=(4,)),
+            PPTransportDataType.TOPK_INDICES: PPTransportTensor(buffer=buffer),
+        }
+    )
 
     def forward(topk):
-        tensors = IntermediateTensors({})
-        add_pp_transport_tensor(tensors, PPTransportDataType.TOPK_INDICES, topk)
-        copy_pp_transport_tensor(tensors, PPTransportDataType.TOPK_INDICES, buffer)
-        return buffer[: topk.shape[0]] + 1
+        tensors = IntermediateTensors({PPTransportDataType.TOPK_INDICES.value: topk})
+        transport.restore_buffers(tensors)
+        output = transport.make_intermediate_tensors(
+            topk.shape[0], hidden_states=topk + 1
+        )
+        return output[PPTransportDataType.TOPK_INDICES.value] + output["hidden_states"]
 
     if compiled:
         forward = torch.compile(forward, backend="eager", fullgraph=True)
     for size in (3, 2, 0):
         previous = buffer.clone()
         topk = torch.arange(size * 4, dtype=torch.int32).reshape(size, 4)
-        torch.testing.assert_close(forward(topk), topk + 1)
+        torch.testing.assert_close(forward(topk), topk * 2 + 1)
         assert buffer.data_ptr() == address
         torch.testing.assert_close(buffer[size:], previous[size:])
 
@@ -175,11 +214,13 @@ def test_topk_copy_preserves_buffer_address(compiled):
     ],
 )
 def test_topk_copy_rejects_invalid_layout(topk):
-    tensors = IntermediateTensors({})
-    add_pp_transport_tensor(tensors, PPTransportDataType.TOPK_INDICES, topk)
+    tensors = IntermediateTensors({PPTransportDataType.TOPK_INDICES.value: topk})
     buffer = torch.full((8, 4), -1.0)
+    transport = PPTransport(
+        {PPTransportDataType.TOPK_INDICES: PPTransportTensor(buffer=buffer)}
+    )
     with pytest.raises(ValueError, match="Invalid pp_transport.topk_indices"):
-        copy_pp_transport_tensor(tensors, PPTransportDataType.TOPK_INDICES, buffer)
+        transport.restore_buffers(tensors)
     torch.testing.assert_close(buffer, torch.full_like(buffer, -1))
 
 
@@ -188,6 +229,65 @@ def test_transport_stays_on_matching_tp_lane(default):
     policy = PPTransportAllGatherPolicy({"residual": False})
     assert policy.get("hidden_states", default) == default
     assert not policy.get("residual", default)
-    for data_type in PPTransportDataType:
-        assert not policy.get(data_type.value, default)
+    for data_type, spec in PP_TRANSPORT_REGISTRY.items():
+        if spec.all_gather is not None:
+            assert policy.get(data_type.value, default) == spec.all_gather
     assert not policy.get("pp_transport.multimodal_embeddings.0.image", default)
+
+
+@pytest.mark.parametrize("receive,send", [(False, False), (False, True), (True, False)])
+def test_stage_schema_and_buffer_direction(receive, send):
+    """Capture inputs and sends can differ at shared-indexer boundaries."""
+    buffer = torch.full((8, 2), -1, dtype=torch.int32)
+    transport = PPTransport(
+        {
+            PPTransportDataType.HIDDEN_STATES: PPTransportTensor(shape=(4,)),
+            PPTransportDataType.RESIDUAL: PPTransportTensor(shape=(4,)),
+            PPTransportDataType.TOPK_INDICES: PPTransportTensor(
+                buffer=buffer, receive=receive, send=send
+            ),
+        }
+    )
+    inputs = transport.make_empty_intermediate_tensors(
+        3, torch.bfloat16, torch.device("cpu")
+    )
+    key = PPTransportDataType.TOPK_INDICES.value
+    assert (key in inputs.tensors) == receive
+    assert inputs["hidden_states"].shape == (3, 4)
+    assert inputs["hidden_states"].dtype == torch.bfloat16
+    assert inputs["residual"].dtype == torch.bfloat16
+    if receive:
+        assert inputs[key].shape == (3, 2)
+        assert inputs[key].dtype == torch.int32
+    transport.restore_buffers(inputs)
+    torch.testing.assert_close(
+        buffer[:3], torch.full((3, 2), 0 if receive else -1, dtype=torch.int32)
+    )
+    output = transport.make_intermediate_tensors(
+        3, hidden_states=inputs["hidden_states"], residual=inputs["residual"]
+    )
+    assert (key in output.tensors) == send
+    if send:
+        assert output[key].data_ptr() == buffer.data_ptr()
+        assert output[key].shape == (3, 2)
+
+
+def test_payload_selection_and_unknown_fields():
+    transport = PPTransport(payload_types=(PPTransportDataType.TARGET_EMBEDDINGS,))
+    payload = transport.new_payload(
+        {
+            PPTransportDataType.TARGET_EMBEDDINGS.value: torch.ones(3, 4),
+            PPTransportDataType.MULTIMODAL_MASK.value: torch.ones(3, dtype=torch.bool),
+        }
+    )
+    assert list(payload.tensors) == [PPTransportDataType.TARGET_EMBEDDINGS.value]
+    with pytest.raises(ValueError, match="not selected"):
+        payload.set_multimodal_embeddings([], torch.zeros(3, dtype=torch.bool))
+    with pytest.raises(ValueError, match="Unregistered"):
+        transport.new_payload({"pp_transport.unknown": torch.zeros(1)})
+    with pytest.raises(ValueError, match="Unregistered"):
+        PPTransportAllGatherPolicy().get("pp_transport.unknown")
+    with pytest.raises(ValueError, match="model input schema"):
+        PPTransport(payload_types=(PPTransportDataType.TOPK_INDICES,))
+    with pytest.raises(ValueError, match="PP payload"):
+        PPTransport({PPTransportDataType.TARGET_EMBEDDINGS: PPTransportTensor((4,))})

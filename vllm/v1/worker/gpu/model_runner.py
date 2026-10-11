@@ -39,7 +39,11 @@ from vllm.distributed.aux_output_connector.worker import (
     get_aux_output_connector,
 )
 from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
-from vllm.distributed.pp_transport import PPTransportPayload
+from vllm.distributed.pp_transport import (
+    PPTransport,
+    PPTransportDataType,
+    PPTransportPayload,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -287,6 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         self.speculator = None
         self.relay_draft_mm_embeddings = False
+        self.pp_transport = PPTransport()
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -433,6 +438,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator is not None and self.speculator.supports_mm_inputs,
                 src=pp_group.world_size - 1,
             )
+            if self.relay_draft_mm_embeddings:
+                self.pp_transport = PPTransport(
+                    payload_types=(PPTransportDataType.MULTIMODAL_EMBEDDINGS,)
+                )
 
         self.decode_query_len = (
             self.num_speculative_steps
@@ -1959,7 +1968,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch, draft_lookahead=1
             )
             if mm_embeds:
-                pp_payload = PPTransportPayload()
+                pp_payload = self.pp_transport.new_payload()
                 pp_payload.set_multimodal_embeddings(mm_embeds, mm_mask)
 
         model_inputs = {
@@ -1980,7 +1989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             if not dummy_run:
-                pp_payload = PPTransportPayload(intermediate_tensors.tensors)
+                pp_payload = self.pp_transport.new_payload(intermediate_tensors.tensors)
             n = input_batch.num_tokens_after_padding
             new_tensors = {
                 k: v[:n]

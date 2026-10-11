@@ -10,9 +10,9 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.pp_transport import (
+    PPTransport,
     PPTransportDataType,
-    add_pp_transport_tensor,
-    copy_pp_transport_tensor,
+    PPTransportTensor,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
@@ -39,7 +39,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
@@ -236,37 +235,32 @@ class DeepseekV32Model(torch.nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        make_empty_hidden = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
-        self.receive_pp_topk = (
-            vllm_config.use_v2_model_runner
-            and not get_pp_group().is_first_rank
-            and reuses_previous_topk(config, self.start_layer)
-        )
-        self.send_pp_topk = (
-            vllm_config.use_v2_model_runner
-            and not get_pp_group().is_last_rank
-            and reuses_previous_topk(config, self.end_layer)
-        )
-
-        def make_empty_intermediate_tensors(
-            batch_size: int, dtype: torch.dtype, device: torch.device
-        ) -> IntermediateTensors:
-            tensors = make_empty_hidden(batch_size, dtype, device)
-            if self.receive_pp_topk:
-                add_pp_transport_tensor(
-                    tensors,
-                    PPTransportDataType.TOPK_INDICES,
-                    torch.zeros(
-                        (batch_size, config.index_topk),
-                        dtype=self.topk_indices_buffer.dtype,
-                        device=device,
+        self.pp_transport = PPTransport(
+            {
+                PPTransportDataType.HIDDEN_STATES: PPTransportTensor(
+                    shape=(config.hidden_size,)
+                ),
+                PPTransportDataType.RESIDUAL: PPTransportTensor(
+                    shape=(config.hidden_size,)
+                ),
+                PPTransportDataType.TOPK_INDICES: PPTransportTensor(
+                    buffer=self.topk_indices_buffer,
+                    receive=(
+                        vllm_config.use_v2_model_runner
+                        and not get_pp_group().is_first_rank
+                        and reuses_previous_topk(config, self.start_layer)
                     ),
-                )
-            return tensors
-
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
+                    send=(
+                        vllm_config.use_v2_model_runner
+                        and not get_pp_group().is_last_rank
+                        and reuses_previous_topk(config, self.end_layer)
+                    ),
+                ),
+            }
+        )
+        self.make_empty_intermediate_tensors = (
+            self.pp_transport.make_empty_intermediate_tensors
+        )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
         self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
@@ -304,12 +298,7 @@ class DeepseekV32Model(torch.nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            if self.receive_pp_topk:
-                copy_pp_transport_tensor(
-                    intermediate_tensors,
-                    PPTransportDataType.TOPK_INDICES,
-                    self.topk_indices_buffer,
-                )
+            self.pp_transport.restore_buffers(intermediate_tensors)
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
@@ -339,16 +328,9 @@ class DeepseekV32Model(torch.nn.Module):
             assert not self.use_sequence_parallel, (
                 "Currently, SP is not supported with PP"
             )
-            tensors = IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+            return self.pp_transport.make_intermediate_tensors(
+                full_num_tokens, hidden_states=hidden_states, residual=residual
             )
-            if self.send_pp_topk:
-                add_pp_transport_tensor(
-                    tensors,
-                    PPTransportDataType.TOPK_INDICES,
-                    self.topk_indices_buffer[:full_num_tokens],
-                )
-            return tensors
 
         if self.use_sequence_parallel:
             hidden_states, _ = self.norm(hidden_states, residual)
