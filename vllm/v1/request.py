@@ -186,6 +186,15 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
+        # Cache the required prefix boundary once, outside the scheduling loop.
+        self.mm_required_kv_tokens = max(
+            (
+                feature.mm_position.offset + feature.mm_position.length
+                for feature in self.mm_features
+                if feature.requires_kv
+            ),
+            default=0,
+        )
 
         # Read-only views
         # Prevent directly appending to these lists since

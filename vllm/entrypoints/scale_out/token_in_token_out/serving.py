@@ -5,7 +5,7 @@
 import asyncio
 import math
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from collections.abc import Sequence as GenericSequence
 from typing import Any
 
@@ -37,14 +37,14 @@ from vllm.entrypoints.serve.engine.protocol import (
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
-from vllm.inputs import EngineInput, TokensPrompt, mm_input
+from vllm.inputs import EngineInput, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.inputs import (
-    MultiModalKwargsItem,
-    MultiModalKwargsItems,
-    PlaceholderRange,
+from vllm.multimodal.feature_utils import (
+    engine_input_from_features,
+    placeholder_ranges_from_engine_input,
 )
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -53,10 +53,6 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
-from .mm_features import (
-    mm_kwargs_from_features,
-    placeholder_ranges_from_engine_input,
-)
 from .protocol import (
     GenerateLogProb,
     GenerateLogProbs,
@@ -159,7 +155,7 @@ class ServingTokens(GenerateBaseServing):
 
     def _validate_mm_cache_handles(
         self,
-        mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
+        mm_kwargs: Mapping[str, GenericSequence[MultiModalKwargsItem | None]],
         mm_hashes: dict[str, list[str]],
     ) -> ErrorResponse | None:
         cache = self.online_renderer.renderer.mm_processor_cache
@@ -267,27 +263,15 @@ class ServingTokens(GenerateBaseServing):
                 [prompt]
             )
         elif features := request.features:
-            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
-            mm_placeholders: dict[str, list[PlaceholderRange]] = {
-                modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-                ]
-                for modality, ranges in features.mm_placeholders.items()
-            }
-
-            # Deserialize full tensor data and optional metadata-only data.
-            # Metadata-only items are valid when ec_transfer_params is set.
-            mm_kwargs = mm_kwargs_from_features(features)
-            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
-                return error
-
-            engine_input = mm_input(
-                prompt_token_ids=request.token_ids,
-                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=features.mm_hashes,
-                mm_placeholders=mm_placeholders,
+            engine_input = engine_input_from_features(
+                request.token_ids,
+                features,
                 cache_salt=request.cache_salt,
             )
+            if error := self._validate_mm_cache_handles(
+                engine_input["mm_kwargs"], features.mm_hashes
+            ):
+                return error
         else:
             (engine_input,) = await self.online_renderer.preprocess_completion(
                 request,
