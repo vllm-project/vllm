@@ -39,6 +39,92 @@ logger = init_logger(__name__)
 UNO_LORA_ID = 1_000_003
 
 
+def validate_uno_config(vllm_config: VllmConfig) -> None:
+    """Refuse configurations Uno does not support, before anything is built."""
+    speculative_config = vllm_config.speculative_config
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    if speculative_config.num_speculative_tokens_per_batch_size is not None:
+        raise ValueError("Uno requires a fixed num_speculative_tokens")
+    if speculative_config.rejection_sample_method != "standard":
+        raise ValueError("Uno requires rejection_sample_method='standard'")
+    if speculative_config.use_heterogeneous_vocab:
+        raise ValueError("Uno shares the target vocabulary")
+    if speculative_config.use_local_argmax_reduction:
+        raise ValueError("Uno requires full draft logits; local argmax is unsupported")
+    if speculative_config.enable_adaptive_verification:
+        raise ValueError(
+            "Adaptive verification is not supported with method='uno'; "
+            "disable enable_adaptive_verification"
+        )
+    if speculative_config.draft_tensor_parallel_size not in (
+        None,
+        parallel_config.tensor_parallel_size,
+    ) or any(
+        getattr(parallel_config, name) != 1
+        for name in (
+            "pipeline_parallel_size",
+            "data_parallel_size",
+            "prefill_context_parallel_size",
+            "decode_context_parallel_size",
+        )
+    ):
+        raise ValueError(
+            "Uno supports tensor parallelism; pipeline/data/context "
+            "parallelism are not supported, and the draft must use the "
+            "target's tensor_parallel_size"
+        )
+    if parallel_config.use_ubatching:
+        raise ValueError("Uno does not support dual batch overlap")
+    if (
+        model_config.runner_type != "generate"
+        or model_config.is_diffusion
+        or model_config.is_multimodal_model
+        or model_config.is_encoder_decoder
+    ):
+        raise ValueError("Uno requires a text-only decoder model")
+    if (
+        model_config.is_hybrid
+        or model_config.is_attention_free
+        or model_config.get_sliding_window() is not None
+    ):
+        raise ValueError("Uno requires a model with full attention in every layer")
+    lora_config = vllm_config.lora_config
+    if lora_config is None:
+        raise ValueError(
+            "Uno requires --enable-lora and --max-lora-rank large enough "
+            "for the Uno adapter"
+        )
+    if lora_config.max_loras < 2:
+        raise ValueError(
+            "Uno requires max_loras >= 2 for shared-adapter warmup and graph capture"
+        )
+    if (
+        vllm_config.kv_transfer_config is not None
+        or vllm_config.cache_config.kv_offloading_size is not None
+    ):
+        raise ValueError("Uno does not support KV cache transfer")
+    if vllm_config.cache_config.kv_sharing_fast_prefill:
+        raise ValueError(
+            "Fast prefill optimization for KV sharing is not compatible "
+            "with Uno: Uno's draft layers are the target's layers, so the "
+            "KV-sharing eligibility walk would wrap sharing layers "
+            "incorrectly, and fast prefill gives incorrect logits for "
+            "prompt tokens that Uno's verification requires."
+        )
+    if not vllm_config.scheduler_config.async_scheduling:
+        raise ValueError("Uno requires asynchronous scheduling")
+    scheduler_config = vllm_config.scheduler_config
+    required_tokens = (
+        scheduler_config.max_num_seqs * speculative_config.num_speculative_tokens
+    )
+    if scheduler_config.max_num_batched_tokens < required_tokens:
+        raise ValueError(
+            "Uno requires max_num_batched_tokens >= max_num_seqs * "
+            f"num_speculative_tokens ({required_tokens}) for draft LoRA routing"
+        )
+
+
 def prepare_uno_inputs_reference(
     buffers: InputBuffers,
     slot_mapping: torch.Tensor,
@@ -134,13 +220,9 @@ class UnoSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         if device.type != "cuda" or not current_platform.is_cuda():
             raise ValueError("Uno currently requires an NVIDIA CUDA device")
+        validate_uno_config(vllm_config)
         super().__init__(vllm_config, device)
         self.k = self.num_speculative_steps
-        if self.max_num_reqs * self.k > self.max_num_tokens:
-            raise ValueError(
-                "Uno requires max_num_batched_tokens >= "
-                "max_num_seqs * num_speculative_tokens"
-            )
         assert self.speculative_config.uno_lora_path is not None
         self.lora_request = LoRARequest(
             "uno", UNO_LORA_ID, self.speculative_config.uno_lora_path

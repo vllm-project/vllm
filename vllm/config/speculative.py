@@ -489,7 +489,7 @@ class SpeculativeConfig:
     """Enable parallel drafting, where all speculative tokens are generated
     in parallel rather than sequentially. This can improve performance but
     requires the speculative model be trained to support parallel drafting.
-    Only compatible with EAGLE, draft model, and Uno methods."""
+    Only compatible with EAGLE and draft model methods."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -1234,7 +1234,6 @@ class SpeculativeConfig:
             self._validate_suffix_decoding()
         elif self.method == "uno":
             self._validate_uno()
-            self.model = "uno"
             self.prompt_lookup_min = 0
             self.prompt_lookup_max = 0
             self.draft_model_config = self.target_model_config
@@ -1657,51 +1656,8 @@ class SpeculativeConfig:
             )
         if self.num_speculative_tokens is None:
             raise ValueError("Uno requires num_speculative_tokens")
-        if self.num_speculative_tokens_per_batch_size is not None:
-            raise ValueError("Uno requires a fixed num_speculative_tokens")
-        if self.rejection_sample_method != "standard":
-            raise ValueError("Uno requires rejection_sample_method='standard'")
-        if self.use_heterogeneous_vocab:
-            raise ValueError("Uno shares the target vocabulary")
-        if self.use_local_argmax_reduction:
-            raise ValueError(
-                "Uno requires full draft logits; local argmax is unsupported"
-            )
-        if self.enable_adaptive_verification:
-            raise ValueError(
-                "Adaptive verification is not supported with method='uno'; "
-                "disable enable_adaptive_verification"
-            )
-        if self.draft_tensor_parallel_size not in (
-            None,
-            parallel_config.tensor_parallel_size,
-        ) or any(
-            getattr(parallel_config, name) != 1
-            for name in (
-                "pipeline_parallel_size",
-                "data_parallel_size",
-                "prefill_context_parallel_size",
-                "decode_context_parallel_size",
-            )
-        ):
-            raise ValueError(
-                "Uno supports tensor parallelism; pipeline/data/context "
-                "parallelism are not supported, and the draft must use the "
-                "target's tensor_parallel_size"
-            )
-        if (
-            model_config.runner_type != "generate"
-            or model_config.is_diffusion
-            or model_config.is_multimodal_model
-            or model_config.is_encoder_decoder
-        ):
-            raise ValueError("Uno requires a text-only decoder model")
-        if (
-            model_config.is_hybrid
-            or model_config.is_attention_free
-            or model_config.get_sliding_window() is not None
-        ):
-            raise ValueError("Uno requires a model with full attention in every layer")
+        # The serving checks live with the method:
+        # vllm/v1/worker/gpu/spec_decode/uno.py::validate_uno_config.
 
         vocab_size = model_config.get_vocab_size()
         if self.uno_mask_token_id is None:
@@ -1986,10 +1942,6 @@ class SpeculativeConfig:
         ==================== ============= ======== ================
         """
         num_draft_tokens = self.num_speculative_tokens
-
-        if self.use_uno():
-            # The K-row draft contains one seed and K-1 noisy queries.
-            return num_draft_tokens - 1
 
         if self.use_dflash():
             # DFlash uses one bonus query followed by K mask queries.

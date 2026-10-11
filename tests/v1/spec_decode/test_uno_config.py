@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,8 +17,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
-from vllm.exceptions import VLLMValidationError
-from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.worker.gpu.spec_decode.uno import validate_uno_config
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -50,6 +50,24 @@ def uno_config_factory():
     return make
 
 
+def _serving_config(speculative_config, **overrides):
+    """The parts of a VllmConfig that validate_uno_config reads."""
+    config = SimpleNamespace(
+        speculative_config=speculative_config,
+        model_config=speculative_config.target_model_config,
+        parallel_config=speculative_config.target_parallel_config,
+        lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
+        cache_config=CacheConfig(),
+        kv_transfer_config=None,
+        scheduler_config=SimpleNamespace(
+            async_scheduling=True, max_num_seqs=4, max_num_batched_tokens=256
+        ),
+    )
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    return config
+
+
 def test_uno_shares_target_and_uses_probabilistic_draft_rows(uno_config_factory):
     config = uno_config_factory()
 
@@ -62,6 +80,7 @@ def test_uno_shares_target_and_uses_probabilistic_draft_rows(uno_config_factory)
     assert config.rejection_sample_method == "standard"
     assert config.uno_mask_token_id == 128
     assert config.uno_noise_seed == 0
+    validate_uno_config(_serving_config(config))
 
 
 def test_uno_forces_probabilistic_draft_sampling(uno_config_factory):
@@ -81,6 +100,16 @@ def test_uno_forces_probabilistic_draft_sampling(uno_config_factory):
         ({"uno_mask_token_id": 129}, "target vocabulary size"),
         ({"model": "other-model"}, "shares the target"),
         ({"target_model_config": None}, "target model"),
+    ],
+)
+def test_uno_config_rejects_invalid_fields(uno_config_factory, overrides, message):
+    with pytest.raises(ValueError, match=message):
+        uno_config_factory(**overrides)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
         ({"draft_tensor_parallel_size": 2}, "target's tensor_parallel_size"),
         ({"rejection_sample_method": "synthetic"}, "standard"),
         ({"num_speculative_tokens_per_batch_size": [(1, 8, 4)]}, "fixed"),
@@ -90,8 +119,9 @@ def test_uno_forces_probabilistic_draft_sampling(uno_config_factory):
     ],
 )
 def test_uno_rejects_incompatible_options(uno_config_factory, overrides, message):
+    config = _serving_config(uno_config_factory(**overrides))
     with pytest.raises(ValueError, match=message):
-        uno_config_factory(**overrides)
+        validate_uno_config(config)
 
 
 @pytest.mark.parametrize(
@@ -108,10 +138,17 @@ def test_uno_rejects_incompatible_options(uno_config_factory, overrides, message
 def test_uno_rejects_unsupported_model_types(
     uno_config_factory, attribute, value, message
 ):
-    target = uno_config_factory().target_model_config
-    setattr(target, attribute, value)
+    config = uno_config_factory()
+    setattr(config.target_model_config, attribute, value)
     with pytest.raises(ValueError, match=message):
-        uno_config_factory(target_model_config=target)
+        validate_uno_config(_serving_config(config))
+
+
+def test_uno_rejects_sliding_window_attention(uno_config_factory):
+    config = uno_config_factory()
+    config.target_model_config.get_sliding_window.return_value = 64
+    with pytest.raises(ValueError, match="full attention"):
+        validate_uno_config(_serving_config(config))
 
 
 @pytest.mark.parametrize(
@@ -125,10 +162,10 @@ def test_uno_rejects_unsupported_model_types(
 )
 def test_uno_rejects_parallel_execution(uno_config_factory, parallelism):
     """Every parallelism except tensor parallelism is still refused."""
-    parallel = uno_config_factory().target_parallel_config
-    setattr(parallel, parallelism, 2)
+    config = uno_config_factory()
+    setattr(config.target_parallel_config, parallelism, 2)
     with pytest.raises(ValueError, match="not supported"):
-        uno_config_factory(target_parallel_config=parallel)
+        validate_uno_config(_serving_config(config))
 
 
 def test_uno_accepts_tensor_parallelism(uno_config_factory):
@@ -144,45 +181,71 @@ def test_uno_accepts_tensor_parallelism(uno_config_factory):
     parallel.tensor_parallel_size = 2
 
     config = uno_config_factory(target_parallel_config=parallel)
-    assert config.use_uno()
     assert config.draft_parallel_config is config.target_parallel_config
+    validate_uno_config(_serving_config(config))
 
     # The draft may name the same degree explicitly, and nothing else.
     config = uno_config_factory(
         target_parallel_config=parallel, draft_tensor_parallel_size=2
     )
-    assert config.use_uno()
-    with pytest.raises(ValueError, match="target's tensor_parallel_size"):
-        uno_config_factory(
-            target_parallel_config=parallel, draft_tensor_parallel_size=1
-        )
-
-
-def test_uno_rejects_sliding_window_attention(uno_config_factory):
-    target = uno_config_factory().target_model_config
-    target.get_sliding_window.return_value = 64
-    with pytest.raises(ValueError, match="full attention"):
-        uno_config_factory(target_model_config=target)
-
-
-def _make_vllm_uno_config(uno_config_factory, cache_config=None, **scheduler_overrides):
-    scheduler_kwargs = dict(
-        max_model_len=2048,
-        max_num_seqs=4,
-        max_num_batched_tokens=256,
-        is_encoder_decoder=False,
-        async_scheduling=None,
+    validate_uno_config(_serving_config(config))
+    config = uno_config_factory(
+        target_parallel_config=parallel, draft_tensor_parallel_size=1
     )
-    scheduler_kwargs.update(scheduler_overrides)
-    kwargs = dict(
+    with pytest.raises(ValueError, match="target's tensor_parallel_size"):
+        validate_uno_config(_serving_config(config))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"lora_config": None}, "enable-lora"),
+        (
+            {"lora_config": LoRAConfig(max_loras=1, lora_dtype=torch.bfloat16)},
+            r"max_loras >= 2",
+        ),
+        ({"cache_config": CacheConfig(kv_sharing_fast_prefill=True)}, "KV sharing"),
+        ({"cache_config": CacheConfig(kv_offloading_size=1.0)}, "KV cache transfer"),
+        ({"kv_transfer_config": SimpleNamespace()}, "KV cache transfer"),
+        (
+            {
+                "scheduler_config": SimpleNamespace(
+                    async_scheduling=False, max_num_seqs=4, max_num_batched_tokens=256
+                )
+            },
+            "asynchronous scheduling",
+        ),
+        (
+            {
+                "scheduler_config": SimpleNamespace(
+                    async_scheduling=True, max_num_seqs=4, max_num_batched_tokens=31
+                )
+            },
+            "max_num_batched_tokens",
+        ),
+    ],
+)
+def test_uno_rejects_unsupported_serving_options(
+    uno_config_factory, overrides, message
+):
+    config = _serving_config(uno_config_factory(), **overrides)
+    with pytest.raises(ValueError, match=message):
+        validate_uno_config(config)
+
+
+def _make_vllm_uno_config(uno_config_factory):
+    return VllmConfig(
         device_config=DeviceConfig(device="cpu"),
         speculative_config=uno_config_factory(),
         lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
-        scheduler_config=SchedulerConfig(**scheduler_kwargs),
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            max_num_seqs=4,
+            max_num_batched_tokens=256,
+            is_encoder_decoder=False,
+            async_scheduling=None,
+        ),
     )
-    if cache_config is not None:
-        kwargs["cache_config"] = cache_config
-    return VllmConfig(**kwargs)
 
 
 def test_uno_uses_native_async_v2_and_reserves_k_lookahead(
@@ -208,183 +271,10 @@ def test_uno_uses_native_async_v2_and_reserves_k_lookahead(
     assert config.speculative_config.max_num_new_slots_for_drafting == 7
     assert config.num_lookahead_tokens == 8
     assert config.uniform_decode_query_len == 9
-
-
-def test_uno_rejects_platform_async_override(uno_config_factory, monkeypatch):
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(
-        current_platform,
-        "check_and_update_config",
-        lambda config: setattr(config.scheduler_config, "async_scheduling", False),
-    )
-    with pytest.raises(ValueError, match="asynchronous scheduling"):
-        _make_vllm_uno_config(uno_config_factory)
-
-
-@pytest.mark.parametrize(
-    ("scheduler_overrides", "message"),
-    [
-        ({"async_scheduling": False}, "asynchronous scheduling"),
-        ({"max_num_batched_tokens": 31}, "max_num_batched_tokens"),
-    ],
-)
-def test_uno_rejects_unsupported_v2_scheduler_options(
-    uno_config_factory, monkeypatch, scheduler_overrides, message
-):
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
-    with pytest.raises(ValueError, match=message):
-        _make_vllm_uno_config(uno_config_factory, **scheduler_overrides)
-
-
-def test_uno_rejects_kv_sharing_fast_prefill(uno_config_factory, monkeypatch):
-    """Uno's draft layers are the target's layers, so reject fast prefill.
-
-    Upstream gates ``kv_sharing_fast_prefill`` on ``use_eagle()``; Uno needs the
-    same refusal because the KV-sharing eligibility walk assumes draft layers
-    are a separate model's and would wrap sharing layers incorrectly.
-    """
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
-    from vllm.platforms import current_platform
-
-    # The CPU platform disables async scheduling, which Uno needs; keep the
-    # config test on CPU by neutralizing the platform hook (as the sibling
-    # async-v2 test does).
-    monkeypatch.setattr(
-        current_platform, "apply_config_platform_defaults", lambda _config: None
-    )
-    monkeypatch.setattr(
-        current_platform, "check_and_update_config", lambda _config: None
-    )
-    with pytest.raises(ValueError, match="KV sharing"):
-        _make_vllm_uno_config(
-            uno_config_factory,
-            cache_config=CacheConfig(kv_sharing_fast_prefill=True),
-        )
-
-
-def test_uno_allows_default_kv_sharing_fast_prefill(uno_config_factory, monkeypatch):
-    """The default (off) flag is not a false positive of the F1 refusal."""
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(
-        current_platform, "apply_config_platform_defaults", lambda _config: None
-    )
-    monkeypatch.setattr(
-        current_platform, "check_and_update_config", lambda _config: None
-    )
-    config = _make_vllm_uno_config(
-        uno_config_factory,
-        cache_config=CacheConfig(kv_sharing_fast_prefill=False),
-    )
-    assert config.cache_config.kv_sharing_fast_prefill is False
+    validate_uno_config(config)
 
 
 def test_uno_rejects_forced_v1_runner(uno_config_factory, monkeypatch):
     monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False)
-    with pytest.raises(ValueError, match="Model Runner V2"):
+    with pytest.raises(ValueError, match="Uno speculative decoding"):
         _make_vllm_uno_config(uno_config_factory)
-
-
-def test_uno_vllm_config_accepts_tensor_parallelism(uno_config_factory, monkeypatch):
-    """The VllmConfig mirror must allow what the speculative config allows.
-
-    The two checks are deliberate duplicates, so a half-applied change is the
-    hazard: this builds the whole config at TP=2, which the speculative config
-    accepts, and fails if only one of the two sites was updated.
-    """
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
-    from vllm.platforms import current_platform
-
-    monkeypatch.setattr(
-        current_platform, "apply_config_platform_defaults", lambda _config: None
-    )
-    monkeypatch.setattr(
-        current_platform, "check_and_update_config", lambda _config: None
-    )
-    parallel = uno_config_factory().target_parallel_config
-    parallel.tensor_parallel_size = 2
-    config = VllmConfig(
-        device_config=DeviceConfig(device="cpu"),
-        speculative_config=uno_config_factory(target_parallel_config=parallel),
-        parallel_config=parallel,
-        lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
-        scheduler_config=SchedulerConfig(
-            max_model_len=2048,
-            max_num_seqs=4,
-            max_num_batched_tokens=256,
-            is_encoder_decoder=False,
-            async_scheduling=None,
-        ),
-    )
-    assert config.parallel_config.tensor_parallel_size == 2
-
-    # And still refuses the parallelisms Uno has not been run under.
-    parallel.pipeline_parallel_size = 2
-    with pytest.raises(ValueError, match="not supported"):
-        VllmConfig(
-            device_config=DeviceConfig(device="cpu"),
-            speculative_config=uno_config_factory(),
-            parallel_config=parallel,
-            lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
-            scheduler_config=SchedulerConfig(
-                max_model_len=2048,
-                max_num_seqs=4,
-                max_num_batched_tokens=256,
-                is_encoder_decoder=False,
-                async_scheduling=None,
-            ),
-        )
-
-
-def test_uno_requires_lora_enabled(uno_config_factory, monkeypatch):
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
-    scheduler = SchedulerConfig(
-        max_model_len=2048,
-        max_num_seqs=4,
-        max_num_batched_tokens=256,
-        is_encoder_decoder=False,
-        async_scheduling=None,
-    )
-    with pytest.raises(ValueError, match="enable-lora"):
-        VllmConfig(
-            device_config=DeviceConfig(device="cpu"),
-            speculative_config=uno_config_factory(),
-            scheduler_config=scheduler,
-        )
-
-
-def test_uno_requires_two_lora_slots(uno_config_factory, monkeypatch):
-    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
-    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
-    scheduler = SchedulerConfig(
-        max_model_len=2048,
-        max_num_seqs=4,
-        max_num_batched_tokens=256,
-        is_encoder_decoder=False,
-        async_scheduling=None,
-    )
-    with pytest.raises(ValueError, match=r"max_loras >= 2"):
-        VllmConfig(
-            device_config=DeviceConfig(device="cpu"),
-            speculative_config=uno_config_factory(),
-            lora_config=LoRAConfig(max_loras=1, lora_dtype=torch.bfloat16),
-            scheduler_config=scheduler,
-        )
-
-
-def test_uno_rejects_request_specific_lora(uno_config_factory):
-    processor = InputProcessor.__new__(InputProcessor)
-    processor.speculative_config = uno_config_factory()
-    processor.lora_config = LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16)
-
-    with pytest.raises(VLLMValidationError, match="request-specific"):
-        processor._validate_lora(MagicMock())
