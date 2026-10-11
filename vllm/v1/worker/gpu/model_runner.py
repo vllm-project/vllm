@@ -1051,65 +1051,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
 
-    @torch.inference_mode()
-    def _run_speculator_proposal(
-        self,
-        input_batch: InputBatch,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings_by_layer: dict[str, torch.Tensor] | None,
-        last_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-        dp_sync_state: DPSyncState | None,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
-        num_spec_tokens: int,
-    ) -> None:
-        """Run one proposal and retain its device-resident draft tokens."""
-        assert self.speculator is not None
-        assert self.sampler is not None
-        if isinstance(self.sampler, GPUWatermarkSampler):
-            self.speculator.prepare_watermarking(self.sampler, input_batch.idx_mapping)
-        with use_workspace_lane(self._draft_workspace_lane):
-            draft_tokens = self.speculator.propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings_by_layer,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                self.req_states.last_sampled_tokens,
-                self.req_states.next_prefill_tokens,
-                self.sampler.sampling_states.temperature.gpu,
-                self.sampler.sampling_states.seeds.gpu,
-                num_speculative_tokens=num_spec_tokens,
-                dp_sync_state=dp_sync_state,
-                mm_inputs=mm_inputs,
-            )
-        if num_spec_tokens < self.num_speculative_steps:
-            draft_tokens[:, num_spec_tokens:] = -1
-        self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-        if self.adaptive_verification is not None:
-            self.adaptive_verification.record_confidences(
-                self.speculator.draft_token_confidence_probs, input_batch
-            )
-
-    def _publish_draft_tokens(
-        self,
-        input_batch: InputBatch,
-        num_spec_tokens: int,
-    ) -> None:
-        """Make device draft tokens visible to the scheduler and PP peers."""
-        if self.num_speculative_steps <= 0:
-            return
-        self.draft_tokens_handler.set_draft_tokens(
-            input_batch,
-            self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
-        )
-        if self.pp_handler is not None:
-            self.pp_handler.broadcast_drafts(self.req_states.draft_tokens, input_batch)
-
     def needs_cudagraph_capture(self) -> bool:
         """Whether capture_model() has any CUDA graphs left to capture."""
         return (
@@ -2254,9 +2195,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.aux_output_connector is not None:
             pending_aux_output = self.aux_output_connector.prepare_output(input_batch)
 
-        # Start the async output copy before postprocessing. The proposal is
-        # queued below, after this copy-stream handoff, so it can overlap the
-        # token copy without retaining a prior turn's tensors.
+        # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
@@ -2307,27 +2246,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
             )
-            # AsyncOutput has already recorded its D2H copy event on the
-            # output stream. Queue Uno's K-row proposal only after that
-            # handoff; the main-stream work cannot delay the already-recorded
-            # token copy, and no proposal inputs must survive into another
-            # worker turn.
-            self._run_speculator_proposal(
-                input_batch,
-                attn_metadata,
-                slot_mappings_by_layer,
-                spec_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                dp_sync_state,
-                mm_inputs,
-                num_spec_tokens,
-            )
+            if isinstance(self.sampler, GPUWatermarkSampler):
+                self.speculator.prepare_watermarking(
+                    self.sampler, input_batch.idx_mapping
+                )
+            with use_workspace_lane(self._draft_workspace_lane):
+                draft_tokens = self.speculator.propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                    spec_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    self.req_states.last_sampled_tokens,
+                    self.req_states.next_prefill_tokens,
+                    self.sampler.sampling_states.temperature.gpu,
+                    self.sampler.sampling_states.seeds.gpu,
+                    num_speculative_tokens=num_spec_tokens,
+                    dp_sync_state=dp_sync_state,
+                    mm_inputs=mm_inputs,
+                )
+            if num_spec_tokens < self.num_speculative_steps:
+                draft_tokens[:, num_spec_tokens:] = -1
+            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            if self.adaptive_verification is not None:
+                self.adaptive_verification.record_confidences(
+                    self.speculator.draft_token_confidence_probs, input_batch
+                )
 
-        # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-        # not have a speculator (i.e. self.speculator is None).
-        self._publish_draft_tokens(input_batch, num_spec_tokens)
+        if self.num_speculative_steps > 0:
+            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
+            # not have a speculator (i.e. self.speculator is None)
+            self.draft_tokens_handler.set_draft_tokens(
+                input_batch,
+                self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
+            )
+            if self.pp_handler is not None:
+                self.pp_handler.broadcast_drafts(
+                    self.req_states.draft_tokens, input_batch
+                )
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
