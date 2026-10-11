@@ -1015,7 +1015,8 @@ def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
     observed = {}
 
     class Compressor:
-        def __call__(self, kv_score, positions):
+        def __call__(self, kv_score, positions, rotary_emb=None):
+            assert rotary_emb is None
             return local_latent
 
         def insert_cache(self, latent, positions, rotary_emb):
@@ -1036,6 +1037,7 @@ def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
     attention = SimpleNamespace(
         use_pcp=True,
         compressor=Compressor(),
+        _fuse_compressor_cache=False,
         indexer=prepare_indexer,
         aux_stream_list=None,
         ln_events=[None, None],
@@ -1069,8 +1071,11 @@ def test_v41_pcp_compressor_latent_is_gathered_for_cache_writes(monkeypatch):
 @pytest.mark.parametrize(
     "use_aux,use_graph", [(False, False), (True, False), (True, True)]
 )
+@pytest.mark.parametrize("fuse_cache", [False, True])
 @torch.inference_mode()
-def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph):
+def test_v41_attention_joins_cache_writes_before_consumption(
+    use_aux, use_graph, fuse_cache
+):
     """Both reused-event joins must publish this forward's states and cache rows."""
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.attention import (
@@ -1142,6 +1147,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
     attention = SimpleNamespace(
         use_pcp=False,
         compressor=compressor,
+        _fuse_compressor_cache=fuse_cache,
         indexer=prepare_indexer,
         aux_stream_list=auxiliary,
         ln_events=[torch.cuda.Event(), torch.cuda.Event()],
@@ -1183,10 +1189,12 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         raw.normal_()
         reset()
         attention.aux_stream_list = None
+        attention._fuse_compressor_cache = False
         run()
         expected = tuple(output.clone() for output in observed)
         reset()
         attention.aux_stream_list = auxiliary
+        attention._fuse_compressor_cache = fuse_cache
         if graph is None:
             run()
         else:
