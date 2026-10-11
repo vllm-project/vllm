@@ -65,6 +65,9 @@ def bind(ctx: MonoContext, caches: Mapping[str, torch.Tensor]) -> list[str]:
 
 
 def eligible(ctx: MonoContext, step: MonoStep) -> str | None:
+    cap = flash_spec.TP_MAX_WIDTH.get(ctx.tp_size)
+    if cap is not None and step.width > cap:
+        return f"more than {cap} rows at TP{ctx.tp_size}"
     return None
 
 
