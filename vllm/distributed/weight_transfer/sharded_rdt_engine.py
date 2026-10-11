@@ -468,17 +468,41 @@ class ShardedRDTWeightTransferEngine(
         check_ray_rdt_version(init_info.staging_device)
         pool_config = self._configure_ring(init_info)
 
-        # Re-init prepares routing and baked state before the candidate plan
-        # reveals its effective lane count. If the active receive pool rejects
-        # that plan's geometry, restore the previous complete init state rather
-        # than pairing its cached plan with the candidate router and bake.
+        # Re-init prepares routing, baked state, and receive buffers in place.
+        # Keep the active state transactional through pre-registration and
+        # worker setup: a failed candidate must not leave its plan, tensors, or
+        # routing active.
         old_num_consumers_override = self._num_consumers_override
         old_router = self._router
         old_name_to_plan = self._name_to_plan
         old_name_to_plan_contents = dict(old_name_to_plan)
         old_name_meta = self._name_meta
+        old_name_meta_contents = dict(old_name_meta)
         old_live_names = self._live_names
+        old_live_names_contents = set(old_live_names)
         old_cached_plan = self._cached_plan
+        old_pool_settings = (
+            self._pool_geometry,
+            self._staging_device,
+            self._stages_in_flight,
+            self._ring_depth,
+            self._lanes,
+            self._buffer_presize,
+        )
+        old_dest_buffers = self._dest_buffers
+        old_dest_slots = list(old_dest_buffers)
+        old_dest_slot_contents = [dict(slot) for slot in old_dest_slots]
+        old_lane_cursors = self._lane_cursors
+        old_lane_cursor_contents = list(old_lane_cursors)
+        old_targets_cache = self._targets_cache
+        old_targets_cache_contents = dict(old_targets_cache)
+        old_worker_refs = (
+            self._slot_read_done,
+            self._slot_queued,
+            self._slot_done,
+            self._slot_cv,
+        )
+        old_worker_contents = tuple(list(values) for values in old_worker_refs[:3])
         try:
             self._num_consumers_override = init_info.num_consumers
             self._resolve_producers(init_info)
@@ -489,24 +513,54 @@ class ShardedRDTWeightTransferEngine(
             self._bake(init_info)
             plan = self._build_static_plan(init_info)
             self._size_pool(pool_config, plan)
+            self._cached_plan = plan
+            # Register ALL NIXL memory now, while the fabric is idle: dma-buf
+            # GPUDirect registration concurrent with in-flight RDMA intermittently
+            # fails (ibv_reg_mr 'Bad address'), which bites under M:N fan-in. Sizes
+            # come from the static plan, so this is exact.
+            self._preregister_at_init()
+            # Start the background post-processing worker (pull/process pipelining).
+            self._ensure_proc_worker()
         except Exception:
             old_name_to_plan.clear()
             old_name_to_plan.update(old_name_to_plan_contents)
+            old_name_meta.clear()
+            old_name_meta.update(old_name_meta_contents)
+            old_live_names.clear()
+            old_live_names.update(old_live_names_contents)
+            old_dest_buffers[:] = old_dest_slots
+            for slot, contents in zip(old_dest_slots, old_dest_slot_contents):
+                slot.clear()
+                slot.update(contents)
+            old_lane_cursors[:] = old_lane_cursor_contents
+            old_targets_cache.clear()
+            old_targets_cache.update(old_targets_cache_contents)
+            for values, contents in zip(old_worker_refs[:3], old_worker_contents):
+                values[:] = contents
             self._num_consumers_override = old_num_consumers_override
             self._router = old_router
             self._name_to_plan = old_name_to_plan
             self._name_meta = old_name_meta
             self._live_names = old_live_names
             self._cached_plan = old_cached_plan
+            (
+                self._pool_geometry,
+                self._staging_device,
+                self._stages_in_flight,
+                self._ring_depth,
+                self._lanes,
+                self._buffer_presize,
+            ) = old_pool_settings
+            self._dest_buffers = old_dest_buffers
+            self._lane_cursors = old_lane_cursors
+            self._targets_cache = old_targets_cache
+            (
+                self._slot_read_done,
+                self._slot_queued,
+                self._slot_done,
+                self._slot_cv,
+            ) = old_worker_refs
             raise
-        self._cached_plan = plan
-        # Register ALL NIXL memory now, while the fabric is idle: dma-buf GPUDirect
-        # registration concurrent with in-flight RDMA intermittently fails
-        # (ibv_reg_mr 'Bad address'), which bites under M:N fan-in. Sizes come from
-        # the static plan, so this is exact.
-        self._preregister_at_init()
-        # Start the background post-processing worker (pull/process pipelining).
-        self._ensure_proc_worker()
 
     def _configure_ring(
         self, init_info: ShardedRDTWeightTransferInitInfo
