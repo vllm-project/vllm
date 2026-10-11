@@ -145,16 +145,16 @@ def _block32_tiled_kernel(
     for kk in range(0, K_PER_SPLIT, BLOCK_K):
         if EVEN_K:
             x = tl.load(x_ptrs, mask=m_mask[:, None], other=0.0)
-            xs = tl.load(xs_ptrs, mask=m_mask[:, None], other=127)
+            xs = tl.load(xs_ptrs, mask=m_mask[:, None], other=0)
             w = tl.load(w_ptrs, mask=n_mask[:, None], other=0.0)
-            ws = tl.load(ws_ptrs, mask=n_mask[:, None], other=127)
+            ws = tl.load(ws_ptrs, mask=n_mask[:, None], other=0)
         else:
             k_ok = (offs_k + kk) < K
             s_ok = (offs_sk + kk // 32) < K // 32
             x = tl.load(x_ptrs, mask=m_mask[:, None] & k_ok[None, :], other=0.0)
-            xs = tl.load(xs_ptrs, mask=m_mask[:, None] & s_ok[None, :], other=127)
+            xs = tl.load(xs_ptrs, mask=m_mask[:, None] & s_ok[None, :], other=0)
             w = tl.load(w_ptrs, mask=n_mask[:, None] & k_ok[None, :], other=0.0)
-            ws = tl.load(ws_ptrs, mask=n_mask[:, None] & s_ok[None, :], other=127)
+            ws = tl.load(ws_ptrs, mask=n_mask[:, None] & s_ok[None, :], other=0)
         acc = tl.dot_scaled(x, xs, "e4m3", w.T, ws, "e4m3", acc=acc)
         x_ptrs += BLOCK_K
         w_ptrs += BLOCK_K
@@ -240,9 +240,9 @@ def _block32_packed_kernel(
             ws_mask = ws_mask & (wg < K // 32)
         x = tl.load(x_ptr + rows[:, None] * K + xk, mask=x_mask, other=0.0)
         w = tl.load(w_ptr + cols[:, None] * K + wk, mask=w_mask, other=0.0)
-        xs = tl.load(xs_ptr + rows[:, None] * (K // 32) + xg, mask=xs_mask, other=127)
+        xs = tl.load(xs_ptr + rows[:, None] * (K // 32) + xg, mask=xs_mask, other=0)
         ws = tl.load(
-            ws_ptr + (cols[:, None] // 32) * (K // 32) + wg, mask=ws_mask, other=127
+            ws_ptr + (cols[:, None] // 32) * (K // 32) + wg, mask=ws_mask, other=0
         )
         acc = tl.dot_scaled(x, xs, "e4m3", w.T, ws, "e4m3", acc=acc)
     # Keep only products of matching K panels: the block diagonal.

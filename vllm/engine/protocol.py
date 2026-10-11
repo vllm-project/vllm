@@ -162,8 +162,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine."""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides."""
         ...
 
     @abstractmethod
@@ -218,7 +224,6 @@ class EngineClient(ABC):
         self,
         *,
         mode: "PauseMode" = "abort",
-        wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
@@ -230,7 +235,6 @@ class EngineClient(ABC):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
 

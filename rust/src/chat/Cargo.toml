@@ -52,6 +52,7 @@ tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+vllm-parser = { workspace = true, features = ["test-util"] }
 vllm-tokenizer = { workspace = true, features = ["test-utils"] }
 zeromq.workspace = true
 

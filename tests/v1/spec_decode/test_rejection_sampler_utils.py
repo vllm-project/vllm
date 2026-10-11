@@ -909,6 +909,7 @@ def test_verify_rejects_unproposed_drafts():
             inputs["expanded_idx_mapping"],
             inputs["expanded_local_pos"],
             None,
+            draft_sampled,
         )
         return sampled, num_sampled
 
