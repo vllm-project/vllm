@@ -90,8 +90,7 @@ class BaseModelLoader(ABC):
             # Release transient tensors held by PyTorch's caching allocator
             # before weight post-processing and raw CUDA driver allocations.
             gc.collect()
-            if current_platform.is_cuda_alike():
-                torch.accelerator.empty_cache()
+            torch.accelerator.empty_cache()
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
@@ -110,8 +109,7 @@ class BaseModelLoader(ABC):
             process_weights_after_loading(model, model_config, target_device)
 
             gc.collect()
-            if current_platform.is_cuda_alike():
-                torch.accelerator.empty_cache()
+            torch.accelerator.empty_cache()
 
         return model.eval()
 
