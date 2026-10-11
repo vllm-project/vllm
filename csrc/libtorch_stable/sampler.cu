@@ -642,6 +642,7 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
       indices, logits, rowStart, rowEnd, outIndices, outLogits, stride1, topK);
 }
 
+#ifdef USE_ROCM
 // Measured native-kernel policy for gfx950, FP32, and k=1024. This
 // active-column split crossover is independent of the Python AITER/native
 // backend crossover; the two policies can be retuned separately. At exactly
@@ -693,7 +694,6 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecodeDeviceLengthAware(
                       stride1, topK);
 }
 
-#ifdef USE_ROCM
 // The grid and workspace stay fixed while graph replays change device lengths.
 __device__ int gfx950TopK512ActiveBlocks(int rowLength, int numRows,
                                          int maxBlocks) {
@@ -755,7 +755,7 @@ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode512DeviceLengthAware
   }
   #endif
 }
-#endif
+#endif  // USE_ROCM
 
 }  // namespace vllm
 
