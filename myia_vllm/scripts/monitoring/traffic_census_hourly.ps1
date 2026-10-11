@@ -9,6 +9,11 @@
 #     exactly ONCE even though it stays in the file until rotation.
 #   - SIZE CLASSES separate the long-context cohort from the p50:
 #     <1K, 1-10K, 10-50K, 50-100K, 100-800K, >800K  (>800K = Haiku-profile body).
+#   - MODEL counts (11/10): the engine log rotates (~1.2h at 60 req/min) and model
+#     was unrecoverable past rotation -- the 10/10 23:17Z->04:49Z night (crash +
+#     missed cycle) could not answer "did the claudish sub-agent test ever run?".
+#     Model alone does not attribute (Jamin also calls swift-1.5-27b); cross with
+#     ua_top + IP deltas at analysis time.
 #   - KEY DISCRIMINATOR: fingerprints only (sha256[:12] of the 16-char prefix),
 #     NEVER key material. The key is a security threshold, not an identity
 #     (hub calls under MEDIUM for all its clients -- body size is the identity).
@@ -54,19 +59,20 @@ for line in open('/logs/error_sources.jsonl', errors='ignore'):
     t = r.get('ts') or 0
     if t <= ckpt or t > now: continue
     h = time.strftime('%Y-%m-%dT%H', time.gmtime(t)) + ':00:00Z'
-    b = buckets.setdefault(h, {'n':0,'sizes':collections.Counter(),'status':collections.Counter(),'ua':collections.Counter(),'keys':collections.Counter()})
+    b = buckets.setdefault(h, {'n':0,'sizes':collections.Counter(),'status':collections.Counter(),'ua':collections.Counter(),'keys':collections.Counter(),'models':collections.Counter()})
     n = r.get('body_bytes') or 0
     cls = '<1K' if n<1000 else '1-10K' if n<10000 else '10-50K' if n<50000 else '50-100K' if n<100000 else '100-800K' if n<800000 else '>800K'
     ua = (r.get('user_agent') or '?').split('/')[0][:20]
     key = r.get('auth_prefix') or 'NONE'
     fp = 'NONE' if key=='NONE' else hashlib.sha256(key.encode()).hexdigest()[:12]
-    b['n'] += 1; b['sizes'][cls] += 1; b['status'][str(r.get('status'))] += 1; b['ua'][ua] += 1; b['keys'][fp] += 1
+    b['n'] += 1; b['sizes'][cls] += 1; b['status'][str(r.get('status'))] += 1; b['ua'][ua] += 1; b['keys'][fp] += 1; b['models'][(r.get('model') or '?')[:24]] += 1
 out = {'max_ts': ckpt, 'hours': []}
 for h in sorted(buckets):
     b = buckets[h]
     out['hours'].append({'hour': h, 'n': b['n'],
         'sizes': dict(b['sizes']), 'status': dict(b['status']),
-        'ua_top': b['ua'].most_common(3), 'keys': dict(b['keys'])})
+        'ua_top': b['ua'].most_common(3), 'keys': dict(b['keys']),
+        'models': dict(b['models'])})
 # true max ts: recompute cheaply
 mx = ckpt
 for line in open('/logs/error_sources.jsonl', errors='ignore'):
@@ -114,6 +120,11 @@ print(json.dumps(out))
             foreach ($p in $h.status.PSObject.Properties) { Add-ToObj $o.status $p.Name ([long]$p.Value) }
             # ua_top / keys: re-merge approximately by addition on same keys
             foreach ($p in $h.keys.PSObject.Properties) { Add-ToObj $o.keys $p.Name ([long]$p.Value) }
+            # models: added 11/10 -- buckets persisted before the field lack it entirely
+            if (-not $o.PSObject.Properties['models']) {
+                $o | Add-Member -NotePropertyName models -NotePropertyValue ([PSCustomObject]@{}) | Out-Null
+            }
+            foreach ($p in $h.models.PSObject.Properties) { Add-ToObj $o.models $p.Name ([long]$p.Value) }
         } else {
             $store[$h.hour] = $h
         }
