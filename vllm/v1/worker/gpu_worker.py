@@ -22,7 +22,6 @@ from vllm.config import (
     CUDAGraphMode,
     ParallelConfig,
     VllmConfig,
-    replace,
     set_current_vllm_config,
     update_config,
 )
@@ -1612,6 +1611,8 @@ class Worker(WorkerBase):
             if cfg.kv_transfer_config is not None or cfg.ec_transfer_config is not None:
                 reasons.append("KV and encoder connectors are unsupported")
             offload = cfg.offload_config
+            if mc.enable_cumem_allocator:
+                reasons.append("CuMem allocator is unsupported for layout transitions")
             if mc.enable_sleep_mode or (
                 offload.uva.cpu_offload_gb
                 or offload.prefetch.offload_group_size
@@ -1625,15 +1626,20 @@ class Worker(WorkerBase):
                 self.weight_transfer_engine, "packed", True
             ):
                 reasons.append("requires an unpacked IPC receiver")
-            target = replace(
-                deepcopy(pc),
-                tensor_parallel_size=tp,
-                data_parallel_size=2 // tp,
-                data_parallel_size_local=2 // tp,
-                data_parallel_rank=self.rank // tp,
-            )
+            # Reconstructing ParallelConfig would re-read launcher environment
+            # defaults and allocate new ports. Keep the validated physical pool.
+            target = deepcopy(pc)
+            target.tensor_parallel_size = tp
+            target.data_parallel_size = 2 // tp
+            target.data_parallel_size_local = 2 // tp
+            target.data_parallel_rank = self.rank // tp
+            target.data_parallel_rank_local = self.rank // tp
+            target.data_parallel_index = self.rank // tp
+            target.elastic_ep_max_dp_size = 2 // tp
+            target.world_size = 2
             target.rank = self.rank
             mc.verify_with_parallel_config(target)
+            LayoutCheckpoint(mc.hf_config).validate_tensor_parallel_size(tp)
         except Exception as error:
             reasons.append(f"worker preflight failed: {type(error).__name__}: {error}")
         try:
@@ -1777,7 +1783,15 @@ class Worker(WorkerBase):
                 self.init_snapshot, self.cache_config
             )
             self.model_runner = self._make_model_runner()
-            self.load_model(load_dummy_weights=True)
+            load_config = self.vllm_config.load_config
+            original_format = load_config.load_format
+            original_extra = load_config.model_loader_extra_config
+            try:
+                load_config.model_loader_extra_config = {}
+                self.load_model(load_dummy_weights=True)
+            finally:
+                load_config.load_format = original_format
+                load_config.model_loader_extra_config = original_extra
             assert self.weight_transfer_engine is not None
             self.weight_transfer_engine.init_transfer_engine(
                 self.weight_transfer_engine.parse_init_info({"packed": False})
@@ -1960,7 +1974,10 @@ class Worker(WorkerBase):
             and getattr(self, "model_runner", None) is not None
             and getattr(self, "weight_transfer_engine", None) is not None
         ):
-            self._release_layout_model()
+            try:
+                self._release_layout_model()
+            except Exception:
+                logger.exception("Layout model retirement failed during shutdown")
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
