@@ -17,7 +17,7 @@ import regex as re
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
@@ -151,7 +151,7 @@ def _get_kda_state_shape_for_config(
     return shapes
 
 
-def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
+def _build_rope_parameters(config: PreTrainedConfig) -> dict | None:
     rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
     if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
         rope_parameters["rope_theta"] = config.rope_theta
@@ -172,7 +172,7 @@ def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
 
 
 def _build_mla_rotary_embedding(
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     head_size: int,
 ) -> nn.Module:
     rope_parameters = _build_rope_parameters(config)
@@ -223,7 +223,7 @@ def _is_block_fp8_config(
 
 def _configure_ling_fp8_quant_config(
     quant_config: QuantizationConfig | None,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
 ) -> None:
     if not _is_block_fp8_config(quant_config):
         return
@@ -372,7 +372,7 @@ def _pad_block_fp8_mlp_checkpoint_tensor(
 
 def _maybe_pad_block_fp8_shared_expert_checkpoint_tensor(
     quant_config: QuantizationConfig | None,
-    config: PretrainedConfig,
+    config: PreTrainedConfig,
     name: str,
     loaded_weight: torch.Tensor,
 ) -> torch.Tensor:
@@ -410,7 +410,7 @@ class BailingMoeV3MLP(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
@@ -446,7 +446,7 @@ class BailingMoeV3MLP(nn.Module):
 class BailingMoeV3MLAAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
@@ -625,7 +625,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
@@ -1121,7 +1121,7 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
 class BailingMoeV3MoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "",
@@ -1193,7 +1193,7 @@ class BailingMoeV3MoE(nn.Module):
 class BailingMoeV3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
         layer_id: int = 0,
         prefix: str = "layer",

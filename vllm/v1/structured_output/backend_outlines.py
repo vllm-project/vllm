@@ -3,11 +3,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import ast
-import importlib
 import json
-import sys
 from dataclasses import dataclass, field
+from re import _constants, _parser  # type: ignore[attr-defined]
 from typing import TYPE_CHECKING
 
 import torch
@@ -35,19 +33,6 @@ if TYPE_CHECKING:
 else:
     oc = LazyLoader("oc", globals(), "outlines_core")
     json_schema = LazyLoader("json_schema", globals(), "outlines_core.json_schema")
-
-# Python 3.11+ sre_parse and sre_constants
-# are deprecated, so we must import them from re
-if sys.version_info >= (3, 11):
-    # Hack to get around pre-commit regex module rule
-    # because going through re is the only way to get sre_parse
-    # and sre_constants in Python 3.11+
-    _re = importlib.import_module("re")
-    sre_parse = _re._parser
-    sre_constants = _re._constants
-else:
-    import sre_constants
-    import sre_parse
 
 
 @dataclass
@@ -82,7 +67,7 @@ class OutlinesBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:
-            choices = ast.literal_eval(grammar_spec)
+            choices = json.loads(grammar_spec)
             choices = [regex_escape(c) for c in choices]
             regex = "(" + "|".join(choices) + ")"
         else:
@@ -97,6 +82,7 @@ class OutlinesBackend(StructuredOutputBackend):
         )
         return OutlinesGrammar(
             vocab_size=self.vocab_size,
+            eos_token_id=self.vocabulary.inner.get_eos_token_id(),
             guide=oc.Guide(index, max_rollback=max_rollback_tokens),
         )
 
@@ -115,60 +101,94 @@ class OutlinesBackend(StructuredOutputBackend):
 @dataclass
 class OutlinesGrammar(StructuredOutputGrammar):
     vocab_size: int
+    eos_token_id: int
     guide: oc.Guide = field(hash=False)
     num_processed_tokens: int = field(
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
 
-    # outlines_core signals done on DFA accept; vLLM expects done after EOS.
-    # We delay the finished flag by one step so EOS can still be emitted.
-    _prev_finished: bool = field(default=False, init=False, repr=False, hash=False)
+    # outlines_core signals done on DFA accept and never advances on EOS
+    # (its mask allows only EOS in a final state, but advance(EOS) fails),
+    # so accepting EOS in a final state is tracked here instead.
+    _is_terminated: bool = field(default=False, init=False, repr=False, hash=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 
-        Returns True if the FSM was advanced successfully.
-        Returns False if the FSM failed to advance.
+        Returns True if all grammar-constrained tokens were accepted.
+        Tokens after termination (EOS) are ignored. Returns False if the FSM
+        failed to advance.
         """
-        if self.guide.accepts_tokens(tokens):
-            # Advance can fail when the next state reached after advancing with
-            # the current tokens is a dead state. This is because Guide.accepts_tokens()
-            # only checks whether the current tokens can be accepted,
-            # whereas guide.advance() additionally checks the next state
-            # after all tokens are accepted.
-            # We need to be aware that the FSM must be prepared without dead states.
-            for t in tokens:
-                self.guide.advance(t)
-                self.num_processed_tokens += 1
+        if self._is_terminated:
             return True
-        return False
+        eos_index = next(
+            (i for i, t in enumerate(tokens) if t == self.eos_token_id), None
+        )
+        if eos_index is not None:
+            tokens = tokens[:eos_index]
+        # Advance can fail when the next state reached after advancing with
+        # the current tokens is a dead state. This is because Guide.accepts_tokens()
+        # only checks whether the current tokens can be accepted,
+        # whereas guide.advance() additionally checks the next state
+        # after all tokens are accepted.
+        # We need to be aware that the FSM must be prepared without dead states.
+        if tokens and not self.guide.accepts_tokens(tokens):
+            return False
+        for t in tokens:
+            self.guide.advance(t)
+        if eos_index is not None:
+            if not self.guide.is_finished():
+                if tokens:
+                    self.guide.rollback_state(len(tokens))
+                return False
+            self._is_terminated = True
+        self.num_processed_tokens += len(tokens) + self._is_terminated
+        return True
 
     def rollback(self, num_tokens: int) -> None:
-        self.guide.rollback_state(num_tokens)
+        if num_tokens <= 0:
+            return
         self.num_processed_tokens -= num_tokens
+        if self._is_terminated:
+            self._is_terminated = False
+            num_tokens -= 1
+        if num_tokens:
+            self.guide.rollback_state(num_tokens)
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
+        if self._is_terminated:
+            return []
         accepted: list[int] = []
         for tok in tokens:
+            if tok == self.eos_token_id:
+                if self._is_finished_after(accepted):
+                    accepted.append(tok)
+                break
             accepted.append(tok)
             if not self.guide.accepts_tokens(accepted):
                 accepted.pop()
                 break
         return accepted
 
+    def _is_finished_after(self, tokens: list[int]) -> bool:
+        if not tokens:
+            return self.guide.is_finished()
+        for t in tokens:
+            self.guide.advance(t)
+        finished = self.guide.is_finished()
+        self.guide.rollback_state(len(tokens))
+        return finished
+
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         mask = bitmask[idx]
         self.guide.write_mask_into(mask.data_ptr(), mask.numel(), mask.element_size())
 
     def is_terminated(self) -> bool:
-        curr = self.guide.is_finished()
-        prev = self._prev_finished
-        self._prev_finished = curr
-        return prev
+        return self._is_terminated
 
     def reset(self):
         self.num_processed_tokens = 0
-        self._prev_finished = False
+        self._is_terminated = False
         self.guide.reset()
 
 
@@ -206,6 +226,11 @@ def validate_structured_output_request_outlines(params: SamplingParams):
         choices = [regex_escape(str(choice)) for choice in so_params.choice]
         regex = "(" + "|".join(choices) + ")"
         validate_regex_is_buildable(regex)
+    elif so_params.json_object:
+        raise VLLMValidationError(
+            "Outlines structured outputs backend "
+            "does not support json_object specifications"
+        )
     elif so_params.grammar:
         raise VLLMValidationError(
             "Outlines structured outputs backend "
@@ -221,20 +246,20 @@ def _prefix_needs_context(parsed) -> bool:
         tokens = parsed.data if hasattr(parsed, "data") else parsed
         for ttype, tval in tokens:
             # literal, character class, or dot always consumes
-            if ttype in (sre_parse.LITERAL, sre_parse.IN, sre_parse.ANY):
+            if ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
                 return True
             # quantified subpattern: check inner pattern
-            elif ttype == sre_parse.MAX_REPEAT:
+            elif ttype == _parser.MAX_REPEAT:
                 _, mx, sub = tval
                 if mx != 0 and subpattern_consumes(sub):
                     return True
             # alternation: if any branch consumes, the whole does
-            elif ttype == sre_parse.BRANCH:
+            elif ttype == _parser.BRANCH:
                 _, branches = tval
                 if any(subpattern_consumes(br) for br in branches):
                     return True
             # grouped subpattern: recurse into its contents
-            elif ttype == sre_parse.SUBPATTERN and subpattern_consumes(tval[3]):
+            elif ttype == _parser.SUBPATTERN and subpattern_consumes(tval[3]):
                 return True
         # No consumers, return False
         return False
@@ -242,14 +267,11 @@ def _prefix_needs_context(parsed) -> bool:
     tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
         # Direct anchors or look-around
-        if ttype == sre_parse.AT or ttype in (
-            sre_constants.ASSERT,
-            sre_constants.ASSERT_NOT,
-        ):
+        if ttype == _parser.AT or ttype in (_constants.ASSERT, _constants.ASSERT_NOT):
             return True
 
         # Nested subpattern: check
-        if ttype == sre_parse.SUBPATTERN:
+        if ttype == _parser.SUBPATTERN:
             # tval: (group, add_flags, del_flags, subpattern)
             if _prefix_needs_context(tval[3]):
                 return True
@@ -258,7 +280,7 @@ def _prefix_needs_context(parsed) -> bool:
 
         # if any branch has a prefix anchor => True,
         # else if at least one branch consumes => prefix ends => False
-        elif ttype == sre_parse.BRANCH:
+        elif ttype == _parser.BRANCH:
             saw_consumer = False
             for br in tval[1]:
                 if _prefix_needs_context(br):
@@ -269,11 +291,11 @@ def _prefix_needs_context(parsed) -> bool:
                 return False
 
         # Immediate consumer tokens
-        elif ttype in (sre_parse.LITERAL, sre_parse.IN, sre_parse.ANY):
+        elif ttype in (_parser.LITERAL, _parser.IN, _parser.ANY):
             return False
 
         # if subpattern has anchor => True, if it can consume => stop
-        elif ttype == sre_parse.MAX_REPEAT:
+        elif ttype == _parser.MAX_REPEAT:
             if _prefix_needs_context(tval[2]):
                 return True
             if subpattern_consumes(tval[2]):
@@ -287,26 +309,28 @@ def _check_unsupported(parsed) -> None:
     tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
         # backreference
-        if ttype in (sre_parse.GROUPREF, sre_parse.GROUPREF_EXISTS):
+        if ttype in (_parser.GROUPREF, _parser.GROUPREF_EXISTS):
             raise ValueError("Backreferences are unsupported.")
 
         # look-around assertion
-        elif ttype in (sre_constants.ASSERT, sre_constants.ASSERT_NOT):
+        elif ttype in (_constants.ASSERT, _constants.ASSERT_NOT):
             raise ValueError("Look-Around assertion are unsupported.")
 
         # unicode word boundaries
-        elif ttype == sre_parse.AT:
-            if tval in (sre_constants.AT_BOUNDARY, sre_constants.AT_NON_BOUNDARY):
+        elif ttype == _parser.AT:
+            if tval in (_constants.AT_BOUNDARY, _constants.AT_NON_BOUNDARY):
                 raise ValueError("Unicode word boundaries are unsupported.")
 
-        elif ttype == sre_parse.BRANCH:
+        elif ttype == _parser.BRANCH:
             # tval is (None, branches)
             for branch in tval[1]:
                 _check_unsupported(branch)
 
-        # tval is (min, max, subpattern)
-        elif ttype == sre_parse.MAX_REPEAT:
-            _check_unsupported(tval[2])
+        else:
+            nested = tval if isinstance(tval, tuple) else (tval,)
+            for sub in nested:
+                if isinstance(sub, _parser.SubPattern):
+                    _check_unsupported(sub)
 
 
 def validate_regex_is_buildable(pattern: str) -> None:
@@ -317,9 +341,9 @@ def validate_regex_is_buildable(pattern: str) -> None:
     https://docs.rs/regex-automata/latest/regex_automata/dfa/trait.Automaton.html#method.universal_start_state
     """
     try:
-        parsed = sre_parse.parse(pattern)
+        parsed = _parser.parse(pattern)
 
-    except sre_constants.error as e:
+    except _constants.error as e:
         raise VLLMValidationError(f"Error parsing regex: {e}") from e
 
     try:

@@ -181,7 +181,11 @@ def get_video_processor_cls_name_from_config(
     # given type when torchvision is unavailable; callers then use opencv.
     model_config = get_hf_file_to_dict("config.json", processor_name, revision=revision)
     if model_config and "model_type" in model_config:
-        return VIDEO_PROCESSOR_MAPPING_NAMES.get(model_config["model_type"])
+        video_processor = VIDEO_PROCESSOR_MAPPING_NAMES.get(model_config["model_type"])
+        # Transformers >= 5.19 maps to {"torchvision": name}
+        if isinstance(video_processor, dict):
+            video_processor = video_processor.get("torchvision")
+        return video_processor
     return None
 
 
