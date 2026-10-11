@@ -12,7 +12,8 @@ from torch.distributed import ProcessGroup, ReduceOp
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (
-    NCCL_UNIQUE_ID_BYTES,
+    NCCL_SPLIT_NOCOLOR,
+    NCCL_SUSPEND_MEM,
     NCCLLibrary,
     buffer_type,
     cudaStream_t,
@@ -139,7 +140,7 @@ class PyNcclCommunicator:
 
         self.available = True
         self.disabled = False
-        self._suspended = False
+        self.suspended = False
 
         self.nccl_version = self.nccl.ncclGetRawVersion()
         if self.rank == 0:
@@ -177,9 +178,11 @@ class PyNcclCommunicator:
         self.device = device
         # nccl communicator and stream will use this device
         with torch.accelerator.device_index(device.index):
+            free_before, _ = torch.cuda.mem_get_info(device.index)
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                 self.world_size, self.unique_id, self.rank
             )
+            free_after_init, _ = torch.cuda.mem_get_info(device.index)
 
             if _warmup_deferred():
                 return
@@ -190,6 +193,91 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+            free_after_warmup, _ = torch.cuda.mem_get_info(device.index)
+            logger.info(
+                "NCCL comm (world_size=%d) non-torch memory: commInitRank=%.1f "
+                "MiB, channel buffers (first all_reduce)=%.1f MiB, total=%.1f "
+                "MiB",
+                self.world_size,
+                (free_before - free_after_init) / (1024**2),
+                (free_after_init - free_after_warmup) / (1024**2),
+                (free_before - free_after_warmup) / (1024**2),
+            )
+
+    @classmethod
+    def _from_existing_comm(
+        cls,
+        parent: "PyNcclCommunicator",
+        comm: ncclComm_t,
+    ) -> "PyNcclCommunicator":
+        self = cls.__new__(cls)
+        self.group = parent.group
+        self.nccl = parent.nccl
+        self.nccl_version = parent.nccl_version
+        self.comm = comm
+        self.rank = self.nccl.ncclCommUserRank(comm)
+        self.world_size = self.nccl.ncclCommCount(comm)
+        self.device = parent.device
+        self.available = True
+        self.disabled = False
+        self.suspended = False
+        return self
+
+    def split(
+        self, color: int | None, key: int | None = None
+    ) -> "PyNcclCommunicator | None":
+        if self.disabled:
+            return None
+        assert not self.suspended, (
+            "cannot split a suspended NCCL communicator; call resume() first"
+        )
+        if color is None:
+            color = NCCL_SPLIT_NOCOLOR
+        elif color < 0:
+            raise ValueError("color must be non-negative or None")
+        if key is None:
+            key = self.rank
+
+        with torch.accelerator.device_index(self.device.index):
+            comm = self.nccl.ncclCommSplit(self.comm, color, key)
+        if comm is None:
+            return None
+        return self._from_existing_comm(self, comm)
+
+    @property
+    def supports_suspend(self) -> bool:
+        return self.available and not self.disabled and self.nccl.hasCommSuspend()
+
+    def suspend(self, flags: int = NCCL_SUSPEND_MEM) -> bool:
+        """Temporarily release this communicator's dynamic GPU resources.
+
+        The communicator handle stays valid but must not issue any
+        communication until `resume()` is called. Requires an NCCL build
+        with the ncclCommSuspend extension; returns False (no-op) otherwise.
+        """
+        if not self.supports_suspend or self.suspended:
+            return False
+        with torch.accelerator.device_index(self.device.index):
+            free_before, _ = torch.cuda.mem_get_info(self.device.index)
+            self.nccl.ncclCommSuspend(self.comm, flags)
+            free_after, _ = torch.cuda.mem_get_info(self.device.index)
+        self.suspended = True
+        logger.info(
+            "Suspended NCCL comm (world_size=%d), freed %.1f MiB",
+            self.world_size,
+            (free_after - free_before) / (1024**2),
+        )
+        return True
+
+    def resume(self) -> bool:
+        """Restore resources released by `suspend()`."""
+        if not self.suspended:
+            return False
+        with torch.accelerator.device_index(self.device.index):
+            self.nccl.ncclCommResume(self.comm)
+        self.suspended = False
+        logger.info("Resumed NCCL comm (world_size=%d)", self.world_size)
+        return True
 
     @classmethod
     def from_unique_id_bytes(

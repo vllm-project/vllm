@@ -3,6 +3,7 @@
 
 
 import json
+import time
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -15,6 +16,10 @@ from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 3)
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -35,8 +40,12 @@ router = APIRouter()
     },
 )
 async def scale_elastic_ep(raw_request: Request):
+    timing_ms: dict[str, float] = {}
+    total_start = time.perf_counter()
     try:
+        step_start = time.perf_counter()
         body = await raw_request.json()
+        timing_ms["parse_request"] = elapsed_ms(step_start)
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail="Invalid JSON format") from e
 
@@ -59,15 +68,40 @@ async def scale_elastic_ep(raw_request: Request):
             status_code=400, detail="drain_timeout must be a positive integer"
         )
 
+    # Set scaling flag to prevent new requests
+    step_start = time.perf_counter()
+    set_scaling_elastic_ep(True)
+    timing_ms["set_scaling_flag"] = elapsed_ms(step_start)
+    scaling_flag_set = True
     client = engine_client(raw_request)
     try:
+        step_start = time.perf_counter()
         await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
+        timing_ms["scale_elastic_ep"] = elapsed_ms(step_start)
+        step_start = time.perf_counter()
+        set_scaling_elastic_ep(False)
+        scaling_flag_set = False
+        timing_ms["clear_scaling_flag"] = elapsed_ms(step_start)
+        timing_ms["total"] = elapsed_ms(total_start)
+        logger.info(
+            "scale_elastic_ep to %s timing_ms=%s",
+            new_data_parallel_size,
+            timing_ms,
+        )
         return JSONResponse(
             {
                 "message": f"Scaled to {new_data_parallel_size} data parallel engines",
+                "timing_ms": timing_ms,
             }
         )
     except TimeoutError as e:
+        if scaling_flag_set:
+            step_start = time.perf_counter()
+            set_scaling_elastic_ep(False)
+            scaling_flag_set = False
+            timing_ms["clear_scaling_flag"] = elapsed_ms(step_start)
+        timing_ms["total"] = elapsed_ms(total_start)
+        logger.exception("Scale timed out timing_ms=%s", timing_ms)
         raise HTTPException(
             status_code=408,
             detail="Scale failed due to request drain timeout "
@@ -76,8 +110,17 @@ async def scale_elastic_ep(raw_request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
-        logger.error("Scale failed: %s", e)
+        if scaling_flag_set:
+            step_start = time.perf_counter()
+            set_scaling_elastic_ep(False)
+            scaling_flag_set = False
+            timing_ms["clear_scaling_flag"] = elapsed_ms(step_start)
+        timing_ms["total"] = elapsed_ms(total_start)
+        logger.exception("Scale failed timing_ms=%s", timing_ms)
         raise HTTPException(status_code=500, detail="Scale failed") from e
+    finally:
+        if scaling_flag_set:
+            set_scaling_elastic_ep(False)
 
 
 @router.post("/is_scaling_elastic_ep")

@@ -265,10 +265,22 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    async def commit_elastic_ep(self) -> None:
-        raise NotImplementedError
+    def set_active_data_parallel_size(  # noqa: B027
+        self, active_data_parallel_size: int
+    ) -> None:
+        """Restrict request routing to the active DP rank prefix.
 
-    async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
+        Utility and collective RPCs still target all engine cores.
+        """
+
+    async def wait_for_dp_ranks_to_drain(  # noqa: B027
+        self,
+        dp_ranks: Sequence[int],
+        timeout: float = 300,
+    ) -> None:
+        """Wait until the selected DP ranks have no queued or running requests."""
+
+    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1444,9 +1456,8 @@ class DPAsyncMPClient(AsyncMPClient):
 
         # List of [waiting, running, kv_cache_usage] per engine.
         # Used only by DPLBAsyncMPClient subclass.
-        self.lb_engines: list[list[int | float]] = [
-            [0, 0, 0.0] for _ in self.core_engines
-        ]
+        self.lb_engines: list[list[int]] = [[0, 0] for _ in self.core_engines]
+        self.active_data_parallel_size = len(self.core_engines)
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
 
@@ -1597,7 +1608,63 @@ class DPAsyncMPClient(AsyncMPClient):
         self._ensure_output_queue_task()
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
+        if request.data_parallel_rank is not None and not self._is_active_dp_rank(
+            request.data_parallel_rank
+        ):
+            logger.warning(
+                "Request %s targeted sleeping DP rank %s; routing to active "
+                "DP rank %s instead.",
+                request.request_id,
+                request.data_parallel_rank,
+                self.engine_ranks_managed[0],
+            )
         return self.core_engine
+
+    def set_active_data_parallel_size(self, active_data_parallel_size: int) -> None:
+        if not (1 <= active_data_parallel_size <= len(self.core_engines)):
+            raise ValueError(
+                "active_data_parallel_size must be in "
+                f"[1, {len(self.core_engines)}], got {active_data_parallel_size}"
+            )
+        self.active_data_parallel_size = active_data_parallel_size
+
+    def _is_active_dp_rank(self, dp_rank: int) -> bool:
+        return 0 <= dp_rank < self.active_data_parallel_size
+
+    def _local_engine_index_for_dp_rank(self, dp_rank: int) -> int | None:
+        try:
+            return self.engine_ranks_managed.index(dp_rank)
+        except ValueError:
+            return None
+
+    def _choose_active_engine_index(self) -> int:
+        return 0
+
+    async def wait_for_dp_ranks_to_drain(
+        self,
+        dp_ranks: Sequence[int],
+        timeout: float = 300,
+    ) -> None:
+        self._ensure_stats_update_task()
+        deadline = asyncio.get_running_loop().time() + timeout
+        pending_ranks = [rank for rank in dp_ranks if rank in self.engine_ranks_managed]
+        while pending_ranks:
+            busy_ranks: list[int] = []
+            for rank in pending_ranks:
+                idx = self._local_engine_index_for_dp_rank(rank)
+                if idx is None or idx >= len(self.lb_engines):
+                    continue
+                waiting, running = self.lb_engines[idx]
+                if waiting or running:
+                    busy_ranks.append(rank)
+            if not busy_ranks:
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    "Timed out waiting for DP ranks to drain: "
+                    f"{busy_ranks}; counts={self.lb_engines}"
+                )
+            await asyncio.sleep(0.1)
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
@@ -1645,56 +1712,65 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             return engine
 
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None and (
-            eng_index := get_late_interaction_engine_index(
+        requested_dp_rank = request.data_parallel_rank
+        count_recorded = False
+        if requested_dp_rank is not None:
+            if self._is_active_dp_rank(requested_dp_rank):
+                eng_index = self._local_engine_index_for_dp_rank(requested_dp_rank)
+                if eng_index is None:
+                    raise ValueError(
+                        f"DP rank {requested_dp_rank} is not managed by this client"
+                    )
+                self.lb_engines[eng_index][0] += self.client_count
+                count_recorded = True
+            else:
+                eng_index = self._choose_active_engine_index()
+                count_recorded = True
+                logger.warning(
+                    "Request %s targeted sleeping DP rank %s; routing to active "
+                    "DP rank %s instead.",
+                    request.request_id,
+                    requested_dp_rank,
+                    self.engine_ranks_managed[eng_index],
+                )
+        else:
+            eng_index = get_late_interaction_engine_index(
                 request.pooling_params, len(self.core_engines)
             )
-        ) is None:
-            current_counts = self.lb_engines
-            # TODO use P2C alg for larger DP sizes
-            num_engines = len(current_counts)
-            min_score: float = sys.maxsize
-            eng_index = 0
-            for i in range(num_engines):
-                # Start from client_index to help with balancing when engines
-                # are empty.
-                idx = (self.eng_start_index + i) % num_engines
-                waiting, running, kv_cache_usage = current_counts[idx]
-                # Estimate engine load as the greater of the coordinator's
-                # latest (waiting + running) snapshot and this client's own
-                # in-flight count (scaled by the number of clients). The
-                # in-flight floor is exact and can't be erased by a snapshot
-                # rebind, so a burst spreads round-robin even when snapshots
-                # race with routing decisions; the snapshot raises the score
-                # when other clients or stale requests load the engine.
-                inflight = self.engine_inflight[self.core_engines[idx]]
-                score: float = max(self.client_count * inflight, waiting + running)
-                if waiting:
-                    # Waiting requests are penalized in proportion to KV cache
-                    # pressure: a queue on a KV-bound engine drains slowly, so
-                    # new requests should strongly prefer other engines. With
-                    # low KV usage the queue is transient (e.g. mid-burst) and
-                    # the penalty stays off, preserving exact round-robin.
-                    # Ramps from 0 at <=50% usage to 3x waiting at 100%.
-                    score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
-                if score < min_score:
-                    min_score = score
-                    eng_index = idx
-            # Increment local waiting count for better balancing between stats
-            # updates from the coordinator (which happen every 100ms).
-            current_counts[eng_index][0] += self.client_count
-            # Rotate the scan start so that ties (equal scores, e.g. right
-            # after a coordinator stats reset when engines look equally loaded)
-            # don't systematically favor the same engine. This removes the
-            # fixed tie-break bias without affecting load-aware decisions when
-            # scores actually differ.
-            self.eng_start_index = (self.eng_start_index + 1) % num_engines
-
+            if eng_index is not None and eng_index >= self.active_data_parallel_size:
+                logger.warning(
+                    "Request %s mapped to sleeping DP rank %s; routing to active "
+                    "DP rank instead.",
+                    request.request_id,
+                    eng_index,
+                )
+                eng_index = self._choose_active_engine_index()
+                count_recorded = True
+            elif eng_index is None:
+                eng_index = self._choose_active_engine_index()
+                count_recorded = True
+        if not count_recorded:
+            self.lb_engines[eng_index][0] += self.client_count
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
         self.engine_inflight[chosen_engine] += 1
         return chosen_engine
+
+    def _choose_active_engine_index(self) -> int:
+        current_counts = self.lb_engines
+        num_engines = min(self.active_data_parallel_size, len(current_counts))
+        min_score = sys.maxsize
+        eng_index = 0
+        for i in range(num_engines):
+            idx = (self.eng_start_index + i) % num_engines
+            waiting, running = current_counts[idx]
+            score = waiting * 4 + running
+            if score < min_score:
+                min_score = score
+                eng_index = idx
+        current_counts[eng_index][0] += self.client_count
+        return eng_index
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
@@ -1708,6 +1784,33 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             for req_id in outputs.finished_requests:
                 if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
                     self.engine_inflight[engine] -= 1
+
+    def dp_rank_for_request(self, request_id: str) -> int | None:
+        """Return the DP rank that the given internal request_id is currently
+        routed to, or None if the request is not tracked by this client."""
+        engine = self.reqs_in_flight.get(request_id)
+        if engine is None:
+            return None
+        try:
+            eng_index = self.core_engines.index(engine)
+        except ValueError:
+            return None
+        if eng_index >= len(self.engine_ranks_managed):
+            return None
+        return self.engine_ranks_managed[eng_index]
+
+    def request_ids_on_dp_ranks(self, dp_ranks: Sequence[int]) -> list[str]:
+        """Return all in-flight internal request_ids whose chosen engine
+        belongs to the given set of DP ranks."""
+        if not dp_ranks:
+            return []
+        target = set(dp_ranks)
+        out: list[str] = []
+        for req_id in list(self.reqs_in_flight):
+            rank = self.dp_rank_for_request(req_id)
+            if rank is not None and rank in target:
+                out.append(req_id)
+        return out
 
     @staticmethod
     async def eep_process_engine_core_notification(

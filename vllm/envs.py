@@ -322,7 +322,8 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-    VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
+    VLLM_NIXL_EP_MAX_NUM_RANKS: int = 8
+    VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -2196,9 +2197,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
     ),
-    # Force N-contiguous weight layout for all XPU unquantized linears.
-    "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
-        int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
+    # NIXL EP environment variables
+    "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
+        os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "8")
+    ),
+    # Whether enable XPU graph on Intel GPU
+    "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
+        int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(

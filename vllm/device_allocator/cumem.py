@@ -111,6 +111,7 @@ class CuMemAllocator:
 
     instance: "CuMemAllocator | None" = None
     default_tag: str = "default"
+    graphs_tag: str = "graphs"
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
@@ -139,55 +140,82 @@ class CuMemAllocator:
     def __init__(self):
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
-        self.allocator_and_pools: dict[str, list[Any]] = {}
+        self.allocator_and_pools: dict[str, Any] = {}
+        # Dedicated stream for sleep/wake bulk copies so per-allocation
+        # cudaMemcpy calls don't serialize on implicit synchronization.
+        self._copy_stream: torch.cuda.Stream | None = None
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
 
-    def release_pools(self) -> None:
-        """Drop Python references to MemPool/pluggable allocators eagerly.
+    @staticmethod
+    def _async_copy_available() -> bool:
+        # Test doubles for libcudart may only provide the synchronous
+        # cudaMemcpy; fall back transparently in that case.
+        return hasattr(libcudart, "cudaMemcpyAsync")
 
-        A cumem ``MemPool`` outlives the ``use_memory_pool`` context (a strong
-        reference is kept in ``allocator_and_pools`` to work around
-        pytorch/pytorch#146431), and a captured CUDA graph can keep it alive
-        longer still. ``MemPool`` only holds a non-owning pointer to the
-        allocator, whose owning reference lives in the Python
-        ``CUDAPluggableAllocator``. If both are instead dropped during
-        interpreter shutdown, GC may finalize the allocator first; the eventual
-        ``~MemPool`` -> ``emptyCache`` -> ``release_block`` then makes a virtual
-        call into the freed allocator -- aborting the process with "pure virtual
-        method called" (pytorch/pytorch#145168).
+    @staticmethod
+    def _reuse_pinned_backup() -> bool:
+        """Whether to keep pinned CPU backup buffers across sleep cycles.
 
-        Release the kept-alive pools before interpreter finalization, and keep
-        the pluggable allocator wrappers alive while MemPool destructors run.
-        This is safe to call more than once.
+        Enabled by default: page-pinning tens of GiB on every sleep costs
+        seconds, and periodic sleep/wake (flash EP scaling, RL rollouts)
+        pays it repeatedly. Costs the same amount of host RAM held pinned
+        between cycles; disable with VLLM_CUMEM_PINNED_CACHE=0.
         """
-        if not self.allocator_and_pools:
-            return
+        return os.environ.get("VLLM_CUMEM_PINNED_CACHE", "1") == "1"
 
-        pool_entries = [e for es in self.allocator_and_pools.values() for e in es]
-        self.allocator_and_pools.clear()
+    def _get_copy_stream(self) -> torch.cuda.Stream:
+        if self._copy_stream is None:
+            self._copy_stream = torch.cuda.Stream()
+        return self._copy_stream
 
-        mem_pools = [entry[0] for entry in pool_entries]
-        allocators = [entry[1] for entry in pool_entries]
-        pool_entries.clear()
+    def _acquire_backup_buffer(self, data: AllocationData) -> torch.Tensor:
+        size_in_bytes = data.handle[1]
+        cached = data.cpu_backup_cache
+        data.cpu_backup_cache = None
+        if cached is not None and cached.numel() == size_in_bytes:
+            return cached
+        return torch.empty(
+            size_in_bytes,
+            dtype=torch.uint8,
+            device="cpu",
+            pin_memory=is_pin_memory_available(),
+        )
 
-        # Phase 1: drop MemPool refs while allocators are still strongly held.
-        mem_pools.clear()
-        gc.collect()
+    def _release_backup_buffer(self, data: AllocationData) -> None:
+        if self._reuse_pinned_backup():
+            data.cpu_backup_cache = data.cpu_backup_tensor
+        data.cpu_backup_tensor = None
 
-        # Phase 2: now it is safe to release allocator wrappers.
-        allocators.clear()
+    def warm_backup_cache(self, offload_tags: tuple[str, ...]) -> int:
+        """Pre-allocate pinned host backup buffers for the given tags.
 
-    def close(self) -> None:
-        """Compatibility alias for deterministic pool release."""
-        self.release_pools()
+        Page-pinning is the dominant cost of the first sleep (seconds for
+        tens of GiB); calling this off the critical path (e.g. while a
+        rank drains before scaling down) makes the first sleep as fast as
+        subsequent cached ones. Idempotent; returns bytes newly pinned.
+        """
+        warmed = 0
+        for data in self.pointer_to_data.values():
+            if data.tag not in offload_tags or data.cpu_backup_tensor is not None:
+                continue
+            size_in_bytes = data.handle[1]
+            cached = data.cpu_backup_cache
+            if cached is not None and cached.numel() == size_in_bytes:
+                continue
+            data.cpu_backup_cache = torch.empty(
+                size_in_bytes,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=is_pin_memory_available(),
+            )
+            warmed += size_in_bytes
+        return warmed
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
-        """Internal method to store the allocation data
-        when memory is allocated in the memory pool.
         """
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
@@ -230,6 +258,24 @@ class CuMemAllocator:
         )
         return data.handle
 
+    def rename_tag(self, old_tag: str, new_tag: str) -> int:
+        """Rename all tracked allocations that currently use ``old_tag``."""
+        changed = 0
+        for data in self.pointer_to_data.values():
+            if data.tag == old_tag:
+                data.tag = new_tag
+                changed += 1
+        return changed
+
+    def retag_allocations_by_ptrs(self, ptrs: set[int], tag: str) -> int:
+        """Assign ``tag`` to tracked allocations identified by device ptr."""
+        changed = 0
+        for ptr, data in self.pointer_to_data.items():
+            if ptr in ptrs:
+                data.tag = tag
+                changed += 1
+        return changed
+
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -251,7 +297,9 @@ class CuMemAllocator:
 
         total_bytes = 0
         backup_bytes = 0
-        has_policy_conflict = False
+        per_tag_total: dict[str, int] = {}
+        per_tag_backup: dict[str, int] = {}
+        offload_items: list[tuple[int, AllocationData]] = []
 
         for ptr, data in self.pointer_to_data.items():
             if data.is_asleep:
@@ -261,31 +309,66 @@ class CuMemAllocator:
                     has_policy_conflict = True
                 continue
             handle = data.handle
+            # CUDA graphs that are not selected for offload must stay resident.
+            # Their memory lives in the cumem pool, but discarding it (unmap
+            # without a CPU backup) would leave the captured graph pointing at
+            # undefined pages after wake-up -> garbage output, since graphs are
+            # restored in place rather than re-captured.
+            if (
+                data.tag == CuMemAllocator.graphs_tag
+                and data.tag not in offload_tags
+            ):
+                continue
             total_bytes += handle[1]
+            per_tag_total[data.tag] = per_tag_total.get(data.tag, 0) + handle[1]
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
-                size_in_bytes = handle[1]
-                cpu_backup_tensor = torch.empty(
-                    size_in_bytes,
-                    dtype=torch.uint8,
-                    device="cpu",
-                    pin_memory=PIN_MEMORY,
-                )
-                cpu_ptr = cpu_backup_tensor.data_ptr()
-                libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
-                data.cpu_backup_tensor = cpu_backup_tensor
-            try:
+                per_tag_backup[data.tag] = per_tag_backup.get(data.tag, 0) + handle[1]
+                offload_items.append((ptr, data))
+            else:
                 unmap_and_release(handle)
-            finally:
-                data.is_asleep = True
+
+        if offload_items:
+            if self._async_copy_available():
+                # Enqueue every D2H copy on a dedicated stream and sync once,
+                # instead of one implicitly-synchronizing cudaMemcpy per
+                # allocation. The full device sync keeps the old null-stream
+                # semantics: the copies must observe writes from all streams.
+                torch.cuda.synchronize()
+                copy_stream = self._get_copy_stream()
+                for ptr, data in offload_items:
+                    data.cpu_backup_tensor = self._acquire_backup_buffer(data)
+                    libcudart.cudaMemcpyAsync(
+                        data.cpu_backup_tensor.data_ptr(),
+                        ptr,
+                        data.handle[1],
+                        copy_stream.cuda_stream,
+                    )
+                copy_stream.synchronize()
+            else:
+                for ptr, data in offload_items:
+                    data.cpu_backup_tensor = self._acquire_backup_buffer(data)
+                    libcudart.cudaMemcpy(
+                        data.cpu_backup_tensor.data_ptr(), ptr, data.handle[1]
+                    )
+            # Unmap only after every copy has drained.
+            for _, data in offload_items:
+                unmap_and_release(data.handle)
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
             "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
-            "directly.",
+            "directly. Per-tag MiB (total/backup): %s",
             total_bytes / 1024**3,
             backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
+            {
+                tag: (
+                    round(per_tag_total[tag] / 1024**2, 1),
+                    round(per_tag_backup.get(tag, 0) / 1024**2, 1),
+                )
+                for tag in per_tag_total
+            },
         )
 
         if has_policy_conflict:
@@ -295,7 +378,13 @@ class CuMemAllocator:
             )
 
         gc.collect()
-        torch.cuda.empty_cache()
+        # Flush torch's caching layer so freed blocks are returned to the
+        # driver. This can raise if a pluggable mem-pool context is active (the
+        # persistent CUDA-graph pool); guard so sleep still succeeds.
+        try:
+            torch.cuda.empty_cache()
+        except Exception as e:
+            logger.debug("torch.cuda.empty_cache() skipped during sleep: %s", e)
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
@@ -339,29 +428,32 @@ class CuMemAllocator:
                 memory allocation will be loaded back to GPU memory.
 
         """
-        gc.collect()
-        torch.accelerator.empty_cache()
-
+        restore_items: list[tuple[int, AllocationData]] = []
         for ptr, data in self.pointer_to_data.items():
-            if not data.is_asleep:
-                continue
-            if tags is None or data.tag in tags or data.tag not in DEFERRABLE_TAGS:
-                handle = data.handle
-                create_and_map(handle)
-                data.is_asleep = False
+            if tags is None or data.tag in tags:
+                create_and_map(data.handle)
                 if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
-                elif current_platform.is_rocm():
-                    # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
-                    libcudart.cudaMemset(ptr, 0, handle[1])
-                    torch.accelerator.synchronize()
+                    restore_items.append((ptr, data))
+
+        if not restore_items:
+            return
+        if self._async_copy_available():
+            copy_stream = self._get_copy_stream()
+            for ptr, data in restore_items:
+                libcudart.cudaMemcpyAsync(
+                    ptr,
+                    data.cpu_backup_tensor.data_ptr(),
+                    data.handle[1],
+                    copy_stream.cuda_stream,
+                )
+            copy_stream.synchronize()
+        else:
+            for ptr, data in restore_items:
+                libcudart.cudaMemcpy(
+                    ptr, data.cpu_backup_tensor.data_ptr(), data.handle[1]
+                )
+        for _, data in restore_items:
+            self._release_backup_buffer(data)
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
@@ -458,3 +550,39 @@ class CuMemAllocator:
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
+
+    def get_graph_pool_handle(self) -> tuple[int, int]:
+        """Return a CUDA graph memory pool id backed by this allocator.
+
+        CUDA graphs captured against this pool are tagged ``graphs`` and thus
+        participate in the same sleep/wake offload mechanism as weights and
+        the KV cache. The pool is created once and kept alive for the
+        lifetime of the process, so every subsequent graph capture allocates
+        into it.
+        """
+        if not hasattr(self, "_custom_graph_pool_id"):
+            logger.info(
+                "CuMemAllocator: creating CUDA graph pool with tag '%s'",
+                CuMemAllocator.graphs_tag,
+            )
+            # MemPool backed by the cumem pluggable allocator. We do NOT enter
+            # a ``use_mem_pool`` context: ``torch.cuda.graph(pool=id)`` calls
+            # ``beginAllocateToPool`` for the same pool during capture, and an
+            # outer ``use_mem_pool`` on the same id would fail with "already
+            # recording to mempool_id".
+            #
+            # The ``graphs`` tag is applied by the capture caller holding
+            # ``current_tag = graphs_tag`` across ``capture_model`` (see
+            # ``GPUWorker._pin_sleep_mode_graph_pool``).
+            new_alloc = get_pluggable_allocator(
+                self.python_malloc_callback, self.python_free_callback
+            )
+            mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
+            self.allocator_and_pools[CuMemAllocator.graphs_tag] = (
+                mem_pool,
+                new_alloc,
+            )
+            # Keep a strong ref so the pool is not destroyed.
+            self._custom_graph_pool_obj = mem_pool
+            self._custom_graph_pool_id = mem_pool.id
+        return self._custom_graph_pool_id

@@ -25,6 +25,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode
 from vllm.config.profiler import validate_profile_prefix
 from vllm.device_allocator import get_mem_allocator_instance
+from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -98,11 +99,8 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
-from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
-from vllm.v1.worker.startup_plan import (
-    maybe_apply_startup_plan,
-    maybe_save_startup_plan,
-)
+from vllm.v1.worker.sleep_tags import WEIGHT_SLEEP_TAGS, expand_weight_sleep_tags
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -239,48 +237,8 @@ class Worker(WorkerBase):
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
 
-        # Resolved lazily on first sleep/wake; persists worker-process state.
-        self._sleep_mode_backend: SleepModeBackend | None = None
-
-    @property
-    def sleep_mode_backend(self) -> "SleepModeBackend":
-        if self._sleep_mode_backend is None:
-            from vllm.device_allocator.sleep_mode_backend import (
-                SleepModeBackendFactory,
-            )
-
-            self._sleep_mode_backend = SleepModeBackendFactory.create_backend(
-                self.vllm_config.model_config
-            )
-        return self._sleep_mode_backend
-
-    def _save_sleep_parameters(self, model: nn.Module) -> None:
-        patterns = self.model_config.sleep_preserve_parameter_names
-        if not patterns:
-            self._sleep_saved_parameters = {}
-            return
-        parameters = dict(model.named_parameters())
-        names: set[str] = set()
-        for pattern in patterns:
-            matches = fnmatch_filter(parameters, pattern)
-            if not matches:
-                raise ValueError(f"No parameter matches sleep retention: {pattern}")
-            names.update(matches)
-        self._sleep_saved_parameters = {
-            name: param.detach().to("cpu")
-            for name, param in parameters.items()
-            if name in names and not param.is_cpu
-        }
-
-    @torch.no_grad()
-    def _restore_sleep_parameters(self, model: nn.Module) -> None:
-        for name, value in self._sleep_saved_parameters.items():
-            model.get_parameter(name).copy_(value)
-        self._sleep_saved_parameters.clear()
-
-    def sleep(self, level: int = 1) -> None:
-        torch.accelerator.synchronize()
-        free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
+    def sleep(self, level: int = 1, tags: list[str] | None = None) -> None:
+        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -308,6 +266,12 @@ class Worker(WorkerBase):
                 break
             time.sleep(0.1)
 
+        self.model_runner.skip_dummy_model_forward = True
+
+        allocator = get_mem_allocator_instance()
+        allocator.sleep(offload_tags=self._sleep_offload_tags(level, tags))
+        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
@@ -317,9 +281,19 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        self.sleep_mode_backend.resume(tags)
-        if self.vllm_config.model_config.enable_nccl_comm_suspend:
-            resume_device_comms()
+        allocator = get_mem_allocator_instance()
+        wake_tags = expand_weight_sleep_tags(tags)
+        if wake_tags is not None and self._graph_offload_active():
+            # `graphs` is always offloaded with a CPU backup at sleep time.
+            # If we skip it here, its vaddrs stay unmapped after wake and
+            # any later kernel that touches the graph pool (cudagraph
+            # replay, or anything sharing the same vaddr range) hits an
+            # illegal memory access. When graphs are disabled there is no
+            # such pool, and injecting the tag would ask cumem to re-map
+            # memory it never unmapped.
+            if CuMemAllocator.graphs_tag not in wake_tags:
+                wake_tags = list(wake_tags) + [CuMemAllocator.graphs_tag]
+        allocator.wake_up(wake_tags)
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
@@ -332,40 +306,152 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if wake_weights and len(self._sleep_saved_draft_buffers):
-            draft = self.get_draft_model()
-            if draft is not None:
-                for name, buffer in draft.named_buffers():
-                    if name in self._sleep_saved_draft_buffers:
-                        buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
-            self._sleep_saved_draft_buffers = {}
+        self.model_runner.skip_dummy_model_forward = False
+        if tags is None or "kv_cache" in tags:
+            self.model_runner.post_kv_cache_wake_up()
 
-        self.synchronize_device()
+    def _sleep_offload_tags(
+        self, level: int, tags: list[str] | None
+    ) -> tuple[str, ...]:
+        """CuMem tags that get a CPU backup for the given sleep request.
 
-    def discard(self, tags: tuple[str, ...]) -> None:
-        self.sleep_mode_backend.discard(tags)
+        L1 backs up the selected weight tags; L2 discards weights + KV
+        (peer transfer refills them on wake). CUDA graphs, when the cumem
+        graph pool is active, are always CPU-backed so they can be
+        restored in place without re-capture (cumem preserves vaddrs);
+        with graphs disabled no such pool exists and injecting the tag
+        would be a misleading no-op.
+        """
+        graph_offload = self._graph_offload_active()
+        if level == 1:
+            selected_tags = expand_weight_sleep_tags(tags)
+            offload_tags = tuple(selected_tags) if selected_tags else WEIGHT_SLEEP_TAGS
+            if graph_offload:
+                offload_tags = tuple(set(offload_tags) | {CuMemAllocator.graphs_tag})
+            return offload_tags
+        return (CuMemAllocator.graphs_tag,) if graph_offload else tuple()
 
-    def checkpoint_prepare(self) -> None:
-        checkpoint_prepare_distributed_state()
+    def warm_sleep_backup(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str],
+        level: int = 1,
+    ) -> int:
+        """Pre-pin the host backup buffers a later sleep will offload into.
 
-    def checkpoint_restore(self) -> None:
-        checkpoint_restore_distributed_state()
+        Rank-local and idempotent; run off the critical path (e.g. while
+        the rank drains before scaling down) so the first sleep skips the
+        seconds-scale page-pinning cost. Returns bytes newly pinned.
+        """
+        from vllm.distributed.parallel_state import get_ep_group
 
-    def _weight_checksum_prefix(self) -> str:
-        # data_parallel_rank is 0 in dense workers; only the index is unique.
-        dp = self.parallel_config.data_parallel_index
-        pp = get_pp_group().rank_in_group
-        pcp = get_pcp_group().rank_in_group
-        tp = get_tp_group().rank_in_group
-        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
+        if get_ep_group().rank not in sleeping_ep_ranks:
+            return 0
+        allocator = get_mem_allocator_instance()
+        warm = getattr(allocator, "warm_backup_cache", None)
+        if warm is None:
+            return 0
+        warmed = warm(self._sleep_offload_tags(level, tags))
+        if warmed:
+            logger.info(
+                "warm_sleep_backup: pre-pinned %.1f GiB of host backup",
+                warmed / 1024**3,
+            )
+        return warmed
 
-    def compute_weight_checksums(self) -> dict[str, str]:
-        prefix = self._weight_checksum_prefix()
-        digests = compute_tensor_digests(self.model_runner.get_model())
-        return {prefix + name: digest for name, digest in digests.items()}
+    def empty_cache(self) -> None:
+        """Return cached-but-unused allocator blocks to the driver.
 
-    def reset_weights(self) -> None:
-        zero_weights(self.model_runner.get_model())
+        Used during the flash EP scale pause window to free transient
+        activation memory so wake-up / weight transfer has headroom. The
+        cache refills lazily on the next forward pass; no explicit restore
+        is needed. Logs how much was actually returned so a no-op (nothing
+        cached at pause time) is distinguishable from a real reclaim.
+        """
+        free_before, _ = torch.cuda.mem_get_info()
+        reserved_before = torch.cuda.memory_reserved()
+        allocated = torch.cuda.memory_allocated()
+        torch.accelerator.empty_cache()
+        free_after, _ = torch.cuda.mem_get_info()
+        logger.info(
+            "empty_cache: freed %.1f MiB to driver (torch reserved %.1f -> "
+            "%.1f MiB, still-live allocated=%.1f MiB)",
+            (free_after - free_before) / (1024**2),
+            reserved_before / (1024**2),
+            torch.cuda.memory_reserved() / (1024**2),
+            allocated / (1024**2),
+        )
+
+    def resize_sleep_ep_ranks(self, sleeping_ep_ranks: list[int]) -> None:
+        self.model_runner.resize_sleep_ep_ranks(sleeping_ep_ranks)
+
+    def get_ep_sleep_state(self) -> dict[str, object]:
+        return self.model_runner.get_ep_sleep_state()
+
+    def _graph_offload_active(self) -> bool:
+        """Whether the cumem-backed CUDA graph ``graphs`` pool is in use.
+
+        Single source of truth for every graph sleep/wake code path. Only
+        when this is True does a ``graphs``-tagged cumem pool exist, so only
+        then should we route capture into it or inject ``graphs`` into the
+        sleep/wake offload tags. When CUDA graphs are disabled — either via
+        ``enforce_eager`` or an explicit ``cudagraph_mode == NONE`` (e.g. the
+        DeepEP high-throughput path, where ``enforce_eager`` stays False) —
+        nothing is ever captured, so touching the graph pool or its tag is at
+        best a no-op and at worst an illegal-memory / empty-pool foot-gun.
+        """
+        if not self.vllm_config.model_config.enable_cumem_allocator:
+            return False
+        if self.vllm_config.model_config.enforce_eager:
+            return False
+        if (
+            self.vllm_config.compilation_config.cudagraph_mode
+            == CUDAGraphMode.NONE
+        ):
+            return False
+        return current_platform.is_cuda_alike()
+
+    def _pin_sleep_mode_graph_pool(self) -> "CuMemAllocator | None":
+        """Pin the cumem-backed CUDA graph pool before graph capture.
+
+        Returns the allocator when graph offload is active so the caller can
+        hold the ``graphs`` tag across capture and restore it afterwards,
+        else None.
+
+        The cumem graph pool must be the pool every CUDA-graph capture
+        allocates into, so it has to be wired up *before* ``capture_model``:
+        ``CudaPlatform._global_graph_pool`` is cached process-wide on the
+        first ``get_global_graph_pool()`` call, which can precede the cumem
+        instance and cache the native pool; and ``CUDAGraphWrapper``
+        instances cache ``graph_pool`` at construction. We therefore
+        overwrite the global pool and re-point every live wrapper at the
+        cumem pool. Without this, capture routes to the native allocator
+        and the graph memory is never offloaded.
+        """
+        if not self._graph_offload_active():
+            # CUDA graphs are disabled (enforce_eager or cudagraph_mode
+            # NONE) or cumem is off → no "graphs" pool to route capture into.
+            return None
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+
+        allocator = CuMemAllocator.get_instance()
+        pool_id = allocator.get_graph_pool_handle()
+        type(current_platform)._global_graph_pool = pool_id
+        wrappers = list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        )
+        for inst in wrappers:
+            inst.graph_pool = pool_id
+        logger.info(
+            "Pinned cumem graph pool id=%s, re-pointed %d existing wrappers "
+            "(CUDAGraphWrapper=%d, Breakable=%d)",
+            pool_id,
+            len(wrappers),
+            len(CUDAGraphWrapper._all_instances),
+            len(BreakableCUDAGraphWrapper._all_instances),
+        )
+        return allocator
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
@@ -519,8 +605,21 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(
-                init_snapshot, self.cache_config, external_weight_memory
+            self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            # Baseline anchor: everything already resident at snapshot time
+            # (CUDA context + NCCL comms built during distributed init). This
+            # is the non_torch that lands in the (1-util) reserve and is NOT
+            # counted in the later "Memory breakdown" non_torch figure.
+            logger.info(
+                "Init memory baseline (GiB): total=%s, free=%s, used=%s "
+                "(torch=%s, non_torch=%s [CUDA context + NCCL]); "
+                "requested(util)=%s",
+                format_gib(init_snapshot.total_memory),
+                format_gib(init_snapshot.free_memory),
+                format_gib(init_snapshot.cuda_memory),
+                format_gib(init_snapshot.torch_memory),
+                format_gib(init_snapshot.non_torch_memory),
+                format_gib(self.requested_memory),
             )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
@@ -591,10 +690,181 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
-        # Preserve parallel weight loading, then use serving's thread count
-        # for profiling and compilation so Dynamo's global-state guards remain
-        # valid when requests arrive.
-        set_torch_threads_for_runtime()
+    def sleep_ep_ranks_by_tags(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str],
+        level: int = 1,
+    ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank not in sleeping_ep_ranks:
+            return
+
+        selected_tags = list(dict.fromkeys(tags))
+        if not selected_tags:
+            raise ValueError("tags must not be empty")
+
+        if level == 2:
+            eplb = self.model_runner.eplb_state
+            if eplb is None or not eplb.is_logical_sleep_active():
+                raise RuntimeError(
+                    "level=2 sleep requires logical_sleep to be active "
+                    "(experts must have been migrated away first)"
+                )
+            if "weights" in selected_tags:
+                raise ValueError(
+                    "level=2 sleep must not include the 'weights' tag — "
+                    "it would re-enable CPU backup and defeat the purpose"
+                )
+
+        self.sleep(level=level, tags=selected_tags)
+
+    def wake_up_ep_ranks(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str] | None = None,
+        level: int = 1,
+    ) -> None:
+        """Rank-local CuMem wake on ranks in ``sleeping_ep_ranks``.
+
+        Contains no collectives, so it may run outside the pause window
+        while active ranks keep serving. At level 2 the remapped weights
+        hold garbage until ``finalize_l2_wake`` refills them; the waking
+        ranks stay logically slept (and skip forwards) until the
+        subsequent ``resize_sleep_ep_ranks``.
+        """
+        del level  # local wake is identical for both levels
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank in sleeping_ep_ranks:
+            self.wake_up(tags=tags)
+
+    def finalize_l2_wake(self, sleeping_ep_ranks: list[int]) -> None:
+        """Collective L2 refill after ``wake_up_ep_ranks``.
+
+        Must run on every EP rank inside the pause window: the EPLB map
+        broadcast and dense-weight P2P are NCCL group calls that must not
+        interleave with active ranks' forward-pass collectives. Experts
+        are refilled later by resize_sleep_ep_ranks -> EPLB rearrange.
+        """
+        from vllm.distributed.elastic_ep.peer_weight_transfer import (
+            get_max_dp_group,
+            transfer_dense_to_waking_ranks,
+        )
+        from vllm.distributed.parallel_state import get_ep_group
+
+        is_waking = get_ep_group().rank in sleeping_ep_ranks
+
+        # Refill EPLB GPU maps on waking ranks (collective, all EP ranks).
+        # L2 sleep wiped their physical pages with no CPU backup, so the
+        # values came back as garbage. Must run before any downstream
+        # collective consumes them (resize_sleep_ep_ranks -> NCCL P2P).
+        eplb = self.model_runner.eplb_state
+        if eplb is not None:
+            eplb.broadcast_eplb_maps_from_active()
+            if is_waking:
+                eplb.reset_load_history_after_l2_wake()
+
+        # Use the always-preserved max DP communicator directly instead of
+        # get_dp_group(): a prior scale_down may have NCCL-split _DP down
+        # to active_ep_size, so the current _DP cannot reach the waking
+        # peers. Reading _DP_MAX avoids mutating any global DP state, so
+        # the subsequent resize_sleep_ep_ranks can manage _DP as usual.
+        model = self.model_runner.get_model()
+        transfer_dense_to_waking_ranks(
+            model=model,
+            expert_weights=model.expert_weights,
+            dp_group=get_max_dp_group(),
+            waking_dp_ranks=self._ep_ranks_to_dp_ranks(sleeping_ep_ranks),
+        )
+        if is_waking:
+            self._maybe_nixl_eplb_on_l2_wake()
+
+    def _ep_ranks_to_dp_ranks(self, ep_ranks: list[int]) -> list[int]:
+        """Translate EP ranks into DP-local indices for the current DP group.
+
+        Assumes the standard layout `ep_rank = dp_rank * tp_size + tp_rank`
+        and that logical sleep enforces whole-DP-slice suffixes (i.e.,
+        `len(ep_ranks) % tp_size == 0`).
+        """
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        return sorted({ep // tp_size for ep in ep_ranks})
+
+    def disconnect_nixl_from_sleeping(
+        self, sleeping_ep_ranks: list[int]
+    ) -> int:
+        """LIVE ranks only: drop nixl connections to peers that are about
+        to be destroyed. Waking / sleeping ranks skip. Called before
+        destroy_nixl_buffer during scale-down.
+        """
+        from vllm.distributed.device_communicators.all2all import (
+            NixlEPAll2AllManager,
+        )
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank in sleeping_ep_ranks:
+            return 0
+        mgr = get_ep_group().device_communicator.all2all_manager
+        if not isinstance(mgr, NixlEPAll2AllManager):
+            return 0
+        return mgr.disconnect_from_sleeping(sleeping_ep_ranks)
+
+    def destroy_nixl_buffer(self, sleeping_ep_ranks: list[int]) -> int:
+        """Release the NIXL EP RDMA buffer on ranks in ``sleeping_ep_ranks``.
+
+        Must be called from the flash_epscale pause window so no dispatch/
+        combine is in flight. Returns MiB freed (0 if not applicable).
+        """
+        from vllm.distributed.device_communicators.all2all import (
+            NixlEPAll2AllManager,
+        )
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank not in sleeping_ep_ranks:
+            return 0
+        mgr = get_ep_group().device_communicator.all2all_manager
+        if not isinstance(mgr, NixlEPAll2AllManager):
+            return 0
+        return mgr.destroy_buffer()
+
+    def ensure_nixl_buffer(self, sleeping_ep_ranks: list[int]) -> str:
+        """Restore NIXL all2all state before wake. COLLECTIVE across the EP
+        group: every rank must call this (the destroyed-buffer ranks rebuild,
+        the live-buffer ranks reconnect to them). Returns per-rank action.
+        """
+        from vllm.distributed.device_communicators.all2all import (
+            NixlEPAll2AllManager,
+        )
+        from vllm.distributed.parallel_state import get_ep_group
+
+        ep_rank = get_ep_group().rank
+        logger.info(
+            "ensure_nixl_buffer ENTER: ep_rank=%s, waking=%s",
+            ep_rank,
+            sleeping_ep_ranks,
+        )
+        mgr = get_ep_group().device_communicator.all2all_manager
+        if not isinstance(mgr, NixlEPAll2AllManager):
+            logger.info("ensure_nixl_buffer: not NIXL backend, noop")
+            return "noop"
+        result = mgr.ensure_buffer(waking_ep_ranks=sleeping_ep_ranks)
+        logger.info("ensure_nixl_buffer EXIT: ep_rank=%s, result=%s", ep_rank, result)
+        return result
+
+    def _maybe_nixl_eplb_on_l2_wake(self) -> None:
+        """Re-pin EPLB communicator memory after L2 wake. No-op unless
+        the active backend is NIXL."""
+        eplb = self.model_runner.eplb_state
+        if eplb is None:
+            return
+        for ms in eplb.model_states.values():
+            comm = getattr(ms, "communicator", None)
+            if comm is None:
+                continue
+            on_wake = getattr(comm, "on_l2_wake", None)
+            if on_wake is not None:
+                on_wake()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the
@@ -690,7 +960,60 @@ class Worker(WorkerBase):
         ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
-        # Respect the opt-in flag as originally designed.
+            # Profile CUDA graph memory if graphs will be captured.
+            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
+            # differently and can produce incorrect/negative estimates.
+            cudagraph_memory_estimate = 0
+            if (
+                current_platform.is_cuda()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
+                # Pin the cumem graph pool + tag here too: profile capture
+                # routes graph-internal allocations into cumem, so we must
+                # tag them "graphs" up front. Otherwise they land in the
+                # "default" tag, are discarded at L2 sleep, and leave dangling
+                # vaddrs after wake (which doesn't restore "default").
+                graph_allocator = self._pin_sleep_mode_graph_pool()
+                if graph_allocator is not None:
+                    old_tag = graph_allocator.current_tag
+                    graph_allocator.current_tag = graph_allocator.graphs_tag
+                try:
+                    cudagraph_memory_estimate = (
+                        self.model_runner.profile_cudagraph_memory()
+                    )
+                finally:
+                    if graph_allocator is not None:
+                        graph_allocator.current_tag = old_tag
+
+        # Use the pre-cudagraph torch peak to avoid double-counting.
+        profile_result.torch_peak_increase = (
+            profile_torch_peak - profile_result.before_profile.torch_peak
+        )
+
+        # Split the activation peak into transient vs persistent. The profiling
+        # context already ran empty_cache on exit, so live torch memory now is
+        # weights (cumem) + persistent default-pool tensors (routing tables,
+        # sampler, kernel workspaces). The remainder of the peak was transient
+        # activation that has been freed and is only a budget reservation.
+        allocated = torch.cuda.memory_allocated(self.device)
+        persistent_default = max(0, allocated - int(profile_result.weights_memory))
+        logger.info(
+            "Activation peak split (GiB): peak=%s = transient ~%s (freed) + "
+            "persistent ~%s (default-pool residue: routing tables / sampler / "
+            "kernel workspaces, survives sleep)",
+            format_gib(profile_result.torch_peak_increase),
+            format_gib(max(0, profile_result.torch_peak_increase - persistent_default)),
+            format_gib(persistent_default),
+        )
+        profile_result.non_kv_cache_memory = (
+            profile_result.non_torch_increase
+            + profile_result.torch_peak_increase
+            + profile_result.weights_memory
+        )
+
+        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
+        # On CUDA, respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
             cudagraph_memory_estimate
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
@@ -728,6 +1051,24 @@ class Worker(WorkerBase):
             self.requested_memory
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
+        )
+
+        # Fine-grained startup memory breakdown. The components below add up to
+        # the requested (util-capped) budget: weights + peak_activation +
+        # non_torch (CUDA context, NCCL, NIXL EP, etc.) + cudagraph + KV cache.
+        logger.info_once(
+            "Memory breakdown (GiB): total=%s, requested(util=%.4f)=%s || "
+            "weights=%s, peak_activation=%s, non_torch=%s, "
+            "cudagraph=%s (applied=%s), available_kv_cache=%s",
+            format_gib(self.init_snapshot.total_memory),
+            self.cache_config.gpu_memory_utilization,
+            format_gib(self.requested_memory),
+            format_gib(profile_result.weights_memory),
+            format_gib(self.peak_activation_memory),
+            format_gib(self.non_torch_memory),
+            format_gib(cudagraph_memory_estimate),
+            format_gib(cudagraph_memory_estimate_applied),
+            format_gib(self.available_kv_cache_memory_bytes),
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -945,8 +1286,17 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            with self._get_cudagraph_capture_context():
+            # Wire the cumem graph pool before capture so the captured graph
+            # memory is tagged "graphs" and participates in sleep/wake offload.
+            graph_allocator = self._pin_sleep_mode_graph_pool()
+            if graph_allocator is not None:
+                old_tag = graph_allocator.current_tag
+                graph_allocator.current_tag = graph_allocator.graphs_tag
+            try:
                 cuda_graph_memory_bytes = self.model_runner.capture_model()
+            finally:
+                if graph_allocator is not None:
+                    graph_allocator.current_tag = old_tag
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
