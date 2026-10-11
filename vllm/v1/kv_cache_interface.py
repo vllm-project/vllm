@@ -1044,7 +1044,9 @@ class MambaSpec(KVCacheSpec):
     num_heads: int = 1
     tokens_per_state: int = -1
     # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
-    # rank holds the full state (e.g. the replicated PLE conv state).
+    # rank holds the full state (e.g. the replicated PLE conv state). Block
+    # scheduling does not depend on it, so replicated and sharded states can
+    # share a KV cache group; the grouping keeps them apart only for NIXL.
     tp_replicated: bool = False
 
     @property
@@ -1102,7 +1104,6 @@ class MambaSpec(KVCacheSpec):
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
-            and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
 

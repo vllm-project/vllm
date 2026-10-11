@@ -16,7 +16,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, KVTransferConfig
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
@@ -424,6 +425,138 @@ class TestCSALinearGrouping:
         # That block holds every GDN state at once, so the repeat pattern alone
         # decides the split; the cap must not add groups on top of it.
         assert len(gdn) == 10
+
+
+QWEN4_EXP_NUM_LAYERS = 48
+QWEN4_EXP_FULL_ATTENTION_INTERVAL = 4
+QWEN4_EXP_PLE_LAYER = 2
+QWEN4_EXP_NUM_SPECULATIVE_TOKENS = 3
+QWEN4_EXP_RING_CAPACITY = 8
+# Per-GPU state bytes at TP8: GDN conv (bf16) + SSM state, and the
+# TP-replicated PLE short-conv state.
+GDN_CONV_SHAPE = (1_280, 6)
+GDN_SSM_SHAPE = (6, 128, 128)
+PLE_STATE_BYTES = 245_760
+PLE_NAME = f"model.layers.{QWEN4_EXP_PLE_LAYER}.ple"
+
+
+def _make_qwen4_exp_specs(
+    block_size: int, ssm_dtype: torch.dtype
+) -> dict[str, KVCacheSpec]:
+    """Per-GPU KV cache specs of Qwen3.8-Flash-Next at TP8 with MTP 3: 12 QSA
+    layers plus the MTP QSA layer, 36 GDN layers and one PLE layer. As in a
+    real run, every Mamba page is padded to the main attention page."""
+    attention_page_bytes = 512 * block_size
+    mamba_kwargs = dict(
+        block_size=block_size,
+        page_size_padded=attention_page_bytes,
+        mamba_cache_mode="align",
+        num_speculative_blocks=QWEN4_EXP_NUM_SPECULATIVE_TOKENS,
+    )
+    specs: dict[str, KVCacheSpec] = {}
+    for layer_index in range(QWEN4_EXP_NUM_LAYERS + 1):
+        is_mtp_layer = layer_index == QWEN4_EXP_NUM_LAYERS
+        if is_mtp_layer or layer_index % QWEN4_EXP_FULL_ATTENTION_INTERVAL == 3:
+            specs[_main_kv_name(layer_index)] = FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=256,
+                dtype=torch.uint8,
+            )
+            specs[_compressed_name(layer_index)] = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.bfloat16,
+                tokens_per_state=4,
+            )
+            specs[_compressor_state_name(layer_index)] = CircularBufferSpec(
+                block_size=QWEN4_EXP_RING_CAPACITY,
+                num_kv_heads=1,
+                head_size=128,
+                head_size_v=0,
+                dtype=torch.bfloat16,
+            )
+        else:
+            specs[f"model.layers.{layer_index}.linear_attn"] = MambaSpec(
+                shapes=(GDN_CONV_SHAPE, GDN_SSM_SHAPE),
+                dtypes=(torch.bfloat16, ssm_dtype),
+                **mamba_kwargs,
+            )
+        if layer_index == QWEN4_EXP_PLE_LAYER:
+            specs[PLE_NAME] = MambaSpec(
+                shapes=((PLE_STATE_BYTES // 2,),),
+                dtypes=(torch.bfloat16,),
+                tp_replicated=True,
+                **mamba_kwargs,
+            )
+    return specs
+
+
+class TestReplicatedStateSharesShardedStateGroup:
+    """Each KV cache group spends one whole pool block per block it holds. A
+    TP-replicated state (the Qwen4Exp PLE conv state) that fits beside the
+    sharded GDN states therefore joins their group instead of using a whole
+    block for one page."""
+
+    @staticmethod
+    def _config(nixl: bool):
+        config = _shared_layout_config()
+        config.cache_config.mamba_cache_mode = "align"
+        config.kv_transfer_config = (
+            KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_both")
+            if nixl
+            else None
+        )
+        return config
+
+    @staticmethod
+    def _state_blocks_per_request(config, groups) -> int:
+        """Blocks a running request holds in the groups that do not grow with
+        its length (Mamba states and the compressor ring)."""
+        return sum(
+            cdiv(
+                group.kv_cache_spec.max_memory_usage_bytes(config),
+                group.kv_cache_spec.page_size_bytes,
+            )
+            for group in groups
+            if not group.kv_cache_spec.prefix_cacheable
+            or isinstance(group.kv_cache_spec.first_spec, MambaSpec)
+        )
+
+    @pytest.mark.parametrize(
+        ("block_size", "ssm_dtype", "bytes_per_block"),
+        [(800, torch.float32, 5_990_400), (480, torch.bfloat16, 3_594_240)],
+    )
+    def test_qwen4_exp_state_blocks_per_request(
+        self, block_size, ssm_dtype, bytes_per_block
+    ):
+        """Align mode with MTP 3 holds 2 + 3 blocks per Mamba group and one
+        ring block per running request. Before: 3 GDN groups, 1 PLE group and
+        1 ring group = 21 blocks. After: the PLE state shares a GDN group = 16
+        blocks. The pool block does not change. NIXL keeps the PLE state alone
+        because it builds its transfer descriptors per group."""
+        specs = _make_qwen4_exp_specs(block_size, ssm_dtype)
+        counts = {}
+        for nixl in (True, False):
+            config = self._config(nixl)
+            groups = get_kv_cache_groups(config, specs)
+            ple_owner = next(g for g in groups if PLE_NAME in g.layer_names)
+            assert (ple_owner.layer_names == [PLE_NAME]) == nixl
+            assert (
+                _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC)
+                == bytes_per_block
+            )
+            pages = _pages(groups)
+            for group in groups:
+                assert sum(pages[n] for n in group.layer_names) <= bytes_per_block
+            counts[nixl] = (
+                len(groups),
+                self._state_blocks_per_request(config, groups),
+            )
+
+        assert counts[True] == (6, 21)
+        assert counts[False] == (5, 16)
 
 
 class TestSlidingWindowBucketCap:

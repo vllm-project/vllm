@@ -1857,6 +1857,31 @@ def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -
     return best_d
 
 
+def _keeps_tp_replicated_state_apart(vllm_config: VllmConfig) -> bool:
+    """Whether TP-replicated Mamba state needs a KV cache group of its own.
+
+    NIXL builds its transfer descriptors per group and requires the replicated
+    state (e.g. the Qwen4Exp PLE conv state) alone in one group. Otherwise the
+    state shares a sharded state group, so it does not use a whole block.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return kv_transfer_config is not None and kv_transfer_config.has_connector(
+        "NixlConnector"
+    )
+
+
+def _mixes_tp_replication(kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+    return (
+        len(
+            {
+                isinstance(spec, MambaSpec) and spec.tp_replicated
+                for spec in kv_cache_specs.values()
+            }
+        )
+        > 1
+    )
+
+
 def _get_packed_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -1881,7 +1906,10 @@ def _get_packed_kv_cache_groups(
     for name, spec in kv_cache_spec.items():
         for bucket in buckets:
             candidate = {**bucket, name: spec}
-            if UniformTypeKVCacheSpecs.is_uniform_type(candidate):
+            if UniformTypeKVCacheSpecs.is_uniform_type(candidate) and not (
+                _mixes_tp_replication(candidate)
+                and _keeps_tp_replicated_state_apart(vllm_config)
+            ):
                 bucket[name] = spec
                 break
         else:
