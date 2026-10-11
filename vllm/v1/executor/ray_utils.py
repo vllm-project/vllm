@@ -198,7 +198,7 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
     backed by Ray's shared-memory object store. Ray's channel docs explicitly
     warn that subsequent reads may block if such an object is still in scope.
 
-    vLLM can return numpy-backed logprobs and routed experts in
+    vLLM can return numpy-backed logprobs in
     `ModelRunnerOutput`. If those arrays are backed by Ray SHM (commonly
     read-only), retaining them in scope across scheduler iterations can stall
     the channel and eventually hit `RAY_CGRAPH_get_timeout`.
@@ -232,11 +232,6 @@ def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> No
             output.logprobs = type(output.logprobs)(
                 token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
             )
-
-    aux_output = output.aux_output_connector_output
-    if aux_output is not None:
-        for request_output in aux_output.values():
-            request_output.rows = _copy_if_readonly(request_output.rows)
 
 
 class FutureWrapper(Future):

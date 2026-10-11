@@ -559,3 +559,30 @@ print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
+
+routed_experts_wire = [
+    0,
+    [
+        msgspec.to_builtins(
+            EngineCoreOutput(f"req-{index}", [7, 8], finish_reason=FinishReason.LENGTH)
+        )
+        for index in range(4)
+    ],
+    None,
+    1.0,
+    None,
+    None,
+    None,
+    None,
+    "v7",
+    (np.arange(6, dtype=np.uint8).reshape(3, 1, 2), [1, -1, 0, 2]),
+]
+for threshold in (256, 1):
+    print(
+        " ".join(
+            frame.hex()
+            for frame in encode_output_frames(
+                routed_experts_wire, size_threshold=threshold
+            )
+        )
+    )

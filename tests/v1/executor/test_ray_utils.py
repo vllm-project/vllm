@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import numpy as np
+import pytest
 
 from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
+    AuxStepOutput,
 )
 from vllm.v1.executor.ray_utils import detach_zero_copy_from_model_runner_output
 from vllm.v1.outputs import (
@@ -61,19 +63,26 @@ def test_detach_zero_copy_from_model_runner_output_copies_only_numpy_views():
     assert output.prompt_logprobs_dict["req-0"] is prompt_logprobs
 
 
-def test_detach_zero_copy_aux_output_without_logprobs():
-    rows = _make_readonly(np.arange(12, dtype=np.uint8).reshape(2, 3, 2))
+def test_ray_deserialization_detaches_aux_output():
+    """Both packed rows and historical rows must stop referencing Ray storage."""
+    ray = pytest.importorskip("ray")
+    rows = _make_readonly(np.ones((4096, 52, 6), dtype=np.uint8))
     output = ModelRunnerOutput(
-        req_ids=["req-0"],
-        req_id_to_index={"req-0": 0},
-        aux_output_connector_output={"req-0": AuxRequestOutput(0, rows)},
+        req_ids=["request"],
+        req_id_to_index={"request": 0},
+        aux_output_connector_output=AuxStepOutput(
+            rows, {"request": (0, 0, 1)}, {"prefix": AuxRequestOutput(0, rows)}
+        ),
     )
-
-    detach_zero_copy_from_model_runner_output(output)
-
-    aux_output = output.aux_output_connector_output
-    assert aux_output is not None
-    detached = aux_output["req-0"].rows
-    assert detached is not rows
-    assert detached.flags.writeable
-    np.testing.assert_array_equal(detached, rows)
+    with ray.init(
+        address="local",
+        num_cpus=1,
+        num_gpus=0,
+        include_dashboard=False,
+        object_store_memory=150 * 1024 * 1024,
+    ):
+        decoded = ray.get(ray.put(output)).aux_output_connector_output
+        assert decoded.rows.flags.owndata and decoded.rows.flags.writeable
+        assert decoded.materialized["prefix"].rows.flags.owndata
+        np.testing.assert_array_equal(decoded["request"].rows, rows[:1])
+        np.testing.assert_array_equal(decoded["prefix"].rows, rows)
