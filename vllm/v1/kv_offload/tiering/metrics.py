@@ -124,7 +124,8 @@ class TieringMetricsTracker:
         self, job_metadata: _JobMetadataLike, result: JobResult
     ) -> None:
         self._observe_finished_job_stats(job_metadata, result)
-        self._observe_promotion_latency(job_metadata)
+        if job_metadata.transfer_job.is_promotion:
+            self._observe_promotion_latency(job_metadata)
         self._decrement_tier_state(job_metadata)
 
     def on_promotion_allocation_failure(self) -> None:
