@@ -1942,7 +1942,7 @@ def _generate_prebuilt(llm, prompt_token_ids, sampling, lora_request):
         )
         request.lora_request = lora_request
         engine.add_request(request.request_id, request, sampling)
-        finished = []
+        finished: list = []
         while engine.has_unfinished_requests():
             finished.extend(output for output in engine.step() if output.finished)
         assert len(finished) == 1, finished
