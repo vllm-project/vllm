@@ -10,7 +10,8 @@
 ``grid = 256 CTAs x 512 threads`` (one CTA per MI355X CU) runs one MoE layer's
 FFN for this rank's TP shard::
 
-    seam: the layer's FFN input rows -> mailbox ``a``
+    seam: TP sum of vLLM's attention partials -> mHC post -> R' + mix partials
+      -> gate: mixes -> pre / post / comb (Sinkhorn) -> RMSNorm'd FFN input row
       -> router GEMV (bf16) -> sigmoid scores + the rows' MXFP8 activation blocks
       -> top-8 of 288 (sigmoid + bias) -> 1 shared + 8 routed expert up/gate,
          clamped SiLU -> mid MXFP8 quant -> expert down + route weighting
@@ -36,19 +37,26 @@ from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.common.mono import abi
 from vllm.models.glm5next.amd.ops.mono.config import (
+    EPS,
     FP8_MAX,
+    HC_EPS,
+    HC_MULT,
+    HC_POST_MULT,
     HIDDEN,
     MOE_SLOTS,
     N_EXPERTS,
     ROUTE_SCALE,
     ROUTER_CANDIDATES,
     SHARED_EXPERT,
+    SINKHORN_ITERS,
     SWIGLU_LIMIT,
     TOP_K,
 )
 from vllm.models.glm5next.amd.ops.mono.ffn.layout import (
+    N_MIX,
     N_ROUTER,
     N_ROW_TILES,
+    PMIX,
     POLL_STAGES,
     XQ_BLOCKS,
     XQ_GROUPS,
@@ -76,6 +84,7 @@ from vllm.models.glm5next.amd.ops.mono.layout import (
 )
 from vllm.models.glm5next.amd.ops.mono.ops import (
     bpermute_i32,
+    div_rn,
     mem_realtime,
     spin_pause,
     wave_umax_dpp,
@@ -83,6 +92,7 @@ from vllm.models.glm5next.amd.ops.mono.ops import (
 )
 from vllm.models.glm5next.amd.ops.mono.ops import exp as _exp
 from vllm.models.glm5next.amd.ops.mono.ops import rcp as _rcp
+from vllm.models.glm5next.amd.ops.mono.ops import rsq as _rsq
 from vllm.models.glm5next.amd.ops.mono.ops import rsrc as _rsrc
 from vllm.models.glm5next.amd.ops.mono.ops import uniform as _uniform
 from vllm.models.glm5next.amd.ops.mono.ops import uniform_f32 as _uniform_f32
@@ -139,7 +149,7 @@ def build_flash_ffn_kernel(
 
     tasks = dict(stage_tasks(S, expert_inter))
     base, acc = {}, 0
-    for name in ("seam", "router", "ug", "down"):
+    for name in ("seam", "gate", "router", "ug", "down"):
         base[name] = acc % G
         acc += tasks[name]
 
@@ -149,7 +159,17 @@ def build_flash_ffn_kernel(
 
     @flyc.kernel(known_block_size=[THREADS, 1, 1])
     def flash_ffn_kernel(
-        h_in: Int64,
+        attn_part: Int64,
+        res_in: Int64,
+        post_in: Int64,
+        comb_in: Int64,
+        hc_fn: Int64,
+        hc_scale: Int64,
+        hc_base: Int64,
+        g_norm: Int64,
+        res_out: Int64,
+        post_out: Int64,
+        comb_out: Int64,
         x_out: Int64,
         w_r: Int64,
         bias: Int64,
@@ -178,7 +198,6 @@ def build_flash_ffn_kernel(
         outs = xs + OUT_OFF
         v4f = fx.Vector.make_type(4, fx.Float32)
 
-        r_h = _rsrc(h_in)
         # this launch's epoch: every mailbox tag must equal it.  ``step`` is a
         # device counter bumped once per decode step; ``layer`` makes it unique
         # per layer within the step.
@@ -202,6 +221,26 @@ def build_flash_ffn_kernel(
         # ------------------------------------------------------------ helpers
         def ld_f32(r, i):
             return fx.Float32(bo.buffer_load(r, i, vec_width=1, dtype=T.f32))
+
+        def ld_bf16(r, i):
+            return fx.Float32(
+                fx.BFloat16(bo.buffer_load(r, i, vec_width=1, dtype=T.bf16))
+            )
+
+        def ld_pair(r, elem):
+            """bf16 elements elem, elem + 1 (elem even) of a plain tensor -> 2 f32."""
+            return bf2_f32(
+                fx.Int32(bo.buffer_load(r, elem // 2, vec_width=1, dtype=T.i32))
+            )
+
+        def bf16_round(a):
+            return fx.Float32(fx.Float32(a).to(fx.BFloat16))
+
+        def div(a, b):
+            return div_rn(a, b, _rcp(b))
+
+        def sigmoid(a):
+            return div(fx.Float32(1.0), 1.0 + _exp(-a))
 
         def lds_ld(ptr, i):
             return fx.ptr_load(ptr + i)
@@ -375,6 +414,22 @@ def build_flash_ffn_kernel(
                 (v[0].bitcast(fx.Float32), v[1].bitcast(fx.Float32))
                 for v in poll([(b, i, 2) for b, i in specs])
             ]
+
+        def wave_sum(v):
+            for sh in range_constexpr(6):
+                v = _xred(v, 32 >> sh, lambda a, b: a + b)
+            return v
+
+        def block_sum(v):
+            w = wave_sum(v)
+            if lane == 0:
+                lds_st(red, wave, w)
+            gpu.barrier()
+            t = lds_ld(red, 0)
+            for i in range_constexpr(1, WAVES):
+                t = t + lds_ld(red, i)
+            gpu.barrier()
+            return t
 
         # ------------------------------------------------ MFMA GEMV machinery
         def unit_native_mxfp4(
@@ -696,19 +751,235 @@ def build_flash_ffn_kernel(
             """This lane's local MFMA B column; inactive columns duplicate the last one."""
             return fx.min(lane % 16, count - 1)
 
-        # ===================== 1. seam: the FFN input rows -> mailbox ``a``
+        # ========= 1. seam: attention TP reduce + mHC post -> R', partial mixes
+        # One task a 32-column tile, every row: x_attn = the TP sum of vLLM's
+        # unreduced attention output (bf16), R'[j] = bf16(sum_i comb[i][j] R[i]
+        # + post[j] x_attn) -> res_out and mailbox ``rnew``, and the tile's share of
+        # the mix projection (fn . R') and of sum(R'^2) -> mailbox ``pmix``.
+        r_attn = _rsrc(attn_part)
+        r_res = _rsrc(res_in)
+        r_fn = _rsrc(hc_fn)
+        r_post = _rsrc(post_in)
+        r_comb = _rsrc(comb_in)
+        XA = 0
+        RN = S * ROW_TILE
+        NPAIR = S * ROW_TILE // 2
         for t in range(start("seam"), N_ROW_TILES, G):
             t = fx.Int32(t)
             stamp("seam")
-            if tid < S * ROW_TILE // 2:
+            col0 = t * ROW_TILE
+            attn_base = fx.Int64(SY["attn"]) + fx.Int64(peer_slot) * fx.Int64(
+                SY["_part_stride"]
+            )
+            if const_expr(W > 1):
+                if wave < W:
+                    for batch in range_constexpr((NPAIR + 63) // 64):
+                        pair = lane + batch * 64
+                        if pair < NPAIR:
+                            si = pair // (ROW_TILE // 2)
+                            ci = (pair % (ROW_TILE // 2)) * 2
+                            word = fx.Int32(
+                                bo.buffer_load(
+                                    r_attn,
+                                    (si * HIDDEN + col0 + ci) // 2,
+                                    vec_width=1,
+                                    dtype=T.i32,
+                                )
+                            )
+                            bo.buffer_store(
+                                fx.Vector.from_elements([word, tag], fx.Int32),
+                                _rsrc(peer_dst + attn_base),
+                                (rank * S + si) * HIDDEN + col0 + ci,
+                                cache_modifier=CM_SYS,
+                            )
+                gpu.barrier()
+            if tid < NPAIR:
                 s = tid // (ROW_TILE // 2)
-                row = t * ROW_TILE + (tid % (ROW_TILE // 2)) * 2
-                word = fx.Int32(
-                    bo.buffer_load(
-                        r_h, (s * HIDDEN + row) // 2, vec_width=1, dtype=T.i32
+                c = (tid % (ROW_TILE // 2)) * 2
+                if const_expr(W == 1):
+                    v0, v1 = ld_pair(r_attn, s * HIDDEN + col0 + c)
+                else:
+                    own = sym + attn_base
+                    got = poll(
+                        [
+                            (own, ((src * S + s) * HIDDEN + col0 + c) // 2, 1)
+                            for src in range(W)
+                        ],
+                        "one-as",
                     )
+                    v0 = fx.Float32(0.0)
+                    v1 = fx.Float32(0.0)
+                    for src in range_constexpr(W):
+                        a0, a1 = bf2_f32(got[src][0])
+                        v0 = v0 + a0
+                        v1 = v1 + a1
+                    v0, v1 = bf16_round(v0), bf16_round(v1)
+                lds_st(xs, XA + s * ROW_TILE + c, v0)
+                lds_st(xs, XA + s * ROW_TILE + c + 1, v1)
+            gpu.barrier()
+            if tid < S * HC_MULT * (ROW_TILE // 2):
+                s = tid // (HC_MULT * (ROW_TILE // 2))
+                j = (tid // (ROW_TILE // 2)) % HC_MULT
+                c = (tid % (ROW_TILE // 2)) * 2
+                pj = ld_f32(r_post, s * HC_MULT + j)
+                acc0 = fx.Float32(0.0)
+                acc1 = fx.Float32(0.0)
+                for i in range_constexpr(HC_MULT):
+                    cij = ld_f32(r_comb, (s * HC_MULT + i) * HC_MULT + j)
+                    r0, r1 = ld_pair(r_res, (s * HC_MULT + i) * HIDDEN + col0 + c)
+                    acc0 = acc0 + cij * r0
+                    acc1 = acc1 + cij * r1
+                n0 = bf16_round(acc0 + pj * lds_ld(xs, XA + s * ROW_TILE + c))
+                n1 = bf16_round(acc1 + pj * lds_ld(xs, XA + s * ROW_TILE + c + 1))
+                elem = (s * HC_MULT + j) * HIDDEN + col0 + c
+                bo.buffer_store(
+                    fx.Vector.from_elements([n0, n1], fx.Float32).to(fx.BFloat16),
+                    _rsrc(res_out),
+                    elem,
                 )
-                put(mb("a"), (s * HIDDEN + row) // 2, word)
+                put(mb("rnew"), elem // 2, bf16_pair(n0, n1))
+                lds_st(xs, RN + (s * HC_MULT + j) * ROW_TILE + c, n0)
+                lds_st(xs, RN + (s * HC_MULT + j) * ROW_TILE + c + 1, n1)
+            gpu.barrier()
+            if tid < S * PMIX:
+                s = tid // PMIX
+                k = tid % PMIX
+                is_mix = k < N_MIX
+                krow = fx.min(k, N_MIX - 1) * (HC_MULT * HIDDEN)
+                acc = fx.Float32(0.0)
+                for j in range_constexpr(HC_MULT):
+                    for c in range_constexpr(ROW_TILE):
+                        v = lds_ld(xs, RN + (s * HC_MULT + j) * ROW_TILE + c)
+                        w = ld_f32(r_fn, krow + j * HIDDEN + col0 + c)
+                        acc = acc + v * is_mix.select(w, v)
+                put(mb("pmix"), (s * N_ROW_TILES + t) * PMIX + k, acc)
+            gpu.barrier()
+
+        # ========= 2. gate: mixes -> pre / post / comb (Sinkhorn), FFN input row
+        # One CTA a row. The tile partials are summed in a fixed order, so every
+        # rank computes bit-identical mixes.
+        NP = 16
+        TPP = N_ROW_TILES // NP
+        CPT = HIDDEN // THREADS
+        r_scale = _rsrc(hc_scale)
+        r_base = _rsrc(hc_base)
+        r_g = _rsrc(g_norm)
+        for t in range(start("gate"), S, G):
+            s = fx.Int32(t)
+            stamp("gate")
+            gam = [ld_bf16(r_g, tid * CPT + q) for q in range(CPT)]
+            if tid < PMIX * NP:
+                k = tid // NP
+                part = tid % NP
+                vals = getf_many(
+                    [
+                        (mb("pmix"), (s * N_ROW_TILES + part * TPP + q) * PMIX + k)
+                        for q in range(TPP)
+                    ]
+                )
+                tot = vals[0]
+                for q in range_constexpr(1, TPP):
+                    tot = tot + vals[q]
+                lds_st(red, k * NP + part, tot)
+            gpu.barrier()
+            if tid < PMIX:
+                tot = lds_ld(red, tid * NP)
+                for p_ in range_constexpr(1, NP):
+                    tot = tot + lds_ld(red, tid * NP + p_)
+                lds_st(misc, tid, tot)
+            gpu.barrier()
+            if tid == 0:
+                rinv = _rsq(lds_ld(misc, N_MIX) * (1.0 / (HC_MULT * HIDDEN)) + EPS)
+                m = [lds_ld(misc, k) * rinv for k in range(N_MIX)]
+                sc = [ld_f32(r_scale, i) for i in range(3)]
+                hb = [ld_f32(r_base, k) for k in range(N_MIX)]
+                for i in range_constexpr(HC_MULT):
+                    pre_i = sigmoid(m[i] * sc[0] + hb[i]) + HC_EPS
+                    lds_st(misc, 32 + i, pre_i)
+                    post_i = (
+                        sigmoid(m[HC_MULT + i] * sc[1] + hb[HC_MULT + i]) * HC_POST_MULT
+                    )
+                    bo.buffer_store(post_i, _rsrc(post_out), s * HC_MULT + i)
+                o = 2 * HC_MULT
+                comb = []
+                for i in range_constexpr(HC_MULT):
+                    row = [
+                        m[o + i * HC_MULT + j] * sc[2] + hb[o + i * HC_MULT + j]
+                        for j in range(HC_MULT)
+                    ]
+                    mx = row[0]
+                    for j in range_constexpr(1, HC_MULT):
+                        mx = fx.max(mx, row[j])
+                    ex = [_exp(v - mx) for v in row]
+                    den = ex[0]
+                    for j in range_constexpr(1, HC_MULT):
+                        den = den + ex[j]
+                    comb.append([div(v, den) + HC_EPS for v in ex])
+
+                def norm_cols(cm):
+                    for j in range_constexpr(HC_MULT):
+                        den = cm[0][j]
+                        for i in range_constexpr(1, HC_MULT):
+                            den = den + cm[i][j]
+                        den = den + HC_EPS
+                        for i in range_constexpr(HC_MULT):
+                            cm[i][j] = div(cm[i][j], den)
+                    return cm
+
+                def norm_rows(cm):
+                    for i in range_constexpr(HC_MULT):
+                        den = cm[i][0]
+                        for j in range_constexpr(1, HC_MULT):
+                            den = den + cm[i][j]
+                        den = den + HC_EPS
+                        cm[i] = [div(v, den) for v in cm[i]]
+                    return cm
+
+                comb = norm_cols(comb)
+                for _ in range_constexpr(SINKHORN_ITERS - 1):
+                    comb = norm_cols(norm_rows(comb))
+                for i in range_constexpr(HC_MULT):
+                    for j in range_constexpr(HC_MULT):
+                        bo.buffer_store(
+                            comb[i][j],
+                            _rsrc(comb_out),
+                            (s * HC_MULT + i) * HC_MULT + j,
+                        )
+            gpu.barrier()
+            pre = [lds_ld(misc, 32 + i) for i in range(HC_MULT)]
+            got = poll(
+                [
+                    (
+                        mb("rnew"),
+                        ((s * HC_MULT + i) * HIDDEN + tid * CPT + 4 * q) // 2,
+                        2,
+                    )
+                    for i in range(HC_MULT)
+                    for q in range(CPT // 4)
+                ]
+            )
+            li = []
+            for q in range_constexpr(CPT // 4):
+                for h in range_constexpr(2):
+                    for e in range_constexpr(2):
+                        v = fx.Float32(0.0)
+                        for i in range_constexpr(HC_MULT):
+                            word = got[i * (CPT // 4) + q][h]
+                            v = v + pre[i] * bf2_f32(word)[e]
+                        li.append(bf16_round(v))
+            ss = fx.Float32(0.0)
+            for v in li:
+                ss = ss + v * v
+            rstd = _rsq(block_sum(ss) * (1.0 / HIDDEN) + EPS)
+            for q in range_constexpr(CPT // 2):
+                put(
+                    mb("a"),
+                    (s * HIDDEN + tid * CPT + 2 * q) // 2,
+                    bf16_pair(
+                        li[2 * q] * rstd * gam[2 * q],
+                        li[2 * q + 1] * rstd * gam[2 * q + 1],
+                    ),
+                )
 
         # ====== 2. router scores + the row's MXFP8 activation blocks (one sample a CTA)
         r_wr = _rsrc(w_r)
@@ -1028,7 +1299,17 @@ def build_flash_ffn_kernel(
 
     @flyc.jit
     def launch(
-        h_in: Int64,
+        attn_part: Int64,
+        res_in: Int64,
+        post_in: Int64,
+        comb_in: Int64,
+        hc_fn: Int64,
+        hc_scale: Int64,
+        hc_base: Int64,
+        g_norm: Int64,
+        res_out: Int64,
+        post_out: Int64,
+        comb_out: Int64,
         x_out: Int64,
         w_r: Int64,
         bias: Int64,
@@ -1045,7 +1326,17 @@ def build_flash_ffn_kernel(
         stream: fx.Stream = fx.Stream(None),
     ):
         flash_ffn_kernel(
-            h_in,
+            attn_part,
+            res_in,
+            post_in,
+            comb_in,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            g_norm,
+            res_out,
+            post_out,
+            comb_out,
             x_out,
             w_r,
             bias,
