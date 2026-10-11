@@ -1905,11 +1905,11 @@ def _get_packed_kv_cache_groups(
             default=0,
         )
 
-    def split_plan(repeats: int | None) -> list[tuple[int, int]]:
-        """The n groups of each bucket and the page bytes of its widest one."""
+    def split_plan(repeats: int | None) -> list[int]:
+        """The number of groups each bucket splits into."""
         anchor = anchor_bytes(repeats)
         plan = []
-        for spec, page_size_layers, balanced in bucketed:
+        for spec, _, balanced in bucketed:
             num_groups = num_groups_for(spec, balanced, repeats)
             # Cap a state group at the states a block already fits rather than
             # let it widen the block.
@@ -1918,7 +1918,7 @@ def _get_packed_kv_cache_groups(
                 num_groups = max(
                     num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
                 )
-            plan.append((num_groups, widest_group_bytes(page_size_layers, num_groups)))
+            plan.append(num_groups)
         return plan
 
     # Every group claims its blocks from one shared pool, so a block is as wide
@@ -1941,42 +1941,46 @@ def _get_packed_kv_cache_groups(
         for _, page_size_layers, balanced in bucketed
     )
 
-    def pool_bytes_per_request(repeats: int) -> int:
-        plan = split_plan(repeats)
-        block_bytes = max((widest for _, widest in plan), default=0)
-        return block_bytes * sum(
-            num_groups * spec.max_memory_usage_pages(vllm_config)
-            for (num_groups, _), (spec, _, _) in zip(plan, bucketed)
-        )
+    def build_groups(repeats: int | None) -> list[KVCacheGroupSpec]:
+        """The groups a split choice produces."""
+        groups: list[KVCacheGroupSpec] = []
+        for (spec, page_size_layers, _), num_groups in zip(
+            bucketed, split_plan(repeats)
+        ):
+            if num_groups == 1:
+                groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
+                continue
 
+            pattern_repeats = list(zip(*page_size_layers.values()))
+            for i in range(num_groups):
+                group_layer_names = [
+                    name for repeat in pattern_repeats[i::num_groups] for name in repeat
+                ]
+                group_layer_specs = {
+                    name: spec.kv_cache_specs[name] for name in group_layer_names
+                }
+                group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
+                assert group_spec is not None
+                groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
+        return groups
+
+    # Price a split by what the allocator actually charges for it: every group
+    # claims its own blocks from the shared pool, and a block is rounded up to
+    # the layers' stride alignment, which is what
+    # ``_max_memory_usage_bytes_from_groups`` computes.
     repeats_per_group = (
         min(
             range(1, max_repeats_per_group + 1),
-            key=lambda repeats: (pool_bytes_per_request(repeats), -repeats),
+            key=lambda repeats: (
+                _max_memory_usage_bytes_from_groups(vllm_config, build_groups(repeats)),
+                -repeats,
+            ),
         )
         if needs_packing
         else None
     )
 
-    groups = []
-    for (spec, page_size_layers, _), (num_groups, _) in zip(
-        bucketed, split_plan(repeats_per_group)
-    ):
-        if num_groups == 1:
-            groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
-            continue
-
-        pattern_repeats = list(zip(*page_size_layers.values()))
-        for i in range(num_groups):
-            group_layer_names = [
-                name for repeat in pattern_repeats[i::num_groups] for name in repeat
-            ]
-            group_layer_specs = {
-                name: spec.kv_cache_specs[name] for name in group_layer_names
-            }
-            group_spec = UniformTypeKVCacheSpecs.from_specs(group_layer_specs)
-            assert group_spec is not None
-            groups.append(KVCacheGroupSpec(group_layer_names, group_spec))
+    groups = build_groups(repeats_per_group)
 
     _annotate_eagle_groups(
         vllm_config,
