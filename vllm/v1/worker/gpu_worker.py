@@ -650,6 +650,17 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
+        if current_platform.is_cuda_alike():
+            # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
+            # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
+            # request never triggers that because torch doesn't see it. Profiling can
+            # grow torch's cache until the GPU is full, and the first cuBLAS call would
+            # then fail even though torch holds idle memory it could have given back.
+            # Create the handles now, while memory is still free.
+            torch.cuda.current_blas_handle()
+            x = torch.ones(16, 16, dtype=torch.float16, device="cuda")
+            torch.nn.functional.linear(x, x, x[0])
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
