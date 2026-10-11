@@ -20,9 +20,8 @@ value per option, in ``option_spans`` order: its probability within its
 question, or its logit with ``use_activation=False``.
 """
 
-import itertools
 import math
-from collections.abc import Callable, Iterable, Set
+from collections.abc import Callable, Set
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,9 +33,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import Pooler, PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.tokwise.methods import AllPool
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import PoolingTask
-from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -48,7 +47,6 @@ from .qwen3_omni_moe_thinker import (
     Qwen3OmniMoeThinkerMultiModalProcessor,
     Qwen3OmniMoeThinkerProcessingInfo,
 )
-from .utils import AutoWeightsLoader
 
 JOINT_HEAD_WEIGHTS = "joint_head.safetensors"
 NUM_QUESTION_TYPES = 3
@@ -369,31 +367,22 @@ class ClefOmniForJointSchema(Qwen3OmniMoeThinkerForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        head_config = vllm_config.model_config.hf_config.joint_head_config
+        model_config = vllm_config.model_config
+        head_config = model_config.hf_config.joint_head_config
         self.pooler = JointSchemaPooler(
             JointSchemaHead(**head_config), self._embed_lexical
         )
+        # The head's weights ship as their own safetensors file.
+        self.secondary_weights = [
+            DefaultModelLoader.Source(
+                model_or_path=model_config.model,
+                revision=model_config.revision,
+                prefix="pooler.head.",
+                allow_patterns_overrides=[JOINT_HEAD_WEIGHTS],
+            )
+        ]
 
     def _embed_lexical(self, token_ids: torch.Tensor) -> torch.Tensor:
         # The head embeds options with the output embeddings. ParallelLMHead
         # forbids lookups, so use the vocab-parallel embedding's.
         return VocabParallelEmbedding.forward(self.language_model.lm_head, token_ids)
-
-    def _joint_head_weights(self) -> Iterable[tuple[str, torch.Tensor]]:
-        from safetensors.torch import load
-
-        model_config = self.vllm_config.model_config
-        data = get_hf_file_bytes(
-            JOINT_HEAD_WEIGHTS, model_config.model, model_config.revision
-        )
-        if data is None:
-            raise ValueError(f"{model_config.model} has no {JOINT_HEAD_WEIGHTS}")
-        for name, tensor in load(data).items():
-            yield f"pooler.head.{name}", tensor
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(
-            itertools.chain(weights, self._joint_head_weights()),
-            mapper=self.hf_to_vllm_mapper,
-        )
