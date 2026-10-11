@@ -176,7 +176,7 @@ async fn generate_chunk_stream(
         match next {
             Ok(output) => {
                 if let Some(metrics) = output.spec_decode_metrics {
-                    spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(metrics));
+                    spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
                 }
                 if prompt_tokens.is_none()
                     && let Some(info) = output.prompt_info.as_ref()
@@ -632,11 +632,11 @@ mod tests {
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
-                prompt_info: Some(GeneratePromptInfo {
+                prompt_info: Some(Box::new(GeneratePromptInfo {
                     prompt_token_ids: Arc::from([11_u32, 22_u32]),
                     prompt_logprobs: None,
                     prompt_token_id_logprobs: None,
-                }),
+                })),
                 token_ids: vec![33],
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
@@ -716,10 +716,12 @@ mod tests {
     ) -> GenerateOutput {
         GenerateOutput {
             request_id: String::new(),
-            prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
-                prompt_token_ids: Arc::from(ids),
-                prompt_logprobs: None,
-                prompt_token_id_logprobs: None,
+            prompt_info: prompt_token_ids.map(|ids| {
+                Box::new(GeneratePromptInfo {
+                    prompt_token_ids: Arc::from(ids),
+                    prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
+                })
             }),
             token_ids,
             logprobs: None,
@@ -817,7 +819,7 @@ mod tests {
             ..Default::default()
         };
         let mut output = stream_output(None, Vec::new(), Some(FinishReason::stop_eos()));
-        output.spec_decode_metrics = Some(metrics.clone());
+        output.spec_decode_metrics = Some(Box::new(metrics.clone()));
 
         for include_usage in [false, true] {
             let chunks: Vec<_> = generate_chunk_stream(

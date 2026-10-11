@@ -12,12 +12,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import regex as re
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
@@ -81,6 +83,21 @@ class WeightCacheDaemon:
                 f"Weight cache daemon is not ready: HTTP {error.code}"
             ) from error
 
+    def wait_until_ready(self, timeout_s: float = 900) -> None:
+        """Poll until READY (which covers the autotune tuners) or the preload
+        process dies."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                self.check_health()
+                return
+            except (AssertionError, urllib.error.URLError):
+                if time.monotonic() > deadline:
+                    raise
+                if self._proc is not None and self._proc.poll() is not None:
+                    raise AssertionError("vllm preload exited before ready") from None
+                time.sleep(2)
+
     def _stop(self) -> None:
         assert self._proc is not None
         self._proc.terminate()
@@ -99,6 +116,10 @@ class ModelCase:
     images: list | None = None
     llm_kwargs: dict[str, Any] = field(default_factory=dict)
     daemon_args: list[str] = field(default_factory=list)
+    # Additionally assert the daemons tune in place before serving and write
+    # the on-disk FlashInfer autotune cache, and the restart engine reuses it
+    # (needs SM90+/FlashInfer).
+    check_flashinfer_cache: bool = False
 
 
 def generate(
@@ -157,6 +178,9 @@ K3_CASE = ModelCase(
         max_model_len=4096,
     ),
     daemon_args=["--trust-remote-code"],
+    # Kimi K3 has tunable FlashInfer ops (a dense model like Qwen2.5 tunes
+    # nothing and upstream never writes the cache file for it).
+    check_flashinfer_cache=True,
 )
 
 # Qwen3.5-0.8B ships one MTP layer in the target checkpoint, so method="mtp"
@@ -186,18 +210,38 @@ QWEN_MTP_CASE = ModelCase(
     [QWEN_CASE, K3_CASE, QWEN_MTP_CASE],
     ids=["qwen3.5", "kimi-k3", "qwen3.5-mtp"],
 )
-def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
+def test_ipc_cache_cold_start_and_warm_restart(
+    vllm_runner, case: ModelCase, tmp_path, monkeypatch, capfd
+):
     """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
 
     All runs must produce outputs identical to a default-loader baseline. The
     warm runs disable the disk fallback, so they only pass if the weights
     really came from the daemon — for the MTP case, both the target's and the
     draft's daemon groups.
+
+    Cases with ``check_flashinfer_cache`` additionally cover in-daemon
+    autotune (default-on with `--enable-flashinfer-autotune`): each daemon
+    tunes before binding its socket and must write the on-disk FlashInfer
+    autotune cache, and the restart engine must load tactics from it instead
+    of re-profiling. The daemon's cache file is keyed with the
+    OPENAI_API_SERVER batch defaults while these engines run under LLM_CLASS,
+    so they never hit the daemon's file by design; reuse is proven against
+    the file the earlier in-process engines wrote.
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+    if case.check_flashinfer_cache:
+        from vllm.utils.flashinfer import has_flashinfer
+
+        if not (has_flashinfer() and current_platform.has_device_capability(90)):
+            pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
+        # Isolate the on-disk autotune cache. The engines are in-process
+        # (envs read lazily); the daemon subprocesses spawn later and
+        # inherit it.
+        monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
 
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
@@ -212,15 +256,40 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
         cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
 
+    if case.check_flashinfer_cache:
+        # The baseline engine already wrote its own (LLM_CLASS-keyed) table.
+        engine_cache_files = set(tmp_path.rglob("autotune_configs*.json"))
+
     with WeightCacheDaemon(
         case.model,
         tp_size=1,
         extra_args=case.daemon_args,
     ) as d:
         warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
-        d.check_health()
+        d.wait_until_ready()
+        if case.check_flashinfer_cache:
+            # Each daemon tunes before its ready report; exactly one new file
+            # (their OPENAI_API_SERVER-keyed table) must appear.
+            tuner_files = set(tmp_path.rglob("autotune_configs*.json"))
+            tuner_files -= engine_cache_files
+            assert len(tuner_files) == 1, (
+                f"expected the tuner's tuned table, got {tuner_files}"
+            )
         # Warm restart: a second engine lifetime against the same daemon.
+        if case.check_flashinfer_cache:
+            capfd.readouterr()  # drain: the assertion reads the increment
         restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        if case.check_flashinfer_cache:
+            # The restart's EngineCore subprocess inherits pytest's fds; the
+            # flashinfer autotuner logs "[Autotuner]: Loaded N configs from
+            # <path>" (INFO, not once-deduplicated) on a disk cache hit.
+            out = capfd.readouterr()
+            m = re.search(
+                r"\[Autotuner\]: Loaded (\d+) configs from", out.out + out.err
+            )
+            assert m and int(m.group(1)) > 0, (
+                "restart engine did not load the on-disk autotune cache"
+            )
 
     assert cold_outputs == baseline_outputs
     assert warm_outputs == baseline_outputs
@@ -354,6 +423,52 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
+
+
+@pytest.mark.parametrize("hf_quant_config", [None, {"quant_algo": "NVFP4"}])
+def test_weight_cache_key_distinguishes_nvfp4_activation_override(
+    tmp_path, hf_quant_config
+):
+    """Cache keys isolate activation modes and reject ambiguous legacy hashes."""
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config.quantization import QuantizationConfigArgs
+    from vllm.model_executor.model_loader.weight_cache.protocol import WeightCacheKey
+    from vllm.utils.hashing import safe_hash
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="modelopt_fp4",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(
+            architectures=["NemotronHForCausalLM"],
+            quantization_config=hf_quant_config,
+        ),
+    )
+    static_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    model_config.quantization_config = QuantizationConfigArgs(
+        moe={"activation": "nvfp4_per_token"}
+    )
+    per_token_key = WeightCacheKey.from_model_config(model_config, tp_size=1, tp_rank=0)
+    assert static_key.mismatched_fields(per_token_key) == ["quant_config_hash"]
+
+    legacy_hash = (
+        ""
+        if hf_quant_config is None
+        else safe_hash(
+            json.dumps(hf_quant_config, sort_keys=True).encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+    )
+    assert static_key.mismatched_fields(
+        replace(static_key, quant_config_hash=legacy_hash)
+    ) == ["quant_config_hash"]
 
 
 def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
