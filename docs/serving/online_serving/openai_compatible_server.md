@@ -204,6 +204,12 @@ To get prompt token IDs before generation, use
 a self-contained Responses request without inference and returns the prompt
 token IDs, so a separate `/tokenize` call is not needed.
 
+#### Sampling parameters
+
+In addition to the OpenAI request fields, the Responses API forwards vLLM
+[sampling parameters](../../api/README.md#inference-parameters) such as `top_k`,
+`min_p`, `repetition_penalty`, `seed`, `stop`, and `ignore_eos` to the engine.
+
 #### Extra parameters
 
 The following extra parameters in the request object are supported:

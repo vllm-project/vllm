@@ -60,10 +60,6 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 
-FP8_DTYPE = current_platform.fp8_dtype()
-
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
 CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
