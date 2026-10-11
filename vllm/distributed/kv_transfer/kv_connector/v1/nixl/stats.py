@@ -15,10 +15,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.logger import init_logger
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 if TYPE_CHECKING:
     from vllm.distributed.nixl_utils import nixlXferTelemetry
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -189,6 +192,12 @@ class NixlPromMetrics(KVConnectorPromMetrics):
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
+        logger.info(
+            "NIXL KV connector metrics are aggregated across all "
+            "tensor-parallel ranks before summary statistics are computed. "
+            "Throughput is per-rank average, not aggregate system throughput."
+        )
+
         buckets = [
             0.001,
             0.005,
@@ -292,7 +301,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
         )
 
-        def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
                 self.nixl_histogram_xfer_time,
@@ -316,6 +325,10 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 self.counter_nixl_num_kv_expired_reqs,
             ],
             [
+                # Transfer, handshake and notification failures are grouped:
+                # all are sporadic lower-transport-layer events. KV expiry is
+                # reported separately as it signals autoscaler behavior, not
+                # transport health.
                 (
                     "num_failed_transfers",
                     "num_failed_handshakes",
