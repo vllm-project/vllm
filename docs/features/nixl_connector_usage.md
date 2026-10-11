@@ -130,6 +130,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 - `decoder_kv_blocks_ttl` (via `kv_connector_extra_config`): TTL (in seconds) for KV blocks cached on the decoder in bidirectional transfer mode. (Optional)
     - Default: 480
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
+    - In either transfer direction, a KV read still in flight after this long marks the engine it reads from as unreachable. Until its outstanding reads finish and it is reconnected, new requests whose KV is on that engine go straight to `kv_load_failure_policy` instead of hanging on the same connection.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
 ## Bidirectional KV Transfer (Multi-turn)
