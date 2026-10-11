@@ -11,7 +11,6 @@ from typing import Literal
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
 
@@ -34,6 +33,14 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
+    # PEFT features that change the adapter's semantics and that vLLM does not
+    # implement. They are read only to reject such adapters.
+    lora_bias: bool = field(default=False)
+    init_lora_weights: bool | str = field(default=True)
+    alora_invocation_tokens: list[int] | None = field(default=None)
+    layer_replication: list[list[int]] | None = field(default=None)
+    use_bdlora: dict | None = field(default=None)
+    use_qalora: bool = field(default=False)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: int | None = field(default=False)
@@ -53,7 +60,39 @@ class PEFTHelper:
                 )
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
+        if self.lora_bias:
+            error_msg.append("vLLM does not support LoRA bias (lora_bias).")
+        if not self._init_is_supported():
+            error_msg.append(
+                f"vLLM does not support init_lora_weights={self.init_lora_weights!r}."
+                " Inits such as PiSSA, OLoRA, CorDA and LoftQ modify the base model"
+                " weights when PEFT loads the adapter. Convert it to a regular LoRA"
+                " adapter with PEFT's path_initial_model_for_weight_conversion, or"
+                " set init_lora_weights to true if the served base model already"
+                " contains the modified weights."
+            )
+        if self.alora_invocation_tokens:
+            error_msg.append("vLLM does not support Activated LoRA (aLoRA).")
+        if self.layer_replication:
+            error_msg.append("vLLM does not support layer_replication.")
+        if self.use_bdlora:
+            error_msg.append("vLLM does not support block-diagonal LoRA (BD-LoRA).")
+        if self.use_qalora:
+            error_msg.append("vLLM does not support QALoRA.")
         return error_msg
+
+    def _init_is_supported(self) -> bool:
+        # These inits only set the initial adapter weights, so a saved adapter
+        # loads in PEFT as a plain LoRA. lora_ga modifies the base weights only
+        # during training, when its gradients are attached.
+        init = self.init_lora_weights
+        return not isinstance(init, str) or init.lower() in (
+            "gaussian",
+            "eva",
+            "orthogonal",
+            "mica",
+            "lora_ga",
+        )
 
     def __post_init__(self):
         if self.r <= 0:
@@ -89,33 +128,10 @@ class PEFTHelper:
         cls,
         lora_path: str,
         max_position_embeddings: int | None,
-        tensorizer_config_dict: dict | None = None,
     ) -> "PEFTHelper":
         lora_config_path = os.path.join(lora_path, "adapter_config.json")
-
-        if tensorizer_config_dict:
-            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
-            tensorizer_args = tensorizer_config._construct_tensorizer_args()
-            from tensorizer.stream_io import open_stream
-
-            tensorizer_dir = tensorizer_config.tensorizer_dir
-            if tensorizer_dir is None:
-                raise ValueError("tensorizer_dir must be set in tensorizer config.")
-
-            lora_config_path = os.path.join(tensorizer_dir, "adapter_config.json")
-            with open_stream(
-                lora_config_path, mode="rb", **tensorizer_args.stream_kwargs
-            ) as f:
-                config = json.load(f)
-
-            logger.info(
-                "Successfully deserialized LoRA config from %s",
-                tensorizer_config.tensorizer_dir,
-            )
-
-        else:
-            with open(lora_config_path) as f:
-                config = json.load(f)
+        with open(lora_config_path) as f:
+            config = json.load(f)
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         return cls.from_dict(config)

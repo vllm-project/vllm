@@ -5,6 +5,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) LM Eval Small Models"
   device: h200_35gb
   key: lm-eval-small-models
+  automatic_shard: true
   timeout_in_minutes: 45
   source_file_dependencies:
   - csrc/
@@ -208,7 +209,6 @@ steps:
       - tests/evals/gsm8k/
       - tests/utils.py
       - vllm/distributed/
-      - vllm/transformers_utils/configs/diffusion_gemma.py
       - vllm/v1/attention/ops/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
@@ -270,6 +270,9 @@ steps:
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
+  - tests/watermarking/test_compatibility.py
+  - tests/watermarking/test_engine_compatibility.py
+  - tests/watermarking/test_parallel_compatibility.py
   - vllm/config/speculative.py
   - vllm/config/vllm.py
   - vllm/config/watermarking.py
@@ -282,6 +285,7 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
+  - pytest -s -v watermarking/test_compatibility.py watermarking/test_engine_compatibility.py watermarking/test_parallel_compatibility.py
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval Watermark Feature Combination"
@@ -318,9 +322,11 @@ steps:
   optional: true
   source_file_dependencies:
   - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TEP4.yaml
+  - tests/evals/gsm8k/configs/DeepSeek-V4.1-Flash-NVFP4-DSpark-TP4.yaml
   - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-TP4.yaml
   - tests/evals/gsm8k/configs/models-spec-decode.txt
   - vllm/models/deepseek_v4/
+  - vllm/models/deepseek_v41/
   - vllm/models/kimi_k3/
   - vllm/model_executor/models/qwen3_dspark.py
   - vllm/v1/spec_decode/metrics.py
@@ -411,8 +417,6 @@ steps:
       - vllm/model_executor/models/qwen3_next_mtp.py
       - vllm/model_executor/models/nemotron_h.py
       - vllm/model_executor/models/nemotron_h_mtp.py
-      - vllm/transformers_utils/configs/qwen3_next.py
-      - vllm/transformers_utils/configs/nemotron_h.py
       - vllm/model_executor/model_loader/
       - vllm/model_executor/layers/quantization/
       - vllm/model_executor/layers/fused_moe/
@@ -439,8 +443,6 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
-  - vllm/transformers_utils/configs/qwen3_5.py
-  - vllm/transformers_utils/configs/qwen3_5_moe.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
   - vllm/third_party/flash_linear_attention/ops/
@@ -457,8 +459,6 @@ steps:
       source_file_dependencies:
       - vllm/model_executor/models/qwen3_5.py
       - vllm/model_executor/models/qwen3_5_mtp.py
-      - vllm/transformers_utils/configs/qwen3_5.py
-      - vllm/transformers_utils/configs/qwen3_5_moe.py
       - vllm/model_executor/models/qwen2.py
       - vllm/model_executor/models/qwen3.py
       - vllm/model_executor/models/qwen3_next.py

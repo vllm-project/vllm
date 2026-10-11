@@ -25,6 +25,12 @@ PROMPTS = [
     "The capital of France is",
     "Once upon a time, in a small village,",
 ]
+# The NVFP4 model is not reproducible across engine instances; these prompts
+# avoid near-ties and decode confidently past the replay window.
+FLASHINFER_PROMPTS = [
+    "The capital of France is",
+    "It was the best of times, it was the worst of times,",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +49,7 @@ def _check_replayssm_parity(
     *,
     tensor_parallel_size=1,
     mamba_backend: str = "triton",
+    prompts: list[str] = PROMPTS,
     name_1: str = "replayssm",
     expected_v2: bool | None = None,
 ):
@@ -60,7 +67,7 @@ def _check_replayssm_parity(
     with vllm_runner(model_name, **common) as llm:
         if expected_v2 is not None:
             assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is expected_v2
-        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+        baseline = llm.generate_greedy_logprobs(prompts, max_tokens=32, num_logprobs=5)
     with vllm_runner(
         model_name,
         use_replayssm=True,
@@ -69,7 +76,7 @@ def _check_replayssm_parity(
     ) as llm:
         if expected_v2 is not None:
             assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is expected_v2
-        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+        replay = llm.generate_greedy_logprobs(prompts, max_tokens=32, num_logprobs=5)
 
     check_logprobs_close(
         outputs_0_lst=baseline,
@@ -105,6 +112,7 @@ def test_replayssm_flashinfer_decode_matches_baseline(
                 vllm_runner,
                 model_name,
                 mamba_backend="flashinfer",
+                prompts=FLASHINFER_PROMPTS,
                 name_1="replayssm_flashinfer",
                 expected_v2=use_v2_model_runner,
             )
@@ -127,7 +135,9 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
         },
     )
     with vllm_runner(model_name, mamba_backend="flashinfer", **common) as llm:
-        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+        baseline = llm.generate_greedy_logprobs(
+            FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
+        )
     with vllm_runner(
         model_name,
         use_replayssm=True,
@@ -135,7 +145,9 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
         mamba_backend="flashinfer",
         **common,
     ) as llm:
-        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+        replay = llm.generate_greedy_logprobs(
+            FLASHINFER_PROMPTS, max_tokens=32, num_logprobs=5
+        )
 
     check_logprobs_close(
         outputs_0_lst=baseline,

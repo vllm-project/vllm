@@ -36,6 +36,7 @@ VIDEO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
             "<|VISION_START|><|VIDEO_PAD|><|VISION_END|>Describe this video."
             "<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
         ),
+        "patch_hf_runner": model_utils.cohere_compass_patch_hf_runner,
     },
     "Qwen/Qwen2.5-VL-3B-Instruct": {
         "prompt": (
@@ -88,6 +89,9 @@ def test_transformers_video_generation(
         model_id, dtype="bfloat16", auto_cls=AutoModelForImageTextToText
     ) as hf_model:
         hf_model = model_utils.qwen3_vl_patch_hf_runner(hf_model)
+        patch_hf_runner = VIDEO_MODEL_SETTINGS[model_id].get("patch_hf_runner")
+        if patch_hf_runner is not None:
+            hf_model = patch_hf_runner(hf_model)
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             [prompt], 128, num_logprobs=10, videos=[video]
         )
