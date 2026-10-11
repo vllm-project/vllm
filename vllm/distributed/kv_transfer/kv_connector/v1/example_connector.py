@@ -402,6 +402,7 @@ class ExampleConnector(KVConnectorBase_V1):
         Returns:
             The key and the number of cached tokens, or ``(None, 0)`` when
             the prompt does not cover a full block.
+
         """
         num_cached_tokens = align_to_block_size(
             request.num_prompt_tokens - 1, self._block_size
