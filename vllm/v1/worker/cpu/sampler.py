@@ -15,6 +15,7 @@ host memory.
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.cpu.kernels.gumbel import gumbel_argmax, gumbel_noise
@@ -23,6 +24,13 @@ from vllm.v1.worker.cpu.logits_processors import (
     CPULogitBias,
     CPUPenalties,
 )
+from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+from vllm.v1.worker.gpu.sample.logits_processor.interface import (
+    LogitsProcessor,
+    LogitsProcRequestState,
+)
+from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import SamplingStates
 
@@ -142,10 +150,29 @@ class CPUSamplingStates(SamplingStates):
 
 
 class CPUSampler(Sampler):
-    sampling_states_cls = CPUSamplingStates
-    logit_bias_cls = CPULogitBias
-    penalties_cls = CPUPenalties
-    bad_words_cls = CPUBadWords
+    def __init__(
+        self, vllm_config: VllmConfig, max_num_reqs: int, vocab_size: int, **kwargs
+    ):
+        super().__init__(vllm_config, max_num_reqs, vocab_size, **kwargs)
+        self.sampling_states = CPUSamplingStates(max_num_reqs, vocab_size)
+        # Swap in the CPU built-in processors, keeping pipeline order and any
+        # custom processors.
+        cpu_processors: dict[type, type[LogitsProcessor]] = {
+            LogitBiasState: CPULogitBias,
+            PenaltiesState: CPUPenalties,
+            BadWordsState: CPUBadWords,
+        }
+        lp_req_state = LogitsProcRequestState.from_request_state(self.req_states)
+        self.logits_processors = [
+            cpu_processors[type(p)](vllm_config, lp_req_state)
+            if type(p) in cpu_processors
+            else p
+            for p in self.logits_processors
+        ]
+        # The runner reads penalties_state.output_bin_counts, which is None.
+        self.penalties_state = next(  # type: ignore[assignment]
+            p for p in self.logits_processors if isinstance(p, CPUPenalties)
+        )
 
     def sample(
         self,

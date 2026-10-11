@@ -1677,10 +1677,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         output_bin_counts = None
         if self.is_last_pp_rank:
             assert self.sampler is not None
-            # None when the penalties processor keeps no device bin counts.
-            output_bin_counts = getattr(
-                self.sampler.penalties_state, "output_bin_counts", None
-            )
+            output_bin_counts = self.sampler.penalties_state.output_bin_counts
         post_update(
             idx_mapping,
             self.req_states.num_computed_tokens.gpu,
