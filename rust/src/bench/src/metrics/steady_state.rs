@@ -179,7 +179,7 @@ use crate::datasets::SampleRequest;
 /// as a placeholder; reporting TTFT over that would silently be E2EL.
 pub fn compute(
     outputs: &[RequestFuncOutput],
-    input_requests: &[SampleRequest],
+    _input_requests: &[SampleRequest],
     window: &SteadyStateWindow,
     percentiles: &[f64],
     is_pooling: bool,
@@ -200,7 +200,7 @@ pub fn compute(
     let mut ttfts_in_window: Vec<f64> = Vec::new();
     let mut tpots_in_window: Vec<f64> = Vec::new();
 
-    for (idx, o) in outputs.iter().enumerate() {
+    for o in outputs.iter() {
         if !o.success {
             continue;
         }
