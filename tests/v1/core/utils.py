@@ -264,6 +264,7 @@ def create_requests(
     same_prompt: bool = False,
     block_size: int = 16,
     req_ids: list[str] | None = None,
+    mm_requires_kv: bool = False,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -321,10 +322,11 @@ def create_requests(
                 # Unique dummy hash for each mm item
                 identifier = f"hash{i}_{j}"
             mm_feature = MultiModalFeatureSpec(
-                data=MultiModalKwargsItem.dummy(),
+                data=None if mm_requires_kv else MultiModalKwargsItem.dummy(),
                 mm_position=position,
                 identifier=identifier,
                 modality="image",
+                requires_kv=mm_requires_kv,
             )
             mm_features.append(mm_feature)
 
