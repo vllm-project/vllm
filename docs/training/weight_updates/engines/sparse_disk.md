@@ -87,6 +87,9 @@ A process that does not use the trainer engine can write files with
   whose final load step is a same-shaped copy.
 - Every worker reads the whole file, so with tensor parallelism it is read once
   per rank.
+- An update needs free GPU memory on every rank: the patch, plus the loader's
+  full checkpoint-shaped tensor for the largest weight. Leave headroom with
+  `--gpu-memory-utilization`.
 - The caller owns diffing and restart or reseed after a partial failure. A
   failed update does not roll back patches that were already applied.
 - Workers open whatever path `update_weights` names. Expose the weight transfer
