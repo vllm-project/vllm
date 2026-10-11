@@ -372,6 +372,7 @@ class ModelConfig:
     hip platforms are supported)."""
     sleep_preserve_parameter_names: list[str] = field(default_factory=list)
     """Parameter-name globs to preserve across level-2 sleep.
+    Use ``draft.<name>`` for draft-private parameters, or ``draft.*`` for all.
     The sender must omit these parameters; loaders must preserve their storage."""
     sleep_mode_backend: str = "cumem"
     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
