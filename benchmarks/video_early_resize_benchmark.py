@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark early video frame resizing vs baseline decoding.
 
 Measures memory consumption, decode time, and verifies bit-identity
