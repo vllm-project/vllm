@@ -6,9 +6,12 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.serve.exception_handling.error_response import (
+    create_error_response,
+)
 from vllm.logger import init_logger
 from vllm.tasks import SupportedTask
 
@@ -69,6 +72,9 @@ def register_scale_out_api_routers(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
 ):
+    from .derender.api_router import router as derender_render
+    from .render.api_router import router as render_render
+
     args = getattr(app.state, "args", None)
     # `vllm launch render` and `vllm serve --tokens-only` are dedicated to
     # serving these endpoints, so they always register them regardless of
@@ -83,36 +89,28 @@ def register_scale_out_api_routers(
         logger.warning(message)
 
         async def disabled_scale_out() -> JSONResponse:
-            error = ErrorResponse(
-                error=ErrorInfo(
-                    message=message,
-                    type="PermissionDeniedError",
-                    code=HTTPStatus.FORBIDDEN,
-                )
+            error = create_error_response(
+                message, "PermissionDeniedError", HTTPStatus.FORBIDDEN
             )
             return JSONResponse(error.model_dump(), status_code=HTTPStatus.FORBIDDEN)
 
-        for path in (
-            "/v1/chat/completions/render",
-            "/v1/chat/completions/derender",
-            "/v1/completions/render",
-            "/v1/completions/derender",
-            "/v1/messages/render",
-            "/v1/responses/render",
-            "/inference/v1/generate",
-            "/inference/v1/abort_requests",
+        from .token_in_token_out.api_router import router as token_router
+
+        for route in (
+            *render_render.routes,
+            *derender_render.routes,
+            *token_router.routes,
         ):
-            app.add_api_route(
-                path, disabled_scale_out, methods=["POST"], include_in_schema=False
-            )
+            if isinstance(route, APIRoute):
+                app.add_api_route(
+                    route.path,
+                    disabled_scale_out,
+                    methods=sorted(route.methods),
+                    include_in_schema=False,
+                )
         return
 
-    from .render.api_router import router as render_render
-
     app.include_router(render_render)
-
-    from .derender.api_router import router as derender_render
-
     app.include_router(derender_render)
 
     if "generate" in supported_tasks:
