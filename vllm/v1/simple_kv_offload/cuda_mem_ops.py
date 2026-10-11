@@ -128,6 +128,40 @@ def _resolve_batch_memcpy() -> tuple[Any, int]:
     return _BATCH_MEMCPY_FUNC_TYPE(ptr), 1
 
 
+# Per-copy fallback entry point (cuMemcpyAsync), resolved lazily on first use.
+_per_copy_memcpy: Any | None = None
+
+_MEMCPY_FUNC_TYPE = ctypes.CFUNCTYPE(
+    ctypes.c_int,  # CUresult
+    ctypes.c_uint64,  # dst
+    ctypes.c_uint64,  # src
+    ctypes.c_size_t,  # ByteCount
+    ctypes.c_void_p,  # hStream
+)
+
+
+def _use_per_copy_memcpy() -> bool:
+    """Whether to bypass cuMemcpyBatchAsync with one cuMemcpyAsync per copy.
+
+    cuMemcpyBatchAsync can be resolvable yet fault at runtime on some platforms
+    (e.g. NVIDIA vGPU guests). CUDA only; ROCm keeps hipMemcpyBatchAsync.
+    """
+    return envs.VLLM_KV_OFFLOAD_DISABLE_BATCH_MEMCPY and not current_platform.is_rocm()
+
+
+def _resolve_per_copy_memcpy() -> Any:
+    """Resolve ``cuMemcpyAsync`` for the per-copy fallback (one-time)."""
+    global _per_copy_memcpy
+    if _per_copy_memcpy is None:
+        from cuda.bindings import driver as drv
+
+        err, ptr, _ = drv.cuGetProcAddress(b"cuMemcpyAsync", 12080, 0)
+        if err != drv.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"cuGetProcAddress(cuMemcpyAsync) failed: {err}")
+        _per_copy_memcpy = _MEMCPY_FUNC_TYPE(ptr)
+    return _per_copy_memcpy
+
+
 def _load_hip_runtime() -> ctypes.CDLL:
     """Load ``libamdhip64``, tolerating installs without the devel symlink.
 
@@ -248,6 +282,14 @@ def copy_blocks(
     ).ravel()
     sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
+
+    if _use_per_copy_memcpy():
+        memcpy = _resolve_per_copy_memcpy()
+        for dst, src, size in zip(dst_all.tolist(), src_all.tolist(), sz_all.tolist()):
+            err = memcpy(dst, src, size, params.stream_handle)
+            if err != 0:
+                raise RuntimeError(f"per-copy memcpy failed: err={err}")
+        return
 
     # Chunk on ROCm: hipMemcpyBatchAsync faults above 8192 descriptors/call.
     # CUDA is uncapped (max_desc == 0) and issues a single call.

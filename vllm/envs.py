@@ -2151,9 +2151,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS": lambda: int(
         os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", "0")
     ),
-    # Force CPU-KV-offload swap_blocks_batch to issue per-copy cudaMemcpyAsync
-    # instead of cuMemcpyBatchAsync. Set to 1 on platforms where the batch API
-    # faults at runtime (e.g. NVIDIA vGPU guests). CUDA only.
+    # Force CPU KV offload (OffloadingConnector and SimpleCPUOffloadConnector)
+    # to issue one memcpy per copy instead of cuMemcpyBatchAsync. Set to 1 on
+    # platforms where the batch API faults at runtime (e.g. NVIDIA vGPU
+    # guests). CUDA only.
     "VLLM_KV_OFFLOAD_DISABLE_BATCH_MEMCPY": lambda: bool(
         int(os.getenv("VLLM_KV_OFFLOAD_DISABLE_BATCH_MEMCPY", "0"))
     ),
