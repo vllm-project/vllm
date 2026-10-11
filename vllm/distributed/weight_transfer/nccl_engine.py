@@ -229,7 +229,7 @@ class NCCLWeightTransferEngine(
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
-            # Clean up the communicator by removing the reference
+            self.model_update_group.destroy()
             self.model_update_group = None
 
 
@@ -456,4 +456,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             torch.cuda.current_stream().synchronize()
 
     def shutdown(self) -> None:
-        self.model_update_group = None
+        if self.model_update_group is not None:
+            self.model_update_group.destroy()
+            self.model_update_group = None

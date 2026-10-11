@@ -296,6 +296,10 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
+        raise NotImplementedError
+
     async def start_weight_update(self) -> None:
         """Start a new weight update."""
         raise NotImplementedError

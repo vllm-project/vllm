@@ -46,7 +46,10 @@ from vllm.distributed.weight_transfer.m2n_source import (
     mesh_from_tensor,
     placements_from_tensor,
 )
-from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
+from vllm.distributed.weight_transfer.m2n_trainer import (
+    M2NTrainerInitInfo,
+    M2NTrainerWeightTransferEngine,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -55,6 +58,27 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
 VALID_UID_B64 = base64.b64encode(b"\x00" * 128).decode()
+
+
+@pytest.mark.parametrize(
+    "engine_type,group_attribute",
+    [
+        (M2NWeightTransferEngine, "model_update_group"),
+        (M2NTrainerWeightTransferEngine, "group"),
+    ],
+)
+def test_shutdown_destroys_communicator_once(engine_type, group_attribute):
+    engine = object.__new__(engine_type)
+    engine._handle = None
+    engine._executor = None
+    group = Mock()
+    setattr(engine, group_attribute, group)
+
+    engine.shutdown()
+    engine.shutdown()
+
+    group.destroy.assert_called_once_with()
+    assert getattr(engine, group_attribute) is None
 
 
 class TestLayout:

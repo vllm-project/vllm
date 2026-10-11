@@ -168,6 +168,13 @@ async def init_weight_transfer_engine(
     return JSONResponse(content={"message": "Weight transfer initialized"})
 
 
+@router.post("/shutdown_weight_transfer_engine")
+async def shutdown_weight_transfer_engine(raw_request: Request):
+    with weight_operation_metrics().record("shutdown"):
+        await engine_client(raw_request).shutdown_weight_transfer_engine()
+    return JSONResponse(content={"message": "Weight transfer shut down"})
+
+
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
     with weight_operation_metrics().record("start"):

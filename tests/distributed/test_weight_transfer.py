@@ -218,6 +218,27 @@ class TestSparseNCCLWeightTransferUpdateInfoValidation:
 # --- Unit Tests: Engine Parsing ---
 
 
+@pytest.mark.parametrize(
+    "engine_type",
+    [
+        NCCLWeightTransferEngine,
+        NCCLTrainerWeightTransferEngine,
+        SparseNCCLWeightTransferEngine,
+        SparseNCCLTrainerWeightTransferEngine,
+    ],
+)
+def test_nccl_shutdown_destroys_communicator_once(engine_type):
+    engine = object.__new__(engine_type)
+    group = MagicMock()
+    engine.model_update_group = group
+
+    engine.shutdown()
+    engine.shutdown()
+
+    group.destroy.assert_called_once_with()
+    assert engine.model_update_group is None
+
+
 class TestNCCLEngineParsing:
     """Test NCCLWeightTransferEngine parsing methods."""
 
@@ -1292,6 +1313,9 @@ class TestTrainerClients:
         handle.finish_weight_update.remote.assert_called_once_with()
         handle.update_weight_version.remote.assert_called_once_with("step-42")
 
+        client.shutdown_weight_transfer_engine()
+        handle.shutdown_weight_transfer_engine.remote.assert_called_once_with()
+
     def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
         """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
         captured = {}
@@ -1322,6 +1346,7 @@ class TestTrainerClients:
         captured = {}
 
         def fake_post(self, path, json=None):
+            captured["path"] = path
             captured["json"] = json
 
         monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
@@ -1332,6 +1357,9 @@ class TestTrainerClients:
 
         client.finish_weight_update("step-42")
         assert captured["json"] == {"weight_version": "step-42"}
+
+        client.shutdown_weight_transfer_engine()
+        assert captured == {"path": "shutdown_weight_transfer_engine", "json": None}
 
 
 class TestModuleSource:

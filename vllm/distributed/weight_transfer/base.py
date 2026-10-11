@@ -514,9 +514,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def shutdown(self) -> None:
-        """Shutdown the weight transfer engine.
-        This should be called when the worker is shutting down.
-        """
+        """Release transfer resources without shutting down the inference worker."""
         raise NotImplementedError
 
 
