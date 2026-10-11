@@ -351,8 +351,8 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 False,
                 "requires per token activation scales and per channel weight scales.",
             )
-
-        # Require a tuned configuration for the architecture's GEMM backend.
+        # Aiter's per-token Gemm performs better than torch only when its
+        # tuned.
         if not rocm_aiter_ops.is_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
