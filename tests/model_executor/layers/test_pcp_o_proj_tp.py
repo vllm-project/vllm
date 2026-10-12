@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 import vllm.model_executor.layers.linear as linear_module
 import vllm.model_executor.parameter as parameter_module
+from vllm.config.quantization import QuantSpec
 from vllm.model_executor.kernels.linear import (
     CutlassNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
@@ -19,14 +20,13 @@ from vllm.model_executor.layers.linear import (
     PCPOProjLinearMethod,
     PCPOProjRowParallelLinear,
 )
-from vllm.config.quantization import QuantSpec
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kNvfp4Dynamic,
-    kNvfp4Static,
-)
 from vllm.model_executor.layers.quantization.modelopt import (
     CkptCtx,
     ModelOptLinearMethod,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 
 
@@ -76,11 +76,12 @@ def _make_layer(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
     monkeypatch.setattr(linear_module, "get_current_vllm_config", lambda: config_scope)
-    monkeypatch.setattr(
-        linear_module.UnquantizedLinearMethod,
-        "apply",
-        lambda _self, layer, x, bias=None: F.linear(x, layer.weight, bias),
-    )
+
+    def _apply(_self, layer, x, bias=None):
+        assert layer.input_size_per_partition == x.shape[-1]
+        return F.linear(x, layer.weight, bias)
+
+    monkeypatch.setattr(linear_module.UnquantizedLinearMethod, "apply", _apply)
     layer = PCPOProjRowParallelLinear(
         input_size=4,
         output_size=3,
@@ -92,6 +93,7 @@ def _make_layer(
 
 def test_prefill_waits_for_async_full_weight_gather(monkeypatch):
     layer, _ = _make_layer(monkeypatch, pcp_rank=1)
+    assert layer.quant_method.supports_pre_processed_weights
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     layer.weight_loader_v2(layer.weight, full_weight)
     torch.testing.assert_close(layer.weight, full_weight[:, 2:])
@@ -117,6 +119,7 @@ def test_prefill_waits_for_async_full_weight_gather(monkeypatch):
     assert work.waited
     assert output_bias is None
     torch.testing.assert_close(output, F.linear(input_, full_weight))
+    assert layer.input_size_per_partition == 2
 
 
 def test_forward_requires_explicit_attention_prefetch(monkeypatch):
@@ -285,12 +288,39 @@ def test_modelopt_nvfp4_rejects_non_cutlass_post_load_layout():
         method.get_tp_weight_switch_specs(torch.nn.Module())
 
 
+@pytest.mark.parametrize("activation,group_size", [(None, 16), (kNvfp4Dynamic, 32)])
+def test_modelopt_weight_switch_rejects_unsupported_quant_spec(activation, group_size):
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kNvfp4Static, activation=activation)
+    method.ctx = CkptCtx(group_size=group_size)
+    method.kernel = CutlassNvFp4LinearKernel.__new__(CutlassNvFp4LinearKernel)
+
+    with pytest.raises(RuntimeError, match="only ModelOpt W4A4 NVFP4"):
+        method.get_tp_weight_switch_specs(torch.nn.Module())
+
+
+def test_modelopt_nvfp4_rejects_padded_local_weight():
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kNvfp4Static, activation=kNvfp4Dynamic)
+    method.ctx = CkptCtx(group_size=16)
+    method.kernel = CutlassNvFp4LinearKernel.__new__(CutlassNvFp4LinearKernel)
+    layer = torch.nn.Module()
+    layer.input_size_per_partition = 64
+    layer.weight = torch.nn.Parameter(
+        torch.zeros(128, 64, dtype=torch.uint8), requires_grad=False
+    )
+
+    with pytest.raises(RuntimeError, match="no input-axis padding"):
+        method.get_tp_weight_switch_specs(layer)
+
+
 def test_unquantized_method_restores_local_weight_after_kernel_failure(monkeypatch):
     layer, _ = _make_layer(monkeypatch, pcp_rank=0)
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     layer.weight_loader_v2(layer.weight, full_weight)
 
     def _raise_on_apply(_self, layer, x, bias=None):
+        assert layer.input_size_per_partition == x.shape[-1]
         raise RuntimeError("fake linear kernel failure")
 
     monkeypatch.setattr(linear_module.UnquantizedLinearMethod, "apply", _raise_on_apply)
@@ -308,4 +338,5 @@ def test_unquantized_method_restores_local_weight_after_kernel_failure(monkeypat
         layer(torch.zeros(1, 4))
 
     assert layer.weight.shape == (3, 2)
+    assert layer.input_size_per_partition == 2
     assert layer._use_full_weight is None

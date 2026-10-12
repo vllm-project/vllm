@@ -1835,6 +1835,10 @@ class PCPOProjLinearMethod(LinearMethodBase):
     def __init__(self, quant_method: LinearMethodBase) -> None:
         self.quant_method = quant_method
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return self.quant_method.supports_pre_processed_weights
+
     def __getattr__(self, name: str) -> Any:
         """Preserve access to backend-specific method configuration."""
         quant_method = self.__dict__.get("quant_method")
@@ -1929,6 +1933,7 @@ class PCPOProjRowParallelLinear(RowParallelLinear):
 
         self._tp_input_size = divide(input_size, self.o_proj_tp_size)
         self._buffer_scope = id(get_current_vllm_config())
+        assert isinstance(self.quant_method, LinearMethodBase)
         self.quant_method = PCPOProjLinearMethod(self.quant_method)
         self._tp_weight_method: TPWeightSwitchMixin | None = None
         self._tp_weight_state: TPWeightSwitchState | None = None
@@ -1937,6 +1942,7 @@ class PCPOProjRowParallelLinear(RowParallelLinear):
             self._enable_pcp_weight_switch()
 
     def _get_tp_weight_switch_method(self) -> TPWeightSwitchMixin:
+        assert isinstance(self.quant_method, PCPOProjLinearMethod)
         quant_method = self.quant_method.quant_method
         if (
             isinstance(quant_method, TPWeightSwitchMixin)
@@ -2000,9 +2006,12 @@ class PCPOProjRowParallelLinear(RowParallelLinear):
         method, state = self._weight_switch()
         method.wait_tp_weight_all_gather(state)
         method.switch_tp_weight(self, state, use_full_weight=True)
+        local_input_size = self.input_size_per_partition
+        self.input_size_per_partition = self._tp_input_size
         try:
             return self.quant_method.apply(self, input_, None)
         finally:
+            self.input_size_per_partition = local_input_size
             method.switch_tp_weight(self, state, use_full_weight=False)
 
     def _apply_pcp_weight_shard(self, input_: torch.Tensor) -> torch.Tensor:

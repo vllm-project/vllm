@@ -145,7 +145,7 @@ class ParallelConfig:
     the process world size but does not increase the KV-cache shard count."""
     enable_pcp_o_proj_tp: bool = False
     """Shard MLA O-Proj weights over TP x PCP. This experimental MVP supports
-    unquantized eager execution with DCP disabled."""
+    eager execution with DCP disabled and a compatible O-Proj weight layout."""
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor, prefill-context, and data parallel sizes."""

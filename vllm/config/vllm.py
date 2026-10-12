@@ -1411,7 +1411,6 @@ class VllmConfig:
         self.engram_config.verify_parallel_config(self.parallel_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
-
     def _verify_pcp_o_proj_tp_config(self) -> None:
         if not self.parallel_config.enable_pcp_o_proj_tp:
             return
