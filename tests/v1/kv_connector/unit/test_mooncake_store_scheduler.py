@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -48,6 +48,7 @@ def _make_bare_scheduler(
     scheduler.save_decode_cache = save_decode_cache
     scheduler.enable_kv_events = False
     scheduler.lookup_async = False
+    scheduler.client = _StubLookupClient(hit_tokens=0)
     scheduler.enable_lookup = True
     scheduler._capacity_only = False
     scheduler._block_size = 16
@@ -927,6 +928,19 @@ class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
         self.num_tokens: list[int] = []
+        self.prefetched: list[int] = []
+        self.adopted: list[tuple[str, object]] = []
+        self.discarded: list[str] = []
+
+    def discard(self, req_id):
+        self.discarded.append(req_id)
+
+    def prefetch(self, num_tokens: int, block_hashes: list[bytes]):
+        self.prefetched.append(num_tokens)
+        return SimpleNamespace(future=MagicMock())
+
+    def adopt(self, req_id: str, state) -> None:
+        self.adopted.append((req_id, state))
 
     def lookup(
         self,
@@ -939,6 +953,90 @@ class _StubLookupClient:
         return MooncakeLookupResult(self._hit_tokens)
 
 
+def _make_admission_request(request_id="req-0"):
+    return SimpleNamespace(
+        request_id=request_id,
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        skip_reading_prefix_cache=False,
+        kv_preschedule_handle=None,
+    )
+
+
+def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+
+    handle = scheduler.start_lookup_prefetch(request)
+    request.kv_preschedule_handle = handle
+
+    assert scheduler.client.prefetched == [48]
+    assert scheduler.client.adopted == []
+    assert scheduler.load_specs == {}
+    assert scheduler._unfinished_requests == {}
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
+    assert scheduler.client.adopted == [(request.request_id, handle)]
+    assert request.kv_preschedule_handle is None
+    assert scheduler.load_specs[request.request_id].vllm_cached_tokens == 16
+    assert scheduler.load_specs[request.request_id].can_load is False
+
+
+@pytest.mark.parametrize(
+    "option", ["sync", "disabled", "skip_cache", "short", "no_hash"]
+)
+def test_admission_lookup_skips_ineligible_requests(option):
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+    if option == "sync":
+        scheduler.lookup_async = False
+    elif option == "disabled":
+        scheduler.enable_lookup = False
+    elif option == "skip_cache":
+        request.skip_reading_prefix_cache = True
+    elif option == "short":
+        request.num_tokens = 12
+    else:
+        request.block_hashes = []
+
+    assert scheduler.start_lookup_prefetch(request) is None
+    assert scheduler.client.prefetched == []
+
+
+def test_unadopted_admission_lookup_is_cancelled_when_request_finishes():
+    """A request aborted while waiting never reaches the scheduler probe."""
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+    handle = scheduler.start_lookup_prefetch(request)
+    request.kv_preschedule_handle = handle
+
+    scheduler.cancel_lookup_prefetch(request)
+
+    handle.future.cancel.assert_called_once()
+    assert request.kv_preschedule_handle is None
+
+
+@pytest.mark.parametrize("preempted", [False, True])
+def test_admission_lookup_is_discarded_on_finish_or_preemption(preempted):
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+    output = _make_preemption_scheduler_output()
+    if not preempted:
+        output.preempted_req_ids = set()
+        output.finished_req_ids = {request.request_id}
+
+    scheduler.build_connector_meta(output)
+
+    assert scheduler.client.discarded == [request.request_id]
+
+
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     # The worker re-derives a full external hit below the request end on an
     # existing boundary, so the scheduler receives the usable aligned hit.
@@ -948,6 +1046,7 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
 
     request = SimpleNamespace(
         request_id="req-0",
+        kv_preschedule_handle=None,
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -978,6 +1077,7 @@ def test_full_external_hit_with_full_local_hit_skips_load():
 
     request = SimpleNamespace(
         request_id="req-0",
+        kv_preschedule_handle=None,
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -1000,6 +1100,7 @@ def test_partial_hash_hit_block_aligned_local_loads_partial_tail():
 
     request = SimpleNamespace(
         request_id="req-0",
+        kv_preschedule_handle=None,
         num_tokens=32,
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
     )
@@ -1025,6 +1126,7 @@ def test_partial_hash_hit_no_remote_gain_skips_load():
 
     request = SimpleNamespace(
         request_id="req-0",
+        kv_preschedule_handle=None,
         num_tokens=32,
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
     )
@@ -1049,6 +1151,7 @@ def test_sub_block_prompt_looks_up_with_fine_grained():
 
     request = SimpleNamespace(
         request_id="req-0",
+        kv_preschedule_handle=None,
         num_tokens=12,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -1070,6 +1173,7 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
 
     request = SimpleNamespace(
         request_id="req-0",
+        kv_preschedule_handle=None,
         num_tokens=12,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -1093,6 +1197,7 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
 
     request = SimpleNamespace(
         request_id="req-0",
+        kv_preschedule_handle=None,
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
