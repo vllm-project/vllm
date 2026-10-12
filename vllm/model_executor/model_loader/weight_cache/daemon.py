@@ -78,6 +78,7 @@ cached and keep loading from disk in the engine.
 
 import contextlib
 import fcntl
+import gc
 import multiprocessing
 import os
 import socket
@@ -111,11 +112,15 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     verify_peer_is_owner,
 )
 from vllm.model_executor.model_loader.weight_cache.utils import (
+    build_warmup_runner,
     export_model_attrs,
     format_daemon_role,
     is_draft_model_cacheable,
 )
+from vllm.model_executor.warmup.kernel_warmup import flashinfer_autotune
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -234,6 +239,41 @@ class WeightCacheDaemon:
             is_draft=is_draft,
         )
 
+    def warmup(self) -> None:
+        """Run the FlashInfer autotune pass against the cached model."""
+        vllm_config = self.vllm_config
+        # Mirrors the gate in the engine's kernel warmup.
+        if (
+            vllm_config.kernel_config.enable_flashinfer_autotune is False
+            or not has_flashinfer()
+            or not current_platform.has_device_capability(90)
+            or is_draft_model_cacheable(vllm_config.speculative_config)
+        ):
+            return
+        try:
+            current_platform.update_block_size_for_backend(vllm_config)
+            runner = build_warmup_runner(
+                vllm_config,
+                self.local_rank,
+                is_draft=self.is_draft,
+                model_config=self.model_config,
+            )
+            assert self.model is not None, "warmup ran before load_model"
+            runner.load_model(model=self.model)
+            # The V2 runner requires skip_attn when no KV cache exists
+            flashinfer_autotune(runner, skip_attn=vllm_config.use_v2_model_runner)
+            logger.info(
+                "Weight cache %s daemon rank %d tuned FlashInfer; the tuned "
+                "configs are in the on-disk autotune cache",
+                self.role,
+                self.global_rank,
+            )
+        finally:
+            # Free the runner and the dummy-run activations; the daemon's
+            # weights are untouched.
+            gc.collect()
+            torch.accelerator.empty_cache()
+
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
         # Outside the config context so the daemon keeps its own rendezvous
@@ -249,10 +289,17 @@ class WeightCacheDaemon:
         with set_current_vllm_config(self.vllm_config):
             ensure_model_parallel_initialized(self.tp_size, self.pp_size)
             self.model = self.get_model()
+        # Loading and post-processing leave freed transients in the caching
+        # allocator; return them so engines sharing the GPU can use them.
+        gc.collect()
+        torch.accelerator.empty_cache()
         logger.info(
-            "Weight cache %s daemon rank %d loaded model",
+            "Weight cache %s daemon rank %d loaded model (%s GiB allocated, "
+            "%s GiB reserved)",
             self.role,
             self.global_rank,
+            format_gib(torch.accelerator.memory_allocated()),
+            format_gib(torch.accelerator.memory_reserved()),
         )
 
     def get_model(self) -> torch.nn.Module:
@@ -369,6 +416,14 @@ class WeightCacheDaemon:
         cmd = request.get("cmd")
         if cmd == "get_state":
             self._handle_get_state(conn, request)
+        elif cmd == "get_memory":
+            send_msg(
+                conn,
+                {
+                    "status": "ok",
+                    "memory_bytes": torch.accelerator.memory_allocated(),
+                },
+            )
         elif cmd == "release":
             self._handle_release(conn)
         else:
@@ -440,6 +495,7 @@ def _run_daemon(
         pp_rank,
     )
     daemon.load_model()
+    daemon.warmup()
     daemon.serve_forever(
         ready_callback=lambda: ready_queue.put((daemon.role, daemon.global_rank))
     )

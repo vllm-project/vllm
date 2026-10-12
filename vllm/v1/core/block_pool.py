@@ -25,6 +25,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
     resolve_block_hashes,
+    to_event_extra_keys,
 )
 from vllm.v1.request import Request
 
@@ -367,7 +368,7 @@ class BlockPool:
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
             medium=self.medium,
             lora_name=request.lora_request.name if request.lora_request else None,
-            extra_keys=extra_keys_list if extra_keys_list else None,
+            extra_keys=to_event_extra_keys(extra_keys_list),
             group_idx=kv_cache_group_id,
             session_id=request.session_id,
         )
@@ -478,8 +479,8 @@ class BlockPool:
             kv_cache_group_id: KV cache group that owns the partial entry.
             block_size: Cache block size for the owning group. The partial
                 entry hash itself is always the prefix-chain hash at
-                ``num_tokens``; ``block_size`` is used to assert that the
-                entry is partial within the owning cache block.
+                ``num_tokens``; ``block_size`` must be a multiple of the hash
+                block size.
             replace_existing_hashes: Whether the block contents were replaced
                 and all existing cache entries must be removed before the new
                 entry is registered.
@@ -493,9 +494,6 @@ class BlockPool:
             return None
 
         assert block_size % self.hash_block_size == 0
-        assert replace_existing_hashes or (
-            block_size > self.hash_block_size and num_tokens % block_size != 0
-        )
         block_hash = self._get_partial_block_hash(request, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
@@ -557,7 +555,7 @@ class BlockPool:
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
-                    extra_keys=[extra_keys],
+                    extra_keys=to_event_extra_keys([extra_keys]),
                     group_idx=kv_cache_group_id,
                     session_id=request.session_id,
                 )
@@ -828,7 +826,7 @@ class BlockPool:
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
-        flows to invalid prefix caching after the weights are updated,
+        flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
 
         Returns:

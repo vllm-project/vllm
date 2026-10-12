@@ -345,6 +345,7 @@ def _rocm_aiter_fused_moe_impl(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
         shared_w1,
@@ -378,6 +379,12 @@ def _rocm_aiter_fused_moe_impl(
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
         )
+    if q_dtype_a is not None:
+        # DeepSeek V4.1 a4w4 override (use_mxfp4_w4a4_dsv4 in
+        # rocm_aiter_moe.py). rocm_aiter_ops.fused_moe_supports_quant_dtype_a()
+        # is checked at config time, so this is only reached on an AITER
+        # build new enough to accept it.
+        extra_kwargs["quant_dtype_a"] = q_dtype_a
 
     return fused_moe(
         hidden_states,
@@ -435,6 +442,7 @@ def _rocm_aiter_fused_moe_fake(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1159,7 +1167,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
     )
     assert result is not None
@@ -1211,7 +1220,8 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
         w=weight,
         eps=epsilon,
         group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
+        registered=torch.cuda.is_current_stream_capturing()
+        and ca.enable_register_for_capturing,
         use_1stage=use_1stage,
         emit_bf16=True,
     )
@@ -1905,6 +1915,11 @@ def _sync_aiter_situv2_moe_env() -> None:
             os.environ.pop(name, None)
 
 
+_GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
+_GFX950_C4A_NATIVE_MAX_ROWS = 256
+_GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -1984,6 +1999,8 @@ class rocm_aiter_ops:
 
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+    # Chunk length the AITER FlyDSL K5 prefill kernels are compiled for.
+    GDN_FLYDSL_CHUNK_SIZE = 64
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
@@ -2454,6 +2471,23 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
+    @staticmethod
+    def _gdn_flydsl_prefill_kernels_importable() -> bool:
+        try:
+            from aiter.ops.flydsl.linear_attention_prefill_kernels import (  # noqa: F401
+                chunk_gated_delta_rule_fwd_h_flydsl_opt,
+                gdn_prepare_flydsl_supported,
+                gdn_prepare_fwd_flydsl,
+            )
+            from aiter.ops.triton.gated_delta_net import (  # noqa: F401
+                build_gated_delta_rule_prefill_metadata,
+                chunk_gated_delta_rule_opt_vk,
+            )
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
+
     @classmethod
     @if_aiter_supported
     def are_gdn_triton_kernels_available(cls) -> bool:
@@ -2464,6 +2498,100 @@ class rocm_aiter_ops:
         in older aiter builds.
         """
         return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
+
+    @classmethod
+    @functools.cache
+    def is_gdn_flydsl_prefill_available(cls) -> bool:
+        """Whether the opt-in AITER FlyDSL GDN prefill path can be used.
+
+        Selecting the backend is an explicit opt-in in itself, but it still
+        runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch that
+        turns all of them off.
+        """
+        return (
+            cls._AITER_ENABLED
+            and is_aiter_found_and_supported()
+            and cls._gdn_flydsl_prefill_kernels_importable()
+        )
+
+    @classmethod
+    def build_gdn_flydsl_prefill_metadata(
+        cls,
+        seq_lens_cpu: list[int],
+        cu_seqlens: torch.Tensor,
+    ) -> object:
+        """Build the reusable varlen metadata FlyDSL GDN prefill runs against.
+
+        The K5 recurrence is compiled for a fixed 64-token chunk, so the chunk
+        size is a property of the AITER kernel rather than of FLA, and is not
+        the caller's to choose.
+        """
+        from aiter.ops.triton.gated_delta_net import (
+            build_gated_delta_rule_prefill_metadata,
+        )
+
+        return build_gated_delta_rule_prefill_metadata(
+            seq_lens_cpu,
+            cu_seqlens=cu_seqlens,
+            chunk_size=cls.GDN_FLYDSL_CHUNK_SIZE,
+        )
+
+    @classmethod
+    def gdn_flydsl_prefill(
+        cls,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None,
+        aiter_prefill_metadata: object | None,
+        use_qk_l2norm_in_kernel: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run GDN prefill through AITER's VK path with the FlyDSL kernels.
+
+        Every argument AITER takes is named here rather than forwarded as
+        ``**kwargs``, so a rename or reordering on the AITER side fails at this
+        call instead of silently binding to the wrong parameter.
+        """
+        from aiter.ops.flydsl.linear_attention_prefill_kernels import (
+            gdn_prepare_flydsl_supported,
+        )
+        from aiter.ops.triton.gated_delta_net import chunk_gated_delta_rule_opt_vk
+
+        if cu_seqlens is not None and aiter_prefill_metadata is None:
+            raise RuntimeError(
+                "AITER FlyDSL GDN prefill requires reusable varlen prefill metadata."
+            )
+        if not gdn_prepare_flydsl_supported(k, v):
+            raise RuntimeError(
+                "AITER FlyDSL GDN prepare does not support the runtime input shape, "
+                "dtype, or device."
+            )
+        logger.info_once(
+            "Dispatching AITER FlyDSL GDN prefill (prepare=flydsl, chunk=flydsl)."
+        )
+        return chunk_gated_delta_rule_opt_vk(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            use_chunk_flydsl=True,
+            use_prepare_flydsl=True,
+            state_dtype=initial_state.dtype,
+            prefill_metadata=aiter_prefill_metadata,
+            # The caller stages the state densely and writes it back, so the
+            # kernel gets a plain [N, H, V, K] buffer and never an index into
+            # the pool; there is correspondingly nothing to update in place.
+            inplace_final_state=False,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
 
     @classmethod
     def is_rdna_gdn_triton_kernels_available(cls) -> bool:
@@ -2484,6 +2612,21 @@ class rocm_aiter_ops:
         from aiter.fused_moe import fused_moe
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_quant_dtype_a(cls) -> bool:
+        """Probe whether the installed aiter.fused_moe accepts `quant_dtype_a`.
+
+        Added in https://github.com/ROCm/aiter/pull/5439 (unreleased at
+        merge time). Older AITER can't override the activation quant dtype.
+        """
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
@@ -2522,6 +2665,100 @@ class rocm_aiter_ops:
     def fused_moe_supports_heterogeneous_shared_expert(cls, num_tokens: int) -> bool:
         """Whether AITER has DSV4 native-I384 configs through the given M."""
         return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
+
+    @classmethod
+    @if_aiter_supported
+    def is_indexer_top_k_enabled(cls) -> bool:
+        """gfx950 is the only arch with tuned AITER indexer top-k kernels."""
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and on_gfx950()
+
+    @classmethod
+    def is_indexer_top_k_supported(
+        cls,
+        *,
+        is_prefill: bool,
+        compress_ratio: int,
+        num_rows: int,
+        max_valid_seq_len: int | None = None,
+    ) -> bool:
+        """Whether AITER's sparse indexer top-k beats the in-tree kernel for
+        this shape."""
+        if compress_ratio <= 1 or not cls.is_indexer_top_k_enabled():
+            return False
+
+        if not is_prefill:
+            assert max_valid_seq_len is not None
+            # AITER v0.1.19 decode is one-block only. This measured gfx950
+            # FP32/k=1024 compressed-row boundary is independent of the native
+            # split-count boundary in sampler.cu.
+            if (
+                num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
+                and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
+            ):
+                return False
+
+        return True
+
+    @staticmethod
+    def dsv4_indexer_prefers_native_top_k(
+        *,
+        num_rows: int,
+        num_columns: int,
+        topk_tokens: int,
+    ) -> bool:
+        """The in-tree decode kernel's measured advantage window over AITER.
+        Tuned on DSV4's compressed-KV logits, so it applies to that indexer
+        only."""
+        return (
+            topk_tokens == 512
+            and 0 < num_rows <= 384
+            and num_columns <= _GFX950_DSV4_NATIVE_MAX_COLUMNS
+        )
+
+    @staticmethod
+    def indexer_top_k_decode(
+        logits: torch.Tensor,
+        next_n: int,
+        seq_lens: torch.Tensor,
+        topk_indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        from aiter.ops.topk import top_k_per_row_decode
+
+        top_k_per_row_decode(
+            logits,
+            next_n,
+            seq_lens,
+            topk_indices,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            k=topk_tokens,
+        )
+
+    @staticmethod
+    def indexer_top_k_prefill(
+        logits: torch.Tensor,
+        row_starts: torch.Tensor,
+        row_ends: torch.Tensor,
+        indices: torch.Tensor,
+        topk_tokens: int,
+    ) -> None:
+        from aiter.ops.topk import top_k_per_row_prefill
+
+        top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            indices,
+            None,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            k=topk_tokens,
+        )
 
     @staticmethod
     def register_ops_once() -> None:
@@ -2873,6 +3110,10 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def get_fused_mla_dual_rms_norm_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm_group_quant.default
+
+    @staticmethod
     def rms_norm(
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -3005,6 +3246,7 @@ class rocm_aiter_ops:
         shared_w1_scale: torch.Tensor | None = None,
         shared_w2_scale: torch.Tensor | None = None,
         shared_expert_id: int = -1,
+        q_dtype_a: torch.dtype | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -3036,6 +3278,7 @@ class rocm_aiter_ops:
             shared_w1_scale,
             shared_w2_scale,
             shared_expert_id,
+            q_dtype_a,
         )
 
     @staticmethod

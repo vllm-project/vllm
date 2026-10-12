@@ -162,8 +162,14 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine."""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides."""
         ...
 
     @abstractmethod
@@ -199,8 +205,8 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine."""
+    async def wake_up(self, tags: list[str] | None = None) -> bool:
+        """Wake the tagged resources; return whether every engine is fully awake."""
         ...
 
     @abstractmethod
@@ -218,7 +224,6 @@ class EngineClient(ABC):
         self,
         *,
         mode: "PauseMode" = "abort",
-        wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
@@ -230,7 +235,6 @@ class EngineClient(ABC):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
 
@@ -268,6 +272,10 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
+    async def compute_weight_checksums(self) -> list[dict[str, str]]:
+        """Return rank-qualified weight digests from every worker of every engine."""
+        raise NotImplementedError
+
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
@@ -286,6 +294,10 @@ class EngineClient(ABC):
         self, init_request: WeightTransferInitRequest
     ) -> None:
         """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
         raise NotImplementedError
 
     async def start_weight_update(self) -> None:
