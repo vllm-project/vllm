@@ -453,6 +453,12 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 )
 
 
+_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
+    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
+    "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
+)
+
+
 class DeprecatedLogConfigFileAction(argparse.Action):
     """Warn when the legacy ``--log-config-file`` option is used."""
 
@@ -790,7 +796,7 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
-    mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    mamba_cache_mode: MambaCacheMode | None = None
     enable_mamba_shared_prefix_checkpoint: bool = (
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
@@ -1391,7 +1397,12 @@ class EngineArgs:
             "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
         )
         cache_group.add_argument(
-            "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
+            "--mamba-cache-mode",
+            **{
+                **cache_kwargs["mamba_cache_mode"],
+                "default": None,
+                "help": _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE,
+            },
         )
         cache_group.add_argument(
             "--enable-mamba-shared-prefix-checkpoint",
@@ -2249,6 +2260,8 @@ class EngineArgs:
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
+        if self.mamba_cache_mode is not None:
+            logger.warning_once(_MAMBA_CACHE_MODE_DEPRECATION_MESSAGE)
 
         cache_config = CacheConfig(
             block_size=self.block_size,  # type: ignore[arg-type]
@@ -2268,7 +2281,6 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             prefix_match_unit=self.prefix_match_unit,
-            mamba_cache_mode=self.mamba_cache_mode,
             enable_mamba_shared_prefix_checkpoint=(
                 self.enable_mamba_shared_prefix_checkpoint
             ),

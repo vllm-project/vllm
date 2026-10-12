@@ -1113,9 +1113,8 @@ def has_noops(
 
 @runtime_checkable
 class SupportsMambaPrefixCaching(Protocol):
-    """The interface for models whose mamba layers support prefix caching.
-
-    This is currently experimental.
+    """The interface for attention-free Mamba models that support prefix
+    caching. Hybrid models get the same methods from `IsHybrid`.
     """
 
     @classmethod
