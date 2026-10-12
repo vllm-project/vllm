@@ -1045,8 +1045,15 @@ def test_uno_continuous_batching_survivor_matches_solo(
                 "num_speculative_tokens": SURVIVOR_NUM_SPECULATIVE_TOKENS,
             },
         ) as runner:
-            engine = runner.llm.llm_engine
-            resolved_attention = engine.collective_rpc(_resolved_attention_state)[0]
+            # The engine runs in this process (VLLM_ENABLE_V1_MULTIPROCESSING=0),
+            # so it is only freed when the runner's exit drops ``runner.llm``.
+            # It is therefore read through ``runner.llm`` at each use, never
+            # bound to a local: a local would keep the model resident through
+            # that exit, and on ROCm the exit waits for the memory and fails.
+            def engine():
+                return runner.llm.llm_engine
+
+            resolved_attention = engine().collective_rpc(_resolved_attention_state)[0]
             mixed.attention = format_attention_receipt(
                 resolved_attention, resolved_attention["requested"]
             )
@@ -1054,8 +1061,8 @@ def test_uno_continuous_batching_survivor_matches_solo(
             # actually built, rather than trusting the literals passed above: a
             # platform default or a config validator that flipped either of them
             # would silently change what the pre-gate means.
-            engine_cache_config = engine.vllm_config.cache_config
-            engine_lookahead = engine.vllm_config.num_lookahead_tokens
+            engine_cache_config = engine().vllm_config.cache_config
+            engine_lookahead = engine().vllm_config.num_lookahead_tokens
             assert not engine_cache_config.enable_prefix_caching, (
                 "the survivor engine enabled prefix caching, so the peers can share "
                 "decode blocks and the arithmetic above does not describe this run: "
@@ -1076,7 +1083,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
             # scheduler preempts has its own solo result to be compared against.
             solo_ids = {
                 f"uno-finish-peer-{index}": _run_request_to_finish(
-                    engine, f"uno-solo-peer-{index}", prompt, finish_sampling
+                    engine(), f"uno-solo-peer-{index}", prompt, finish_sampling
                 )
                 for index, prompt in enumerate(finish_prompts)
             }
@@ -1095,7 +1102,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
             # at the start of the mixed phase and assert only the phase deltas.
             before_metrics = runner.llm.get_metrics()
             _run_survivor_with_peers(
-                engine,
+                engine(),
                 seed_prompt=seed_prompt,
                 finish_prompts=finish_prompts,
                 abort_prompt=abort_prompt,
