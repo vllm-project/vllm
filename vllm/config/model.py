@@ -2169,6 +2169,12 @@ class ModelConfig:
 
     @property
     def is_chunked_prefill_supported(self) -> bool:
+        if not self._model_info.supports_chunked_prefill:
+            logger.debug(
+                "%s does not support chunked prefill.", self._model_info.architecture
+            )
+            return False
+
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:
@@ -2215,6 +2221,12 @@ class ModelConfig:
 
     @property
     def is_prefix_caching_supported(self) -> bool:
+        if not self._model_info.supports_prefix_caching:
+            logger.debug(
+                "%s does not support prefix caching.", self._model_info.architecture
+            )
+            return False
+
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:

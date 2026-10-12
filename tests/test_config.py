@@ -2935,6 +2935,12 @@ def test_s3_url_different_model_and_tokenizer(mock_pull_files):
             "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
+            "sapientinc/HRM-Text-1B",
+            "decoder",
+            False,
+            "HrmTextForCausalLM does not support chunked prefill.",
+        ),
+        (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
             True,
@@ -3052,6 +3058,12 @@ def test_is_chunked_prefill_supported(
             "decoder",
             True,
             "Generative models support prefix caching.",  # noqa: E501
+        ),
+        (
+            "sapientinc/HRM-Text-1B",
+            "decoder",
+            False,
+            "HrmTextForCausalLM does not support prefix caching.",
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
