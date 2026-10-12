@@ -1,9 +1,8 @@
 #!/bin/bash
 # Install the AITER nightly wheel over this build's ci_base.
 #
-# Run by the aiter-nightly-amd step of ci-infra's test-template-amd.j2 when
-# AITER_NIGHTLY=1, after ensure-ci-base-amd, which publishes the stock ci_base
-# this step builds on. In order:
+# Runs in CI when AITER_NIGHTLY=1, once the stock ci_base it builds on is
+# published. In order:
 #   1. Select the newest nightly wheel that fits the stock ci_base
 #      (select_aiter_nightly_wheel.py, beside this script, run inside that image)
 #   2. Build a new image: pip install that wheel over the stock ci_base
@@ -11,11 +10,11 @@
 #      one, so later steps and native jobs use it; record its digest
 #
 # Buildkite meta-data, a key-value store shared by every job in this build:
-#   reads   rocm-ci-base-image       the stock ci_base, set by ensure-ci-base-amd
+#   reads   rocm-ci-base-image       the stock ci_base
 #   r/w     aiter-nightly-wheel-url  the wheel step 1 chose; a retry reads it
 #                                    back and installs that same wheel
-#   writes  aiter-nightly-ci-base    the new image as tag@digest; image-build-amd
-#                                    builds vLLM on it
+#   writes  aiter-nightly-ci-base    the new image as tag@digest; the vLLM
+#                                    image build uses it as its ci_base
 #
 # Exit status:
 #   10  no wheel fits this ci_base
@@ -58,8 +57,6 @@ docker pull "${ci_base}"
 
 echo "--- :mag: Selecting the AITER nightly for ${ci_base}"
 set +e
-# `-` reads select_aiter_nightly_wheel.py from stdin. -P stops an `aiter`
-# directory in the working directory shadowing the installed package.
 out="$(docker run --rm -i --entrypoint python3 "${ci_base}" \
     -P - ${pinned:+--wheel-url "${pinned}"} \
     < "${SELECT_WHEEL}" 2> "${errors}")"
@@ -84,7 +81,6 @@ RUN python3 -m pip install --no-cache-dir "$AITER_WHEEL_URL"
 EOF
 
 echo "--- :docker: Installing ${wheel_url##*/}"
-# --builder default: build into local Docker, where docker push below finds it.
 if ! docker buildx build \
     --builder default \
     --provenance=false \
@@ -98,14 +94,14 @@ if ! docker buildx build \
 fi
 
 docker push "${BUILD_TAG}"
-# Handed off as tag@digest: vLLM's build-test-image.sh, which image-build-amd
-# runs on this image, rejects a ci_base that is not digest-pinned.
+# Handed off as tag@digest: build-test-image.sh rejects a ci_base that is not
+# digest-pinned.
 digest="$(docker buildx imagetools inspect "${BUILD_TAG}" | awk '$1 == "Digest:" { print $2; exit }')"
 if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "Could not resolve the pushed digest of ${BUILD_TAG}" >&2
     exit 1
 fi
-# image-build-amd points the ci_base handoff at this.
+# The vLLM image build uses this as its ci_base.
 buildkite-agent meta-data set aiter-nightly-ci-base "${BUILD_TAG}@${digest}"
 # The annotation starts with :warning: when the wheel is stale.
 style=info
