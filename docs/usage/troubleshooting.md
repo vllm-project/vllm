@@ -38,7 +38,10 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 - `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
+- `export VLLM_WORKER_RPC_DUMP_TIMEOUT_S=30` to dump all Python thread stacks to stderr when a multiprocessing worker's `execute_model` or `sample_tokens` RPC exceeds 30 seconds. Defaults to `0` (disabled); each slow RPC dumps once, without cancelling work. The native timer can fire while the GIL is held. Loading and warmup RPCs are excluded.
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)
+
+Worker RPC stack dumps use the process-wide `faulthandler.dump_traceback_later` timer, so enabling them replaces any other use of that timer in the worker. Dumps from multiple workers may interleave in stderr; the startup log records each rank's PID and thread ID. This observes CPU-side RPC duration and does not detect GPU work that stalls after its RPC has returned.
 
 ## Breakpoints
 

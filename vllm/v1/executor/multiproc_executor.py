@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import faulthandler
 import multiprocessing
 import os
 import pickle
@@ -1037,6 +1038,15 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers."""
         assert self.rpc_broadcast_mq is not None
+        if envs.VLLM_WORKER_RPC_DUMP_TIMEOUT_S > 0:
+            logger.info(
+                "Worker RPC stack dumps enabled: rank=%d pid=%d thread=%#x "
+                "timeout=%.3fs",
+                self.rank,
+                os.getpid(),
+                threading.get_ident(),
+                envs.VLLM_WORKER_RPC_DUMP_TIMEOUT_S,
+            )
         while True:
             self._execute_worker_rpc(self.rpc_broadcast_mq.dequeue(indefinite=True))
 
@@ -1046,6 +1056,13 @@ class WorkerProc:
     ) -> None:
         """Execute one RPC in a separate frame from the dequeue loop."""
         method, args, kwargs, output_rank = rpc_request
+        dump_timeout = envs.VLLM_WORKER_RPC_DUMP_TIMEOUT_S
+        dump_stacks = dump_timeout > 0 and method in (
+            "execute_model",
+            "sample_tokens",
+        )
+        if dump_stacks:
+            faulthandler.dump_traceback_later(dump_timeout)
         try:
             if isinstance(method, str):
                 func = getattr(self.worker, method)
@@ -1065,6 +1082,9 @@ class WorkerProc:
             # containing its string representation before transport.
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(e)
+        finally:
+            if dump_stacks:
+                faulthandler.cancel_dump_traceback_later()
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:

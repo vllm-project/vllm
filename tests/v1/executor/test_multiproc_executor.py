@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import subprocess
+import sys
+import textwrap
 import weakref
 from collections import deque
 from types import SimpleNamespace
@@ -101,3 +105,56 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
             getattr(executor, method)()
     else:
         assert getattr(executor, method)() is result
+
+
+@pytest.mark.parametrize(
+    ("method", "delay", "hold_gil", "expected_dumps"),
+    [
+        ("execute_model", 0.75, False, 1),
+        ("execute_model", 0.75, True, 1),
+        ("sample_tokens", 0, False, 0),
+        ("load_model", 0.75, False, 0),
+    ],
+)
+def test_slow_runtime_rpc_dumps_stacks_without_interrupting_work(
+    method, delay, hold_gil, expected_dumps
+):
+    """Dump even with a held GIL; preserve results and cancel on RPC exit."""
+    script = textwrap.dedent(
+        f"""\
+        import ctypes
+        import time
+        from types import SimpleNamespace
+        from vllm.v1.executor.multiproc_executor import WorkerProc
+
+        def runtime_call():
+            if {hold_gil}:
+                # PyDLL keeps the GIL held across the native call.
+                ctypes.PyDLL(None).usleep({int(delay * 1_000_000)})
+            else:
+                time.sleep({delay})
+            return 42
+
+        worker = WorkerProc.__new__(WorkerProc)
+        worker.rank = 0
+        worker.worker = SimpleNamespace(**{{{method!r}: runtime_call}})
+        results = []
+        worker.handle_output = results.append
+        worker._execute_worker_rpc(({method!r}, (), {{}}, None))
+        assert results == [42]
+        time.sleep(0.5)
+        print("rpc completed")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "VLLM_WORKER_RPC_DUMP_TIMEOUT_S": "0.25"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    assert "rpc completed" in result.stdout
+    assert result.stderr.count("Timeout (") == expected_dumps
+    if expected_dumps:
+        assert "in runtime_call" in result.stderr
