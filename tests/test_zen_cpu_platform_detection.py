@@ -13,23 +13,6 @@ from vllm.platforms import (
 )
 
 
-@pytest.fixture
-def caplog_vllm(caplog):
-    """`caplog`, but also captures vLLM's loggers.
-
-    vllm/logger.py configures the "vllm" logger with propagate=False, so
-    records from child loggers like "vllm.platforms" reach vLLM's own
-    handler but never bubble up to the root logger where plain `caplog`
-    listens. Attach caplog's handler directly to "vllm" to see them too.
-    """
-    logger = logging.getLogger("vllm")
-    logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        logger.removeHandler(caplog.handler)
-
-
 def test_is_amd_zen_cpu_detects_amd_with_avx512():
     cpuinfo = "vendor_id: AuthenticAMD\nflags: avx avx2 avx512f avx512bw"
     with (
