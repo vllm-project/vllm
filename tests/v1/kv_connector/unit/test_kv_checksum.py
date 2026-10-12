@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MambaStateSplit,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -379,6 +380,71 @@ def test_kv_sharing_layers_counted_once():
     )
 
 
+def test_caches_of_one_layer_take_consecutive_slices():
+    """Distinct caches with one layer number (e.g. an attention's KV and its
+    indexer's) are all covered: the second, in layer name order, takes the
+    heads after the first's."""
+    kv, index = _logical_kv(heads=2, seed=1), _logical_kv(heads=2, seed=2)
+    index_name = "model.layers.0.self_attn.indexer.k_cache"
+    worker = _worker(
+        _config(_group(_spec(2), index_name, _name(0))),
+        {_name(0): _cache(kv), index_name: _cache(index)},
+    )
+    np.testing.assert_array_equal(
+        _send(worker)[0].values[:, 0], _reference({0: torch.cat([kv, index], 1)})
+    )
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_replicated_indexer_cache_sums_across_tp(tp_size):
+    """As in MiniMax-M3: per layer, attention KV of 2 heads (sharded at TP2,
+    replicated at TP4) and an indexer cache of one head held whole by every
+    rank (max_tp_shards=1). Producer shards sum to the definition with each
+    head counted once, and every consumer replica check equals it."""
+    kv, index = _logical_kv(heads=2, seed=1), _logical_kv(heads=1, seed=2)
+    index_name = "model.layers.0.self_attn.indexer.k_cache"
+    index_spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_SIZE,
+        dtype=torch.bfloat16,
+        max_tp_shards=1,
+    )
+    group = KVCacheGroupSpec(
+        [_name(0), index_name],
+        UniformTypeKVCacheSpecs(
+            block_size=BLOCK_SIZE,
+            kv_cache_specs={_name(0): _spec(1), index_name: index_spec},
+        ),
+    )
+    head_replicas = tp_size // 2
+    workers = [
+        _worker(
+            _config(group),
+            {
+                _name(0): _cache(kv[:, rank // head_replicas :][:, :1]),
+                index_name: _cache(index),
+            },
+            tp_rank=rank,
+            tp_size=tp_size,
+        )
+        for rank in range(tp_size)
+    ]
+    expected = _reference({0: torch.cat([kv, index], 1)})
+    with np.errstate(over="ignore"):
+        sent = sum(
+            group.values.sum(axis=1, dtype=np.uint64)
+            for worker in workers
+            for group in _send(worker).values()
+        )
+    np.testing.assert_array_equal(sent, expected)
+    received = [_recv(worker)[0] for worker in workers]
+    checks = _sum_replicas(received, len(expected))
+    assert len(checks) == tp_size
+    for check in checks:
+        np.testing.assert_array_equal(check, expected)
+
+
 def test_gathers_are_chunked_without_changing_results(monkeypatch):
     monkeypatch.setattr(checksum_worker, "_MAX_GATHER_BYTES", 1)
     logical = _logical_kv(heads=2)
@@ -477,6 +543,7 @@ def _misaligned_cache() -> torch.Tensor:
             {},
         ),
         (_group(_spec(2), "attn"), {"attn": _cache(_LOGICAL)}, {}),
+        # Under PP these could be on different stages, numbered apart.
         (
             _group(_spec(2), _name(0), "mtp.layers.0.attn"),
             {_name(0): _cache(_LOGICAL), "mtp.layers.0.attn": _cache(_LOGICAL)},
@@ -492,7 +559,7 @@ def _misaligned_cache() -> torch.Tensor:
         "misaligned",
         "kernel-blocks-do-not-tile",
         "no-layer-number",
-        "duplicate-layer-number",
+        "layer-number-of-two-modules",
     ],
 )
 def test_unsupported_groups_are_skipped(group, caches, worker_kwargs):
