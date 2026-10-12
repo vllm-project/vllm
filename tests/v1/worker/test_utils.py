@@ -51,6 +51,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker.host_write_events = (MagicMock(), MagicMock())
     worker.host_write_event = worker.host_write_events[1]
     worker._next_host_write_event = 0
+    worker._host_write_counter = None
+    worker._host_write_step = 0
     worker.dma_stream = None
     worker.shared_host_region = None
     worker._completed_host_copy_dst_ids = []
@@ -306,7 +308,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "engine_id": "hisparse_instance_dp3",
         "num_chunks": 1,
         "rank": 0,
-        "kv_bytes_per_chunk": 4 * page,
+        "kv_bytes_per_chunk": 5 * page,
         "cpu_page_size": 64,
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
@@ -318,18 +320,18 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert [
         (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
         for tensor in pinned
-    ] == [(0, page), (page, 3 * page)]
+    ] == [(0, page), (page, 3 * page), (4 * page, page)]
     assert region.is_pinned
 
 
-@pytest.mark.parametrize("fail_registration", [None, 1, 2])
+@pytest.mark.parametrize("fail_registration", [None, 1, 2, 3])
 def test_shared_host_pool_tracks_successful_registrations(
     monkeypatch, fail_registration
 ):
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
-    backing = torch.empty(3 * page, dtype=torch.uint8)
+    backing = torch.empty(4 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(
         hisparse_runtime_module, "SharedOffloadRegion", lambda **kw: region
@@ -341,7 +343,7 @@ def test_shared_host_pool_tracks_successful_registrations(
     )
     cudart = MagicMock()
     cudart.cudaHostRegister.side_effect = [
-        SimpleNamespace(value=int(fail_registration == i)) for i in (1, 2)
+        SimpleNamespace(value=int(fail_registration == i)) for i in (1, 2, 3)
     ]
     monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     config = SimpleNamespace(
@@ -356,18 +358,19 @@ def test_shared_host_pool_tracks_successful_registrations(
         hisparse_runtime_module.allocate_hisparse_host_pools(
             config, [3 * page], 3, page, use_shared_host_pool=True
         )
-    successful = 2 if fail_registration is None else fail_registration - 1
+    successful = 3 if fail_registration is None else fail_registration - 1
     assert region.pinned_addresses == [
-        backing.data_ptr() + i * page for i in range(successful)
+        backing.data_ptr() + offset for offset in (0, page, 3 * page)[:successful]
     ]
     assert region.is_pinned == bool(successful)
     assert region.cleanup.call_count == int(fail_registration is not None)
-    attempts = 2 if fail_registration is None else fail_registration
+    attempts = 3 if fail_registration is None else fail_registration
     assert (
         cudart.cudaHostRegister.call_args_list
         == [
             call(backing.data_ptr(), page, 0),
             call(backing.data_ptr() + page, 2 * page, 0),
+            call(backing.data_ptr() + 3 * page, page, 0),
         ][:attempts]
     )
 
@@ -1031,10 +1034,18 @@ def test_hisparse_writer_records_transfer_completion_after_dma(monkeypatch):
     assert worker._pending_transfer_events == deque([(event, (3, 7))])
 
 
+@pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("is_host_writer", [False, True])
-def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer):
+def test_hisparse_step_waits_for_previous_host_write(
+    monkeypatch, is_host_writer, shared
+):
+    """With a shared pool, rank 0 publishes each step's index and every other
+    rank waits for exactly that index, so a lagging rank cannot wait on a
+    later step's writes."""
     worker = _make_hisparse_worker()
     worker.is_host_writer = is_host_writer
+    if shared:
+        worker._host_write_counter = MagicMock()
     worker.hot_backing = SimpleNamespace(device=torch.device("cuda:1"))
     host_write_events = (MagicMock(), MagicMock())
     worker.host_write_events = host_write_events
@@ -1090,6 +1101,12 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
         call(host_write_events[0]),
     ]
     assert worker.host_write_event is host_write_events[1]
+    if shared:
+        counter = worker._host_write_counter
+        published = counter.write if is_host_writer else counter.wait
+        unused = counter.wait if is_host_writer else counter.write
+        assert published.call_args_list == [call(stream, 1), call(stream, 2)]
+        unused.assert_not_called()
 
 
 @pytest.mark.parametrize("tp_rank, expected_copies", [(0, 1), (1, 0)])
