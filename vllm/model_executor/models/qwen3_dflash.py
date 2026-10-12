@@ -83,8 +83,16 @@ def _add_global_draft_layer_exclusions(
             continue
         for exclusion in tuple(exclusions):
             global_exclusion = _DRAFT_LAYER_PATTERN.sub(offset_local_layer, exclusion)
-            if global_exclusion != exclusion and global_exclusion not in exclusions:
+            if global_exclusion == exclusion:
+                continue
+            if global_exclusion not in exclusions:
                 exclusions.append(global_exclusion)
+            # fp8 matches `ignored_layers` exactly, and the draft module tree is
+            # rooted at `model.`; wildcard entries only serve pattern matchers.
+            if "*" not in exclusion:
+                rooted_exclusion = f"model.{global_exclusion}"
+                if rooted_exclusion not in exclusions:
+                    exclusions.append(rooted_exclusion)
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
