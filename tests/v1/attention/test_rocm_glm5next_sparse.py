@@ -49,7 +49,6 @@ def _fit_kpool_indices_reference(
     return torch.where(valid_output, output, -1)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
 @triton.jit
 def _store_sparse_query_row_offset_kernel(
     query_idx_ptr, output_ptr, stride: tl.constexpr
@@ -58,6 +57,7 @@ def _store_sparse_query_row_offset_kernel(
     tl.store(output_ptr, _sparse_query_row_offset(query_idx, stride))
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
 def test_fit_kpool_indices_preserves_tail_and_best_history():
     token_indices = torch.tensor(
         [
