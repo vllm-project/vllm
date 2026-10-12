@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from utils import _extract_step_logprobs, skip_if_not_cuda
+from utils import _extract_step_logprobs, skip_if_not_cuda_alike
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import TextPrompt
@@ -89,7 +89,7 @@ def _assert_batch_invariant(llm: LLM, inputs: list[TextPrompt], sampling) -> Non
         )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("input_type", ["image", "video"])
 @pytest.mark.parametrize("mm_encoder_attn_backend", ["FLASH_ATTN", "TORCH_SDPA"])
 def test_vlm_batch_invariance_bs1_vs_bsN(
@@ -101,7 +101,7 @@ def test_vlm_batch_invariance_bs1_vs_bsN(
     _run_vlm_batch_invariance(input_type, mm_encoder_attn_backend, enforce_eager=True)
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 def test_vlm_batch_invariance_default_execution(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
     _run_vlm_batch_invariance("image", "FLASH_ATTN", enforce_eager=False)
