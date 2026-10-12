@@ -800,11 +800,9 @@ class DelegatingParser(Parser):
             ) + self._tool_parser.get_remaining_unstreamed_args()
             return delta_message
 
-        remaining = (
-            self._tool_parser.get_remaining_unstreamed_args()
-            if self._tool_parser is not None
-            else ""
-        )
+        if self._tool_parser is None:
+            return delta_message
+        remaining = self._tool_parser.get_remaining_unstreamed_args()
         if not remaining:
             return delta_message
 
