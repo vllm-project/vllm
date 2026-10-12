@@ -2308,6 +2308,11 @@ def get_kv_cache_capacity(
     return int(max_concurrency * max_model_len), max_concurrency
 
 
+def _kv_cache_device_name(vllm_config: VllmConfig) -> str:
+    device_type = vllm_config.device_config.device_type
+    return "GPU" if device_type == "cuda" else device_type.upper()
+
+
 def update_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> None:
@@ -2316,9 +2321,8 @@ def update_kv_cache_capacity(
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
     vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
     max_model_len = vllm_config.model_config.max_model_len
-    device_type = vllm_config.device_config.device_type
-    pools = "GPU" if device_type == "cuda" else device_type.upper()
-    if kv_cache_config.hisparse_host_num_blocks is not None:
+    pools = _kv_cache_device_name(vllm_config)
+    if vllm_config.attention_config.hisparse_config is not None:
         pools += " + host"
     logger.info_once(
         "%s KV cache size: %s tokens, "
@@ -2452,7 +2456,9 @@ def _auto_fit_max_model_len(
             "to serve even a single token. Try increasing `gpu_memory_utilization`."
         )
 
-    kv_cache_memory = f"{format_gib(limiting_worker_mem)} GiB GPU"
+    kv_cache_memory = (
+        f"{format_gib(limiting_worker_mem)} GiB {_kv_cache_device_name(vllm_config)}"
+    )
     if vllm_config.attention_config.hisparse_config is not None:
         host_pool_gib = format_gib(get_hisparse_host_pool_bytes(vllm_config))
         kv_cache_memory += f" + {host_pool_gib} GiB host"
