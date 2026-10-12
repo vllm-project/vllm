@@ -6,8 +6,7 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.entrypoints.common.offline import OfflineInferenceMixin
 from vllm.inputs import DataPrompt, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -18,6 +17,7 @@ from vllm.outputs import (
     ScoringRequestOutput,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
