@@ -154,9 +154,14 @@ KV_CACHE_RESIDENCY_BUCKETS: tuple[float, ...] = (
     600,
     1200,
     1800,
+    3600,
+    7200,
+    14400,
+    28800,
+    86400,
 )
 """KV cache block residency times: millisecond-scale reuse gaps up to
-30-minute block lifetimes."""
+one-day block lifetimes."""
 
 _STATIC_FAMILY_DEFAULTS: dict[str, tuple[float, ...]] = {
     "request_latency": REQUEST_LATENCY_BUCKETS,

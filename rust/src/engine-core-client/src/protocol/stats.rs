@@ -79,9 +79,9 @@ pub struct PrefixCacheStats {
 pub struct KvCacheEvictionEvent {
     /// Lifetime from allocation to eviction.
     pub lifetime_seconds: f64,
-    /// Idle time observed before eviction.
+    /// Time continuously unreferenced before eviction; zero if still referenced.
     pub idle_seconds: f64,
-    /// Time gaps between consecutive accesses before eviction.
+    /// Time gaps between consecutive prefix reuses, excluding transfer pins.
     pub reuse_gaps_seconds: Vec<f64>,
 }
 

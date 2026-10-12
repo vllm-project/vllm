@@ -5,11 +5,19 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import (
     BlockMetricsState,
     KVCacheMetricsCollector,
 )
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    KVCacheBlock,
+    get_request_block_hasher,
+    init_none_hash,
+)
+from vllm.v1.request import Request
 
 
 class TestBlockMetricsState:
@@ -56,7 +64,7 @@ class TestBlockMetricsState:
     def test_idle_time(self):
         with patch("time.monotonic_ns", return_value=1000000000):
             state = BlockMetricsState()
-        state.last_access_ns = 2000000000
+        state.idle_since_ns = 2000000000
         with patch("time.monotonic_ns", return_value=5200000000):
             assert abs(state.get_idle_time_seconds() - 3.2) < 0.001
 
@@ -125,7 +133,7 @@ class TestKVCacheMetricsCollector:
         assert len(c.block_metrics[0].access_history) == 3
 
     def test_evict_no_accesses(self):
-        # lifetime should equal idle if never accessed
+        # A never-released block is still busy at eviction.
         c = KVCacheMetricsCollector(sample_rate=1.0)
 
         block = KVCacheBlock(block_id=0)
@@ -138,7 +146,7 @@ class TestKVCacheMetricsCollector:
         events = c.drain_events()
         assert len(events) == 1
         assert abs(events[0].lifetime_seconds - 5.0) < 0.001
-        assert abs(events[0].idle_seconds - 5.0) < 0.001
+        assert events[0].idle_seconds == 0.0
 
     def test_evict(self):
         c = KVCacheMetricsCollector(sample_rate=1.0)
@@ -151,6 +159,7 @@ class TestKVCacheMetricsCollector:
             c.on_block_accessed(block)
         with patch("time.monotonic_ns", return_value=3000000000):
             c.on_block_accessed(block)
+            c.on_block_freed(block)
 
         with patch("time.monotonic_ns", return_value=4000000000):
             c.on_block_evicted(block)
@@ -207,6 +216,7 @@ def test_kv_cache_metrics_collector_smoke() -> None:
         collector.on_block_accessed(block)
     with patch("time.monotonic_ns", return_value=3_000_000_000):
         collector.on_block_accessed(block)
+        collector.on_block_freed(block)
 
     # Evict at t = 4.0s.
     with patch("time.monotonic_ns", return_value=4_000_000_000):
@@ -218,7 +228,91 @@ def test_kv_cache_metrics_collector_smoke() -> None:
     event = events[0]
     # Lifetime: 1.0s → 4.0s.
     assert abs(event.lifetime_seconds - 3.0) < 1e-6
-    # Idle: last access at 3.0s, evicted at 4.0s.
+    # Idle: released at 3.0s, evicted at 4.0s.
     assert abs(event.idle_seconds - 1.0) < 1e-6
     # One reuse gap between the two accesses.
     assert event.reuse_gaps_seconds == (1.0,)
+
+
+@pytest.fixture
+def cached_pool():
+    init_none_hash(sha256)
+    collector = KVCacheMetricsCollector(sample_rate=1.0)
+    pool = BlockPool(2, True, 16, metrics_collector=collector)
+    with patch("time.monotonic_ns", return_value=0):
+        block = pool.get_new_blocks(1)[0]
+    request = Request(
+        request_id="test",
+        prompt_token_ids=list(range(16)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(16, sha256),
+    )
+    pool.cache_full_blocks(request, [block], 0, 1, 16, 7)
+    return pool, collector, block
+
+
+@pytest.mark.parametrize("release", ["free_blocks", "unpin_blocks"])
+def test_idle_starts_when_last_reference_is_released(cached_pool, release):
+    pool, collector, block = cached_pool
+    with patch("time.monotonic_ns", return_value=99_000_000_000):
+        if release == "free_blocks":
+            pool.free_blocks([block])
+        else:
+            pool.unpin_blocks([block], on_reuse=lambda _: None)
+    with patch("time.monotonic_ns", return_value=100_000_000_000):
+        pool.get_new_blocks(1)
+    (event,) = collector.drain_events()
+    assert event.lifetime_seconds == 100.0
+    assert event.idle_seconds == 1.0
+
+
+@pytest.mark.parametrize("evict_while_pinned", [False, True])
+def test_transfer_pins_do_not_count_as_prefix_reuses(cached_pool, evict_while_pinned):
+    pool, collector, block = cached_pool
+    with patch("time.monotonic_ns", return_value=3_000_000_000):
+        pool.touch([block])
+        pool.free_blocks([block, block])
+    with patch("time.monotonic_ns", return_value=5_000_000_000):
+        pool.touch([block], record_access=False)
+    with patch("time.monotonic_ns", return_value=7_000_000_000):
+        pool.touch([block])
+        pool.free_blocks([block])
+    if not evict_while_pinned:
+        with patch("time.monotonic_ns", return_value=9_000_000_000):
+            pool.free_blocks([block])
+    with patch("time.monotonic_ns", return_value=10_000_000_000):
+        pool.evict_blocks({block.block_id})
+    (event,) = collector.drain_events()
+    assert event.lifetime_seconds == 10.0
+    assert event.idle_seconds == (0.0 if evict_while_pinned else 1.0)
+    assert event.reuse_gaps_seconds == (4.0,)
+
+
+@pytest.mark.parametrize("eviction_path", ["reallocate", "connector"])
+def test_uncached_blocks_do_not_emit_eviction_samples(eviction_path):
+    collector = KVCacheMetricsCollector(sample_rate=1.0)
+    pool = BlockPool(2, True, 16, metrics_collector=collector)
+    (block,) = pool.get_new_blocks(1)
+    if eviction_path == "reallocate":
+        pool.free_blocks([block])
+        pool.get_new_blocks(1)
+    else:
+        pool.evict_blocks({block.block_id})
+        # A no-op invalidation must preserve tracking if this allocation is
+        # subsequently published to the prefix cache.
+        assert block.block_id in collector.block_metrics
+    assert collector.drain_events() == []
+
+
+@pytest.mark.parametrize("enable_caching", [False, True])
+def test_unsampled_reallocation_discards_previous_lifetime(enable_caching):
+    collector = KVCacheMetricsCollector(sample_rate=1.0)
+    pool = BlockPool(2, enable_caching, 16, metrics_collector=collector)
+    with patch.object(collector, "should_sample_block", side_effect=[True, False]):
+        (block,) = pool.get_new_blocks(1)
+        pool.free_blocks([block])
+        (reused,) = pool.get_new_blocks(1)
+    assert reused is block
+    assert collector.block_metrics == {}
+    assert collector.drain_events() == []

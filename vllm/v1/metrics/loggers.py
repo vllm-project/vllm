@@ -999,7 +999,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_kv_block_lifetime = self._histogram_cls(
                 name="vllm:kv_block_lifetime_seconds",
                 documentation=(
-                    "Histogram of KV cache block lifetime from allocation to eviction. "
+                    "Histogram of KV block lifetime from allocation to "
+                    "prefix-cache eviction. Never-cached blocks are excluded. "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
@@ -1012,7 +1013,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_kv_block_idle_before_evict = self._histogram_cls(
                 name="vllm:kv_block_idle_before_evict_seconds",
                 documentation=(
-                    "Histogram of idle time before KV cache block eviction. "
+                    "Histogram of time continuously unreferenced before KV block "
+                    "eviction (zero if still referenced). "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
                 buckets=kv_cache_residency_buckets,
@@ -1026,7 +1028,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 name="vllm:kv_block_reuse_gap_seconds",
                 documentation=(
                     "Histogram of time gaps between consecutive KV cache block "
-                    "accesses. Only the most recent accesses are recorded "
+                    "prefix reuses, excluding transfer pins. Only the most recent "
+                    "reuses are recorded "
                     "(ring buffer). Sampled metrics (controlled by "
                     "--kv-cache-metrics-sample)."
                 ),
@@ -1165,6 +1168,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
 
+            # The core filters uncached recycling and measures the final idle
+            # interval; exporters observe only the resulting eviction samples.
             if (
                 self.kv_cache_metrics_enabled
                 and scheduler_stats.kv_cache_eviction_events

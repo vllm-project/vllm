@@ -298,6 +298,8 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
 
     // Sampled KV-cache residency histograms.
     if !stats.kv_cache_eviction_events.is_empty() {
+        // The Python core emits these only for actual prefix-cache evictions.
+        // Free/unpin notifications update its idle clock without emitting samples.
         for event in &stats.kv_cache_eviction_events {
             handles.kv_block_lifetime_seconds.observe(event.lifetime_seconds);
             handles.kv_block_idle_before_evict_seconds.observe(event.idle_seconds);
@@ -516,6 +518,45 @@ mod tests {
                 num_failed_keys: 0,
             }],
         )]))
+    }
+
+    #[test]
+    fn kv_residency_long_lifetimes() {
+        use crate::protocol::stats::KvCacheEvictionEvent;
+
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        let stats = SchedulerStats {
+            kv_cache_eviction_events: vec![KvCacheEvictionEvent {
+                lifetime_seconds: 5400.0,
+                idle_seconds: 3600.0,
+                reuse_gaps_seconds: vec![5.0],
+            }],
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+        let rendered = metrics.render().unwrap();
+        let mut series = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("vllm:kv_block_")
+                    && (line.contains("_sum{")
+                        || line.contains("_count{")
+                        || (line.contains("lifetime_seconds_bucket{")
+                            && (line.contains("le=\"1800") || line.contains("le=\"7200"))))
+            })
+            .collect::<Vec<_>>();
+        series.sort_unstable();
+        expect![[r#"
+            vllm:kv_block_idle_before_evict_seconds_count{model_name="model",engine="0"} 1
+            vllm:kv_block_idle_before_evict_seconds_sum{model_name="model",engine="0"} 3600.0
+            vllm:kv_block_lifetime_seconds_bucket{le="1800.0",model_name="model",engine="0"} 0
+            vllm:kv_block_lifetime_seconds_bucket{le="7200.0",model_name="model",engine="0"} 1
+            vllm:kv_block_lifetime_seconds_count{model_name="model",engine="0"} 1
+            vllm:kv_block_lifetime_seconds_sum{model_name="model",engine="0"} 5400.0
+            vllm:kv_block_reuse_gap_seconds_count{model_name="model",engine="0"} 1
+            vllm:kv_block_reuse_gap_seconds_sum{model_name="model",engine="0"} 5.0"#]]
+        .assert_eq(&series.join("\n"));
     }
 
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.

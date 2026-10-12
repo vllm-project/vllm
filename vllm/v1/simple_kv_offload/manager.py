@@ -381,7 +381,7 @@ class SimpleCPUOffloadScheduler:
             pin_blocks = [
                 blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
             ]
-            self.cpu_block_pool.touch(pin_blocks)
+            self.cpu_block_pool.touch(pin_blocks, record_access=False)
             self._pending_cpu_hits[request.request_id] = (
                 cpu_hit_blocks,
                 hit_length,
@@ -490,14 +490,15 @@ class SimpleCPUOffloadScheduler:
                 cpu_blocks_to_touch.append(cpu_blk)
 
         # Touch CPU blocks to prevent eviction during async load.
-        self.cpu_block_pool.touch(cpu_blocks_to_touch)
+        self.cpu_block_pool.touch(cpu_blocks_to_touch, record_access=False)
         # Release the temporary pin held since get_num_new_matched_tokens().
         self._free_pending_cpu_hit(pending)
 
         # Touch GPU blocks to prevent freeing during async load
         assert self._gpu_block_pool is not None
         self._gpu_block_pool.touch(
-            [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+            [self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids],
+            record_access=False,
         )
 
         assert self._reqs_to_load.get(req_id) is None
@@ -633,7 +634,9 @@ class SimpleCPUOffloadScheduler:
             cpu_blocks = cpu_pool.get_new_blocks(len(gpu_ids))
             cpu_ids = [blk.block_id for blk in cpu_blocks]
             # Touch GPU blocks to prevent eviction during async copy.
-            gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
+            gpu_pool.touch(
+                [gpu_pool.blocks[bid] for bid in gpu_ids], record_access=False
+            )
         else:
             cpu_ids = []
 
@@ -732,7 +735,7 @@ class SimpleCPUOffloadScheduler:
                     # a payload, as the size-mismatch fallback already does.
                     merged_block_meta.append({})
                 in_flight.add(gpu_block_id)
-                gpu_block_pool.touch([gpu_block])
+                gpu_block_pool.touch([gpu_block], record_access=False)
                 num_free -= 1
                 stats.stored += 1
                 scheduled_for_req = True
@@ -789,7 +792,8 @@ class SimpleCPUOffloadScheduler:
 
                 # Touch GPU blocks to prevent freeing during async copy
                 gpu_block_pool.touch(
-                    [gpu_block_pool.blocks[bid] for bid in gpu_block_ids]
+                    [gpu_block_pool.blocks[bid] for bid in gpu_block_ids],
+                    record_access=False,
                 )
 
                 logger.debug(
@@ -1251,7 +1255,7 @@ class SimpleCPUOffloadScheduler:
             TransferMeta(gpu_ids, [b.block_id for b in cpu_blocks], block_meta)
         )
         self._in_flight_store_gpu_blocks.update(gpu_ids)
-        gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
+        gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids], record_access=False)
 
     def _find_fa_partial_tail_source(
         self, request: "Request", block_ids: tuple[list[int], ...]

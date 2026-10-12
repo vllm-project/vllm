@@ -20,6 +20,7 @@ class BlockMetricsState:
         now_ns = time.monotonic_ns()
         self.birth_time_ns = now_ns
         self.last_access_ns = now_ns
+        self.idle_since_ns: int | None = None
         # Bounded to prevent unbounded growth if a block is accessed many times.
         self.access_history: deque[int] = deque(maxlen=4)
 
@@ -33,8 +34,10 @@ class BlockMetricsState:
         return (now_ns - self.birth_time_ns) / 1e9
 
     def get_idle_time_seconds(self) -> float:
+        if self.idle_since_ns is None:
+            return 0.0
         now_ns = time.monotonic_ns()
-        return (now_ns - self.last_access_ns) / 1e9
+        return (now_ns - self.idle_since_ns) / 1e9
 
     def get_reuse_gaps_seconds(self) -> list[float]:
         if len(self.access_history) < 2:
@@ -62,11 +65,24 @@ class KVCacheMetricsCollector:
     def on_block_allocated(self, block: "KVCacheBlock") -> None:
         if self.should_sample_block():
             self.block_metrics[block.block_id] = BlockMetricsState()
+        else:
+            # Uncached recycling emits no eviction event, so an unsampled
+            # allocation must discard any state from the previous lifetime.
+            self.block_metrics.pop(block.block_id, None)
 
-    def on_block_accessed(self, block: "KVCacheBlock") -> None:
+    def on_block_accessed(
+        self, block: "KVCacheBlock", *, record_access: bool = True
+    ) -> None:
         metrics = self.block_metrics.get(block.block_id)
         if metrics:
-            metrics.record_access()
+            metrics.idle_since_ns = None
+            if record_access:
+                metrics.record_access()
+
+    def on_block_freed(self, block: "KVCacheBlock") -> None:
+        metrics = self.block_metrics.get(block.block_id)
+        if metrics:
+            metrics.idle_since_ns = time.monotonic_ns()
 
     def on_block_evicted(self, block: "KVCacheBlock") -> None:
         metrics = self.block_metrics.pop(block.block_id, None)

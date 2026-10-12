@@ -590,9 +590,9 @@ class HiSparseCoordinator:
                 return False
             blocks.append(block)
 
-        self.host_manager.block_pool.touch([host_block])
+        self.host_manager.block_pool.touch([host_block], record_access=False)
         for manager, block in zip(self.resident_managers, blocks):
-            manager.block_pool.touch([block])
+            manager.block_pool.touch([block], record_access=False)
         spill_id = self.next_spill_id
         self.next_spill_id += 1
         plan = SparseKVPageTransfer(
@@ -871,7 +871,9 @@ class HiSparseCoordinator:
             )
             # Completed pages need leases too: another allocation may evict
             # them before the remaining copies finish and the prefix publishes.
-            self.host_manager.block_pool.touch(publication.detached_blocks)
+            self.host_manager.block_pool.touch(
+                publication.detached_blocks, record_access=False
+            )
         else:
             # Preemption can cancel a scheduled forward after its spills were
             # planned, so its copies do not prove that the KV was computed.
