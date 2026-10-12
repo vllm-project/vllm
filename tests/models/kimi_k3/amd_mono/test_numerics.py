@@ -536,3 +536,16 @@ def test_stalled_rank_fails_the_step_without_a_hang(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _fault_worker)
+
+
+@needs_gfx950
+def test_warmup_compiles_without_launching() -> None:
+    """The JIT warm-up compiles K1 and K2 before capture without running them:
+    a launch on its null arguments would fault."""
+    from vllm.models.kimi_k3.amd.mono.kernel import compile_build
+    from vllm.models.kimi_k3.amd.ops.mono.attention.kda import KdaPreBuild
+    from vllm.models.kimi_k3.amd.ops.mono.layer import K2Build
+
+    compile_build(KdaPreBuild(tokens=8, qlen=8, nblocks=4, delta=True, state_len=10))
+    compile_build(K2Build(tokens=8, nblocks=4))
+    torch.accelerator.synchronize()
