@@ -126,7 +126,7 @@ async def _disagg(
                 ],
             },
             "prompt_tokens": prompt_tokens,
-            "chat_request": chat_request,
+            "chat_request": {"return_token_ids": True, **chat_request},
         },
     )
     assert resp.status_code == 200, resp.text
@@ -149,6 +149,7 @@ def _assert_parity(coupled: dict, disagg: dict) -> None:
     assert d["message"].get("reasoning") == c["message"].get("reasoning")
     assert _tool_sig(d) == _tool_sig(c)
     assert d["finish_reason"] == c["finish_reason"]
+    assert d["token_ids"] == c["token_ids"]
     assert disagg["usage"]["prompt_tokens"] == coupled["usage"]["prompt_tokens"]
     assert disagg["usage"]["completion_tokens"] == len(c["token_ids"])
 
@@ -386,7 +387,7 @@ async def _run_stream_parity_case(
         [tid for ch in coupled_choices for tid in ch["token_ids"]],
         [len(ch["token_ids"]) for ch in coupled_choices]
         + ([0] if finish_only_tail else []),
-        {"model": MODEL, "messages": messages, **extra},
+        {"model": MODEL, "messages": messages, "return_token_ids": True, **extra},
         len(prompt_token_ids),
         prompt_token_ids,
         finish_reason="stop" if finish_reason == "tool_calls" else finish_reason,

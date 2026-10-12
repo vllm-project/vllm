@@ -95,6 +95,10 @@ async def stream_chat_derender(
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
+        if chat_request.get("return_token_ids") and chat_request.get(
+            "include_reasoning", True
+        ):
+            assert data["chunk"]["choices"][0]["token_ids"] == tids
         state = data["stream_state"]
         choices.extend(data["chunk"]["choices"])
         if on_chunk is not None:
