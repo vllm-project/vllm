@@ -1,12 +1,14 @@
 # Kimi-K3 mono decode (MI355X)
 
-A MonoKernel as RFC #60904 proposes, opt-in with `--monokernel`. A pure
-spec-verify step of at most 8 rows runs each MoE decoder layer as persistent
-FlyDSL launches (256 CTAs, all resident), the TP all-reduces in-kernel over
-peer memory:
+A MonoKernel as RFC #60904 proposes, opt-in with `--monokernel`. A pure,
+uniform decode step of at most 8 rows runs
+each MoE decoder layer as persistent FlyDSL launches (256 CTAs, all resident),
+with the TP all-reduces in-kernel over peer memory. This includes ordinary
+one-token decode when speculation is disabled and spec verification when it is
+configured.
 
-- **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, spec conv, KDA recurrence,
-  gated RMSNorm), then K2.
+- **Whole layers** (KDA): K1 (AttnRes, in_proj, f_b, causal convolution, KDA
+  recurrence, gated RMSNorm), then K2.
 - **FFN layers** (MLA): vLLM's AttnRes and MLA up to o_proj's input, then K2.
 - **K2**: o_proj + all-reduce + MLP AttnRes, then the latent MoE (router,
   top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,

@@ -81,9 +81,7 @@ def refuse_config(vllm_config: "VllmConfig") -> list[str]:
     if tp != TP:
         reasons.append(f"needs TP{TP}, got TP{tp}")
     spec = vllm_config.speculative_config
-    if spec is None:
-        reasons.append("needs speculative decoding (spec-verify steps)")
-    elif spec.num_speculative_tokens + 1 > MAX_TOKENS:
+    if spec is not None and spec.num_speculative_tokens + 1 > MAX_TOKENS:
         reasons.append(
             f"{spec.num_speculative_tokens} speculative tokens: a request's "
             f"{spec.num_speculative_tokens + 1} rows exceed {MAX_TOKENS}"
@@ -207,18 +205,33 @@ def bind(ctx: MonoContext, caches: Mapping[str, Any]) -> list[str]:
 
 
 def eligible(ctx: MonoContext, step: MonoStep) -> str | None:
-    """A pure spec-verify step of whole uniform requests, by the KDA metadata
-    (the same on every rank)."""
+    """A pure uniform decode step, by KDA metadata (the same on every rank)."""
     md = step.attn_metadata
     if not isinstance(md, dict):
         return "no metadata"
     m: Any = md.get(ctx.state.kda_prefix)
-    if m is None or m.spec_sequence_masks is None:
-        return "not spec-verify"
-    if m.num_prefills or m.num_decodes or m.num_spec_decodes < 1:
+    if m is None:
+        return "no metadata"
+    if m.num_prefills:
         return "not pure decode"
-    q = m.spec_state_indices_tensor.size(-1)
-    if m.uniform_spec_sequence_length != q or m.num_spec_decodes * q != step.width:
+    if m.num_spec_decodes:
+        if m.num_decodes or m.spec_sequence_masks is None:
+            return "not pure decode"
+        q = m.spec_state_indices_tensor.size(-1)
+        if m.uniform_spec_sequence_length != q or m.num_spec_decodes * q != step.width:
+            return "not uniform"
+        return None
+    if ctx.vllm_config.speculative_config is not None:
+        return "not spec-verify"
+    if m.num_decodes < 1:
+        return "not pure decode"
+    state_indices = m.non_spec_state_indices_tensor
+    if (
+        state_indices is None
+        or state_indices.ndim != 1
+        or m.num_decodes != step.width
+        or state_indices.size(0) != step.width
+    ):
         return "not uniform"
     return None
 

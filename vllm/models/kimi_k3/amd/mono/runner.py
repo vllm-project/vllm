@@ -46,6 +46,9 @@ class MonoRunner:
         )
         self.epoch = torch.zeros(1, dtype=torch.int32, device=device)
         self.health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device=device)
+        self.regular_num_accepted = torch.ones(
+            MAX_TOKENS, dtype=torch.int32, device=device
+        )
 
         tp = get_tp_group()
         self.rank = tp.rank_in_group

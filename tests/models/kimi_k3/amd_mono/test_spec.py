@@ -30,6 +30,11 @@ def test_widths_are_whole_requests_up_to_eight_rows(k, want):
     assert MONO_SPEC.widths(cfg) == want
 
 
+def test_regular_decode_widths_are_one_to_eight_rows():
+    cfg = _k3_config(speculative_config=None)
+    assert MONO_SPEC.widths(cfg) == tuple(range(1, 9))
+
+
 def _k3_text_config():
     """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
     layer 0 dense."""
@@ -61,10 +66,13 @@ def test_supported_config_is_accepted(monkeypatch):
     assert _refuse(monkeypatch) == []
 
 
+def test_regular_decode_config_is_accepted(monkeypatch):
+    assert _refuse(monkeypatch, speculative_config=None) == []
+
+
 @pytest.mark.parametrize(
     "over, reason",
     [
-        ({"speculative_config": None}, "needs speculative decoding"),
         ({"speculative_config.num_speculative_tokens": 8}, "exceed 8"),
         ({"parallel_config.tensor_parallel_size": 4}, "needs TP8"),
         ({"kv_transfer_config": object()}, "kv_connector"),
@@ -103,11 +111,21 @@ def _step(width: int, **md) -> MonoStep:
         num_decodes=0,
         num_spec_decodes=1,
         spec_state_indices_tensor=torch.zeros(1, 4, dtype=torch.int32),
+        non_spec_state_indices_tensor=None,
         uniform_spec_sequence_length=4,
     )
     for k, v in md.items():
         setattr(m, k, v)
     return MonoStep(width, width, torch.zeros(width), {"kda": m}, CUDAGraphMode.FULL)
+
+
+def _ctx(speculative: bool):
+    return SimpleNamespace(
+        state=SimpleNamespace(kda_prefix="kda"),
+        vllm_config=SimpleNamespace(
+            speculative_config=object() if speculative else None
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -117,20 +135,116 @@ def _step(width: int, **md) -> MonoStep:
         (8, {"num_spec_decodes": 2}, None),
         (4, {"num_prefills": 1}, "not pure decode"),
         (4, {"num_decodes": 1}, "not pure decode"),
-        (4, {"spec_sequence_masks": None}, "not spec-verify"),
+        (4, {"spec_sequence_masks": None}, "not pure decode"),
         (8, {}, "not uniform"),
         (4, {"uniform_spec_sequence_length": None}, "not uniform"),
     ],
 )
 def test_eligible_is_pure_uniform_spec_verify(width, md, why):
-    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda"))
-    assert MONO_SPEC.eligible(ctx, _step(width, **md)) == why
+    assert MONO_SPEC.eligible(_ctx(speculative=True), _step(width, **md)) == why
+
+
+@pytest.mark.parametrize("width", [1, 4, 8])
+def test_eligible_accepts_pure_regular_decode(width):
+    state_indices = torch.arange(width, dtype=torch.int32)
+    step = _step(
+        width,
+        spec_sequence_masks=None,
+        num_decodes=width,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=state_indices,
+        uniform_spec_sequence_length=None,
+    )
+    assert MONO_SPEC.eligible(_ctx(speculative=False), step) is None
+
+
+def test_regular_decode_falls_back_when_speculation_is_configured():
+    state_indices = torch.arange(4, dtype=torch.int32)
+    step = _step(
+        4,
+        spec_sequence_masks=None,
+        num_decodes=4,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=state_indices,
+        uniform_spec_sequence_length=None,
+    )
+    assert MONO_SPEC.eligible(_ctx(speculative=True), step) == "not spec-verify"
+
+
+@pytest.mark.parametrize(
+    "width, state_indices",
+    [
+        (4, torch.arange(3, dtype=torch.int32)),
+        (4, torch.arange(4, dtype=torch.int32).view(2, 2)),
+        (4, None),
+    ],
+)
+def test_regular_decode_requires_one_state_slot_per_row(width, state_indices):
+    step = _step(
+        width,
+        spec_sequence_masks=None,
+        num_decodes=width,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=state_indices,
+        uniform_spec_sequence_length=None,
+    )
+    assert MONO_SPEC.eligible(_ctx(speculative=False), step) == "not uniform"
+
+
+def test_regular_decode_rejects_graph_padding():
+    step = _step(
+        8,
+        spec_sequence_masks=None,
+        num_decodes=4,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
+        non_spec_state_indices_tensor=torch.arange(8, dtype=torch.int32),
+        uniform_spec_sequence_length=None,
+    )
+    assert MONO_SPEC.eligible(_ctx(speculative=False), step) == "not uniform"
+
+
+def test_regular_decode_k1_metadata_uses_one_accepted_token_per_row():
+    from vllm.models.kimi_k3.amd.mono.kernel import _k1_metadata
+
+    state_indices = torch.tensor([7, 11, 13, 17], dtype=torch.int32)
+    accepted = torch.ones(8, dtype=torch.int32)
+    m = SimpleNamespace(
+        num_spec_decodes=0,
+        non_spec_state_indices_tensor=state_indices,
+    )
+    qlen, state_view, num_accepted = _k1_metadata(
+        m, SimpleNamespace(regular_num_accepted=accepted)
+    )
+    assert qlen == 1
+    assert state_view.shape == (4, 1)
+    assert state_view[:, 0].tolist() == state_indices.tolist()
+    assert num_accepted.data_ptr() == accepted.data_ptr()
+    assert num_accepted.tolist() == [1, 1, 1, 1]
+
+
+def test_spec_decode_k1_metadata_is_unchanged():
+    from vllm.models.kimi_k3.amd.mono.kernel import _k1_metadata
+
+    state_indices = torch.arange(8, dtype=torch.int32).view(2, 4)
+    accepted = torch.tensor([2, 4], dtype=torch.int32)
+    m = SimpleNamespace(
+        num_spec_decodes=2,
+        spec_state_indices_tensor=state_indices,
+        num_accepted_tokens=accepted,
+    )
+    qlen, state_view, num_accepted = _k1_metadata(m, SimpleNamespace())
+    assert qlen == 4
+    assert state_view is state_indices
+    assert num_accepted is accepted
 
 
 def test_eligible_needs_metadata():
-    ctx = SimpleNamespace(state=SimpleNamespace(kda_prefix="kda"))
     step = MonoStep(4, 4, torch.zeros(4), None, CUDAGraphMode.FULL)
-    assert MONO_SPEC.eligible(ctx, step) == "no metadata"
+    assert MONO_SPEC.eligible(_ctx(speculative=False), step) == "no metadata"
 
 
 def test_weight_views_reject_every_mismatch():

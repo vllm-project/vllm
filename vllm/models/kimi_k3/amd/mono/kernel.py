@@ -22,6 +22,24 @@ from vllm.models.common.mono.spec import MonoStep
 from vllm.models.kimi_k3.amd.mono.runner import MonoRunner
 
 
+def _k1_metadata(m: Any, runner: MonoRunner):
+    if m.num_spec_decodes:
+        return (
+            m.spec_state_indices_tensor.size(-1),
+            m.spec_state_indices_tensor,
+            m.num_accepted_tokens,
+        )
+    state_indices = m.non_spec_state_indices_tensor
+    if state_indices is None:
+        raise RuntimeError("regular decode requires KDA state indices")
+    state_indices = state_indices.unsqueeze(-1)
+    return (
+        1,
+        state_indices,
+        runner.regular_num_accepted[: state_indices.size(0)],
+    )
+
+
 def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool):
     from vllm.models.kimi_k3.amd.ops.mono import layer as k2
 
@@ -174,11 +192,12 @@ class WholeLayer(_Layer):
         if self.first:
             runner.step_begin()
         conv_state, rstate = self.caches()
+        qlen, state_indices, num_accepted = _k1_metadata(m, runner)
         s = prefix_sum.size(0)
         core = prefix_sum.new_empty(s, kda.PROJ)
         kda.kda_pre(
             self._k1_key(
-                m.spec_state_indices_tensor.size(-1),
+                qlen,
                 conv_state.size(-1),
                 prefix_delta is not None,
             ),
@@ -196,8 +215,8 @@ class WholeLayer(_Layer):
             dt_bias=attn.dt_bias,
             on_w=attn.o_norm.weight,
             rstate=rstate,
-            st_idx=m.spec_state_indices_tensor,
-            num_acc=m.num_accepted_tokens,
+            st_idx=state_indices,
+            num_acc=num_accepted,
             core_out=core,
             layer=layer.layer_idx,
             **runner.launch_args(),
