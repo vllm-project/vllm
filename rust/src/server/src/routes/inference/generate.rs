@@ -176,7 +176,7 @@ async fn generate_chunk_stream(
         match next {
             Ok(output) => {
                 if let Some(metrics) = output.spec_decode_metrics {
-                    spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(metrics));
+                    spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
                 }
                 if prompt_tokens.is_none()
                     && let Some(info) = output.prompt_info.as_ref()
@@ -235,6 +235,7 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         token_ids,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
+                        weight_versions: output.weight_versions,
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
@@ -336,6 +337,7 @@ fn collect_generate(
             finish_reason: Some(finish_reason),
             token_ids: collected.token_ids,
             sampling_mask: collected.sampling_mask.map(|mask| mask.rows),
+            weight_versions: collected.weight_versions,
         }],
         prompt_logprobs,
         prompt_token_id_logprobs: collected
@@ -629,14 +631,15 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_versions: None,
             }),
             Ok(GenerateOutput {
                 request_id: String::new(),
-                prompt_info: Some(GeneratePromptInfo {
+                prompt_info: Some(Box::new(GeneratePromptInfo {
                     prompt_token_ids: Arc::from([11_u32, 22_u32]),
                     prompt_logprobs: None,
                     prompt_token_id_logprobs: None,
-                }),
+                })),
                 token_ids: vec![33],
                 logprobs: None,
                 finish_reason: Some(FinishReason::stop_eos()),
@@ -645,6 +648,7 @@ mod tests {
                 ec_transfer_params: None,
                 sampling_mask: None,
                 spec_decode_metrics: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -716,10 +720,12 @@ mod tests {
     ) -> GenerateOutput {
         GenerateOutput {
             request_id: String::new(),
-            prompt_info: prompt_token_ids.map(|ids| GeneratePromptInfo {
-                prompt_token_ids: Arc::from(ids),
-                prompt_logprobs: None,
-                prompt_token_id_logprobs: None,
+            prompt_info: prompt_token_ids.map(|ids| {
+                Box::new(GeneratePromptInfo {
+                    prompt_token_ids: Arc::from(ids),
+                    prompt_logprobs: None,
+                    prompt_token_id_logprobs: None,
+                })
             }),
             token_ids,
             logprobs: None,
@@ -729,6 +735,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
         }
     }
 
@@ -817,7 +824,7 @@ mod tests {
             ..Default::default()
         };
         let mut output = stream_output(None, Vec::new(), Some(FinishReason::stop_eos()));
-        output.spec_decode_metrics = Some(metrics.clone());
+        output.spec_decode_metrics = Some(Box::new(metrics.clone()));
 
         for include_usage in [false, true] {
             let chunks: Vec<_> = generate_chunk_stream(
@@ -903,6 +910,7 @@ mod tests {
                 rows: vec![vec![30, 40]],
             }),
             spec_decode_metrics: None,
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -957,6 +965,7 @@ mod tests {
             prompt_token_ids: vec![10],
             sampling_mask: None,
             spec_decode_metrics: Some(metrics.clone()),
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -1049,6 +1058,7 @@ mod tests {
             prompt_token_ids: vec![10, 20],
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
         };
 
         let response = collect_generate(
@@ -1084,6 +1094,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
             prompt_token_ids,
         };
 

@@ -359,7 +359,7 @@ def test_runtime_state_survives_sleep(level):
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="Uses the CuMem allocator")
 def test_level2_discards_ordinary_tensor_with_weights_tag():
-    """Reproduce the level-2 variant for an ordinary tensor in weights."""
+    """Discarded weights-tag memory is remapped; ROCm zeroes it over stale pages."""
     allocator = get_mem_allocator_instance()
 
     with allocator.use_memory_pool("weights"):
@@ -374,8 +374,9 @@ def test_level2_discards_ordinary_tensor_with_weights_tag():
     torch.accelerator.synchronize()
 
     assert (fake_weight.data_ptr(), ordinary_tensor.data_ptr()) == pointers
-    assert torch.all(fake_weight == 0xA5)
-    assert torch.all(ordinary_tensor == 0xA5)
+    expected = 0 if current_platform.is_rocm() else 0xA5
+    assert torch.all(fake_weight == expected)
+    assert torch.all(ordinary_tensor == expected)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
@@ -427,7 +428,9 @@ def test_cumem_with_cudagraph():
 
 @pytest.mark.parametrize("level", [1, 2], ids=["sleep-1", "sleep-2"])
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="cuMem CUDA graph pool")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="cuMem CUDA graph pool"
+)
 def test_cudagraph_pool_sleep(level):
     """Routing, and the graph pool backed up at both sleep levels and restored
     in place by any wake."""
