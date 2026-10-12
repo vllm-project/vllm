@@ -580,7 +580,6 @@ class ROCMAiterMLASparseMetadataBuilder(
         num_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs].item())
         num_decodes = metadata.num_decodes
         num_prefills = metadata.num_prefills
-        num_decode_tokens = metadata.num_decode_tokens
         starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts[: num_reqs + 1])
         req_id_per_token = np.repeat(
