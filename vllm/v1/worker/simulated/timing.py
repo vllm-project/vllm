@@ -26,6 +26,7 @@ from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -58,6 +59,20 @@ class ParallelSummary:
     pipeline_parallel_size: int = 1
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
+
+
+def parallel_summary(vllm_config: VllmConfig) -> ParallelSummary:
+    pc = vllm_config.parallel_config
+    return ParallelSummary(
+        tensor_parallel_size=pc.tensor_parallel_size,
+        pipeline_parallel_size=pc.pipeline_parallel_size,
+        data_parallel_size=pc.data_parallel_size,
+        expert_parallel_size=(
+            pc.tensor_parallel_size * pc.data_parallel_size
+            if pc.enable_expert_parallel
+            else 1
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,74 @@ class StepDescriptor:
         d = asdict(self)
         d["requests"] = [asdict(r) for r in self.requests]
         return d
+
+
+def build_step_descriptor(
+    scheduler_output: SchedulerOutput,
+    prompt_lens: dict[str, int],
+    step_index: int,
+    parallel: ParallelSummary,
+) -> StepDescriptor:
+    """Describe one scheduled step from the `SchedulerOutput` alone.
+
+    `prompt_lens` is the caller's running map of request id to prompt length;
+    this function adds newly scheduled requests to it and drops the ones the
+    scheduler reports finished. Keeping the builder independent of worker
+    state lets a real worker and the simulated runner emit identical
+    descriptors, which is what makes recorded steps replayable."""
+    for req_id in scheduler_output.finished_req_ids:
+        prompt_lens.pop(req_id, None)
+    num_scheduled = scheduler_output.num_scheduled_tokens
+    spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+    computed: dict[str, int] = {}
+    cached_at_admission: dict[str, int] = {}
+    for req in scheduler_output.scheduled_new_reqs:
+        prompt_lens[req.req_id] = req.prompt_len
+        computed[req.req_id] = req.num_computed_tokens
+        cached_at_admission[req.req_id] = req.num_computed_tokens
+    cached = scheduler_output.scheduled_cached_reqs
+    for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens):
+        computed[req_id] = num_computed
+
+    requests: list[SimRequestStep] = []
+    num_prefill_tokens = num_decode_tokens = 0
+    num_prefill_reqs = num_decode_reqs = 0
+    num_kv_tokens = 0
+    for req_id in sorted(num_scheduled):
+        scheduled = num_scheduled[req_id]
+        num_computed = computed.get(req_id, 0)
+        prompt_len = prompt_lens.get(req_id, 0)
+        is_prefill = num_computed < prompt_len
+        requests.append(
+            SimRequestStep(
+                req_id=req_id,
+                num_scheduled_tokens=scheduled,
+                num_computed_tokens=num_computed,
+                num_prompt_tokens=prompt_len,
+                num_cached_tokens=cached_at_admission.get(req_id, 0),
+                num_spec_tokens=len(spec_tokens.get(req_id, ())),
+                is_prefill=is_prefill,
+            )
+        )
+        if is_prefill:
+            num_prefill_tokens += scheduled
+            num_prefill_reqs += 1
+        else:
+            num_decode_tokens += scheduled
+            num_decode_reqs += 1
+        num_kv_tokens += num_computed + scheduled
+    common = scheduler_output.num_common_prefix_blocks
+    return StepDescriptor(
+        step_index=step_index,
+        requests=tuple(requests),
+        num_prefill_tokens=num_prefill_tokens,
+        num_decode_tokens=num_decode_tokens,
+        num_prefill_reqs=num_prefill_reqs,
+        num_decode_reqs=num_decode_reqs,
+        num_common_prefix_blocks=max(common) if common else 0,
+        num_kv_tokens=num_kv_tokens,
+        parallel=parallel,
+    )
 
 
 @dataclass(frozen=True)

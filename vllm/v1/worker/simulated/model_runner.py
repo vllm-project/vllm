@@ -28,16 +28,16 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.simulated.timing import (
-    ParallelSummary,
     RealClock,
-    SimRequestStep,
     SimulatedAsyncOutput,
     StepCost,
     StepDescriptor,
     StepLogWriter,
+    build_step_descriptor,
     get_timing_provider,
+    parallel_summary,
 )
 
 if TYPE_CHECKING:
@@ -71,17 +71,8 @@ class SimulatedModelRunner(GPUModelRunner):
         # prepares step N+1 while step N "runs", but N+1 cannot start on the
         # device before N finishes. Track when the device becomes free.
         self._device_free_at = 0.0
-        pc = vllm_config.parallel_config
-        self._parallel = ParallelSummary(
-            tensor_parallel_size=pc.tensor_parallel_size,
-            pipeline_parallel_size=pc.pipeline_parallel_size,
-            data_parallel_size=pc.data_parallel_size,
-            expert_parallel_size=(
-                pc.tensor_parallel_size * pc.data_parallel_size
-                if pc.enable_expert_parallel
-                else 1
-            ),
-        )
+        self._parallel = parallel_summary(vllm_config)
+        self._prompt_lens: dict[str, int] = {}
 
     # ------------------------------------------------------------------ #
     # Virtual KV cache: specs and block tables are real, tensors are not.
@@ -155,64 +146,13 @@ class SimulatedModelRunner(GPUModelRunner):
         finally:
             self.step_log = step_log
             self._pending_step = None
+            self._prompt_lens.clear()
             self._step_index = 0
             self._device_free_at = 0.0
 
     # ------------------------------------------------------------------ #
     # Execution
     # ------------------------------------------------------------------ #
-
-    def _build_step_descriptor(
-        self,
-        scheduler_output: "SchedulerOutput",
-        batch_req_state: BatchReqState,
-    ) -> StepDescriptor:
-        cached_at_admission = {
-            req.req_id: req.num_computed_tokens
-            for req in scheduler_output.scheduled_new_reqs
-        }
-        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-        requests: list[SimRequestStep] = []
-        num_prefill_tokens = num_decode_tokens = 0
-        num_prefill_reqs = num_decode_reqs = 0
-        num_kv_tokens = 0
-        for i, req_id in enumerate(batch_req_state.req_ids):
-            idx = int(batch_req_state.idx_mapping_np[i])
-            scheduled = int(batch_req_state.num_scheduled_tokens[i])
-            computed = int(self.req_states.num_computed_tokens_np[idx])
-            is_prefill = bool(batch_req_state.is_prefilling_np[i])
-            requests.append(
-                SimRequestStep(
-                    req_id=req_id,
-                    num_scheduled_tokens=scheduled,
-                    num_computed_tokens=computed,
-                    num_prompt_tokens=int(self.req_states.prompt_len.np[idx]),
-                    num_cached_tokens=cached_at_admission.get(req_id, 0),
-                    num_spec_tokens=len(spec_tokens.get(req_id, ())),
-                    is_prefill=is_prefill,
-                )
-            )
-            if is_prefill:
-                num_prefill_tokens += scheduled
-                num_prefill_reqs += 1
-            else:
-                num_decode_tokens += scheduled
-                num_decode_reqs += 1
-            num_kv_tokens += computed + scheduled
-        common_prefix_blocks = scheduler_output.num_common_prefix_blocks
-        return StepDescriptor(
-            step_index=self._step_index,
-            requests=tuple(requests),
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            num_prefill_reqs=num_prefill_reqs,
-            num_decode_reqs=num_decode_reqs,
-            num_common_prefix_blocks=(
-                max(common_prefix_blocks) if common_prefix_blocks else 0
-            ),
-            num_kv_tokens=num_kv_tokens,
-            parallel=self._parallel,
-        )
 
     @torch.inference_mode()
     def execute_model(  # type: ignore[override]
@@ -253,7 +193,9 @@ class SimulatedModelRunner(GPUModelRunner):
             num_active_loras=0,
         )
 
-        descriptor = self._build_step_descriptor(scheduler_output, batch_req_state)
+        descriptor = build_step_descriptor(
+            scheduler_output, self._prompt_lens, self._step_index, self._parallel
+        )
         cost = self.timing_provider.estimate(descriptor)
         # Queue the step behind whatever the device is still "executing".
         t_start = max(self.clock.now(), self._device_free_at)

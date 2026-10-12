@@ -189,3 +189,97 @@ def test_replay_critical_path_uses_host_time_when_host_bound(tmp_path):
         critical_path="device",
     )
     assert by_device.estimate(prefill).device_s == pytest.approx(0.006)
+
+
+def test_build_step_descriptor_from_scheduler_output():
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.sched.output import (
+        CachedRequestData,
+        NewRequestData,
+        SchedulerOutput,
+    )
+    from vllm.v1.worker.simulated.timing import (
+        ParallelSummary,
+        build_step_descriptor,
+    )
+
+    prompt_lens: dict[str, int] = {}
+    parallel = ParallelSummary()
+
+    # Step 0: a new 300-token prompt with 96 cached tokens (chunk of 100) and
+    # a new 8-token prompt in one shot.
+    so = SchedulerOutput.make_empty()
+    so.scheduled_new_reqs = [
+        NewRequestData(
+            req_id="a",
+            prompt_token_ids=list(range(300)),
+            mm_features=[],
+            sampling_params=SamplingParams(max_tokens=4),
+            pooling_params=None,
+            block_ids=([0, 1, 2],),
+            num_computed_tokens=96,
+            lora_request=None,
+            prefill_token_ids=list(range(300)),
+        ),
+        NewRequestData(
+            req_id="b",
+            prompt_token_ids=list(range(8)),
+            mm_features=[],
+            sampling_params=SamplingParams(max_tokens=4),
+            pooling_params=None,
+            block_ids=([3],),
+            num_computed_tokens=0,
+            lora_request=None,
+            prefill_token_ids=list(range(8)),
+        ),
+    ]
+    so.num_scheduled_tokens = {"a": 100, "b": 8}
+    so.total_num_scheduled_tokens = 108
+    so.num_common_prefix_blocks = [0]
+    d0 = build_step_descriptor(so, prompt_lens, 0, parallel)
+    assert [r.req_id for r in d0.requests] == ["a", "b"]
+    assert d0.num_prefill_tokens == 108 and d0.num_prefill_reqs == 2
+    assert d0.num_decode_reqs == 0
+    a, b = d0.requests
+    assert (a.num_computed_tokens, a.num_cached_tokens, a.is_prefill) == (96, 96, True)
+    assert b.num_prompt_tokens == 8 and b.is_prefill
+    assert prompt_lens == {"a": 300, "b": 8}
+
+    # Step 1: "a" continues its prefill (104 more), "b" decodes one token.
+    so1 = SchedulerOutput.make_empty()
+    so1.scheduled_cached_reqs = CachedRequestData(
+        req_ids=["a", "b"],
+        resumed_req_ids=set(),
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[None, None],
+        num_computed_tokens=[196, 8],
+        num_output_tokens=[0, 1],
+    )
+    so1.num_scheduled_tokens = {"a": 104, "b": 1}
+    so1.total_num_scheduled_tokens = 105
+    d1 = build_step_descriptor(so1, prompt_lens, 1, parallel)
+    a, b = d1.requests
+    assert a.is_prefill and a.num_computed_tokens == 196 and a.num_cached_tokens == 0
+    assert not b.is_prefill and b.num_scheduled_tokens == 1
+    assert d1.num_prefill_tokens == 104 and d1.num_decode_tokens == 1
+    assert d1.num_kv_tokens == (196 + 104) + (8 + 1)
+
+    # Step 2: "b" finished; the builder forgets it.
+    so2 = SchedulerOutput.make_empty()
+    so2.finished_req_ids = {"b"}
+    so2.scheduled_cached_reqs = CachedRequestData(
+        req_ids=["a"],
+        resumed_req_ids=set(),
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[None],
+        num_computed_tokens=[300],
+        num_output_tokens=[1],
+    )
+    so2.num_scheduled_tokens = {"a": 1}
+    so2.total_num_scheduled_tokens = 1
+    d2 = build_step_descriptor(so2, prompt_lens, 2, parallel)
+    assert "b" not in prompt_lens
+    assert d2.is_decode_only and d2.requests[0].num_computed_tokens == 300
+

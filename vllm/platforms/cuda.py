@@ -330,6 +330,10 @@ class CudaPlatformBase(Platform):
                 parallel_config.worker_cls = (
                     "vllm.v1.worker.simulated.worker.SimulatedWorker"
                 )
+            elif vllm_config.simulation_config.record_step_timing:
+                parallel_config.worker_cls = (
+                    "vllm.v1.worker.simulated.recording.RecordingWorker"
+                )
             else:
                 parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 

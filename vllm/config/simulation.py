@@ -32,8 +32,16 @@ class SimulationConfig:
     """Keyword arguments passed to the timing provider."""
 
     log_path: str | None = None
-    """If set, append one JSON line per simulated step (the step descriptor,
-    the predicted cost and the simulated clock) to this file."""
+    """If set, append one JSON line per step (the step descriptor, its cost and
+    the clock) to this file: predicted costs under `simulate_forward`, measured
+    costs under `record_step_timing`. Both use the same format, which the
+    `table` and `replay` timing providers read."""
+
+    record_step_timing: bool = False
+    """On a real (non-simulated) CUDA deployment, measure every step's device
+    time with CUDA events and its host time with the wall clock, and append
+    them to `log_path`. This is the calibration source for simulated runs of
+    the same model and hardware."""
 
     fallback_token_id: int = Field(default=0, ge=0)
     """Token id emitted at every decode step for requests that carry no
@@ -42,7 +50,7 @@ class SimulationConfig:
 
     @property
     def enabled(self) -> bool:
-        return self.simulate_forward
+        return self.simulate_forward or self.record_step_timing
 
     def compute_hash(self) -> str:
         """Simulation never compiles a graph; only the mode enters the hash."""
