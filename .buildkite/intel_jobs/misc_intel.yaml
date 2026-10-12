@@ -183,7 +183,6 @@ steps:
   source_file_dependencies:
     - vllm/
     - vllm/v1/kv_offload/
-    - vllm/v1/kv_connector/
     - tests/v1/kv_offload/
     - tests/v1/kv_connector/unit/test_offloading_connector.py
   commands:

@@ -190,7 +190,7 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/model_executor/models/
   - vllm/model_executor/layers/
   - vllm/v1/attention/backends/
@@ -241,7 +241,7 @@ steps:
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
   - vllm/model_executor/models/qwen3_next_mtp.py
-  - vllm/model_executor/layers/fla/ops/
+  - vllm/third_party/flash_linear_attention/ops/
   - vllm/_aiter_ops.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
@@ -704,8 +704,8 @@ steps:
   - vllm/compilation/
   - vllm/distributed/
   - vllm/engine/
-  - vllm/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/executor/
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/fullgraph/test_basic_correctness.py
@@ -816,7 +816,6 @@ steps:
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
   - vllm/distributed/
-  - vllm/v1/distributed/
   - vllm/model_executor/layers/fused_moe/
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
@@ -913,7 +912,7 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/compilation/
   - tests/distributed/
   - vllm/platforms/rocm.py
@@ -973,8 +972,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
-  - vllm/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/executor/
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/distributed/
@@ -1510,7 +1509,7 @@ steps:
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - csrc/rocm/
   - tests/kernels/moe
@@ -1669,7 +1668,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/mamba/
+  - csrc/libtorch_stable/mamba/
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
@@ -1688,7 +1687,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/moe/
-  - csrc/quantization/w8a8/cutlass/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fused_moe/
   - tests/kernels/moe/test_deepep_moe.py
   - vllm/_aiter_ops.py
@@ -2183,7 +2182,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
-  - tests/plugins_tests/test_gguf_plugin.py
   - tests/plugins_tests/gguf
   - vllm/platforms/rocm.py
   commands:
@@ -2216,8 +2214,6 @@ steps:
   - vllm/platforms/rocm.py
   - tests/entrypoints/openai/chat_completion/test_include_reasoning.py
   - tests/entrypoints/openai/chat_completion/test_serving_chat.py
-  - tests/entrypoints/openai/completion/test_shutdown.py
-  - tests/entrypoints/openai/test_uds.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -2308,7 +2304,7 @@ steps:
   - rust/
   - vllm/distributed/
   - vllm/engine/
-  - vllm/executor/
+  - vllm/v1/executor/
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/utils.py
@@ -2386,7 +2382,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
   - vllm/v1/sample/
   - vllm/entrypoints/generate/beam_search/
   - tests/samplers
@@ -3277,8 +3272,8 @@ steps:
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
-  - vllm/executor/
-  - vllm/worker/worker_base.py
+  - vllm/v1/executor/
+  - vllm/v1/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/v1/distributed
@@ -3466,14 +3461,12 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/executor/
   - vllm/v1/worker/
-  - vllm/v1/distributed/
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
   - vllm/_aiter_ops.py
   - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
   - vllm/envs.py
-  - examples/offline_inference/data_parallel.py
   - tests/distributed/test_context_parallel.py
   - tests/distributed/test_rocm_aiter_custom_ar.py
   - tests/distributed/test_rocm_quick_reduce.py
@@ -3619,7 +3612,7 @@ steps:
   - vllm/compilation/
   - vllm/config/
   - vllm/engine/
-  - vllm/entrypoints/logger.py
+  - vllm/entrypoints/serve/utils/request_logger.py
   - vllm/envs.py
   - vllm/logger.py
   - vllm/logging_utils/
@@ -3980,7 +3973,6 @@ steps:
   - tests/evals/qwen4_exp/
   - vllm/model_executor/layers/mamba/
   - vllm/models/qwen4_exp/
-  - vllm/transformers_utils/configs/qwen4_exp.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - vllm/platforms/rocm.py
   commands:
@@ -4563,10 +4555,10 @@ steps:
   agent_pool: mi355_dpx
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/quantization/fp4/
-  - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
-  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
+  - csrc/libtorch_stable/quantization/fp4/
+  - csrc/libtorch_stable/attention/mla/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
+  - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/v1/attention/backends/triton_attn.py
   - vllm/v1/attention/backends/rocm_attn.py
   - vllm/v1/attention/backends/rocm_aiter_fa.py
@@ -4652,7 +4644,7 @@ steps:
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - csrc/moe/
   - csrc/rocm/
   - tests/kernels/moe
@@ -4702,7 +4694,7 @@ steps:
   - vllm/utils/torch_utils.py
   - vllm/platforms/
   - vllm/_aiter_ops.py
-  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - vllm/distributed/device_communicators/
   - vllm/config
   commands:
@@ -4732,7 +4724,7 @@ steps:
   - vllm/v1/worker/workspace.py
   - vllm/platforms/
   - vllm/_aiter_ops.py
-  - requirements/rocm-test.txt
+  - requirements/test/rocm.txt
   optional: true
   commands:
   - amd-smi
@@ -4782,7 +4774,7 @@ steps:
   - vllm/platforms/
   - vllm/envs.py
   - vllm/utils/torch_utils.py
-  - requirements/rocm-test.txt
+  - requirements/test/rocm.txt
   optional: true
   commands:
   - amd-smi
@@ -4824,7 +4816,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/moe/
-  - csrc/quantization/w8a8/cutlass/moe/
+  - csrc/libtorch_stable/quantization/w8a8/cutlass/moe/
   - vllm/model_executor/layers/fused_moe/
   - tests/kernels/moe/test_deepep_moe.py
   - vllm/_aiter_ops.py
@@ -5052,7 +5044,6 @@ steps:
   - vllm/v1/attention/ops/
   - vllm/platforms/rocm.py
   - tests/models/language/generation_ppl_test
-  - vllm/model_executor/layers/fla/ops/
   - vllm/
   commands:
   - pytest -v -s models/language/generation_ppl_test
@@ -5200,7 +5191,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
   - vllm/v1/sample/
   - vllm/entrypoints/generate/beam_search/
   - tests/samplers
