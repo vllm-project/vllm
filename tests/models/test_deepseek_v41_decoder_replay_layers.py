@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import (
     BatchDescriptor,
     ForwardContext,
@@ -144,8 +145,18 @@ def test_piecewise_graphs_break_out_by_size():
     write_batch_kv.assert_called_once_with(*states)
 
 
-def test_replay_graph_matches_eager(monkeypatch):
-    """The replay graph of the next captured size pads and runs the rows."""
+@pytest.mark.parametrize(
+    ("moe_backend", "ids_dtype"),
+    [
+        ("auto", torch.int32),
+        *((b, torch.int64) for b in sorted(NATIVE_MEGA_MOE_BACKENDS)),
+        *((b, torch.int32) for b in sorted(FLASHINFER_MOE_EP_BACKENDS)),
+    ],
+    ids=str,
+)
+def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
+    """The replay graph of the next captured size pads and runs the rows. Input ids
+    arrive as the model passes them: int32, cast to int64 for native MegaMoE only."""
     monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
     capture = torch.cuda.stream(torch.cuda.Stream())
     monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
@@ -157,6 +168,7 @@ def test_replay_graph_matches_eager(monkeypatch):
     cfg.cache_config.use_kda_recoverssm = False
     cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
     cfg.model_config.dtype = torch.float32
+    cfg.kernel_config.moe_backend = moe_backend
 
     def run_layers(hidden, positions, ids, pre, post, mix, residual):
         return residual + hidden[:, None] + positions[:, None, None], pre + ids[:, None]
@@ -173,6 +185,7 @@ def test_replay_graph_matches_eager(monkeypatch):
         torch.randn(12, *b.shape[1:], device=DEVICE).to(b.dtype)
         for b in manager.input_buffers
     ]
+    states[2] = torch.arange(12, device=DEVICE, dtype=ids_dtype)  # input_ids
     rows = torch.tensor([11, 2, 7], device=DEVICE)
     desc = manager.dispatch(2, 3, None, 0)
     with override_forward_context(_graph_context(desc.num_tokens)):
