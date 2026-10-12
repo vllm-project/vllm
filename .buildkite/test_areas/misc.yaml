@@ -711,7 +711,7 @@ steps:
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
 
-- label: ":nvidia: (H200 MIG 35GB) Nightly Acceptance Length (Large Models)"
+- label: ":nvidia: (H200 MIG 35GB) Nightly Spec Decode AL Large Models"
   device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 20

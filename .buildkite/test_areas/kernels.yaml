@@ -759,7 +759,7 @@ steps:
       - tools/benchmark_helion_kernels.py
 
  
-- label: ":nvidia: (H100) Nightly FP8 MoE Kernels"
+- label: ":nvidia: (H100) Nightly MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
   timeout_in_minutes: 40
   device: h100
@@ -776,7 +776,7 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: ":nvidia: (H100) Nightly DeepEP FP8 MoE Kernels"
+- label: ":nvidia: (H100) Nightly DeepEP MoE Kernels"
   key: kernels-fp8-moe-test-2xh100
   timeout_in_minutes: 45
   device: h100
