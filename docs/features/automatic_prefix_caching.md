@@ -64,7 +64,7 @@ When reading the hit rate:
 - Hits are counted in full blocks (in `--prefix-match-unit` steps on hybrid models that set it), and the last prompt token is always recomputed to produce logits. With a block size of 16, a request whose first 2,010 tokens match a cached prompt gets 2,000 hit tokens.
 - If requests share only a common system prompt, the hit rate cannot exceed the system prompt length divided by the prompt length. A 2,048-token system prompt followed by 256 unique tokens tops out at 2048 / 2304, about 0.89, even when every request after the first one hits.
 - Each request is counted once, when it is first scheduled. Requests rescheduled after preemption, and requests that skip the cache lookup (for example, because they ask for prompt logprobs), are not counted.
-- A falling hit rate while `vllm:kv_cache_usage_perc` stays near 1 can mean that cached blocks are evicted before they are reused.
+- A falling hit rate on unchanged traffic can mean that cached blocks are evicted before they are reused. `vllm:kv_cache_usage_perc` does not show this: cached blocks that no running request uses count as free and are evicted, least recently used first, whenever new blocks are needed, so eviction can happen while usage is well below 1.
 
 `vllm:prompt_tokens_by_source` splits prompt tokens by a `source` label with the values `local_compute`, `local_cache_hit` and `external_kv_transfer`. With a KV connector, `vllm:external_prefix_cache_queries` and `vllm:external_prefix_cache_hits` report the external cache the same way.
 
