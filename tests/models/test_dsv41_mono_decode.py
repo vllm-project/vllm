@@ -301,7 +301,7 @@ def test_other_steps_reduce_wo_b_themselves(run, case):
     assert out is None and not calls
 
 
-def _config(**parallel):
+def _config(monokernel=True, **parallel):
     parallel = (
         dict(enable_expert_parallel=False, enable_eplb=False, data_parallel_size=1)
         | parallel
@@ -309,6 +309,7 @@ def _config(**parallel):
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=40)),
         parallel_config=SimpleNamespace(**parallel),
+        kernel_config=SimpleNamespace(monokernel=monokernel),
     )
 
 
@@ -316,7 +317,6 @@ def _deployment(monkeypatch, cdna=4, cus=256):
     """A deployment the kernels take (the runner module stubbed: no FlyDSL)."""
     import vllm.platforms.rocm as rocm
 
-    monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1")
     monkeypatch.delenv("VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4", raising=False)
     monkeypatch.setattr(rocm, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(md, "get_tensor_model_parallel_world_size", lambda: 2)
@@ -325,6 +325,14 @@ def _deployment(monkeypatch, cdna=4, cus=256):
     runner = ModuleType(name)
     runner.BLOCKS = 256  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, name, runner)
+
+
+def test_off_without_the_flag(monkeypatch):
+    """No --monokernel: no mono layer, whatever the deployment."""
+    _deployment(monkeypatch)
+    assert (
+        md.MonoDecodeLayer.create(_decoder_layer(), _config(monokernel=False)) is None
+    )
 
 
 @pytest.mark.parametrize("cdna", [3, 5])

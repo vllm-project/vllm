@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1 mono decode layer on ROCm CDNA4 (``VLLM_ROCM_MONO_DECODE=1``).
+"""DeepSeek-V4.1 mono decode layer on ROCm CDNA4 (``--monokernel``).
 
 A decode step's backbone layer -- the attention seam, the attention, its TP
 all-reduce, the FFN seam, the MoE and its all-reduce -- runs as two persistent
@@ -63,7 +63,7 @@ def _mono_runner(device: torch.device):
             # its peer memory is allocated and exchanged eagerly; vLLM warms
             # every graph up eagerly before capturing it
             raise RuntimeError(
-                "VLLM_ROCM_MONO_DECODE was first reached inside a CUDA graph "
+                "--monokernel was first reached inside a CUDA graph "
                 "capture, before an eager decode step."
             )
         from vllm.models.deepseek_v41.amd.mono.runner import MAX_TOKENS, DSV41MonoLayer
@@ -157,7 +157,7 @@ class MonoDecodeLayer:
     def create(
         layer: "DeepseekV4DecoderLayer", vllm_config
     ) -> "MonoDecodeLayer | None":
-        if not envs.VLLM_ROCM_MONO_DECODE:
+        if not vllm_config.kernel_config.monokernel:
             return None
         from vllm.platforms.rocm import get_cdna_version
 
@@ -180,7 +180,7 @@ class MonoDecodeLayer:
                 if cus < BLOCKS:
                     why = f"needs {BLOCKS} compute units, the GPU has {cus}"
         if why is not None:
-            raise ValueError(f"VLLM_ROCM_MONO_DECODE {why}.")
+            raise ValueError(f"--monokernel {why}.")
         # the layer: the kernels serve the backbone's seams and MoE
         config = vllm_config.model_config.hf_config
         attn, ffn = layer.attn, layer.ffn

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The DeepSeek-V4.1 mono decode path through the real model: a five-layer
-DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``VLLM_ROCM_MONO_DECODE`` on
+DeepSeek-V4.1-Flash at TP2 and TP4 on CDNA4, served with ``--monokernel`` on
 and off on the same random weights: every decoder layer's outputs at every
 decode step must match. Unlike ``test_dsv41_mono_numerics.py``, which
 checks the kernels against vLLM's ops one stage at a time, this runs
@@ -232,7 +232,6 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt
 
-    monkeypatch.setenv("VLLM_ROCM_MONO_DECODE", "1" if mono else "0")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
     with vllm_runner(
@@ -242,6 +241,7 @@ def _decode(vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str):
         hf_overrides=TRUNCATED,
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
+        monokernel=mono,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         attention_config={"indexer_kv_dtype": "mxfp4", "indexer_sparse_logits": True},
