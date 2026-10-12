@@ -75,12 +75,14 @@ def _spin(load_all, pending, health, alarm, region_id, index, tag):
 
 
 @traced
-def stall(fault_rank, fault_epoch, ticks, rank, epoch):
+def stall(fault_rank, fault_epoch, fault_layer, ticks, rank, epoch, layer):
     """The fault hook (``VLLM_MONO_FAULT_INJECT``): CTA 0 of rank ``fault_rank``
-    stalls ``ticks`` in every step from epoch ``fault_epoch`` on."""
+    stalls ``ticks`` once, in the launch for slot ``fault_layer`` of the step at
+    epoch ``fault_epoch``."""
     if (
         (rank == fault_rank)
-        & (uniform(ld_i32(epoch, 0)) >= fault_epoch)
+        & (uniform(ld_i32(epoch, 0)) == fault_epoch)
+        & (layer == fault_layer)
         & (fx.block_idx.x == 0)
     ):
         t0 = memrealtime()

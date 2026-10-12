@@ -505,10 +505,11 @@ def _fault_worker(
     from vllm.models.kimi_k3.amd.ops.mono.common.sync import WAIT_TICKS
 
     runner = MonoRunner(device)
-    # rank STALLED's CTA 0 stalls past every wait's bound from epoch 2 on
+    # rank STALLED's CTA 0 stalls past every wait's bound in the epoch 2 launch
     runner.fault = {
         "fault_rank": STALLED,
         "fault_epoch": 2,
+        "fault_layer": 3,
         "fault_ticks": WAIT_TICKS * 3 // 2,
     }
     mw = _moe_weights(rank, device)

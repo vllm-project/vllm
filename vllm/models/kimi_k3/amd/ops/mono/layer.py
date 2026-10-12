@@ -96,9 +96,11 @@ class K2Build:
     ln_eps: float = 1e-5  # the latent RMSNorm
     reduce: bool = True  # the final reduce here (else the next layer's K1)
     reset: bool = False  # a block-write layer: the prefix restarts at the o_proj output
-    # the fault hook (sync.stall): rank fault_rank stalls fault_ticks from fault_epoch
+    # the fault hook (sync.stall): rank fault_rank stalls fault_ticks once, in
+    # slot fault_layer's launch of the step at epoch fault_epoch
     fault_rank: int = -1
     fault_epoch: int = 0
+    fault_layer: int = 0
     fault_ticks: int = 0
     timeline: bool = False
 
@@ -237,7 +239,9 @@ def build(key: K2Build):
         f"_t{int(key.timeline)}"
     )
     if key.fault_rank >= 0:
-        name += f"_f{key.fault_rank}_{key.fault_epoch}_{key.fault_ticks}"
+        name += (
+            f"_f{key.fault_rank}_{key.fault_epoch}_{key.fault_layer}_{key.fault_ticks}"
+        )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k2(
@@ -280,7 +284,15 @@ def build(key: K2Build):
         st = alloc.allocate(StageLds)
         el, al, ul, dl = st.early.peek(), st.attn.peek(), st.ug.peek(), st.down.peek()
         if const_expr(key.fault_rank >= 0):
-            stall(key.fault_rank, key.fault_epoch, key.fault_ticks, rank, epoch)
+            stall(
+                key.fault_rank,
+                key.fault_epoch,
+                key.fault_layer,
+                key.fault_ticks,
+                rank,
+                epoch,
+                layer,
+            )
         mb = Mailbox(step_tag(epoch, layer) - 1, health, alarm, region_ids(REGIONS))
         par = uniform(ld_i32(epoch, 0)) % 2
         bases = peer_bases(peers, TP_)

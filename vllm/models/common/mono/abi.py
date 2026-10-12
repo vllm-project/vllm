@@ -13,8 +13,8 @@ there, drains the store, then sets FAILED, so nothing it stores later can
 overtake the flag. The runner reads these words after every step.
 
 The fault hook (tests only, ``VLLM_MONO_FAULT_INJECT=rank:epoch:us``): a
-build-time stall of one CTA of rank ``rank`` for ``us`` microseconds in
-every step from ``epoch`` on; no code when unset.
+build-time stall of one CTA of rank ``rank`` for ``us`` microseconds, once, in
+the step at ``epoch``; no code when unset.
 """
 
 from vllm import envs
