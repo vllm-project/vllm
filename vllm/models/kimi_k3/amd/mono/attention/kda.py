@@ -123,7 +123,6 @@ class KdaPreBuild:
     timeline: bool = False
     write_idx: int = -1  # a block-write layer's block: the updated prefix stored there
     kda0: int = 0  # the first KDA task's CTA
-    xp: int = 0  # experiment switch (timing only)
 
 
 ABI = KernelAbi(
@@ -355,66 +354,6 @@ def stage_gate(c, t):
     gpu.barrier()
 
 
-GATE_OFF = 512  # red words of stage_gate_local's group sums
-
-
-@traced
-def stage_gate_local(c):
-    """Every token's source weights computed in this CTA (``stage_gate``'s sums
-    in its order, so every CTA's are bit-identical): the 56 slices' partials
-    polled in one round trip (no gate CTA, no WGT hand-off) -> red[t (ns + 1)
-    + src], the sum at + ns."""
-    s, ns, tid, lane, wave, red = (
-        c["S"],
-        c["NS"],
-        c["tid"],
-        c["lane"],
-        c["wave"],
-        c["red"],
-    )
-    nq = ns * 2
-    n = 8 * s * nq  # (group, token, partial) items
-    per = (n + THREADS - 1) // THREADS
-    specs = []
-    for r in range_constexpr(per):
-        item = fx.min(tid + THREADS * r, n - 1)
-        g = item // (s * nq)
-        t = (item // nq) % s
-        q = item % nq
-        specs += [
-            (c["part"], (((g * GSL + k) * s + t) * ns) * 2 + q, 1) for k in range(GSL)
-        ]
-    got = c["poll"](specs, per * GSL)
-    for r in range_constexpr(per):
-        acc = f32_of(got[r * GSL][0])
-        for k in range_constexpr(1, GSL):
-            acc = acc + f32_of(got[r * GSL + k][0])
-        if tid + THREADS * r < n:
-            fx.ptr_store(acc, red + (GATE_OFF + tid + THREADS * r))
-    gpu.barrier()
-    # wave t: token t's weights (stage_gate's math)
-    if wave < s:
-        t = wave
-        src = fx.min(lane, ns - 1)
-        base = GATE_OFF + t * nq
-        sq = fx.ptr_load(red + (base + src * 2))
-        dt = fx.ptr_load(red + (base + src * 2 + 1))
-        for g in range_constexpr(1, 8):
-            sq = sq + fx.ptr_load(red + (base + g * s * nq + src * 2))
-            dt = dt + fx.ptr_load(red + (base + g * s * nq + src * 2 + 1))
-        rstd = hw_rsq(sq * fx.Float32(1.0 / HIDDEN) + fx.Float32(c["eps"]))
-        logit = dt * rstd * fx.Float32(LOG2E)
-        logit = (lane < ns).select(logit, fx.Float32(-3.0e38))
-        m = wave_max(logit)
-        ex = (lane < ns).select(hw_exp2(logit - m), fx.Float32(0.0))
-        den = butterfly(ex, (32, 16, 8, 4, 2, 1))
-        if lane < ns:
-            fx.ptr_store(ex, red + (t * (ns + 1) + lane))
-        if lane == 0:
-            fx.ptr_store(den, red + (t * (ns + 1) + ns))
-    gpu.barrier()
-
-
 @traced
 def stage_mix(c, task):
     """Columns 128 task ..: the softmax mix of ``vals`` (4 columns a thread), its
@@ -424,13 +363,10 @@ def stage_mix(c, task):
     a = c["args"]
     c0 = task * COLS
     nw = s * (ns + 1)
-    if const_expr(c.get("gate_local", False)):
-        stage_gate_local(c)
-    else:
-        if tid < nw:
-            v = c["poll"]([(c["wgt"], tid, 1)])[0][0]
-            fx.ptr_store(f32_of(v), red + tid)
-        gpu.barrier()
+    if tid < nw:
+        v = c["poll"]([(c["wgt"], tid, 1)])[0][0]
+        fx.ptr_store(f32_of(v), red + tid)
+    gpu.barrier()
     mine = tid < s * QC
     t = fx.min(tid // QC, s - 1)
     cc = (tid % QC) * 4
@@ -622,11 +558,7 @@ def kda_conv(c, k, req, h, ch):
         xv = [f32_of(xs[j][0]) for j in range(L)]
         stamp(c["on"], c["tls"], tid, 13)
         rs = rsrc(k["cs"])
-        if const_expr(c["xp"] == 2):
-            # force the staged conv window before timing the stores
-            fx.ptr_store(k["old"][0] + k["win"][0], c["red"] + tid)
-            stamp(c["on"], c["tls"], tid, 13)
-        if (k["slot_c"] > 0) & (c["xp"] != 1):
+        if k["slot_c"] > 0:
             for j in range_constexpr(sl):
                 nv = k["old"][j] if j < sl - L else xv[j - (sl - L)]
                 bo.buffer_store(
@@ -905,9 +837,7 @@ def build(key: KdaPreBuild):
             "onorm_eps": key.onorm_eps,
             "lb": key.lower_bound,
             "kda0": key.kda0,
-            "xp": key.xp,
             "write_idx": key.write_idx,
-            "gate_local": False,
             "put": mb.put,
             "poll": mb.poll,
             "red": lds.red.ptr,

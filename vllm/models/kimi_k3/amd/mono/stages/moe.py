@@ -600,7 +600,7 @@ def stage_ug(c, task, ops):
     t = fx.min(lane % 16, s - 1)
     kb = lane // 16
     acc = fx.Vector.filled(4, 0.0, fx.Float32)
-    for i in range_constexpr(len(steps) if c["xp"] != 2 else 0):
+    for i in range_constexpr(len(steps)):
         st = steps[i]
         bw = fx.Vector(
             fx.ptr_load(
@@ -612,19 +612,8 @@ def stage_ug(c, task, ops):
         # the code's byte (st % 2) 2 + rg % 2 of the word; rg % 2 is the wave's
         sa = (sw[i // 2] >> ((st % 2) * 16 + (rg % 2) * 8)) & 0xFF
         acc = mfma_scaled(av[i], bw, acc, sa, sb, FP4, FP4, 0, 0)
-    if const_expr(c["xp"] == 2):
-        # loads only: keep them live
-        acc = fx.Vector.from_elements(
-            [
-                acc[d] + av[-1][d].bitcast(fx.Float32) * fx.Float32(0.0)
-                for d in range(4)
-            ],
-            fx.Float32,
-        )
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
-    if const_expr(c["xp"] != 0):
-        return
     # thread (token, column): g / u summed over the K halves, SiTUv2
     tt = tid // 32
     col = tid % 32

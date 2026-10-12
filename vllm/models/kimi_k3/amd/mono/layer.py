@@ -90,7 +90,6 @@ class K2Build:
     fault_epoch: int = 0
     fault_ticks: int = 0
     timeline: bool = False
-    xp: int = 0  # timing experiments (7: route without its selection)
 
 
 ABI = KernelAbi(
@@ -293,12 +292,9 @@ def build(key: K2Build):
             "rank": rank,
             "delta": True,
             "reset": key.reset,
-            "gate_local": False,
             "eps": key.eps,
             "out_eps": key.out_eps,
             "ln_eps": key.ln_eps,
-            "xp": key.xp,
-            "lazy_inter": True,
             "put": mb.put,
             "put_bf": mb.put_bf,
             "put_words": mb.put_words,
