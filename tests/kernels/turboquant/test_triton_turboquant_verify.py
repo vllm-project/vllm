@@ -19,31 +19,41 @@ from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_unified_attention im
 )
 
 
-def _make_case(d, qlens, lengths, gqa=8, hk=1, sink=False, rotate=False):
+def _pack_codes(codes, bits):
+    if bits == 4:
+        return codes[..., 0::2] | codes[..., 1::2] << 4
+    groups = codes.reshape(*codes.shape[:-1], -1, 8).long()
+    shifts = torch.arange(8, device=codes.device) * bits
+    words = (groups << shifts).sum(-1)
+    byte_shifts = torch.arange(bits, device=codes.device) * 8
+    return ((words[..., None] >> byte_shifts) & 255).to(torch.uint8).flatten(-2)
+
+
+def _make_case(d, qlens, lengths, gqa=8, hk=1, sink=False, rotate=False, bits=(4, 4)):
     torch.manual_seed(61264)
     bs = 16
     batch = len(qlens)
     blocks = math.ceil(max(lengths) / bs)
     L = blocks * bs
-    slot = d + 6
+    kb, vb = bits
+    data_bytes = d * (kb + vb) // 8
+    slot = data_bytes + 6
     idx = torch.randint(
-        0, 16, (batch, blocks, bs, hk, d), device="cuda", dtype=torch.uint8
+        0, 1 << kb, (batch, blocks, bs, hk, d), device="cuda", dtype=torch.uint8
     )
-    vi = torch.randint(0, 16, idx.shape, device="cuda", dtype=torch.uint8)
+    vi = torch.randint(0, 1 << vb, idx.shape, device="cuda", dtype=torch.uint8)
     norm = torch.ones((batch, blocks, hk, bs), device="cuda", dtype=torch.float16)
     vs = torch.full_like(norm, 0.125)
     vz = torch.full_like(norm, -1.0)
-    cent = torch.linspace(-1, 1, 16, device="cuda")
+    cent = torch.linspace(-1, 1, 1 << kb, device="cuda")
     cache = torch.zeros(
         (batch * blocks, bs, hk, slot), device="cuda", dtype=torch.uint8
     )
     raw = cache.view(batch, blocks, -1)
-    payload = torch.cat(
-        (idx[..., 0::2] | idx[..., 1::2] << 4, vi[..., 0::2] | vi[..., 1::2] << 4), -1
-    )
-    raw[:, :, : bs * hk * d] = payload.reshape(batch, blocks, -1)
+    payload = torch.cat((_pack_codes(idx, kb), _pack_codes(vi, vb)), -1)
+    raw[:, :, : bs * hk * data_bytes] = payload.reshape(batch, blocks, -1)
     meta = torch.stack((norm, vs, vz), -2).contiguous().view(torch.uint8)
-    raw[:, :, bs * hk * d :] = meta.reshape(batch, blocks, -1)
+    raw[:, :, bs * hk * data_bytes :] = meta.reshape(batch, blocks, -1)
     kr = cent[idx.long()].reshape(batch, L, hk, d).float()
     vr = (vi.float() * 0.125 - 1).reshape(batch, L, hk, d)
     bt = torch.arange(batch * blocks, device="cuda", dtype=torch.int32).reshape(
@@ -68,10 +78,10 @@ def _make_case(d, qlens, lengths, gqa=8, hk=1, sink=False, rotate=False):
         PiT=pi.T.contiguous(),
         centroids=cent,
         scale=d**-0.5,
-        mse_bits=4,
-        key_packed_size=d // 2 + 2,
-        value_quant_bits=4,
-        value_packed_size=d // 2 + 4,
+        mse_bits=kb,
+        key_packed_size=d * kb // 8 + 2,
+        value_quant_bits=vb,
+        value_packed_size=d * vb // 8 + 4,
         max_query_len=max(qlens),
         max_seq_len=max(lengths),
         sinks=sinks,
@@ -213,3 +223,14 @@ def test_backend_keeps_short_query_blocks(monkeypatch, d, rows):
     else:
         assert dispatches == [(1, 1), (4, 1), (1, 33)]
     torch.testing.assert_close(output.float(), reference, atol=5e-3, rtol=3e-2)
+
+
+@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("bits", [(3, 4), (3, 3)])
+def test_three_bit_verify_reference(d, bits):
+    args, reference = _make_case(
+        d, [2, 4, 3], [4096, 512, 4097], rotate=True, bits=bits
+    )
+    output = triton_turboquant_decode_attention_soa(**args)
+    assert torch.isfinite(output).all()
+    assert (output.float() - reference).norm() / reference.norm() < 8e-3
