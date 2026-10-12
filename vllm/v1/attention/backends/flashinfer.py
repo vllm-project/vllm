@@ -1532,7 +1532,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # When all attention (both prefill and decode) uses TRTLLM,
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
-        needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
+        # Non-causal XQA decode also consumes GPU seq_lens directly. Keep
+        # native prefill/decode, cascade and DCP on their exact host-length path.
+        needs_seq_lens_cpu = (
+            self.use_dcp
+            or use_cascade
+            or (num_prefills > 0 and not prefill_use_trtllm)
+            or (num_decodes > 0 and not decode_with_flashinfer_trtllm_api)
+        )
         if needs_seq_lens_cpu:
             if (
                 self._num_speculative_tokens == 0
