@@ -16,7 +16,8 @@ from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.backend_outlines import OutlinesGrammar
+from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
+from vllm.v1.structured_output.request import get_structured_output_key
 
 TOKENIZER = "gpt2"
 THINK_END = "\n"  # reasoning-end marker (single GPT-2 token)
@@ -560,3 +561,18 @@ def test_outlines_termination(tokenizer):
     assert grammar.validate_tokens([eos]) == []
     assert grammar.accept_tokens(request.request_id, [one, eos, one])
     assert grammar.is_terminated()
+
+
+def test_outlines_choice_with_non_bmp_characters(tokenizer):
+    """The choice spec is JSON, which encodes emoji as surrogate pairs."""
+    choices = ["😀 yes", "no"]
+    backend = OutlinesBackend(
+        VllmConfig(), tokenizer=tokenizer, vocab_size=len(tokenizer)
+    )
+    request_type, grammar_spec = get_structured_output_key(
+        StructuredOutputsParams(choice=choices)
+    )
+
+    grammar = backend.compile_grammar(request_type, grammar_spec)
+
+    assert grammar.accept_tokens("", tokenizer.encode(choices[0]))

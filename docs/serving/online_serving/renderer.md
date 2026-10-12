@@ -153,6 +153,13 @@ should split those fields:
 - Legacy clients that ignore `mm_metadata` and keep sending `kwargs_data`
   continue to work.
 
+Callers that need only the token layout and item hashes, such as cache-aware
+routers, can set `"return_mm_kwargs": false` on the render request. The response
+then keeps `mm_hashes` and `mm_placeholders` and sets `kwargs_data` and
+`mm_metadata` to null, so the processed tensors are neither serialized nor sent.
+Do not forward such a response to `/inference/v1/generate`, which reads a null
+`kwargs_data` as every item being cached.
+
 ## Example
 
 The example below shows how a disaggregated encode / prefill coordinator can

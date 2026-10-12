@@ -5,12 +5,13 @@
 import time
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.utils import random_uuid
 
 
@@ -30,8 +31,26 @@ class StructuredDecisionRequest(OpenAIBaseModel):
         default=None, description="Context placed ahead of the questions."
     )
     chat_template_kwargs: dict[str, Any] | None = None
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
     request_id: str = Field(default_factory=random_uuid)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            validate_cache_salt(data.get("cache_salt"))
+        return data
 
 
 class DecisionUsage(OpenAIBaseModel):
@@ -65,6 +84,7 @@ class ReadPromptRequest(OpenAIBaseModel):
     would follow a thought rather than start the reply."""
 
     chat_template_kwargs: dict[str, Any] | None = None
+    cache_salt: str | None = None
 
     def build_chat_params(
         self,
