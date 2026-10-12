@@ -1751,9 +1751,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     attn_metadata.checkpoint,
                     raw_qkv=conv_input_non_spec,
                     conv_state=conv_state,
-                    recurrent_checkpoint=state_checkpoints[plan.rows],
+                    recurrent_checkpoint=state_checkpoints,
                     recurrent_state=ssm_state,
                     cu_seqlens=non_spec_query_start_loc,
+                    recurrent_rows=plan.rows,
                 )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)

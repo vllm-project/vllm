@@ -185,7 +185,13 @@ class ConvRecurrentCheckpointExporter(MambaPrefillCheckpointExporter):
         recurrent_checkpoint: torch.Tensor,
         recurrent_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        recurrent_rows: torch.Tensor | None = None,
     ) -> None:
+        """Write checkpoint state into the paged cache.
+
+        ``recurrent_rows`` gives each checkpoint row's row in
+        ``recurrent_checkpoint``; by default they coincide.
+        """
         state_len = (
             self.state_len if self.state_len is not None else conv_state.shape[-1]
         )
@@ -205,6 +211,7 @@ class ConvRecurrentCheckpointExporter(MambaPrefillCheckpointExporter):
             cu_seqlens,
             checkpoint.checkpoint_offsets,
             checkpoint.state_indices,
+            recurrent_rows if recurrent_rows is not None else checkpoint.state_indices,
             raw_qkv.stride(0),
             raw_qkv.stride(1),
             conv_state.stride(0),
@@ -217,6 +224,7 @@ class ConvRecurrentCheckpointExporter(MambaPrefillCheckpointExporter):
             width,
             recurrent_row_size,
             NULL_BLOCK_ID,
+            recurrent_rows is not None,
             block_size,
         )
 
@@ -230,6 +238,7 @@ def store_cache_checkpoints_kernel(
     query_start_loc_ptr,
     checkpoint_offsets_ptr,
     checkpoint_state_indices_ptr,
+    recurrent_rows_ptr,
     x_stride_0: tl.constexpr,
     x_stride_1: tl.constexpr,
     state_stride_0: tl.constexpr,
@@ -242,6 +251,7 @@ def store_cache_checkpoints_kernel(
     WIDTH: tl.constexpr,
     RECURRENT_ROW_SIZE: tl.constexpr,
     NULL_STATE_IDX: tl.constexpr,
+    HAS_RECURRENT_ROWS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     seq_idx = tl.program_id(0)
@@ -271,9 +281,13 @@ def store_cache_checkpoints_kernel(
         mask=valid_conv,
     )
 
+    if HAS_RECURRENT_ROWS:
+        recurrent_row = tl.load(recurrent_rows_ptr + seq_idx).to(tl.int64)
+    else:
+        recurrent_row = seq_idx.to(tl.int64)
     valid_recurrent = (cols < RECURRENT_ROW_SIZE) & valid_checkpoint
     recurrent = tl.load(
-        recurrent_checkpoint_ptr + seq_idx * checkpoint_stride_0 + cols,
+        recurrent_checkpoint_ptr + recurrent_row * checkpoint_stride_0 + cols,
         mask=valid_recurrent,
     )
     tl.store(
