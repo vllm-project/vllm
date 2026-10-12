@@ -2013,7 +2013,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             global_has_prefill = (
                 self.pcp_manager.global_has_prefill
-                if self.pcp_manager is not None
+                if self.pcp_manager is not None and not dummy_run
                 else input_batch.has_prefill
             )
 
