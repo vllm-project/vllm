@@ -15,6 +15,7 @@ import time
 import torch
 
 from vllm import _custom_ops  # noqa: F401
+from vllm._aiter_ops import rocm_aiter_ops
 
 
 def _make_inputs(num_rows, num_cols, causal, device):
@@ -81,13 +82,16 @@ def main():
     native_ms = _time(run_native, args.iters, args.warmup)
     print(f"in-tree  topKPerRowPrefill : {native_ms:8.3f} ms")
 
-    try:
-        from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-            _launch_aiter_top_k_per_row_prefill,
+    if not rocm_aiter_ops.is_indexer_top_k_enabled():
+        print(
+            "AITER path unavailable: requires ROCm gfx950 with AITER installed "
+            "and VLLM_ROCM_USE_AITER=1"
         )
-    except ImportError as exc:
-        print(f"AITER path unavailable: {exc}")
         return
+
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _launch_aiter_top_k_per_row_prefill,
+    )
 
     aiter_out = torch.empty(args.num_rows, args.topk, dtype=torch.int32, device=device)
 
