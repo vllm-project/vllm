@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import math
 from typing import Any
 
 import torch
@@ -129,6 +130,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+        self.draft_context_window = speculative_config.draft_context_window
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -277,6 +279,14 @@ class DFlashSpeculator(DraftModelSpeculator):
         ]
         assert self.draft_kv_cache_group_ids, "No draft attention groups found."
         self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
+        # Draft groups share seq_lens, so the window drops a position count
+        # that is whole block-table entries in every group.
+        self._context_window_span = self.dcp_size * math.lcm(
+            *(
+                self.block_tables.block_sizes[gid]
+                for gid in self.draft_kv_cache_group_ids
+            )
+        )
 
         # Per-group context slot buffers for the precompute (one row per group).
         self._context_slot_mappings = torch.zeros(
@@ -539,6 +549,21 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_model_len,
                 self.sample_from_anchor,
             )
+
+        if self.draft_context_window is not None and not dummy_run:
+            # After prepare_dflash_inputs: its slot mappings index the full table.
+            last_gid = self.draft_kv_cache_group_ids[-1]
+            for gid in self.draft_kv_cache_group_ids:
+                drop_old_draft_context(
+                    self.block_tables.input_block_tables[gid],
+                    self.input_buffers.seq_lens,
+                    num_reqs,
+                    self.num_query_per_req,
+                    self.draft_context_window,
+                    self._context_window_span,
+                    self.block_tables.block_sizes[gid] * self.dcp_size,
+                    update_seq_lens=gid == last_gid,
+                )
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
@@ -908,4 +933,74 @@ def prepare_dflash_inputs(
         CP_SIZE=cp_size,
         CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+
+@triton.jit
+def _drop_old_draft_context_kernel(
+    block_table_ptr,
+    block_table_stride,
+    seq_lens_ptr,
+    num_query_per_req,
+    context_window,
+    window_span,
+    entry_span,
+    UPDATE_SEQ_LENS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    num_excess = tl.maximum(seq_len - num_query_per_req - context_window, 0)
+    num_dropped = num_excess // window_span * window_span
+    if num_dropped == 0:
+        return
+    shift = num_dropped // entry_span
+    num_kept = tl.minimum(
+        tl.cdiv(seq_len - num_dropped, entry_span), block_table_stride - shift
+    )
+    row_ptr = block_table_ptr + req_idx.to(tl.int64) * block_table_stride
+    for i in range(0, num_kept, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        mask = offset < num_kept
+        block_ids = tl.load(row_ptr + shift + offset, mask=mask)
+        # In-place shift: every lane must load before any lane stores.
+        tl.debug_barrier()
+        tl.store(row_ptr + offset, block_ids, mask=mask)
+    if UPDATE_SEQ_LENS:
+        tl.store(seq_lens_ptr + req_idx, seq_len - num_dropped)
+
+
+def drop_old_draft_context(
+    # [max_num_reqs, max_num_blocks]
+    block_table: torch.Tensor,
+    # [max_num_reqs]
+    seq_lens: torch.Tensor,
+    num_reqs: int,
+    num_query_per_req: int,
+    context_window: int,
+    window_span: int,
+    entry_span: int,
+    update_seq_lens: bool,
+) -> None:
+    """Hide all but the last ``context_window`` context tokens from the draft.
+
+    Drops the oldest context positions in multiples of ``window_span`` by
+    shifting each request's block-table row left, so the draft attends to at
+    least ``context_window`` and fewer than ``context_window + window_span``
+    context tokens. ``entry_span`` is the number of positions one entry of this
+    table covers (block_size * dcp_size). Cached keys hold absolute RoPE
+    positions, so no position needs rewriting. ``seq_lens`` must hold the
+    unshifted draft lengths; it is rewritten only when ``update_seq_lens`` is
+    set, which callers do on the last of several tables sharing it.
+    """
+    _drop_old_draft_context_kernel[(num_reqs,)](
+        block_table,
+        block_table.stride(0),
+        seq_lens,
+        num_query_per_req,
+        context_window,
+        window_span,
+        entry_span,
+        UPDATE_SEQ_LENS=update_seq_lens,
+        BLOCK_SIZE=1024,
     )
