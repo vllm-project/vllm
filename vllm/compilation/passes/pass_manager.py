@@ -23,6 +23,7 @@ if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
         RocmAiterAllReduceFusionPass,
     )
     from .fusion.rocm_aiter_fusion import (
+        NORM_SITES,
         MLADualRMSNormFusionPass,
         RocmAiterActMulMxfp4GemmFusionPass,
         RocmAiterRMSNormMxfp4GemmFusionPass,
@@ -190,14 +191,20 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                         RocmAiterRMSNormQuantFusionPass(config),
                     ]
                 self.passes += [RMSNormQuantFusionPass(config)]
-                if rocm_aiter_ops.is_enabled() and norm_mxfp4_pass_enabled(
-                    self.pass_config.fuse_norm_quant
-                ):
-                    self.passes += [
-                        RocmAiterRMSNormMxfp4GemmFusionPass(
-                            config, compile_prefix=self.compile_prefix
-                        )
-                    ]
+                if rocm_aiter_ops.is_enabled():
+                    # One pass per site kind (post-attention norms, input norms), each
+                    # behind its own flag.
+                    for sites in NORM_SITES:
+                        if norm_mxfp4_pass_enabled(
+                            self.pass_config.fuse_norm_quant, sites
+                        ):
+                            self.passes += [
+                                RocmAiterRMSNormMxfp4GemmFusionPass(
+                                    config,
+                                    compile_prefix=self.compile_prefix,
+                                    sites=sites,
+                                )
+                            ]
 
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]

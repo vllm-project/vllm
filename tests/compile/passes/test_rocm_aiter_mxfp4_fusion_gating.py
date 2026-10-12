@@ -46,7 +46,8 @@ from vllm.platforms import current_platform
 
 ACT_FLAG = "VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION"
 POSTNORM_FLAG = "VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION"
-FLAGS = [ACT_FLAG, POSTNORM_FLAG]
+INPUTNORM_FLAG = "VLLM_ROCM_AITER_FP4_INPUTNORM_QUANT_FUSION"
+FLAGS = [ACT_FLAG, POSTNORM_FLAG, INPUTNORM_FLAG]
 
 RANGE_A = Range(1, 8)
 RANGE_B = Range(9, 64)
@@ -105,13 +106,17 @@ def test_flag_changes_the_compile_cache_key(flag, monkeypatch):
 
 # --- when a pass is registered ------------------------------------------------
 
+# (gate function, the flag it reads, extra arguments of the call)
 GATES = [
-    pytest.param("act_mxfp4_pass_enabled", ACT_FLAG, id="act"),
-    pytest.param("norm_mxfp4_pass_enabled", POSTNORM_FLAG, id="norm"),
+    pytest.param("act_mxfp4_pass_enabled", ACT_FLAG, (), id="act"),
+    pytest.param("norm_mxfp4_pass_enabled", POSTNORM_FLAG, (), id="norm"),
+    pytest.param(
+        "norm_mxfp4_pass_enabled", INPUTNORM_FLAG, ("input",), id="input-norm"
+    ),
 ]
 
 
-@pytest.mark.parametrize(("gate", "flag"), GATES)
+@pytest.mark.parametrize(("gate", "flag", "args"), GATES)
 @pytest.mark.parametrize(
     ("flag_on", "fuse", "on_gfx950", "enabled"),
     [
@@ -127,6 +132,7 @@ def test_pass_needs_flag_pass_config_and_gfx950(
     monkeypatch,
     gate,
     flag,
+    args,
     flag_on,
     fuse,
     on_gfx950,
@@ -136,7 +142,37 @@ def test_pass_needs_flag_pass_config_and_gfx950(
     if flag_on:
         monkeypatch.setenv(flag, "1")
     gfx950(on_gfx950)
-    assert getattr(rocm_aiter_fusion, gate)(fuse) is enabled
+    assert getattr(rocm_aiter_fusion, gate)(fuse, *args) is enabled
+
+
+@pytest.mark.parametrize(
+    ("sites", "own", "other"),
+    [("post", POSTNORM_FLAG, INPUTNORM_FLAG), ("input", INPUTNORM_FLAG, POSTNORM_FLAG)],
+)
+def test_each_norm_pass_follows_its_own_flag_only(
+    rocm_aiter_fusion, gfx950, monkeypatch, sites, own, other
+):
+    # Input: the gate of each site kind with neither flag, only the other kind's flag,
+    # and its own flag set. Expected: False, False, True. Why: the two flags are
+    # independent; one must not switch the other's pass on.
+    monkeypatch.delenv(own, raising=False)
+    monkeypatch.delenv(other, raising=False)
+
+    def enabled() -> bool:
+        return rocm_aiter_fusion.norm_mxfp4_pass_enabled(True, sites)
+
+    assert enabled() is False
+    monkeypatch.setenv(other, "1")
+    assert enabled() is False
+    monkeypatch.setenv(own, "1")
+    assert enabled() is True
+
+
+def test_norm_gate_refuses_an_unknown_site_kind(rocm_aiter_fusion, gfx950):
+    # Input: the gate asked about the site kind "both". Expected: ValueError. Why: two
+    # flags mean two passes, one per kind; "both" must not read as either.
+    with pytest.raises(ValueError, match="sites must be one of"):
+        rocm_aiter_fusion.norm_mxfp4_pass_enabled(True, "both")
 
 
 # --- which compile prefixes are the target model --------------------------------
@@ -336,7 +372,9 @@ class _ActMulMxfp4Pass(_StandInPass):
 
 
 class _NormMxfp4Pass(_StandInPass):
-    pass
+    def __init__(self, config, compile_prefix=None, sites="post") -> None:
+        super().__init__(config, compile_prefix)
+        self.sites = sites
 
 
 @pytest.fixture
@@ -344,11 +382,12 @@ def configure_manager(monkeypatch, gfx950, rocm_aiter_fusion):
     """Returns configure(prefix, **switches) -> the passes the manager registers.
 
     pass_manager imports the ROCm passes only on a platform that has them, so the
-    passes configure() names are stand-ins; the gate functions are the real ones.
+    passes configure() names are stand-ins; the gate functions and the table of norm
+    site kinds are the real ones.
     """
     from vllm.compilation.passes import pass_manager
 
-    for name in ("act_mxfp4_pass_enabled", "norm_mxfp4_pass_enabled"):
+    for name in ("act_mxfp4_pass_enabled", "norm_mxfp4_pass_enabled", "NORM_SITES"):
         monkeypatch.setattr(
             pass_manager, name, getattr(rocm_aiter_fusion, name), raising=False
         )
@@ -414,6 +453,48 @@ def test_pass_manager_registers_a_pass_only_for_its_flag_and_switch(
     (registered,) = mxfp4_passes("backbone", **{switch: True})
     assert type(registered) is pass_cls
     assert registered.compile_prefix == "backbone"
+
+
+def _norm_passes(passes):
+    return [p for p in passes if isinstance(p, _NormMxfp4Pass)]
+
+
+@pytest.mark.parametrize(
+    ("flags", "kinds"),
+    [
+        ((), []),
+        ((POSTNORM_FLAG,), ["post"]),
+        ((INPUTNORM_FLAG,), ["input"]),
+        ((POSTNORM_FLAG, INPUTNORM_FLAG), ["post", "input"]),
+    ],
+    ids=["none", "post", "input", "both"],
+)
+def test_pass_manager_registers_one_norm_pass_per_flag(
+    configure_manager, monkeypatch, flags, kinds
+):
+    # Input: no norm flag, each one, and both. Expected: one norm pass per flag set, of
+    # that flag's site kind, next to each other with the post pass first, each with the
+    # compile prefix of the graph. Why: each flag is judged and logged on its own, so
+    # each gets its own pass instance.
+    for flag in FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+    for flag in flags:
+        monkeypatch.setenv(flag, "1")
+    passes = configure_manager("backbone", fuse_norm_quant=True)
+    registered = _norm_passes(passes)
+    assert [p.sites for p in registered] == kinds
+    assert [p.compile_prefix for p in registered] == ["backbone"] * len(kinds)
+    if registered:
+        first = passes.index(registered[0])
+        assert passes[first : first + len(kinds)] == registered
+
+
+def test_input_norm_flag_still_needs_fuse_norm_quant(configure_manager, monkeypatch):
+    # Input: both norm flags set and fuse_norm_quant off. Expected: no norm pass. Why:
+    # a flag adds an opt-in to the pass config, it does not replace it.
+    monkeypatch.setenv(POSTNORM_FLAG, "1")
+    monkeypatch.setenv(INPUTNORM_FLAG, "1")
+    assert _norm_passes(configure_manager("backbone", fuse_norm_quant=False)) == []
 
 
 @pytest.mark.parametrize("model_tag", ["backbone", "eagle_head"])

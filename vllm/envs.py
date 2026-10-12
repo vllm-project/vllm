@@ -151,6 +151,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_AITER_FP4_ACT_QUANT_FUSION: bool = False
     VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION: bool = False
+    VLLM_ROCM_AITER_FP4_INPUTNORM_QUANT_FUSION: bool = False
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -1375,6 +1376,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION": lambda: (
         os.getenv("VLLM_ROCM_AITER_FP4_POSTNORM_QUANT_FUSION", "0").lower()
+        in ("1", "true")
+    ),
+    # Whether to fold the Gemma add+RMSNorm that starts a decoder layer (the input
+    # norm, in front of the attention or gated delta net projections) and its MXFP4
+    # activation quantization into the AITER asm MXFP4 GEMMs that consume them
+    # (gfx950). A norm that feeds two GEMMs is quantized once for both. Also needs
+    # PassConfig.fuse_norm_quant, which the default optimization level enables.
+    # Part of the compile cache key like every vLLM env var.
+    # By default is disabled.
+    "VLLM_ROCM_AITER_FP4_INPUTNORM_QUANT_FUSION": lambda: (
+        os.getenv("VLLM_ROCM_AITER_FP4_INPUTNORM_QUANT_FUSION", "0").lower()
         in ("1", "true")
     ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
