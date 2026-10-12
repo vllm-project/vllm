@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from typing import Any
 
 import torch
@@ -10,8 +11,10 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.utils import next_power_of_2
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -63,6 +66,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         )
         self.expanded_slot_mappings: torch.Tensor
         self.supports_mm_inputs = False
+        self.conv_checkpoints: dict[str, torch.Tensor] = {}
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass  # CUDA graph not yet supported for standalone AR speculator.
@@ -91,6 +95,26 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             dtype=torch.int64,
             device=self.device,
         )
+        layers = self.vllm_config.compilation_config.static_forward_context
+        for name in self.draft_attn_layer_names:
+            layer = layers[name]
+            if not isinstance(layer, ShortConv):
+                continue
+            if self.vllm_config.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "ShortConv draft models require mamba_cache_mode='none'."
+                )
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                raise ValueError(
+                    "ShortConv draft models require prefix caching to be disabled."
+                )
+            self.conv_checkpoints[name] = torch.empty(
+                self.max_num_reqs,
+                layer.conv.weight.shape[0],
+                layer.L_cache - 1,
+                dtype=layer.get_state_dtype()[0],
+                device=self.device,
+            )
 
     def load_draft_model(
         self,
@@ -160,6 +184,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         num_reqs: int,
         skip_attn: bool,
         num_tokens_across_dp: torch.Tensor | None,
+        num_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
     ) -> None:
         if skip_attn:
             src_tokens = input_batch.num_tokens
@@ -190,6 +216,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 last_token_indices=self.last_token_indices,
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=self.max_model_len,
+                num_sampled=num_sampled,
+                next_prefill_tokens=next_prefill_tokens,
             )
 
             prefill_slot_mappings = block_tables.compute_slot_mappings(
@@ -219,6 +247,17 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
                 prefill_slot_mappings, kv_cache_config
             )
+            for name, checkpoint in self.conv_checkpoints.items():
+                assert prefill_attn_md is not None
+                metadata = prefill_attn_md[name]
+                assert isinstance(metadata, ShortConvAttentionMetadata)
+                assert metadata.num_decodes == 0
+                prefill_attn_md[name] = dataclasses.replace(
+                    metadata,
+                    draft_checkpoint=checkpoint,
+                    draft_request_indices=input_batch.idx_mapping[:num_reqs],
+                    draft_correction_indices=self.last_token_indices[:num_reqs],
+                )
             hidden_states = self._run_model(
                 self.expanded_input_ids[:total_expanded],
                 self.expanded_positions[:total_expanded],
@@ -381,6 +420,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             num_reqs,
             skip_attn,
             num_tokens_across_dp,
+            num_sampled,
+            next_prefill_tokens,
         )
 
         if self.num_speculative_steps == 1:
@@ -411,6 +452,8 @@ def _prepare_prefill_inputs_kernel(
     query_start_loc_ptr,  # [num_reqs + 1] int32
     seq_lens_ptr,  # [num_reqs] int32
     num_rejected_ptr,  # [num_reqs] int32
+    num_sampled_ptr,
+    next_prefill_tokens_ptr,
     max_num_reqs,
     max_model_len,
     BLOCK_SIZE: tl.constexpr,
@@ -436,7 +479,10 @@ def _prepare_prefill_inputs_kernel(
     num_rejected = tl.load(num_rejected_ptr + req_idx)
 
     num_valid = q_next - q_start - num_rejected
-    correction_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+    if tl.load(num_sampled_ptr + req_idx) > 0:
+        correction_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+    else:
+        correction_token = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
     start_pos = tl.load(target_positions_ptr + q_start)
     out_start = q_start + req_idx
     total_out = q_next - q_start + 1
@@ -492,6 +538,8 @@ def prepare_prefill_inputs(
     last_token_indices: torch.Tensor,  # [max_num_reqs] int64
     max_num_reqs: int,
     max_model_len: int,
+    num_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
 ) -> int:
     """Call _prepare_prefill_inputs_kernel and return total_expanded tokens.
 
@@ -499,7 +547,7 @@ def prepare_prefill_inputs(
       - expanded_input_ids, expanded_positions
       - last_token_indices
       - input_buffers.query_start_loc  (expanded: original[i] + i)
-      - input_buffers.seq_lens         (= target_seq_lens - num_rejected + 1)
+      - input_buffers.seq_lens         (= target_seq_lens + 1, including slots)
     """
     num_reqs = input_batch.num_reqs
     src_tokens = input_batch.num_tokens
@@ -521,6 +569,8 @@ def prepare_prefill_inputs(
         input_batch.query_start_loc,
         input_batch.seq_lens,
         num_rejected.int(),
+        num_sampled,
+        next_prefill_tokens,
         max_num_reqs,
         max_model_len,
         BLOCK_SIZE=BLOCK_SIZE,

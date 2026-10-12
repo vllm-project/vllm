@@ -297,6 +297,9 @@ class ShortConv(MambaBase, PluggableLayer):
                 cache_indices=state_indices_tensor_p,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
+                draft_checkpoint=attn_metadata.draft_checkpoint,
+                draft_request_indices=attn_metadata.draft_request_indices,
+                draft_correction_indices=attn_metadata.draft_correction_indices,
             ).transpose(0, 1)[:num_prefill_tokens]
 
             y = C_p * Bx
