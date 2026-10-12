@@ -220,16 +220,20 @@ def _tp_replicas(
     return tp_size // uniform_kv_heads
 
 
-def _layer_number(layer_name: str) -> int:
-    """The model-wide layer number in a layer name, the same on every rank."""
+def _layer_module(layer_name: str) -> tuple[int, str]:
+    """The model-wide layer number in a layer name, the same on every rank,
+    and the name of its layer module (up to the number)."""
     from vllm.model_executor.models.utils import extract_layer_index
 
     try:
-        return extract_layer_index(layer_name)
+        number = extract_layer_index(layer_name)
     except AssertionError as e:
         raise _UnsupportedGroupError(
             f"layer {layer_name} has no single layer number"
         ) from e
+    parts = layer_name.split(".")
+    end = next(i for i, part in enumerate(parts) if part.isdigit()) + 1
+    return number, ".".join(parts[:end])
 
 
 def _attention_pieces(
@@ -396,8 +400,9 @@ def _build_layer_views(
     if group.host_resident:
         raise _UnsupportedGroupError("its KV is host-resident")
     # KV-sharing layers alias their target's cache: count each cache once,
-    # under the lowest layer number that uses it.
-    layers: dict[tuple[int, tuple[int, ...], int], _LayerCache] = {}
+    # under the lowest (layer number, name) that uses it.
+    owners: dict[tuple[int, tuple[int, ...]], tuple[int, str]] = {}
+    entries: dict[tuple[int, tuple[int, ...]], list[_LayerCache]] = {}
     for layer_name in group.layer_names:
         spec = _layer_spec(group.kv_cache_spec, layer_name)
         cache = kv_caches.get(layer_name)
@@ -408,37 +413,48 @@ def _build_layer_views(
         ):
             # The scheduler picks a Mamba group's state block by its group spec.
             raise _UnsupportedGroupError("its Mamba layers have different specs")
-        number = _layer_number(layer_name)
+        number, _ = _layer_module(layer_name)
+        identity = (cache.data_ptr(), cache.stride())
+        if identity in owners:
+            owners[identity] = min(owners[identity], (number, layer_name))
+            continue
+        owners[identity] = (number, layer_name)
         if isinstance(spec, MambaSpec) and spec.state_splits is not None:
-            caches = _mamba_rows(spec, cache, num_blocks, number, tp_size)
+            entries[identity] = _mamba_rows(spec, cache, num_blocks, number, tp_size)
         elif isinstance(spec, MambaSpec):
             pieces, replicas, heads = _mamba_pieces(spec, cache, num_blocks, tp_size)
-            caches = [_LayerCache(number, pieces, replicas, heads)]
+            entries[identity] = [_LayerCache(number, pieces, replicas, heads)]
         else:
             pieces, replicas, heads = _attention_pieces(
                 spec, cache, num_blocks, tp_size, uniform_kv_heads
             )
-            caches = [_LayerCache(number, pieces, replicas, heads)]
-        for layer in caches:
-            identity = (cache.data_ptr(), cache.stride(), layer.first_head)
-            if identity in layers:
-                layers[identity].number = min(layers[identity].number, number)
-            else:
-                layers[identity] = layer
+            entries[identity] = [_LayerCache(number, pieces, replicas, heads)]
 
-    slices = [(layer.number, layer.first_head) for layer in layers.values()]
-    if len(set(slices)) != len(slices):
-        raise _UnsupportedGroupError("two of its KV caches share a layer number")
-    if any(
-        layer.first_head + layer.heads * (tp_size // layer.replicas)
-        > MAX_KV_HEADS_PER_LAYER
-        for layer in layers.values()
-    ):
+    # The caches of one layer module (e.g. an attention's KV and its indexer's,
+    # always on one PP stage) take consecutive slices, in layer name order.
+    layers: list[_LayerCache] = []
+    modules: dict[int, str] = {}
+    next_head: dict[int, int] = defaultdict(int)
+    for identity, (number, name) in sorted(owners.items(), key=lambda item: item[1]):
+        module = _layer_module(name)[1]
+        if modules.setdefault(number, module) != module:
+            raise _UnsupportedGroupError(
+                f"layers {modules[number]} and {module} share a layer number"
+            )
+        for layer in entries[identity]:
+            layer.number = number
+            layer.first_head += next_head[number]
+        next_head[number] = max(
+            layer.first_head + layer.heads * (tp_size // layer.replicas)
+            for layer in entries[identity]
+        )
+        layers.extend(entries[identity])
+    if any(heads > MAX_KV_HEADS_PER_LAYER for heads in next_head.values()):
         raise _UnsupportedGroupError(
             f"a layer has more than {MAX_KV_HEADS_PER_LAYER} KV heads"
         )
     views = []
-    for layer in layers.values():
+    for layer in layers:
         shard, replica = divmod(tp_rank, layer.replicas)
         views.append(
             _LayerView(

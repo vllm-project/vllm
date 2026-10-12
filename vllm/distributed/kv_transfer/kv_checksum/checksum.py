@@ -22,7 +22,8 @@ unsharded model (all layers of the group, all KV heads):
    where ``H = MAX_KV_HEADS_PER_LAYER``, a fixed bound on any layer's KV
    heads, so that ``m`` does not depend on the model or how it is split.
    Layers are numbered by the layer number in their names and heads
-   globally across TP.
+   globally across TP; several caches of one layer (e.g. an attention's KV
+   and its indexer's) number their heads consecutively, in layer name order.
 
 Odd factors make any change to a single piece change ``c``, and distinct
 factors make misplaced data (swapped tokens, blocks, heads or layers) change
