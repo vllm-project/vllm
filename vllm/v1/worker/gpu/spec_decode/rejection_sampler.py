@@ -188,8 +188,10 @@ class RejectionSampler:
         cu_num_logits: torch.Tensor,
         cu_num_logits_np: np.ndarray,
         max_num_logprobs: int,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        max_token_ids: int = 0,
     ) -> LogprobsTensors | None:
-        if max_num_logprobs == NO_LOGPROBS:
+        if max_num_logprobs == NO_LOGPROBS and max_token_ids == 0:
             return None
 
         num_reqs = cu_num_logits.shape[0] - 1
@@ -216,9 +218,14 @@ class RejectionSampler:
                 cu_num_generated_tokens = cu_num_logits_np.tolist()
         return compute_topk_scores(
             logits,
-            max_num_logprobs,
+            max(max_num_logprobs, 0),
             flat_sampled,
             cu_num_generated_tokens,
+            logprob_token_ids_state=(
+                self.sampler.logprob_token_ids_state if max_token_ids else None
+            ),
+            expanded_idx_mapping=expanded_idx_mapping,
+            max_per_req_token_ids=max_token_ids,
             logits_mode=self.sampler.logprobs_mode
             in ("raw_logits", "processed_logits"),
         )
@@ -305,6 +312,7 @@ class RejectionSampler:
         max_chunk_logits: int,
         max_num_logprobs: int,
         verify_draft_sampled: torch.Tensor | None = None,
+        max_token_ids: int = 0,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -365,6 +373,8 @@ class RejectionSampler:
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
                 max_num_logprobs,
+                input_batch.expanded_idx_mapping[lo:hi],
+                max_token_ids,
             )
             if chunk_logprobs is not None:
                 logprobs_chunks.append(chunk_logprobs)
@@ -444,6 +454,11 @@ class RejectionSampler:
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
         )
+        # Requests may also ask for the logprobs of specific tokens
+        # (`logprob_token_ids`), without any top-k logprobs.
+        max_token_ids = self.sampler.logprob_token_ids_state.max_num_token_ids(
+            input_batch.idx_mapping_np
+        )
         chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
         (
             sampled,
@@ -459,6 +474,7 @@ class RejectionSampler:
             chunk_logit_limit,
             max_num_logprobs,
             verify_draft_sampled,
+            max_token_ids,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(

@@ -10,7 +10,10 @@ import torch
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -148,6 +151,82 @@ def test_chunked_scores_match_full_batch(
         == full_logprobs.cu_num_generated_tokens
     )
     assert sampling_mask_tensors is None
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+def test_logprob_token_ids_without_topk_logprobs(logprobs_mode: str):
+    """Requests that only set `logprob_token_ids` (no `logprobs`) still get the
+    scores of those tokens when their batch is verified with speculative drafts."""
+    device = torch.device("cuda")
+    vocab_size = 17
+    cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
+    idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
+    input_batch = _make_input_batch(cu_num_logits_np, idx_mapping_np, device)
+    wanted = {3: [5, 11], 0: [2], 2: [], 1: [16, 0, 7]}  # request state index -> ids
+    token_ids_state = LogprobTokenIdsState(4, device)
+    for req_idx, ids in wanted.items():
+        token_ids_state.add_request(req_idx, SamplingParams(logprob_token_ids=ids))
+    token_ids_state.apply_staged_writes()
+    max_token_ids = token_ids_state.max_num_token_ids(idx_mapping_np)
+    assert max_token_ids == 3
+    rejection_sampler = _make_rejection_sampler(
+        SimpleNamespace(
+            logprobs_mode=logprobs_mode,
+            return_sampling_mask=False,
+            logprob_token_ids_state=token_ids_state,
+        ),
+        num_speculative_steps=3,
+    )
+
+    def fake_verify(
+        self, logits, _draft_logits, _draft_sampled, _pos, cu_num_logits, *_
+    ):
+        num_sampled = torch.diff(cu_num_logits).to(torch.int32)
+        sampled = (
+            torch.arange(4, device=device).repeat(len(num_sampled), 1) % vocab_size
+        )
+        return logits, sampled, num_sampled
+
+    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)
+    torch.manual_seed(0)
+    logits = torch.randn(10, vocab_size, device=device)
+
+    _, _, chunked, _ = rejection_sampler._verify_in_chunks(
+        logits,
+        input_batch,
+        draft_logits=None,
+        draft_sampled=torch.arange(10, device=device),
+        pos=torch.arange(10, device=device),
+        max_chunk_logits=5,
+        max_num_logprobs=NO_LOGPROBS,
+        max_token_ids=max_token_ids,
+    )
+    assert chunked is not None
+    assert chunked.logprobs.shape == (10, 1 + max_token_ids)
+
+    expected = logits if logprobs_mode == "raw_logits" else logits.log_softmax(-1)
+    for req, req_idx in enumerate(idx_mapping_np):
+        ids = wanted[int(req_idx)]
+        for row in range(cu_num_logits_np[req], cu_num_logits_np[req + 1]):
+            assert chunked.logprob_token_ids[row, 1 : 1 + len(ids)].tolist() == ids
+            torch.testing.assert_close(
+                chunked.logprobs[row, 1 : 1 + len(ids)], expected[row, ids]
+            )
+            assert torch.isinf(chunked.logprobs[row, 1 + len(ids) :]).all()
+
+    # Without any requested token ids nothing is computed.
+    assert (
+        rejection_sampler._get_logprobs_tensors(
+            torch.zeros(4, 4, dtype=torch.int64, device=device),
+            torch.ones(4, dtype=torch.int32, device=device),
+            logits[:4],
+            input_batch.cu_num_logits[:5],
+            input_batch.cu_num_logits_np[:5],
+            NO_LOGPROBS,
+        )
+        is None
+    )
 
 
 @pytest.mark.skipif(
