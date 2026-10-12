@@ -45,7 +45,6 @@ trait_set! {
 }
 
 /// Text request preparation shared by inference and render-only frontends.
-#[derive(Clone)]
 pub struct TextRequestProcessor {
     /// Tokenizer/model metadata backend responsible for prompt encode/decode
     /// and sampling hints.
@@ -57,7 +56,6 @@ pub struct TextRequestProcessor {
     max_logprobs: i32,
     /// Backend that compiles every structured-output constraint.
     structured_outputs_backend: StructuredOutputBackend,
-    return_token_offsets: bool,
 }
 
 impl TextRequestProcessor {
@@ -68,7 +66,6 @@ impl TextRequestProcessor {
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
             structured_outputs_backend: StructuredOutputBackend::default(),
-            return_token_offsets: false,
         }
     }
 
@@ -91,12 +88,6 @@ impl TextRequestProcessor {
         self.structured_outputs_backend
     }
 
-    /// Collect source character offsets when the tokenizer supports them.
-    pub fn with_token_offsets(mut self, enabled: bool) -> Self {
-        self.return_token_offsets = enabled;
-        self
-    }
-
     /// Return the tokenizer used by this processor.
     pub fn tokenizer(&self) -> DynTokenizer {
         self.backend.tokenizer()
@@ -113,7 +104,7 @@ impl TextRequestProcessor {
             mut token_ids,
             mut token_offsets,
         } = match take(&mut request.prompt) {
-            Prompt::Text(text) if self.return_token_offsets && request.mm_features.is_none() => {
+            Prompt::Text(text) if request.return_token_offsets && request.mm_features.is_none() => {
                 tokenizer.encode_with_offsets(&text, request.add_special_tokens)?
             }
             Prompt::Text(text) => EncodedPrompt {
@@ -380,8 +371,7 @@ mod tests {
 
     #[test]
     fn token_offsets_survive_truncation_and_repeated_preparation() {
-        let processor =
-            TextRequestProcessor::new(Arc::new(TestTextBackend), 4).with_token_offsets(true);
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 4);
         for (side, expected_ids, expected_offsets) in [
             (
                 TruncationSide::Left,

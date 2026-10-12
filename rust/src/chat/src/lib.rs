@@ -260,6 +260,7 @@ impl ChatRequestProcessor {
             priority: request.priority,
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
+            return_token_offsets: request.return_token_offsets,
             data_parallel_rank: request.data_parallel_rank,
             session_id: request.session_id,
             kv_hints: None,

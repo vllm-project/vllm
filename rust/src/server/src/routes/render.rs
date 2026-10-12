@@ -15,10 +15,10 @@ use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use validator::Validate;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_text::{TextRequest, TextRequestProcessor};
+use vllm_text::TextRequest;
 
 use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
-use crate::error::{ApiError, server_error, text_submit_error};
+use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::render::RenderState;
 use crate::routes::inference::generate::{
@@ -53,25 +53,6 @@ struct RenderResponse {
     #[serde(flatten)]
     request: GenerateRequest,
     token_offsets: Option<Vec<(usize, usize)>>,
-}
-
-async fn render_processor(
-    state: &RenderState,
-    return_token_offsets: Option<bool>,
-) -> Result<TextRequestProcessor, ApiError> {
-    let enabled = return_token_offsets.unwrap_or(false);
-    if enabled {
-        let tokenizer = state.text.tokenizer();
-        tokio::task::spawn_blocking(move || tokenizer.warm_offsets())
-            .await
-            .map_err(|error| {
-                server_error!(
-                    "offset tokenizer initialization failed: {}",
-                    error.as_report()
-                )
-            })?;
-    }
-    Ok(state.text.clone().with_token_offsets(enabled))
 }
 
 pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
@@ -126,14 +107,14 @@ fn response_model(state: &RenderState, requested_model: Option<&str>) -> String 
 
 fn lower_render_request(
     state: &RenderState,
-    processor: &TextRequestProcessor,
     text_request: TextRequest,
     model: String,
     stream: bool,
     stream_options: Option<StreamOptions>,
     return_token_ids: Option<bool>,
 ) -> Result<RenderResponse, ApiError> {
-    let prepared = processor
+    let prepared = state
+        .text
         .prepare(text_request)
         .map_err(|error| text_submit_error("failed to prepare render request", error))?;
     let token_ids = prepared.generate_request.prompt_token_ids;
@@ -206,14 +187,14 @@ async fn render_chat(
     headers: HeaderMap,
     ValidatedJson(render): ValidatedJson<RenderRequest<ChatCompletionRequest>>,
 ) -> Result<Json<RenderResponse>, ApiError> {
-    let processor = render_processor(&state, render.return_token_offsets).await?;
     let body = render.request;
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
+    let mut chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
+    chat_request.return_token_offsets = render.return_token_offsets.unwrap_or(false);
     validate_max_output_tokens(
         "max_completion_tokens",
         chat_request.sampling_params.max_tokens,
@@ -221,13 +202,12 @@ async fn render_chat(
     )?;
     let text_request = state
         .chat
-        .prepare(chat_request, &processor)
+        .prepare(chat_request, &state.text)
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
         .text_request;
     Ok(Json(lower_render_request(
         &state,
-        &processor,
         text_request,
         model,
         stream,
@@ -241,7 +221,6 @@ async fn render_completion(
     headers: HeaderMap,
     ValidatedJson(render): ValidatedJson<RenderRequest<CompletionRequest>>,
 ) -> Result<Json<Vec<RenderResponse>>, ApiError> {
-    let processor = render_processor(&state, render.return_token_offsets).await?;
     let body = render.request;
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
@@ -249,7 +228,7 @@ async fn render_completion(
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let tokenizer = state.text.tokenizer();
-    let text_request = lower_completion_request(
+    let mut text_request = lower_completion_request(
         body,
         &model_resolution(&state),
         request_context,
@@ -260,9 +239,9 @@ async fn render_completion(
         text_request.sampling_params.max_tokens,
         state.text.max_model_len(),
     )?;
+    text_request.return_token_offsets = render.return_token_offsets.unwrap_or(false);
     Ok(Json(vec![lower_render_request(
         &state,
-        &processor,
         text_request,
         model,
         stream,

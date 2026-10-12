@@ -284,6 +284,8 @@ impl HuggingFaceTokenizer {
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))
     }
 
+    /// Lazily load a Hugging Face tokenizer for offsets, which fastokens does not
+    /// provide. The first caller pays the load.
     fn offsets_tokenizer(&self) -> Option<&HfTokenizer> {
         self.offsets_tokenizer
             .get_or_init(|| {
@@ -340,12 +342,6 @@ impl Tokenizer for HuggingFaceTokenizer {
             token_ids,
             token_offsets,
         })
-    }
-
-    fn warm_offsets(&self) {
-        if !matches!(self.backend, Backend::Hf(_)) {
-            self.offsets_tokenizer();
-        }
     }
 
     fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
@@ -606,7 +602,8 @@ mod tests {
         });
         let path = write_tokenizer_json(dir.path(), "tokenizer.json", &json);
         let tokenizer = HuggingFaceTokenizer::new_fastokens(&path).unwrap();
-        tokenizer.warm_offsets();
+        // Load the companion before the source file changes.
+        tokenizer.encode_with_offsets("", false).unwrap();
         let x_id = json["model"]["vocab"]["x"].clone();
         let y_id = json["model"]["vocab"]["y"].clone();
         json["model"]["vocab"]["x"] = y_id.clone();

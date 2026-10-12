@@ -160,6 +160,7 @@ pub(super) fn prepare_completion_request(
         priority: ctx.priority.or(request.priority).unwrap_or(0),
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
+        return_token_offsets: false,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id,
         kv_hints: None,

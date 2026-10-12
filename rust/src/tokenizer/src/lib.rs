@@ -40,9 +40,6 @@ pub trait Tokenizer: Send + Sync {
         })
     }
 
-    /// Warm offset resources; async callers should use a blocking task.
-    fn warm_offsets(&self) {}
-
     /// Equivalent to `encode(text, false)`, except that every added,
     /// special, and control-token matcher is bypassed.
     fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>>;

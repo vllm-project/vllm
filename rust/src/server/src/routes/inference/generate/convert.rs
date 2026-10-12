@@ -83,6 +83,7 @@ pub(super) fn prepare_generate_request(
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
+        return_token_offsets: false,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id: ctx.session_id,
         kv_hints: None,
