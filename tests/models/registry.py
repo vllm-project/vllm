@@ -776,6 +776,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         },
         max_model_len=4096,
     ),
+    "DistilBertForSequenceClassification": _HfExamplesInfo(
+        "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+    ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
     ),

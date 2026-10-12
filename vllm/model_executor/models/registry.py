@@ -779,6 +779,11 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
         "transformers",
         "TransformersMultiModalForCausalLM",
     ),
+    # Sequence classification models
+    "DistilBertForSequenceClassification": (
+        "transformers",
+        "TransformersForSequenceClassification",
+    ),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
