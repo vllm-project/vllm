@@ -260,3 +260,28 @@ def test_simulate_offline_speculative_decoding(
     for timing in result.requests:
         assert timing.num_output_tokens == 16
         assert len(timing.token_times) == chunks
+
+
+@pytest.mark.parametrize(("tp", "pp"), [(2, 1), (1, 2)])
+def test_simulate_forward_multi_rank(
+    vllm_runner: type[VllmRunner], tp: int, pp: int
+) -> None:
+    """Every rank runs the bookkeeping; the output rank's trace tokens come
+    back as on a single rank."""
+    if not current_platform.is_cuda_alike() or (
+        current_platform.device_count() < tp * pp
+    ):
+        pytest.skip(f"Needs {tp * pp} CUDA devices.")
+    prompt = list(range(1000, 1064))
+    sampling_params = SamplingParams(trace_decode_token_ids=[501, 502, 503])
+    with vllm_runner(
+        "Qwen/Qwen3-0.6B",
+        simulate_forward=True,
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
+        kv_cache_memory_bytes=1024**3,
+        max_model_len=1024,
+    ) as vllm_model:
+        outputs = vllm_model.generate([prompt] * 4, sampling_params=sampling_params)
+    for output in outputs:
+        assert output[0][0][-3:] == [501, 502, 503]

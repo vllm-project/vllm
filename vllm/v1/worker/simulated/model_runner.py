@@ -19,9 +19,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import (
@@ -29,6 +31,7 @@ from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -40,10 +43,13 @@ from vllm.v1.worker.simulated.timing import (
     ZeroTimingProvider,
     acceptance_rates_from_log,
     build_step_descriptor,
+    empty_step_descriptor,
+    gather_dp_step,
     get_clock,
     get_timing_provider,
     is_building_driven_engine,
     parallel_summary,
+    step_log_path,
 )
 
 if TYPE_CHECKING:
@@ -78,14 +84,18 @@ class SimulatedModelRunner(GPUModelRunner):
                 "vllm.v1.worker.simulated.offline.make_engine()."
             )
         self.clock = get_clock(sim.clock)
-        self.step_log = StepLogWriter(sim.log_path) if sim.log_path else None
+        log_path = step_log_path(vllm_config)
+        self.step_log = StepLogWriter(log_path) if log_path else None
         self.fallback_token_id = sim.fallback_token_id
         self._pending_step: _PendingStep | None = None
         self._step_index = 0
-        # The device is a serial resource: under async scheduling the host
-        # prepares step N+1 while step N "runs", but N+1 cannot start on the
-        # device before N finishes. Track when the device becomes free.
-        self._device_free_at = 0.0
+        self._warming_up = False
+        # Each pipeline stage's device is a serial resource: under async
+        # scheduling the host prepares step N+1 while step N "runs", but N+1
+        # cannot start on a stage before N leaves it. Track when each stage
+        # becomes free. Every rank models the whole pipeline from the same
+        # inputs, so all ranks agree on every deadline.
+        self._stage_free_at = [0.0] * self.parallel_config.pipeline_parallel_size
         self._parallel = parallel_summary(vllm_config)
         self._prompt_lens: dict[str, int] = {}
         self._rng = np.random.default_rng(vllm_config.model_config.seed)
@@ -173,6 +183,8 @@ class SimulatedModelRunner(GPUModelRunner):
         step_log, self.step_log = self.step_log, None
         provider = self.timing_provider
         self.timing_provider = ZeroTimingProvider(self.vllm_config)
+        # Ranks warm up independently; keep DP ranks out of the step sync.
+        self._warming_up = True
         try:
             assert self.execute_model(step) is None
             out = self.sample_tokens(None)
@@ -188,7 +200,8 @@ class SimulatedModelRunner(GPUModelRunner):
             self._pending_step = None
             self._prompt_lens.clear()
             self._step_index = 0
-            self._device_free_at = 0.0
+            self._stage_free_at = [0.0] * len(self._stage_free_at)
+            self._warming_up = False
 
     # ------------------------------------------------------------------ #
     # Execution
@@ -237,18 +250,19 @@ class SimulatedModelRunner(GPUModelRunner):
         descriptor = build_step_descriptor(
             scheduler_output, self._prompt_lens, self._step_index, self._parallel
         )
-        cost = self.timing_provider.estimate(descriptor)
+        descriptor, now = self._dp_joint_step(descriptor, t_entry)
+        cost = self._estimate(descriptor)
         # Queue the step behind whatever the device is still "executing". It
         # cannot complete before its host work (launches, sampling) is done.
-        t_start = max(t_entry, self._device_free_at)
-        self._device_free_at = t_start + cost.device_s
+        t_start = self._agree_start(max(t_entry, self._stage_free_at[0]), now)
+        device_end = self._run_pipeline(t_start, cost.device_s)
         self._pending_step = _PendingStep(
             input_batch=input_batch,
             descriptor=descriptor,
             cost=cost,
             t_entry=t_entry,
             t_start=t_start,
-            t_deadline=max(self._device_free_at, t_entry + cost.host_s),
+            t_deadline=max(device_end, t_entry + cost.host_s),
             finished_req_ids=list(scheduler_output.finished_req_ids),
             num_spec_tokens_to_schedule=scheduler_output.num_spec_tokens_to_schedule,
         )
@@ -283,11 +297,17 @@ class SimulatedModelRunner(GPUModelRunner):
             num_accepted = np.where(
                 completes, self._num_accepted(pending, input_batch, num_drafts), 0
             )
+            # Under MoE DP the descriptor is the joint step, whose other
+            # ranks' acceptance this rank does not know.
             pending.cost = dataclasses.replace(
                 pending.cost,
-                num_accepted=tuple(
-                    int(num_accepted[row[r.req_id]])
-                    for r in pending.descriptor.requests
+                num_accepted=(
+                    tuple(
+                        int(num_accepted[row[r.req_id]])
+                        for r in pending.descriptor.requests
+                    )
+                    if all(r.req_id in row for r in pending.descriptor.requests)
+                    else None
                 ),
             )
         num_sampled_np = np.where(completes, 1 + num_accepted, 0).astype(np.int32)
@@ -301,8 +321,9 @@ class SimulatedModelRunner(GPUModelRunner):
             dtype=torch.int64,
             device=self.device,
         )
-        assert self.sampler is not None
-        trace_state = self.sampler.trace_replay_state
+        # Only the last pipeline stage has a sampler; the token values matter
+        # only there (the counts must agree on all ranks).
+        trace_state = self.sampler.trace_replay_state if self.sampler else None
         if trace_state is not None and self.num_speculative_steps == 0:
             trace_state.apply_trace(sampled.view(-1), input_batch.idx_mapping)
 
@@ -347,6 +368,58 @@ class SimulatedModelRunner(GPUModelRunner):
         # Hold the engine thread for the rest of the step's host time.
         self.clock.sleep_until(pending.t_entry + pending.cost.host_s)
         return SimulatedAsyncOutput(output, pending.t_deadline, self.clock)
+
+    def _run_pipeline(self, t_start: float, device_s: float) -> float:
+        """Push a step entering stage 0 at `t_start` through the pipeline;
+        returns when it leaves the last stage. `device_s` is the step's time
+        through the whole model, so with balanced stages each one is busy for
+        an equal share of it."""
+        stage_s = device_s / len(self._stage_free_at)
+        t = t_start
+        for stage, free_at in enumerate(self._stage_free_at):
+            t = max(t, free_at) + stage_s
+            self._stage_free_at[stage] = t
+        return t
+
+    def _dp_joint_step(
+        self, descriptor: StepDescriptor, now: float
+    ) -> tuple[StepDescriptor, float]:
+        """Under MoE data parallelism, the joint step of all DP ranks and the
+        time at which they all reached it (the gather is a barrier); this
+        rank's own step otherwise."""
+        if self.dp_size == 1 or self._warming_up or should_skip_dp_coordination():
+            return descriptor, now
+        joint = gather_dp_step(descriptor)
+        return joint, self.clock.now()
+
+    def _agree_start(self, t_start: float, now: float) -> float:
+        """The latest DP rank's start time. Clocks need not agree across
+        hosts, so the ranks exchange delays relative to the moment they all
+        reached the step."""
+        if self.dp_size == 1 or self._warming_up or should_skip_dp_coordination():
+            return t_start
+        delay = torch.tensor([t_start - now], dtype=torch.float64)
+        dist.all_reduce(delay, op=dist.ReduceOp.MAX, group=get_dp_group().cpu_group)
+        return now + float(delay[0])
+
+    def _estimate(self, descriptor: StepDescriptor) -> StepCost:
+        if not descriptor.requests:
+            return StepCost(device_s=0.0)
+        return self.timing_provider.estimate(descriptor)
+
+    def _dummy_run(self, num_tokens: int, *args, **kwargs):  # type: ignore[override]
+        """An idle DP rank's dummy batch: join the lockstep step and occupy
+        the pipeline like the busy ranks. The host does not wait for it, as
+        the real dummy forward returns once launched."""
+        if self.dp_size > 1:
+            descriptor, now = self._dp_joint_step(
+                empty_step_descriptor(self._step_index, self._parallel),
+                self.clock.now(),
+            )
+            cost = self._estimate(descriptor)
+            t_start = self._agree_start(max(now, self._stage_free_at[0]), now)
+            self._run_pipeline(t_start, cost.device_s)
+        return None, None
 
     def _num_accepted(
         self, pending: _PendingStep, input_batch: InputBatch, num_drafts: np.ndarray

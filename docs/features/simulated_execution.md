@@ -198,12 +198,64 @@ is sampled independently per step, so the spread of per-request acceptance
 (and with it P99 TPOT) is narrower than on the real deployment. Trace replay
 is not available with speculative decoding; outputs are fallback tokens.
 
+### Parallelism
+
+Tensor, pipeline and data parallelism run as in the real deployment: one
+simulated worker per rank, each building its shard of the model on the meta
+device, so per-rank KV-cache specs (and with them the KV capacity) are
+vLLM's own. `--kv-cache-memory-bytes` is per rank. No collective runs during a
+step; every rank derives the same timing from the same scheduler output.
+
+* **Tensor parallelism**: the ranks run in lockstep and agree on every step's
+  time.
+* **Pipeline parallelism**: no hidden states pass between stages. `device_s`
+  is the step's time through the whole pipeline and each of the balanced
+  stages is busy for an equal share, so consecutive microbatches overlap as on
+  the real pipeline. A step recorded under pipeline parallelism is timed on
+  the last stage from its arrival there, which includes the wait for the
+  earlier stages, i.e. the same through-pipeline time. When the real
+  pipeline is saturated the last stage is still busy with the previous
+  microbatch as the next one arrives, so its recorded time shrinks toward one
+  stage's; record such workloads with a recording at lower load or a
+  per-stage model.
+* **Data parallelism**: dense models run independent engines; DP rank
+  i > 0 writes its step log to `<log_path>.dp<i>`. MoE models run their DP
+  ranks in lockstep (their forward passes meet in all-to-all collectives), so
+  a step's cost depends on every rank's batch. Where the real runner
+  synchronizes the ranks (every step that runs the model and every dummy
+  batch of an idle rank), the simulated ranks, and the recording ranks of a
+  real deployment, gather their step descriptors into one joint step. The
+  joint step is priced once, starts on the latest rank, and is what DP rank 0
+  logs; the other ranks write no log. Accepted draft counts are not recorded
+  for joint steps.
+
+Only the output rank (last pipeline stage, first tensor-parallel rank) writes
+the step log, for simulated and recorded runs alike. On CUDA hosts each rank
+binds its own device, as in the deployment being modeled; a simulated rank
+needs only a few MB of device memory.
+
+On Qwen3-8B / H200 with a Poisson workload (ISL 512, OSL 64, 8 req/s, 96
+requests), replaying a recording of the same configuration through the
+offline driver on the real clock gives:
+
+| | TTFT mean | TPOT mean | E2E mean |
+|---|---|---|---|
+| TP=2, real / simulated (ms) | 19.94 / 20.09 | 3.990 / 3.996 | 271.3 / 271.9 |
+| PP=2, real / simulated (ms) | 18.81 / 18.30 | 5.881 / 5.915 | 389.3 / 391.0 |
+
+With PP=2 saturated (256 requests at 64 req/s) the simulation is about 10%
+optimistic (TPOT 10.06 vs 11.12 ms), as the recorded through-pipeline times
+shrink (see above). Qwen3-VL-30B-A3B-Instruct-FP8 (MoE, text only) with DP=2
+and expert parallelism under `vllm serve` (ISL 512, OSL 64, 16 req/s, 128
+requests) reproduces mean TPOT within 2% and mean TTFT within 9%.
+
 ## Limitations
 
-* Single rank: tensor, pipeline and data parallelism are rejected. The
-  parallel configuration is passed to the provider for modeling purposes only.
+* Ranks cannot share a device on CUDA hosts, so simulating a deployment
+  needs as many devices as it has ranks (not their memory).
+* Pipeline stages are assumed balanced.
 * No LoRA, KV transfer or pooling models. Speculative decoding without
   adaptive verification only, and no diffusion models.
-* The `fast_forward` and `virtual` clocks are offline-only and single-process;
-  served simulations run in real time.
+* The `fast_forward` and `virtual` clocks are offline-only and need a single
+  process (one rank); served and multi-rank simulations run in real time.
 * Prompt and output token ids are not meaningful; only their counts are.

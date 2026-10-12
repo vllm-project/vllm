@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import os
 import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
@@ -184,6 +185,47 @@ def build_step_descriptor(
         num_kv_tokens=num_kv_tokens,
         parallel=parallel,
     )
+
+
+def empty_step_descriptor(step_index: int, parallel: ParallelSummary) -> StepDescriptor:
+    """A rank's share of a lockstep step in which it has no requests (an idle
+    data-parallel rank's dummy batch)."""
+    return StepDescriptor(step_index, (), 0, 0, 0, 0, 0, 0, parallel)
+
+
+def merge_dp_descriptors(descriptors: list[StepDescriptor]) -> StepDescriptor:
+    """All MoE data-parallel ranks' shares of one lockstep step, as one step.
+    Their forward passes meet in all-to-all collectives, so the step takes as
+    long as the whole joint batch dictates on every rank."""
+    own = descriptors[0]
+    return StepDescriptor(
+        step_index=own.step_index,
+        requests=tuple(
+            sorted((r for d in descriptors for r in d.requests), key=lambda r: r.req_id)
+        ),
+        num_prefill_tokens=sum(d.num_prefill_tokens for d in descriptors),
+        num_decode_tokens=sum(d.num_decode_tokens for d in descriptors),
+        num_prefill_reqs=sum(d.num_prefill_reqs for d in descriptors),
+        num_decode_reqs=sum(d.num_decode_reqs for d in descriptors),
+        num_common_prefix_blocks=max(d.num_common_prefix_blocks for d in descriptors),
+        num_kv_tokens=sum(d.num_kv_tokens for d in descriptors),
+        parallel=own.parallel,
+    )
+
+
+def gather_dp_step(descriptor: StepDescriptor) -> StepDescriptor:
+    """The joint step of all MoE data-parallel ranks. Must be called exactly
+    where the real runner synchronizes the DP ranks: every step that runs the
+    model, and every dummy batch of an idle rank."""
+    import torch.distributed as dist
+
+    from vllm.distributed.parallel_state import get_dp_group
+
+    group = get_dp_group()
+    gathered: list[StepDescriptor | None] = [None] * group.world_size
+    dist.all_gather_object(gathered, descriptor, group=group.cpu_group)
+    others = [d for i, d in enumerate(gathered) if i != group.rank_in_group]
+    return merge_dp_descriptors([descriptor, *others])  # type: ignore[list-item]
 
 
 @dataclass(frozen=True)
@@ -606,6 +648,33 @@ class SimulatedAsyncOutput(AsyncModelRunnerOutput):
 # --------------------------------------------------------------------------- #
 # Step log
 # --------------------------------------------------------------------------- #
+
+
+def step_log_path(vllm_config: VllmConfig) -> str | None:
+    """This rank's step log, if it writes one. Only the rank whose output the
+    executor returns (last pipeline stage, first tensor-parallel rank) writes
+    one. Under pipeline parallelism a recorded device time therefore runs from
+    the step's arrival at the last stage, whose first kernels wait for the
+    earlier stages, to its end: the step's time through the whole pipeline,
+    which is what `device_s` means to the simulated runner (while the pipeline
+    is not saturated). MoE data-parallel ranks step in lockstep and log the
+    joint step, so only DP rank 0 writes; independent (dense) DP rank i > 0
+    writes `<log_path>.dp<i>`."""
+    from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+
+    path = vllm_config.simulation_config.log_path
+    if path is None or not get_pp_group().is_last_rank:
+        return None
+    if get_tp_group().rank_in_group != 0:
+        return None
+    parallel_config = vllm_config.parallel_config
+    dp_index = parallel_config.data_parallel_index
+    if parallel_config.data_parallel_size > 1:
+        return path if parallel_config.data_parallel_rank == 0 else None
+    if dp_index > 0:
+        root, ext = os.path.splitext(path)
+        path = f"{root}.dp{dp_index}{ext}"
+    return path
 
 
 class StepLogWriter:

@@ -311,3 +311,17 @@ def test_acceptance_rates_from_log(tmp_path):
     # Position 1: 4 of 5 accepted. Position 2: 2 of the 3 that reached it.
     # Position 3: 1 of the 2 that reached it.
     assert acceptance_rates_from_log(str(log)) == pytest.approx([4 / 5, 2 / 3, 1 / 2])
+
+
+def test_pipeline_stages_overlap_consecutive_steps():
+    from types import SimpleNamespace
+
+    from vllm.v1.worker.simulated.model_runner import SimulatedModelRunner
+
+    runner = SimpleNamespace(_stage_free_at=[0.0, 0.0])
+    run = SimulatedModelRunner._run_pipeline
+    # 4 ms through two balanced stages: 2 ms each.
+    assert run(runner, 0.0, 4e-3) == pytest.approx(4e-3)
+    # A second step enters stage 0 as the first moves to stage 1.
+    assert run(runner, 0.0, 4e-3) == pytest.approx(6e-3)
+    assert runner._stage_free_at == pytest.approx([4e-3, 6e-3])

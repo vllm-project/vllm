@@ -15,15 +15,20 @@ import time
 
 import torch
 
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.simulated.timing import (
     StepCost,
     StepDescriptor,
     StepLogWriter,
     build_step_descriptor,
+    empty_step_descriptor,
+    gather_dp_step,
     parallel_summary,
+    step_log_path,
 )
 
 logger = init_logger(__name__)
@@ -78,6 +83,9 @@ def _num_accepted(
     if not sampled or not any(r.num_spec_tokens for r in descriptor.requests):
         return None
     index = output.req_id_to_index
+    if not all(r.req_id in index for r in descriptor.requests):
+        # A joint MoE-DP step: the other ranks' acceptance is not known here.
+        return None
     return tuple(
         max(len(sampled[index[r.req_id]]) - 1, 0) if r.req_id in index else 0
         for r in descriptor.requests
@@ -92,35 +100,49 @@ class RecordingWorker(Worker):
         sim = self.vllm_config.simulation_config
         if sim.log_path is None:
             raise ValueError("record_step_timing requires simulation_config.log_path")
-        self._writer = StepLogWriter(sim.log_path)
+        self._pending: tuple[torch.cuda.Event, StepDescriptor, float, list[str]] | None
+        self._pending = None
+        # The output rank of every DP replica describes its steps; under MoE
+        # data parallelism they also join each other's lockstep steps.
+        self._describes = (
+            get_pp_group().is_last_rank and get_tp_group().rank_in_group == 0
+        )
+        self._joins_dp = self._describes and self.parallel_config.data_parallel_size > 1
+        log_path = step_log_path(self.vllm_config)
+        self._writer = StepLogWriter(log_path) if log_path else None
         self._parallel = parallel_summary(self.vllm_config)
         self._prompt_lens: dict[str, int] = {}
         self._step_index = 0
-        self._pending: tuple[torch.cuda.Event, StepDescriptor, float, list[str]] | None
-        self._pending = None
-        logger.info("Recording per-step timing to %s", sim.log_path)
+        if self._writer is not None:
+            logger.info("Recording per-step timing to %s", log_path)
 
     def execute_model(self, scheduler_output):  # type: ignore[override]
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            # Still let the descriptor builder see finished requests.
-            build_step_descriptor(
-                scheduler_output, self._prompt_lens, self._step_index, self._parallel
-            )
+        if not self._describes:
             return super().execute_model(scheduler_output)
         descriptor = build_step_descriptor(
             scheduler_output, self._prompt_lens, self._step_index, self._parallel
         )
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            return super().execute_model(scheduler_output)
         self._step_index += 1
-        start = torch.cuda.Event(enable_timing=True)
-        start.record(torch.cuda.current_stream(self.device))
-        t_start = time.perf_counter()
-        self._pending = (
-            start,
-            descriptor,
-            t_start,
-            list(scheduler_output.finished_req_ids),
-        )
+        if self._joins_dp and not should_skip_dp_coordination():
+            descriptor = gather_dp_step(descriptor)
+        if self._writer is not None:
+            start = torch.cuda.Event(enable_timing=True)
+            start.record(torch.cuda.current_stream(self.device))
+            t_start = time.perf_counter()
+            self._pending = (
+                start,
+                descriptor,
+                t_start,
+                list(scheduler_output.finished_req_ids),
+            )
         return super().execute_model(scheduler_output)
+
+    def execute_dummy_batch(self) -> None:
+        if self._joins_dp and not should_skip_dp_coordination():
+            gather_dp_step(empty_step_descriptor(self._step_index, self._parallel))
+        super().execute_dummy_batch()
 
     def sample_tokens(self, grammar_output):  # type: ignore[override]
         output = super().sample_tokens(grammar_output)

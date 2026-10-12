@@ -18,6 +18,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import (
     CUDAGraphMode,
+    ParallelConfig,
     VllmConfig,
     set_current_vllm_config,
     update_config,
@@ -438,25 +439,7 @@ class Worker(WorkerBase):
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
-            if (
-                parallel_config.distributed_executor_backend
-                not in ("ray", "external_launcher")
-                and parallel_config.data_parallel_backend != "ray"
-                and parallel_config.nnodes_within_dp == 1
-            ):
-                # Use local DP rank if available, otherwise use global DP rank.
-                dp_local_rank = self.parallel_config.data_parallel_rank_local
-                if dp_local_rank is None:
-                    dp_local_rank = self.parallel_config.data_parallel_index
-
-                tp_pcp_pp_world_size = (
-                    self.parallel_config.pipeline_parallel_size
-                    * self.parallel_config.prefill_context_parallel_size
-                    * self.parallel_config.tensor_parallel_size
-                )
-
-                # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pcp_pp_world_size
+            self.local_rank = dp_adjusted_local_rank(parallel_config, self.local_rank)
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.
@@ -1635,6 +1618,28 @@ class Worker(WorkerBase):
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
+
+
+def dp_adjusted_local_rank(parallel_config: ParallelConfig, local_rank: int) -> int:
+    """The local device index of a rank: with one node per DP group and the
+    multiprocessing backend, local DP ranks take consecutive blocks of
+    devices (DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK)."""
+    if (
+        parallel_config.distributed_executor_backend in ("ray", "external_launcher")
+        or parallel_config.data_parallel_backend == "ray"
+        or parallel_config.nnodes_within_dp != 1
+    ):
+        return local_rank
+    # Use local DP rank if available, otherwise use global DP rank.
+    dp_local_rank = parallel_config.data_parallel_rank_local
+    if dp_local_rank is None:
+        dp_local_rank = parallel_config.data_parallel_index
+    tp_pcp_pp_world_size = (
+        parallel_config.pipeline_parallel_size
+        * parallel_config.prefill_context_parallel_size
+        * parallel_config.tensor_parallel_size
+    )
+    return local_rank + dp_local_rank * tp_pcp_pp_world_size
 
 
 def init_worker_distributed_environment(

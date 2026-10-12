@@ -18,7 +18,11 @@ if current_platform.is_cpu():
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
+from vllm.v1.worker.gpu_worker import (
+    Worker,
+    dp_adjusted_local_rank,
+    init_worker_distributed_environment,
+)
 from vllm.v1.worker.simulated.model_runner import SimulatedModelRunner
 from vllm.v1.worker.worker_base import CompilationTimes
 
@@ -40,6 +44,9 @@ class SimulatedWorker(Worker):
         self.parallel_config.disable_custom_all_reduce = True
 
         if current_platform.is_cuda_alike():
+            self.local_rank = dp_adjusted_local_rank(
+                self.parallel_config, self.local_rank
+            )
             assert self.local_rank < torch.accelerator.device_count(), (
                 f"local rank {self.local_rank} is out of bounds for "
                 f"{torch.accelerator.device_count()} devices"
@@ -72,6 +79,12 @@ class SimulatedWorker(Worker):
             self.vllm_config.simulation_config.timing,
         )
         self._init_workspace_and_model_runner()
+
+    def execute_model(self, scheduler_output):  # type: ignore[override]
+        """No hidden states flow between pipeline stages: every stage runs
+        its own bookkeeping and timing from the same scheduler output."""
+        with self.annotate_profile(scheduler_output):
+            return self.model_runner.execute_model(scheduler_output)
 
     def _make_model_runner(self) -> SimulatedModelRunner:  # type: ignore[override]
         return SimulatedModelRunner(self.vllm_config, self.device)

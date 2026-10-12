@@ -2911,20 +2911,24 @@ class EngineArgs:
                 _raise_unsupported_error(
                     feature_name="simulated forward on this platform"
                 )
-            if self.pipeline_parallel_size != 1:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with pipeline parallelism"
-                )
-            if self.tensor_parallel_size != 1:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with tensor parallelism"
-                )
-            if self.data_parallel_size != 1:
-                _raise_unsupported_error(
-                    feature_name="simulated forward with data parallelism"
-                )
             if self.enable_lora:
                 _raise_unsupported_error(feature_name="simulated forward with LoRA")
+            if self.prefill_context_parallel_size > 1:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with prefill context parallelism"
+                )
+            num_ranks = (
+                self.tensor_parallel_size
+                * self.pipeline_parallel_size
+                * self.data_parallel_size
+            )
+            if self.simulation_config.clock != "real" and num_ranks > 1:
+                _raise_unsupported_error(
+                    feature_name=(
+                        f"the {self.simulation_config.clock} simulation clock "
+                        "with more than one rank"
+                    )
+                )
             if self.kv_transfer_config is not None:
                 _raise_unsupported_error(
                     feature_name="simulated forward with KV transfer"
