@@ -23,8 +23,6 @@ import regex as re
 
 INDEX_URL = "https://rocm.frameworks-nightlies.amd.com/whl-multi-arch/amd-aiter/"
 AITER_COMMIT_URL = "https://github.com/ROCm/aiter/commit/"
-# Older than yesterday's means a night was missed. Only a warning: the build
-# still passes. Yesterday's is fresh: this can run before today's is published.
 STALE_AFTER = datetime.timedelta(days=1)
 
 # Example:
@@ -35,8 +33,6 @@ WHEEL_NAME = re.compile(
     r"^amd_aiter-(?P<base_version>[^+-]+)\+(?P<local>[^-]+)"
     r"-(?P<python>cp\d+)-(?P=python)-linux_x86_64\.whl$"
 )
-# Fields of the local version, the part after `+`, each found by name wherever
-# it sits, so a field added later, such as `triton3.5`, is ignored.
 ROCM_FIELD = re.compile(r"(?:^|\.)rocm(\d+(?:\.\d+)*)(?:a\d+)?(?=\.|$)")
 TORCH_FIELD = re.compile(r"(?:^|\.)torch(\d+\.\d+)(?=\.|$)")
 COMMIT_AND_DATE_FIELD = re.compile(r"(?:^|\.)([0-9a-f]{7,40})\.d(\d{8})(?=\.|$)")
@@ -166,7 +162,6 @@ def select_wheel(wheels: list[Wheel], rocm: str, torch: str, python: str) -> Whe
 
 def fetch(url: str) -> str:
     """GET url as text. A failure exits 1, so Buildkite retries the step."""
-    # A hung connection fails, and is retried, rather than hang the step.
     with urllib.request.urlopen(url, timeout=60) as response:
         return response.read().decode()
 
@@ -226,7 +221,7 @@ def _for_image(wheels: list[Wheel]) -> Wheel:
 
 
 def select(index_url: str, wheel_url: str = "") -> Wheel:
-    """The wheel to install: a retry's earlier choice, else the newest.
+    """The wheel to install: wheel_url on a retry, else the newest.
 
     However old the newest is, it is tested; the annotation shows its build date.
     """
@@ -254,8 +249,6 @@ def main(argv=None) -> int:
     try:
         wheel = select(args.index_url, args.wheel_url)
     except NoWheel as error:
-        # To stdout, not stderr: on exit 10 the overlay script shows stdout in
-        # its error annotation.
         print(error)
         return EXIT_NO_WHEEL
     print(wheel.url)
