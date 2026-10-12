@@ -720,67 +720,13 @@ def test_flashinfer_mm_prefix_validate_configuration(use_dcp, use_rswa, reason):
         assert any(reason in r for r in reasons), reasons
 
 
-@pytest.mark.parametrize(
-    ("major", "mm_prefix", "wrapper", "native"),
-    [
-        (9, True, True, True),
-        # SM100 leaves the ranges to the composite and keeps its FP8 query.
-        (10, True, True, False),
-        (9, False, True, False),
-        (9, True, False, False),
-    ],
-)
-def test_flashinfer_fp8_query_dtype(major, mm_prefix, wrapper, native):
-    """fa2 has no FP8-query path, so the native mm-prefix path keeps a
-    model-dtype query for an FP8 cache, for prefill and decode alike, and
-    drops q_scale; elsewhere q_scale still applies."""
-    import unittest.mock
-    from types import SimpleNamespace
-
-    from tests.v1.attention.utils import create_vllm_config
-    from vllm.config import set_current_vllm_config
-    from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends import flashinfer as fi
-
-    vllm_config = create_vllm_config(model_name=MODEL)
-    vllm_config.cache_config.cache_dtype = "fp8"
-    if mm_prefix:
-        _enable_mm_prefix(vllm_config)
-    mc = vllm_config.model_config
-    builder = SimpleNamespace(
-        vllm_config=vllm_config, model_config=mc, cache_dtype="fp8"
-    )
-    with (
-        set_current_vllm_config(vllm_config),
-        unittest.mock.patch.object(
-            type(current_platform),
-            "get_device_capability",
-            return_value=DeviceCapability(major, 0),
-        ),
-        unittest.mock.patch.object(
-            fi, "_mm_prefix_wrapper_cls", lambda: object if wrapper else None
-        ),
-        unittest.mock.patch.object(
-            fi, "can_use_trtllm_attention", lambda *a, **k: False
-        ),
-    ):
-        prefill = fi.FlashInferMetadataBuilder.get_q_data_type(builder, True)
-        decode = fi.FlashInferMetadataBuilder.get_q_data_type(builder, False)
-        impl = fi.FlashInferImpl(8, HEAD_SIZE, 1.0, 2, None, None, "fp8")
-
-    assert prefill == (mc.dtype if native else torch.float8_e4m3fn)
-    if native:
-        assert decode == mc.dtype
-    assert impl.query_scale(SimpleNamespace(_q_scale_float=2.0)) == (
-        1.0 if native else 2.0
-    )
-
-
 def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto"):
     """vllm_config + kv_cache_spec + per-layer-parameter mock for FlashInfer."""
     import unittest.mock
 
     from tests.v1.attention.utils import create_vllm_config
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.backends.utils import PerLayerParameters
     from vllm.v1.kv_cache_interface import FullAttentionSpec, get_kv_quant_mode
 
@@ -793,6 +739,11 @@ def _flashinfer_builder_env(sliding_window: int | None, cache_dtype: str = "auto
         )
     )
     vllm_config.cache_config.cache_dtype = cache_dtype
+    # SM100 serves the ranges natively only when FLASHINFER is explicit, and
+    # its trtllm-gen text path reads a head-major cache.
+    vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+    layouts = FlashInferBackend.supported_kv_cache_layouts() or (KVCacheLayout.LBNHC,)
+    vllm_config.cache_config.kv_cache_layout = layouts[0].name
     mc = vllm_config.model_config
     kv_cache_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -888,7 +839,7 @@ def test_flashinfer_mm_prefix_text_only_and_decode_only_keep_causal(cache_dtype)
         common.mm_req_doc_ranges = {0: [], 1: []}
         md = builder.build(common_prefix_len=0, common_attn_metadata=common)
         assert md.mm_prefix_query_range_tensor is None
-        assert md.prefill is not None and md.prefill.mm_wrapper is None
+        assert md.prefill is not None and md.mm_wrapper is None
 
         # Decode-only: every query token sits past every prompt range.
         batch = BatchSpec(seq_lens=[513, 200, 97], query_lens=[1, 1, 1], name="decode")
@@ -965,6 +916,9 @@ def test_flashinfer_mm_prefix_kv_cache_path(cache_dtype):
         new_vs.append(v_full[ctx:])
 
     query, key, value = torch.cat(qs), torch.cat(new_ks), torch.cat(new_vs)
+    if cache_dtype == "fp8_e4m3":
+        # SM100's causal path quantizes the query with _q_scale (1.5 below).
+        query = (query / 1.5).to(torch.float8_e4m3fn).to(DTYPE) * 1.5
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_ctxs,
         v_contexts=v_ctxs,
@@ -975,7 +929,7 @@ def test_flashinfer_mm_prefix_kv_cache_path(cache_dtype):
         device=device,
         num_blocks=2048,
         common_attn_metadata=common,
-        layout=KVCacheLayout.LBNHC,
+        layout=KVCacheLayout[vllm_config.cache_config.kv_cache_layout],
         randomize_blocks=True,
         kv_cache_dtype=cache_dtype,
     )
@@ -988,7 +942,7 @@ def test_flashinfer_mm_prefix_kv_cache_path(cache_dtype):
         attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
         assert attn_metadata.mm_prefix_query_range_tensor is not None
         assert attn_metadata.prefill is not None
-        assert attn_metadata.prefill.mm_wrapper is not None
+        assert attn_metadata.mm_wrapper is not None
 
         impl = FlashInferImpl(
             num_heads=num_heads,
@@ -1051,14 +1005,18 @@ def test_flashinfer_mm_prefix_kv_cache_path(cache_dtype):
             expected_by_clamp[False], causal_only, atol=2e-2, rtol=2e-2
         )
 
-        # Cleared metadata field -> plain causal wrapper.
+        # Cleared metadata field -> plain causal wrapper, which keeps main's
+        # q_scale handling.
         attn_metadata.mm_prefix_query_range_tensor = None
         mock_layer.mm_prefix_clamp_sliding_window = False
+        mock_layer._q_scale_float = 1.0
         output = torch.empty_like(query)
         actual = impl.forward(
             mock_layer, query, key, value, kv_cache, attn_metadata, output=output
         )
-        torch.testing.assert_close(actual.float(), causal_only, atol=2e-2, rtol=2e-2)
+        # Main's FP8 causal path keeps test_attention_backends' FP8 tolerance.
+        tol = 6e-2 if cache_dtype == "fp8_e4m3" else 2e-2
+        torch.testing.assert_close(actual.float(), causal_only, atol=tol, rtol=tol)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
@@ -1102,14 +1060,14 @@ def test_flashinfer_mm_prefix_short_extend_stays_a_prefill():
     # counted as a prefill even though its query length is 1.
     assert md.num_prefills == 1
     assert md.num_decodes == 1
-    assert md.prefill is not None and md.prefill.mm_wrapper is not None
-    assert md.prefill.mm_prefill_ranges is not None
+    assert md.prefill is not None and md.mm_wrapper is not None
+    assert md.mm_prefill_ranges is not None
     # The prefill slice holds exactly the tail row: its range, inclusive.
     # The wrapper takes (N, 2) rows and rejects a non-contiguous tensor, so
     # both are part of the contract this slice has to satisfy.
-    assert md.prefill.mm_prefill_ranges.shape == (1, 2)
-    assert md.prefill.mm_prefill_ranges.is_contiguous()
-    assert md.prefill.mm_prefill_ranges.tolist() == [[100, 200]]
+    assert md.mm_prefill_ranges.shape == (1, 2)
+    assert md.mm_prefill_ranges.is_contiguous()
+    assert md.mm_prefill_ranges.tolist() == [[100, 200]]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend imports")

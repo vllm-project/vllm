@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Literal
 from unittest.mock import MagicMock, patch
 
@@ -849,29 +849,40 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
 
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
-@pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "nvfp4"])
 @pytest.mark.parametrize("native_mm_prefix", [False, True])
+@pytest.mark.parametrize("selected", [None, AttentionBackendEnum.FLASHINFER])
 def test_mm_prefix_selects_composite_without_changing_causal_default(
-    use_mm_prefix, kv_cache_dtype, native_mm_prefix, blackwell_selection
+    use_mm_prefix, kv_cache_dtype, native_mm_prefix, selected, blackwell_selection
 ):
-    """The image-mask requirement must reach CUDA's automatic backend priority."""
+    """The image-mask requirement must reach CUDA's automatic backend priority;
+    selecting FLASHINFER serves it natively, never over an NVFP4 cache."""
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
-        model="google/gemma-4-31B-it", dtype="bfloat16"
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        kv_cache_dtype=kv_cache_dtype,
+        attention_config=AttentionConfig(backend=selected),
     ).create_engine_config()
+    if not use_mm_prefix:
+        expected = "FLASHINFER"
+    elif kv_cache_dtype == "nvfp4" or (selected and not native_mm_prefix):
+        expected = None
+    else:
+        expected = "FLASHINFER" if selected else "TRITON_FLASHINFER"
     with (
         patch(
             "vllm.v1.attention.backends.flashinfer._mm_prefix_wrapper_cls",
             return_value=object if native_mm_prefix else None,
         ),
         set_current_vllm_config(config),
+        pytest.raises(ValueError) if expected is None else nullcontext(),
     ):
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
-    expected = "TRITON_FLASHINFER" if use_mm_prefix else "FLASHINFER"
-    assert backend.get_name() == expected
+        assert backend.get_name() == expected
 
 
 @blackwell_only
