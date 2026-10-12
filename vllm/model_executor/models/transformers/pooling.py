@@ -26,17 +26,21 @@ from transformers import (
 )
 
 from vllm.config.utils import getattr_iter
+from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 
 from .base import Base
+from .fusers import ClassifierFuser
 
 if TYPE_CHECKING:
     from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 
 class ClassifierWithReshape(nn.Module):
@@ -66,19 +70,22 @@ class EmbeddingMixin(VllmModelForPooling, Base):
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
 
-# Shape-preserving modules applied between the base model and the classifier, keyed
-# by `model_type`. Other heads can't be adopted safely because their `forward` may
-# apply more than their modules (e.g. DistilBERT's ReLU, DeBERTa's CLS slicing).
-_CLASSIFIER_HEADS: dict[str, tuple[str, ...]] = {"modernbert": ("head",)}
-
-
 class ClassificationMixin(VllmModelForPooling, Base):
     default_seq_pooling_type = "CLS"
 
     def init_classifier(
-        self, auto_cls: type["_BaseAutoModelClass"], reshape: bool
+        self, auto_cls: type["_BaseAutoModelClass"], pooled: bool
     ) -> nn.Module:
-        """Adopt the classifier, and any head before it, from `auto_cls`."""
+        """Adopt the classifier, and the head before it, from `auto_cls`.
+
+        Args:
+            auto_cls: The auto class of the classification model.
+            pooled: Whether the classifier's input is pooled.
+
+        Returns:
+            The module that maps hidden states to logits.
+
+        """
         # Certain information about the model and classifier can only be
         # inferred from the `For*Classification` class. Therefore, we
         # instantiate it on the "meta" device to avoid allocating GPU memory.
@@ -97,15 +104,35 @@ class ClassificationMixin(VllmModelForPooling, Base):
                 break
 
         # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
-        self.classifier = getattr_iter(cls_model, ["classifier", "score"], None)
-        if self.classifier is None:
+        classifier = getattr_iter(cls_model, ["classifier", "score"], None)
+        if classifier is None:
             raise ValueError(
                 "Could not find `classifier` or `score` layer in the "
                 f"`{auto_cls.__name__}` instance."
             )
-        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
-        if reshape:
+        if fuser := ClassifierFuser.match_model(cls_model, pooled=pooled):
+            logger.debug(fuser.info(auto_cls.__name__))
+            for name in dict.fromkeys(n.split(".")[0] for n in fuser.module_names):
+                module = cls_model.get_submodule(name)
+                if next(module.parameters(), None) is None:
+                    continue
+                if hasattr(self, name):
+                    raise ValueError(
+                        f"Classification head module {name!r} would overwrite an "
+                        "existing attribute."
+                    )
+                self.init_parameters(module, dtype=self.model_config.head_dtype)
+                setattr(self, name, module)
+            return fuser.fuse(cls_model, "", self.vllm_config)
+
+        logger.warning_once(
+            "Could not match the head of %s, only its classifier will be applied.",
+            type(cls_model).__name__,
+        )
+        self.classifier = classifier
+        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
+        if pooled:
             # Order `ClassifierWithReshape` ahead of the classifier's own class so
             # that its `super().forward(...)` reaches the original implementation.
             self.classifier.__class__ = type(
@@ -113,14 +140,7 @@ class ClassificationMixin(VllmModelForPooling, Base):
                 (ClassifierWithReshape, type(self.classifier)),
                 {},
             )
-
-        heads = []
-        for name in _CLASSIFIER_HEADS.get(self.config.model_type, ()):
-            module = getattr(cls_model, name)
-            self.init_parameters(module, dtype=self.model_config.head_dtype)
-            setattr(self, name, module)
-            heads.append(module)
-        return nn.Sequential(*heads, self.classifier) if heads else self.classifier
+        return self.classifier
 
 
 class SequenceClassificationMixin(SupportsCrossEncoding, ClassificationMixin):
@@ -134,7 +154,7 @@ class SequenceClassificationMixin(SupportsCrossEncoding, ClassificationMixin):
         assert pooler_config is not None
 
         classifier = self.init_classifier(
-            AutoModelForSequenceClassification, reshape=True
+            AutoModelForSequenceClassification, pooled=True
         )
 
         self.pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=classifier)
@@ -150,7 +170,5 @@ class TokenClassificationMixin(ClassificationMixin):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        classifier = self.init_classifier(
-            AutoModelForTokenClassification, reshape=False
-        )
+        classifier = self.init_classifier(AutoModelForTokenClassification, pooled=False)
         self.pooler = pooler_for_token_classify(pooler_config, classifier=classifier)
