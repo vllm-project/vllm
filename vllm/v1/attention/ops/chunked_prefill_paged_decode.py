@@ -94,7 +94,7 @@ def kernel_paged_attention_2d(
         cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
         cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
         cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
-        if cur_batch_query_len > 1:
+        if cur_batch_query_len != 1:
             return
     else:
         cur_batch_in_all_start_index = seq_idx
@@ -305,6 +305,8 @@ def chunked_prefill_paged_decode(
     sinks=None,
     is_block_table_ptr: bool = False,
     causal: bool = True,
+    mm_prefix_range: torch.Tensor | None = None,
+    mm_prefix_clamp_sliding_window: bool = False,
 ):
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
@@ -314,7 +316,7 @@ def chunked_prefill_paged_decode(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
-    if max_query_len > 1:
+    if max_query_len > 1 or mm_prefix_range is not None:
         context_attention_fwd(
             q=query,
             k=key,
@@ -333,11 +335,16 @@ def chunked_prefill_paged_decode(
             alibi_slopes=alibi_slopes,
             sliding_window=sliding_window,
             sm_scale=sm_scale,
-            skip_decode=True,
+            skip_decode=mm_prefix_range is None,
             fp8_out_scale=output_scale,
             sinks=sinks,
             causal=causal,
+            mm_prefix_range=mm_prefix_range,
+            mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
         )
+
+    if mm_prefix_range is not None:
+        return
 
     block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)

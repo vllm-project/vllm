@@ -15,6 +15,8 @@ auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -883,3 +885,107 @@ def test_composite_shared_cache_across_image_and_causal_steps(
                     output.float(), expected, atol=2e-2, rtol=2e-2
                 )
             previous = end
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
+@pytest.mark.parametrize(
+    "use_mm_prefix,use_v2,model_window,layer_window,clamp,expected",
+    [
+        (False, False, None, None, False, "ALWAYS"),
+        (True, False, 1024, 1024, False, "NEVER"),
+        (True, True, None, None, False, "UNIFORM_BATCH"),
+        (True, True, 1024, 1024, False, "UNIFORM_BATCH"),
+        (True, True, 2048, 1024, False, "NEVER"),
+        (True, True, None, 1024, False, "NEVER"),
+        (True, True, 2048, 1024, True, "UNIFORM_BATCH"),
+    ],
+)
+def test_rocm_prefix_full_decode_requires_invariant_mask(
+    use_mm_prefix: bool,
+    use_v2: bool,
+    model_window: int | None,
+    layer_window: int | None,
+    clamp: bool,
+    expected: str,
+) -> None:
+    from vllm.v1.attention.backend import AttentionCGSupport
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadataBuilder
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    config = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        model_config=SimpleNamespace(
+            is_mm_prefix_lm=use_mm_prefix, get_sliding_window=lambda: model_window
+        ),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False
+        ),
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "attn": SimpleNamespace(
+                    sliding_window=layer_window,
+                    use_mm_prefix=True,
+                    mm_prefix_clamp_sliding_window=clamp,
+                ),
+                "draft": SimpleNamespace(sliding_window=256, use_mm_prefix=False),
+            }
+        ),
+    )
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    assert RocmAttentionMetadataBuilder.get_cudagraph_support(config, spec) == getattr(
+        AttentionCGSupport, expected
+    )
+    bound = RocmAttentionMetadataBuilder.get_varlen_cudagraph_max_query_len(
+        config, spec
+    )
+    assert bound == (4 if expected == "UNIFORM_BATCH" else None)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
+@pytest.mark.parametrize(
+    "query_len,seq_len,window,span,is_prefilling,has_cpu_bounds,needs_prefix",
+    [
+        pytest.param(1, 65, None, (0, 64), True, True, False, id="image-end-global"),
+        pytest.param(1, 65, 32, (33, 64), True, True, False, id="image-end-window"),
+        pytest.param(1, 65, 32, (32, 64), True, True, True, id="image-exceeds-window"),
+        pytest.param(2, 65, 32, (33, 64), True, True, True, id="inside-image"),
+        pytest.param(4, 68, 32, (33, 64), True, True, False, id="draft-placeholders"),
+        pytest.param(4, 69, 32, (32, 64), True, True, False, id="past-image"),
+        pytest.param(1, 65, None, (0, 64), True, False, True, id="missing-cpu-bounds"),
+        pytest.param(1, 65, None, (0, 64), False, False, False, id="generated-token"),
+    ],
+)
+def test_rocm_prefix_metadata_keeps_only_required_image_ranges(
+    query_len: int,
+    seq_len: int,
+    window: int | None,
+    span: tuple[int, int],
+    is_prefilling: bool,
+    has_cpu_bounds: bool,
+    needs_prefix: bool,
+) -> None:
+    """Prompt bounds must preserve future keys and image keys beyond the window."""
+    from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadataBuilder
+
+    builder = object.__new__(RocmAttentionMetadataBuilder)
+    builder.mm_prefix_unclamped_window = window
+    common = create_common_attn_metadata(
+        BatchSpec(query_lens=[query_len], seq_lens=[seq_len]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common.mm_req_doc_ranges = {0: [span]}
+    common.is_prefilling = torch.tensor([is_prefilling], device="cpu")
+    if not has_cpu_bounds:
+        common.seq_lens_cpu_upper_bound = None
+    metadata = builder.build(0, common)
+    if needs_prefix:
+        torch.testing.assert_close(
+            metadata.mm_prefix_range_tensor,
+            torch.tensor([[span]], dtype=torch.int32, device="cpu"),
+        )
+    else:
+        assert metadata.mm_prefix_range_tensor is None

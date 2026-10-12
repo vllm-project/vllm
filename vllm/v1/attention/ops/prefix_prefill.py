@@ -10,6 +10,10 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.triton_attention_helpers import (
+    compute_kv_seq_mask,
+    compute_tile_loop_bounds,
+)
 
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
@@ -167,6 +171,10 @@ def _fwd_kernel(
     # paged KV cache. This supports layers that re-attend an already-cached
     # sequence with query only (e.g. IQuest LoopCoder's `attn(q, None, None)`).
     KV_FROM_CACHE: tl.constexpr = False,
+    mm_prefix_range_ptr=None,
+    USE_MM_PREFIX: tl.constexpr = False,
+    MAX_MM_RANGES: tl.constexpr = 0,
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -186,6 +194,32 @@ def _fwd_kernel(
     # start position inside of the query
     # generally, N goes over kv, while M goes over query_len
     block_start_loc = BLOCK_M * start_m
+
+    context_start = 0
+    context_end = cur_batch_ctx_len
+    if USE_MM_PREFIX:
+        loop_lo, loop_hi, _ = compute_tile_loop_bounds(
+            cur_batch_ctx_len,
+            cur_batch_seq_len,
+            cur_batch_query_len,
+            start_m,
+            segm_idx_or_0=0,
+            tiles_per_segment_or_0=0,
+            TILE_SIZE=BLOCK_SIZE,
+            BLOCK_M=BLOCK_M,
+            BLOCK_Q=BLOCK_M,
+            num_queries_per_kv=1,
+            SLIDING_WINDOW=SLIDING_WINDOW,
+            USE_MM_PREFIX=USE_MM_PREFIX,
+            IS_3D=False,
+            USE_CAUSAL=CAUSAL,
+            MM_PREFIX_CLAMP_SW=MM_PREFIX_CLAMP_SW,
+            MAX_MM_RANGES=MAX_MM_RANGES,
+            mm_prefix_range_ptr=mm_prefix_range_ptr,
+            seq_idx=cur_batch,
+        )
+        context_start = tl.minimum(loop_lo * BLOCK_SIZE, cur_batch_ctx_len)
+        context_end = tl.minimum(loop_hi * BLOCK_SIZE, cur_batch_ctx_len)
 
     # initialize offsets
     # [BLOCK_SIZE]; starts at 0
@@ -227,9 +261,9 @@ def _fwd_kernel(
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
-    # compute query against context (no causal mask here)
+    # Attend to cached context.
     for start_n in tl.range(
-        0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
+        context_start, context_end, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
     ):
         # Under a block size of 544 (Qwen/Qwen3-Next-80B-A3B-Thinking),
         # replace one physical block every 17 32-Tile blocks
@@ -239,15 +273,12 @@ def _fwd_kernel(
         # (handles cross-block tiles via B_Loc). Same addressing is reused for
         # the current-chunk cache read below.
         token_indices = start_n + offs_bs_n
-        # Context tokens are always followed by the current chunk, so the tile
-        # never steps past this batch's block-table row; the block-table load
-        # stays unmasked (MASK_BLOCK_TABLE=False) and offs_bs_n is an unused
-        # placeholder for token_valid.
+        context_token_valid = token_indices < cur_batch_ctx_len
         off_k, off_v = _paged_kv_cache_offsets(
             B_Loc,
             cur_batch,
             token_indices,
-            offs_bs_n,
+            context_token_valid,
             offs_d,
             cur_kv_head,
             x,
@@ -263,6 +294,7 @@ def _fwd_kernel(
             stride_v_cache_d,
             stride_v_cache_bl,
             PHYSICAL_BLOCK_SIZE,
+            MASK_BLOCK_TABLE=USE_MM_PREFIX,
         )
 
         if (
@@ -271,12 +303,29 @@ def _fwd_kernel(
         ):
             k_load = tl.load(
                 K_cache + off_k,
-                mask=dim_mask[:, None]
-                & ((start_n + offs_bs_n[None, :]) < cur_batch_ctx_len),
+                mask=dim_mask[:, None] & context_token_valid[None, :],
                 other=0.0,
             )  # [D,N]
         else:
             k_load = tl.load(K_cache + off_k)
+
+        if USE_MM_PREFIX:
+            attn_mask = compute_kv_seq_mask(
+                cur_batch_ctx_len + offs_m[:, None],
+                token_indices,
+                cur_batch,
+                cur_batch_seq_len,
+                mm_prefix_range_ptr,
+                SLIDING_WINDOW=SLIDING_WINDOW,
+                USE_MM_PREFIX=USE_MM_PREFIX,
+                MAX_MM_RANGES=MAX_MM_RANGES,
+                USE_CAUSAL=CAUSAL,
+                MM_PREFIX_CLAMP_SW=MM_PREFIX_CLAMP_SW,
+            )
+            valid_rows = offs_m[:, None] < cur_batch_query_len
+            visible_kv = tl.sum((attn_mask & valid_rows).to(tl.int32), axis=0) > 0
+            # Evicted pages may contain NaNs; zero-probability keys must be finite.
+            k_load = tl.where(visible_kv[None, :], k_load, 0.0)
 
         if k_load.dtype.is_fp8():
             k = (k_load.to(tl.float32) * tl.load(k_scale)).to(q.dtype)
@@ -289,7 +338,9 @@ def _fwd_kernel(
             (start_n + offs_bs_n[None, :]) < cur_batch_ctx_len, qk, float("-inf")
         )
         # qk *= sm_scale
-        if SLIDING_WINDOW > 0:
+        if USE_MM_PREFIX:
+            qk = tl.where(attn_mask, qk, float("-inf"))
+        elif SLIDING_WINDOW > 0:
             # (cur_batch_ctx_len + offs_m[:, None]) are the positions of
             # Q entries in sequence
             # (start_n + offs_bs_n[None, :]) are the positions of
@@ -324,12 +375,14 @@ def _fwd_kernel(
         ):
             v_load = tl.load(
                 V_cache + off_v,
-                mask=dim_mask[None, :]
-                & ((start_n + offs_bs_n[:, None]) < cur_batch_ctx_len),
+                mask=dim_mask[None, :] & context_token_valid[:, None],
                 other=0.0,
             )  # [N,D]
         else:
             v_load = tl.load(V_cache + off_v)
+
+        if USE_MM_PREFIX:
+            v_load = tl.where(visible_kv[:, None], v_load, 0.0)
 
         if v_load.dtype.is_fp8():
             v = (v_load.to(tl.float32) * tl.load(v_scale)).to(q.dtype)
@@ -360,14 +413,22 @@ def _fwd_kernel(
 
     # compute query against itself (causal among queries by default;
     # CAUSAL=False for bidirectional attention over query tokens, e.g. DFlash.)
-    if CAUSAL:
+    key_range_lower = 0
+    if USE_MM_PREFIX:
+        key_range_lower = tl.maximum(0, loop_lo * BLOCK_SIZE - cur_batch_ctx_len)
+        key_range_lower = key_range_lower // BLOCK_N * BLOCK_N
+        key_range_upper = tl.minimum(
+            cur_batch_query_len, loop_hi * BLOCK_SIZE - cur_batch_ctx_len
+        )
+        key_range_upper = block_mask * tl.cdiv(key_range_upper, BLOCK_N) * BLOCK_N
+    elif CAUSAL:
         key_range_upper = block_mask * (start_m + 1) * BLOCK_M
     else:
         q_len_pad = (cur_batch_query_len + BLOCK_N - 1) // BLOCK_N * BLOCK_N
         key_range_upper = block_mask * q_len_pad
 
     for start_n in tl.range(
-        0,
+        key_range_lower,
         key_range_upper,
         BLOCK_N,
         loop_unroll_factor=num_unroll_request,
@@ -428,11 +489,24 @@ def _fwd_kernel(
         qk *= sm_scale
 
         valid_kv = (start_n + offs_n[None, :]) < cur_batch_query_len
-        if CAUSAL:
+        if USE_MM_PREFIX:
+            attn_mask = valid_kv & compute_kv_seq_mask(
+                cur_batch_ctx_len + offs_m[:, None],
+                cur_batch_ctx_len + start_n + offs_n,
+                cur_batch,
+                cur_batch_seq_len,
+                mm_prefix_range_ptr,
+                SLIDING_WINDOW=SLIDING_WINDOW,
+                USE_MM_PREFIX=USE_MM_PREFIX,
+                MAX_MM_RANGES=MAX_MM_RANGES,
+                USE_CAUSAL=CAUSAL,
+                MM_PREFIX_CLAMP_SW=MM_PREFIX_CLAMP_SW,
+            )
+        elif CAUSAL:
             attn_mask = valid_kv & (offs_m[:, None] >= (start_n + offs_n[None, :]))
         else:
             attn_mask = valid_kv
-        if SLIDING_WINDOW > 0:
+        if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
             attn_mask = attn_mask & (
                 offs_m[:, None] - (start_n + offs_n[None, :]) < SLIDING_WINDOW
             )
@@ -797,6 +871,8 @@ def context_attention_fwd(
     sinks=None,
     is_block_table_ptr: bool = False,
     causal: bool = True,
+    mm_prefix_range: torch.Tensor | None = None,
+    mm_prefix_clamp_sliding_window: bool = False,
 ):
     q_dtype_is_f32 = q.dtype is torch.float32
 
@@ -882,6 +958,9 @@ def context_attention_fwd(
         processed_b_loc = b_loc.to(torch.int32)
 
     if alibi_slopes is not None:
+        assert mm_prefix_range is None, (
+            "Prefix-LM attention is not supported with ALiBi"
+        )
         assert causal, "Non-causal prefix attention is not supported with alibi"
         assert sinks is None, "Sinks arg is not supported with alibi"
         assert fp8_out_scale is None, "FP8 output not supported with alibi"
@@ -1012,6 +1091,10 @@ def context_attention_fwd(
         USE_SINKS=sinks is not None,
         CAUSAL=causal,
         KV_FROM_CACHE=kv_from_cache,
+        mm_prefix_range_ptr=mm_prefix_range,
+        USE_MM_PREFIX=mm_prefix_range is not None,
+        MAX_MM_RANGES=mm_prefix_range.shape[1] if mm_prefix_range is not None else 0,
+        MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
         **extra_kargs,
     )
     return
