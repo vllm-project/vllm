@@ -159,20 +159,20 @@ class OnlineDerenderer:
             if has_parser and chat_request is not None
             else {}
         )
-        # Like the coupled chat endpoint, hide per-token metadata when a
-        # parser is configured and reasoning is hidden: decoded logprob
-        # tokens would otherwise leak the reasoning text.
+        # Like the coupled chat endpoint, hide per-token metadata (logprobs,
+        # token ids) when a parser is configured and reasoning is hidden:
+        # either would otherwise leak the reasoning text.
         hide_metadata = (
             has_parser
             and chat_request is not None
             and not chat_request.include_reasoning
         )
-
         return_token_ids = (
             chat_request is not None
             and chat_request.return_token_ids
-            and (not has_parser or chat_request.include_reasoning)
+            and not hide_metadata
         )
+
         for choice in generate_response.choices:
             if not choice.token_ids:
                 raise ValueError(f"choice {choice.index} has empty or null token_ids")
@@ -603,9 +603,7 @@ class OnlineDerenderer:
         last_tool_call_ids = list(state.last_tool_call_ids)
         logprob_context = list(state.logprob_context_token_ids)
 
-        return_token_ids = (
-            chat_request.return_token_ids and chat_request.include_reasoning
-        )
+        return_token_ids = chat_request.return_token_ids and not hide_metadata
 
         # At most one choice: the caller (derender_chat_stream) already
         # rejects >1 before dispatching here. role_sent/tools_streamed/
