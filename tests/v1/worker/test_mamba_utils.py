@@ -659,7 +659,6 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
         max_num_batched_tokens=64,
         max_num_blocks_per_group=[4],
         device=device,
-        kernel_block_sizes=[cfg.block_size],
     )
 
     state = object.__new__(MambaHybridModelState)
