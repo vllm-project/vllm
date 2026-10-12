@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig, VllmConfig
 from vllm.multimodal.utils import encode_video_url
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.params import ChatParams
 from vllm.tokenizers.registry import cached_tokenizer_from_config
