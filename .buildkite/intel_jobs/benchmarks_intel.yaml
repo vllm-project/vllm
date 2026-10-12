@@ -1,4 +1,4 @@
-group: Benchmarks
+group: Benchmarks Intel
 depends_on: 
   - image-build-xpu
 steps:

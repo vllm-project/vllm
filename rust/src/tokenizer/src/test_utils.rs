@@ -69,6 +69,7 @@ struct TestToken {
 pub struct TestTokenizer {
     token_to_id: BTreeMap<String, u32>,
     id_to_token: BTreeMap<u32, TestToken>,
+    added_vocab: Vec<(String, u32)>,
     unknown_decode: UnknownDecode,
     vocab_size: Option<usize>,
     bos_token_id: Option<u32>,
@@ -86,6 +87,7 @@ impl TestTokenizer {
         Self {
             token_to_id: BTreeMap::new(),
             id_to_token: BTreeMap::new(),
+            added_vocab: Vec::new(),
             unknown_decode: UnknownDecode::Error,
             vocab_size: None,
             bos_token_id: None,
@@ -154,9 +156,21 @@ impl TestTokenizer {
         if self.token_to_id.insert(token.clone(), id).is_some() {
             panic!("configured test token text {token:?} was registered more than once");
         }
-        if self.id_to_token.insert(id, TestToken { text: token, kind }).is_some() {
+        if self
+            .id_to_token
+            .insert(
+                id,
+                TestToken {
+                    text: token.clone(),
+                    kind,
+                },
+            )
+            .is_some()
+        {
             panic!("configured test token id {id} was registered more than once");
         }
+        self.added_vocab.push((token, id));
+        self.added_vocab.sort_unstable_by_key(|(_, id)| *id);
     }
 
     fn byte_to_token(id: u32) -> Option<String> {
@@ -252,6 +266,10 @@ impl Tokenizer for TestTokenizer {
             .get(&id)
             .map(|token| token.text.clone())
             .or_else(|| Self::byte_to_token(id))
+    }
+
+    fn added_vocab(&self) -> &[(String, u32)] {
+        &self.added_vocab
     }
 
     fn vocab_size(&self) -> usize {

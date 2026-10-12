@@ -20,11 +20,11 @@ import numpy.typing as npt
 import regex as re
 import torch
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import BatchFeature, PreTrainedConfig, TensorType
 
 from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
-from vllm.multimodal.processing.processor import PromptUpdateDetails
+from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
 from vllm.multimodal.video_prune.evs import compute_retained_tokens_count
 from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
@@ -292,8 +292,7 @@ class DynamicResolutionImageTiler:
         self,
         target_num_tokens_post_shuffle: int,
     ) -> tuple[int, int]:
-        """
-        TODO: optimize this so it squeezes closer to target number of tokens.
+        """TODO: optimize this so it squeezes closer to target number of tokens.
         Calculate image dimensions that produce approximately `target` tokens after
         pixel_shuffle.
 
@@ -318,6 +317,7 @@ class DynamicResolutionImageTiler:
         ...     height // PATCH_SIZE
         ... ) // 2**2 == 8100  # tokens post-shuffle
         >>> assert tiler._get_num_embeddings(width=width, height=height) == 8100
+
         """
         side_pixels = (
             math.isqrt(target_num_tokens_post_shuffle)
@@ -386,6 +386,7 @@ class DynamicResolutionImageTiler:
             num_tokens_available: Number of tokens available for this media
         Returns:
             DynamicResolutionParams for the media
+
         """
         current_num_tokens_available = num_tokens_available
         assert isinstance(media, Image.Image), (
@@ -473,6 +474,7 @@ class DynamicResolutionImageTiler:
             num_tokens_available: Total number of tokens available across all media
         Returns:
             List of ImageTilingParams for each media item
+
         """
         num_tokens_available = (
             num_tokens_available
@@ -549,7 +551,9 @@ class DynamicResolutionImageTiler:
         )
 
     @staticmethod
-    def stack(images: list[torch.Tensor], patch_size: int) -> torch.Tensor:
+    def stack(
+        images: list[torch.Tensor] | torch.Tensor, patch_size: int
+    ) -> torch.Tensor:
         assert len(images) > 0, "No images to stack"
 
         def rearrange_img(x):
@@ -571,8 +575,7 @@ class DynamicResolutionImageTiler:
 
 
 class BaseNanoNemotronVLProcessor(ABC):
-    """
-    This model doesn't define its own HF processor,
+    """This model doesn't define its own HF processor,
     so we implement our own one here.
 
     The code to insert image tokens is based on:
@@ -581,7 +584,7 @@ class BaseNanoNemotronVLProcessor(ABC):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         tokenizer: HfTokenizer,
         *args,
         max_model_len: int,
@@ -620,7 +623,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         self.dtype: torch.dtype = getattr(config, "dtype", torch.float32)
 
     @staticmethod
-    def use_dynamic_resolution(config: PretrainedConfig) -> bool:
+    def use_dynamic_resolution(config: PreTrainedConfig) -> bool:
         return "min_num_patches" in config.vision_config.args
 
     @property
@@ -633,7 +636,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         self,
         feature_size: int,
         num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         raise NotImplementedError
 
     def get_num_image_tokens(
@@ -730,7 +733,12 @@ class BaseNanoNemotronVLProcessor(ABC):
             zip(num_tokens_per_image, image_num_patches, strict=True)
         ):
             image_repl = self.get_image_repl(feature_size, num_patches)
-            parts[i] = parts[i].replace("<image>", image_repl.full)
+            # image_repl.full is a list of token IDs
+            # Convert token IDs back to text for the HF processor flow
+            image_repl_text = self.tokenizer.decode(
+                image_repl.full, skip_special_tokens=False
+            )
+            parts[i] = parts[i].replace("<image>", image_repl_text)
         text = ["".join(parts)]
 
         return text, image_inputs
@@ -756,15 +764,14 @@ class BaseNanoNemotronVLProcessor(ABC):
 
 
 class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
-    """
-    HF Processor with extended video processing logic.
+    """HF Processor with extended video processing logic.
     Code for video processing is adapted from video example:
     https://huggingface.co/OpenGVLab/InternVL3-1B#inference-with-transformers
     """
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         tokenizer: HfTokenizer,
         *,
         max_model_len: int,
@@ -1001,7 +1008,11 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         for idx, part in enumerate(parts):
             if part == AUDIO_CONTEXT:
                 audio_repl = self.get_audio_repl(audios[audio_index])
-                parts[idx] = audio_repl.full
+                # audio_repl.full is a list of token IDs
+                # Convert token IDs back to text for the HF processor flow
+                parts[idx] = self.tokenizer.decode(
+                    audio_repl.full, skip_special_tokens=False
+                )
                 audio_index += 1
         text = ["".join(parts)]
         audio_inputs = extractor(audios)
@@ -1078,20 +1089,30 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         self,
         feature_size: int,
         num_patches: int | None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
 
-        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+
+        return PromptUpdateDetails.select_token_ids(
+            full_ids, self._img_context_token_ids
+        )
 
     def get_audio_repl(
         self,
         audio: npt.NDArray,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         assert self.audio_extractor is not None
         num_tokens = self.audio_extractor.audio_token_count(len(audio))
         repl_full = f"{AUDIO_START}{AUDIO_CONTEXT * num_tokens}{AUDIO_END}"
-        return PromptUpdateDetails.select_text(repl_full, AUDIO_CONTEXT)
+
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+        ctx_token_ids = cached_encode(
+            self.tokenizer, AUDIO_CONTEXT, add_special_tokens=False
+        )
+
+        return PromptUpdateDetails.select_token_ids(full_ids, ctx_token_ids)
 
     @classmethod
     def get_video_repl(
@@ -1105,9 +1126,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
         video_temporal_patch_size: int = 1,
-    ) -> PromptUpdateDetails[list[int]]:
-        """
-        Build prompt replacement for a video.
+    ) -> PromptUpdateDetails:
+        """Build prompt replacement for a video.
         The replacement returned is not actually used to replace the placeholder
         tokens - it's just used to make sure we allocate the correct number
         of tokens.

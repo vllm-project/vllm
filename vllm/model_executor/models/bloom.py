@@ -360,7 +360,7 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head.weight"])
+        loader = AutoWeightsLoader(self)
         weights = _add_transformer_prefix(weights)
         return loader.load_weights(weights)
 

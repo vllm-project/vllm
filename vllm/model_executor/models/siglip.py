@@ -16,7 +16,7 @@ from transformers import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -56,7 +57,9 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
+from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
@@ -71,12 +74,11 @@ from .vision import (
 
 
 class SiglipImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -125,13 +127,15 @@ class SiglipProcessingInfo(BaseProcessingInfo):
 
         pooler_config = self.ctx.model_config.pooler_config
         assert pooler_config is not None
+        pooling_type = pooler_config.seq_pooling_type
+        assert pooling_type is not None
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
+            _get_vision_feature_select_strategy(pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -155,20 +159,16 @@ class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -191,39 +191,16 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
         if inputs.mm_data_items:
-            if isinstance(inputs.prompt, str):
-                if len(inputs.prompt) > 0:
-                    raise ValueError(
-                        "SigLIP accepts text-only or image-only inputs, not both! "
-                        "You must pass an image with an empty text prompt."
-                    )
+            special_tokens = self.info.get_tokenizer().all_special_ids
+            if all(tok in special_tokens for tok in inputs.prompt):
+                inputs.prompt = []
             else:
-                special_tokens = self.info.get_tokenizer().all_special_ids
-                if all(tok in special_tokens for tok in inputs.prompt):
-                    inputs.prompt = []
-                else:
-                    raise ValueError(
-                        "SigLIP accepts text-only or image-only inputs, not both! "
-                        "You must pass an image with an empty token prompt."
-                    )
-
-            # For multi-modal data, the prompt after processing should
-            # only contain the dummy image tokens
-            inputs.tokenization_kwargs = {
-                **inputs.tokenization_kwargs,
-                "add_special_tokens": False,
-            }
+                raise ValueError(
+                    "SigLIP accepts text-only or image-only inputs, not both! "
+                    "You must pass an image with an empty token prompt."
+                )
 
         return super().apply(inputs, timing_ctx)
-
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
 
     def _get_mm_fields_config(
         self,
@@ -418,7 +395,7 @@ class SiglipAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
-        """Input shape: Batch x Time x Channel"""
+        """Input shape: Batch x Time x Channel."""
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
         out = self.attn(query_states, key_states, value_states)
@@ -491,13 +468,13 @@ class SiglipEncoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
-        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm1 = LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -597,7 +574,7 @@ class SiglipTextTransformer(nn.Module):
             attn_cls=EncoderOnlyAttention,
         )
 
-        self.final_layer_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.final_layer_norm = LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.head = nn.Linear(embed_dim, config.projection_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -640,7 +617,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self.attention = torch.nn.MultiheadAttention(
             config.hidden_size, config.num_attention_heads, batch_first=True
         )
-        self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config=config,
             quant_config=quant_config,
@@ -709,8 +686,9 @@ class SiglipVisionTransformer(nn.Module):
         if require_post_norm is None:
             require_post_norm = len(self.encoder.layers) == num_hidden_layers
 
+        self.post_layernorm: LayerNorm | None
         if require_post_norm:
-            self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+            self.post_layernorm = LayerNorm(embed_dim, eps=config.layer_norm_eps)
         else:
             self.post_layernorm = None
 
@@ -737,6 +715,16 @@ class SiglipVisionTransformer(nn.Module):
             else None
         )
         self.last_hs_proc = partial(self.maybe_layer_norm_and_apply_head)
+
+        drops = dict[str, None]()
+        if self.post_layernorm is None:
+            drops["post_layernorm."] = None
+        if self.head is None:
+            drops["head."] = None
+        if drops:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix=drops
+            )
 
     @property
     def dtype(self):
@@ -787,8 +775,9 @@ class SiglipVisionTransformer(nn.Module):
         """Apply the post layer norm and head if they are enabled,
         given the last hidden states tensor.
 
-        args:
+        Args:
             encoder_outputs: The last hidden states from the visual encoder.
+
         """
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)
@@ -797,12 +786,7 @@ class SiglipVisionTransformer(nn.Module):
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.post_layernorm is None:
-            skip_prefixes.append("post_layernorm.")
-        if self.head is None:
-            skip_prefixes.append("head.")
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
 
         layer_count = len(self.encoder.layers)
 
@@ -912,6 +896,8 @@ class SiglipTextEmbeddings(nn.Module):
 class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".position_ids": None})
+
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     @classmethod
@@ -959,7 +945,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
-        self._is_text_input = True
+        # Set in embed_input_ids; consumed by forward.
+        self._has_text_tokens = True
+        self._mm_token_mask: torch.Tensor | None = None
 
     def get_text_features(
         self,
@@ -1023,7 +1011,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         flip_indices_cpu = (
             starts_cpu[sequence_ids_cpu] + ends_cpu[sequence_ids_cpu]
         ) - (1 + current_positions_cpu)
-        flip_indices = flip_indices_cpu.to(features.device, non_blocking=True)
+        flip_indices = async_tensor_h2d(flip_indices_cpu, features.device)
 
         return features[flip_indices]
 
@@ -1033,9 +1021,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
-            feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.seq_pooling_type
-            )
+            pooling_type = self.pooler_config.seq_pooling_type
+            assert pooling_type is not None
+            feature_select_strategy = _get_vision_feature_select_strategy(pooling_type)
 
         pooled_output = self.vision_model(
             pixel_values=pixel_values,
@@ -1104,8 +1092,12 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._is_text_input = (
-            multimodal_embeddings is None or len(multimodal_embeddings) == 0
+        has_mm_embeddings = (
+            multimodal_embeddings is not None and len(multimodal_embeddings) > 0
+        )
+        self._mm_token_mask = is_multimodal
+        self._has_text_tokens = dual_encoder_has_text_tokens(
+            has_mm_embeddings, is_multimodal
         )
 
         if multimodal_embeddings is None or is_multimodal is None:
@@ -1137,9 +1129,11 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             raise RuntimeError("PP is not supported for this model")
 
         # Multimodal inputs (image embeddings)
-        if not self._is_text_input:
+        assert inputs_embeds is not None
+        if not self._has_text_tokens:
             return inputs_embeds
 
+        vision_embeds = inputs_embeds
         # NOTE: inputs_embeds in model runner has size text_config.projection_size
         # (instead of text_config.hidden_size) to accommodate image embeddings
         hidden_size = self.text_embed_dim
@@ -1149,13 +1143,15 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             # No need to handle this case for now
             raise NotImplementedError
 
-        return self.get_text_features(input_ids, positions, inputs_embeds)
+        text_features = self.get_text_features(input_ids, positions, inputs_embeds)
+        return merge_dual_encoder_text_and_vision(
+            text_features, vision_embeds, self._mm_token_mask
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
-            skip_substrs=[".position_ids"],
             ignore_unexpected_prefixes=["logit_scale.", "logit_bias."],
         )
 
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

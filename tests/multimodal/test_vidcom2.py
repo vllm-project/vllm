@@ -56,6 +56,27 @@ def test_retained_count_floors_at_one_token_per_frame() -> None:
     )
 
 
+def test_mask_reads_frame_budgets_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_tolist = torch.Tensor.tolist
+    transfers: list[tuple[int, ...]] = []
+
+    def reject_item(tensor: torch.Tensor) -> None:
+        raise AssertionError(f"unexpected scalar read from shape {tuple(tensor.shape)}")
+
+    def record_tolist(tensor: torch.Tensor) -> list[int]:
+        transfers.append(tuple(tensor.shape))
+        return original_tolist(tensor)
+
+    monkeypatch.setattr(torch.Tensor, "item", reject_item)
+    monkeypatch.setattr(torch.Tensor, "tolist", record_tolist)
+    embeds = _fake_video_embeds(num_frames=4, rows=6, cols=8)
+
+    mask = compute_retention_mask(embeds, (4, 12, 16), spatial_merge_size=2, q=0.5)
+
+    assert transfers == [(4,)]
+    assert mask.shape == (4 * 6 * 8,)
+
+
 @pytest.mark.parametrize("q", [0.25, 0.5, 0.75, 0.9])
 @pytest.mark.parametrize("num_frames", [1, 4, 16])
 def test_total_retained_matches_target(q: float, num_frames: int) -> None:

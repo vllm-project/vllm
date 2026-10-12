@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
@@ -19,29 +19,31 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
-    OpenAIBaseModel,
-    PerRequestTimingMetrics,
+    PerRequestMetrics,
     StopParam,
     StreamOptions,
     ToolCall,
-    UsageInfo,
+    TopLogprobsParam,
     structured_outputs_from_response_format,
+    validate_cache_salt,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    has_non_text_content,
+)
 from vllm.sampling_params import (
     BeamSearchParams,
     RepetitionDetectionParams,
@@ -51,6 +53,9 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+
+if TYPE_CHECKING:
+    from vllm.parser.abstract_parser import Parser
 
 logger = init_logger(__name__)
 
@@ -146,7 +151,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None, description="ECTransfer parameters."
     )
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -178,7 +183,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     # Rendered prompt text from chat templating (only set when
     # ``return_prompt_text=True`` on the request); only sent on the first chunk.
     prompt_text: str | None = None
-    metrics: PerRequestTimingMetrics | None = None
+    metrics: PerRequestMetrics | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -215,10 +220,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/chat/create
     messages: list[ChatCompletionMessageParam]
     model: str | None = None
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     max_tokens: int | None = Field(
         default=None,
         deprecated="max_tokens is deprecated in favor of "
@@ -226,7 +231,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     max_completion_tokens: int | None = None
     n: int | None = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     response_format: AnyResponseFormat | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = []
@@ -267,6 +272,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    watermarking: bool | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -452,21 +458,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    return_assistant_tokens_mask: bool = Field(
-        default=False,
+    return_mm_kwargs: bool = Field(
+        default=True,
         description=(
-            "If true, the /render response will include an "
-            "``assistant_tokens_mask`` field — a per-token list of 0/1 "
-            "values indicating which tokens were assistant-generated. "
-            "Requires the chat template to use ``{% generation %}`` "
-            "tags.  When the template does not support it, "
-            "``assistant_tokens_mask`` will be ``null``."
+            "If false, the render response's `features` set `kwargs_data` "
+            "and `mm_metadata` to null, for callers that need only the token "
+            "layout and item hashes, such as cache-aware routers. Do not send "
+            "such a response to `/inference/v1/generate`, which reads a null "
+            "`kwargs_data` as every item being cached. Only supported on the "
+            "render endpoints; ignored on regular generation endpoints."
         ),
     )
 
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -521,6 +528,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _normalize_messages_before(cls, data: Any) -> Any:
         """Pre-process message dicts before Pydantic field validation.
 
@@ -567,6 +582,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
+    def resolve_reasoning_ended(
+        self, parser: "Parser | None", prompt_token_ids: list[int]
+    ) -> bool | None:
+        """Resolve the engine's `reasoning_ended` for structured outputs.
+
+        Call after `adjust_request`, which may set `_grammar_from_parser`.
+        `True` constrains from the first generated token; `None` lets the
+        engine check the prompt with its own reasoning parser.
+        """
+        if not self.include_reasoning:
+            return True
+        if self._grammar_from_parser:
+            # The Mistral grammar already includes an optional `think?`
+            # rule that handles both reasoning and non-reasoning outputs.
+            return True
+        if parser is not None and parser.reasoning_parser is not None:
+            return parser.is_reasoning_end(prompt_token_ids)
+        return None
+
     def build_chat_params(
         self,
         default_template: str | None,
@@ -595,7 +629,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
-            return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
             # No-tools requests default to tool_choice="none" at the API
             # layer. Collapse that default before rendering, so K3 emits a
             # model-visible tool-choice instruction only for requests with a
@@ -627,6 +660,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # Default sampling parameters for chat completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 0,
@@ -647,8 +682,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
+            skip_special_tokens=self.skip_special_tokens,
         )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
@@ -663,28 +700,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         default_sampling_params: dict,
     ) -> SamplingParams:
-        # Default parameters
-        if (repetition_penalty := self.repetition_penalty) is None:
-            repetition_penalty = default_sampling_params.get(
-                "repetition_penalty",
-                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+        # Priority: user -> server default -> OpenAI default
+        sampling_params = {
+            name: (
+                value
+                if (value := getattr(self, name)) is not None
+                else default_sampling_params.get(name, default)
             )
-        if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
-            )
-        if (top_p := self.top_p) is None:
-            top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
-            )
-        if (top_k := self.top_k) is None:
-            top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
-            )
-        if (min_p := self.min_p) is None:
-            min_p = default_sampling_params.get(
-                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
-            )
+            for name, default in self._DEFAULT_SAMPLING_PARAMS.items()
+        }
 
         # Merge server-default stop_token_ids (e.g., model-specific tokens
         # like </call> for gpt-oss) with any request-specified ones
@@ -711,13 +735,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args["ec_transfer_params"] = self.ec_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
-            presence_penalty=self.presence_penalty,
-            frequency_penalty=self.frequency_penalty,
-            repetition_penalty=repetition_penalty,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
+            **sampling_params,
+            watermarking=self.watermarking,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=stop_token_ids,
@@ -996,6 +1015,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def drop_prompt_token_ids_with_media(cls, data):
+        # The forwarded ids would drop media in ``messages``, so ignore them. Runs
+        # before validation, which can turn content into a one-shot iterator.
+        if not isinstance(data, dict):
+            return data
+        kv_transfer_params = data.get("kv_transfer_params")
+        if (
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+            and has_non_text_content(data.get("messages"))
+        ):
+            logger.debug(
+                "Ignoring kv_transfer_params['prompt_token_ids']: "
+                "messages have non-text content and are rendered instead."
+            )
+            kv_transfer_params.pop("prompt_token_ids")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_system_message_content_type(cls, data):
         """Warn if system messages contain non-text content.
 
@@ -1066,10 +1105,10 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     model: str | None = None
 
     # Shared sampling / generation fields — mirror ChatCompletionRequest.
-    frequency_penalty: float | None = 0.0
+    frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
     logprobs: bool | None = False
-    top_logprobs: int | None = 0
+    top_logprobs: TopLogprobsParam = 0
     logprob_token_ids: list[int] | None = Field(
         default=None,
         description=(
@@ -1081,7 +1120,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     n: int | None = 1
-    presence_penalty: float | None = 0.0
+    presence_penalty: float | None = None
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: StopParam = Field(default_factory=list)
@@ -1097,6 +1136,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    watermarking: bool | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
@@ -1134,6 +1174,17 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise VLLMValidationError(
                 "when using `logprob_token_ids`, `logprobs` must be set to true.",
                 parameter="logprob_token_ids",
+            )
+        kv_transfer_params = data.get("kv_transfer_params")
+        if (
+            isinstance(kv_transfer_params, dict)
+            and kv_transfer_params.get("prompt_token_ids") is not None
+        ):
+            raise VLLMValidationError(
+                "Batch chat completions do not support "
+                "`kv_transfer_params['prompt_token_ids']`: one pre-tokenized "
+                "prompt cannot serve several conversations.",
+                parameter="kv_transfer_params.prompt_token_ids",
             )
         response_format = data.get("response_format")
         if response_format is not None:

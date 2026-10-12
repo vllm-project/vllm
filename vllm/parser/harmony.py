@@ -16,36 +16,33 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     ConstStringFormat,
     Format,
-    GrammarFormat,
     JSONSchemaFormat,
     OptionalFormat,
     OrFormat,
-    RegexFormat,
     SequenceFormat,
     TagFormat,
-    TriggeredTagsFormat,
 )
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
+    get_encoding,
     get_streamable_parser_for_assistant,
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
-from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.abstract_parser import DelegatingParser, structured_outputs_to_format
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SimplifiedToolChoice,
@@ -113,6 +110,9 @@ class HarmonyParser(DelegatingParser):
         self._parser: StreamableParser | None = None
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
+
+        self._num_counted_tokens = 0
+        self._num_reasoning_tokens = 0
 
         # For error recovery
         self._current_message_tokens: list[int] = []
@@ -335,7 +335,10 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                continue
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
@@ -348,9 +351,7 @@ class HarmonyParser(DelegatingParser):
             else:
                 self._current_message_tokens.append(token_id)
 
-            if channel == "analysis" or (
-                channel == "commentary" and recipient is not None
-            ):
+            if self._is_reasoning_token(token_id, channel, recipient):
                 reasoning_token_count += 1
 
             segments.append(
@@ -364,10 +365,37 @@ class HarmonyParser(DelegatingParser):
 
             # TODO: Optionally merge and suppress empty Segments
 
+        self._num_counted_tokens += len(token_ids)
+        self._num_reasoning_tokens += reasoning_token_count
         return ChunkResult(
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if len(token_ids) == self._num_counted_tokens:
+            return self._num_reasoning_tokens
+
+        parser = get_streamable_parser_for_assistant()
+        count = 0
+        for token_id in token_ids:
+            try:
+                parser.process(token_id)
+            except HarmonyError:
+                continue
+            recipient = self._normalize_recipient(parser.current_recipient)
+            if self._is_reasoning_token(token_id, parser.current_channel, recipient):
+                count += 1
+        return count
+
+    @staticmethod
+    def _is_reasoning_token(
+        token_id: int, channel: str | None, recipient: str | None
+    ) -> bool:
+        is_reasoning_channel = channel == "analysis" or (
+            channel == "commentary" and recipient is not None
+        )
+        return is_reasoning_channel and not get_encoding().is_special_token(token_id)
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -387,6 +415,7 @@ class HarmonyParser(DelegatingParser):
         return recipient[:constrain_index].rstrip() or None
 
 
+_JSON_CONSTRAINS = [" json", " <|constrain|>json"]
 # Harmomy's stop tokens are <|return|>, <|call|>, <|endoftext|>
 # They are represented as "" since xgrammar disallows stop tokens while
 # under constraints, leading to bad or infinite generations.
@@ -398,12 +427,9 @@ _TOOL_CALL_CHANNELS = [
     "<|channel|>final",
 ]
 _FUNCTION_CALL_BEGINS = [
-    "to=functions.{name} {channel} json<|message|>",
-    "to=functions.{name} {channel} <|constrain|>json<|message|>",
-    "{channel} to=functions.{name} json<|message|>",
-    "{channel} to=functions.{name} <|constrain|>json<|message|>",
+    " to=functions.{name}{channel}{constrain}<|message|>",
+    "{channel} to=functions.{name}{constrain}<|message|>",
 ]
-_JSON_CONTENT = JSONSchemaFormat(json_schema={"type": "object"})
 _ANY_CONTENT = AnyTextFormat()
 
 
@@ -446,15 +472,16 @@ def _assemble_tag(
     return StructuralTag(format=SequenceFormat(elements=tags))
 
 
-@register_vllm_structural_tag("harmony")
+@register_vllm_structural_tag("harmony", builtin_tools=True)
 def get_harmony_structural_tag(
     tools: list[FunctionToolParam],
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
     # reasoning always enabled for Harmony
-    del reasoning
+    del reasoning, token_suffix
 
     if builtin_tools:
         # Fallback for built-in tools
@@ -476,7 +503,9 @@ def get_harmony_structural_tag(
     else:
         tags = [
             TagFormat(
-                begin=pattern.format(name=tool.function.name, channel=channel),
+                begin=pattern.format(
+                    name=tool.function.name, channel=channel, constrain=constrain
+                ),
                 content=JSONSchemaFormat(
                     json_schema=get_function_parameters(tool.function)
                 ),
@@ -484,65 +513,23 @@ def get_harmony_structural_tag(
             )
             for tool in tools
             for pattern in _FUNCTION_CALL_BEGINS
+            for constrain in _JSON_CONSTRAINS
             for channel in _TOOL_CALL_CHANNELS
         ]
 
     if tool_choice == "auto":
-        tags.append(
+        tags.extend(
             TagFormat(
-                begin=_FINAL_BEGIN.format(constrain=" <|constrain|>json"),
+                begin=_FINAL_BEGIN.format(constrain=constrain),
                 content=_ANY_CONTENT,
                 end=_END_TAG,
             )
-        )
-        tags.append(
-            TagFormat(
-                begin=_FINAL_BEGIN.format(constrain=""),
-                content=_ANY_CONTENT,
-                end=_END_TAG,
-            )
+            for constrain in _JSON_CONSTRAINS + [""]
         )
 
     return _assemble_tag(
         allow_analysis=True, allow_commentary=True, content=OrFormat(elements=tags)
     )
-
-
-def _params_to_final_content(params: StructuredOutputsParams) -> Format | None:
-    """Map StructuredOutputsParams in a XGrammar Format."""
-    if params.json_object:
-        return _JSON_CONTENT
-    if params.json is not None:
-        schema = params.json
-        if isinstance(schema, str):
-            schema = json.loads(schema)
-        return JSONSchemaFormat(json_schema=schema)
-    if params.regex is not None:
-        return RegexFormat(pattern=params.regex)
-    if params.choice is not None:
-        return OrFormat(
-            elements=[ConstStringFormat(value=choice) for choice in params.choice]
-        )
-    if params.grammar is not None:
-        return GrammarFormat(grammar=params.grammar)
-    if params.structural_tag is not None:
-        s_tag = json.loads(params.structural_tag)
-        if "structures" in s_tag:
-            # LegacyStructuralTagResponseFormat
-            return TriggeredTagsFormat(
-                triggers=s_tag["triggers"],
-                tags=[
-                    TagFormat(
-                        begin=structure["begin"],
-                        content=JSONSchemaFormat(json_schema=structure["schema"]),
-                        end=structure["end"],
-                    )
-                    for structure in s_tag["structures"]
-                ],
-            )
-        # StructuralTagResponseFormat
-        return StructuralTag.model_validate(s_tag).format
-    return None
 
 
 def _adjust_output_format(
@@ -553,19 +540,27 @@ def _adjust_output_format(
     if params is None:
         return request
 
-    final_content = _params_to_final_content(params)
+    final_content = structured_outputs_to_format(params)
     if final_content is None:
         return request
 
     if isinstance(final_content, JSONSchemaFormat):
-        begin = _FINAL_BEGIN.format(constrain=" <|constrain|>json")
+        content = OrFormat(
+            elements=[
+                TagFormat(
+                    begin=_FINAL_BEGIN.format(constrain=constrain),
+                    content=final_content,
+                    end=_END_TAG,
+                )
+                for constrain in _JSON_CONSTRAINS
+            ]
+        )
     else:
-        begin = _FINAL_BEGIN.format(constrain="")
-
+        content = TagFormat(
+            begin=_FINAL_BEGIN.format(constrain=""), content=final_content, end=_END_TAG
+        )
     structural_tag = _assemble_tag(
-        allow_analysis=True,
-        allow_commentary=False,
-        content=TagFormat(begin=begin, content=final_content, end=_END_TAG),
+        allow_analysis=True, allow_commentary=False, content=content
     )
 
     request.structured_outputs = replace(

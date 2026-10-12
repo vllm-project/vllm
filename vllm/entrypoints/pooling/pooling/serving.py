@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import assert_never, cast
 
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing_extensions import assert_never
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -74,7 +73,7 @@ class ServingPooling(PoolingBaseServing):
         assert request.task is not None
         pooling_task = request.task
 
-        # plugin task uses io_processor.parse_request to verify inputs
+        # plugin task uses io_processor.parse_data to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:
                 raise VLLMValidationError(

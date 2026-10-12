@@ -1,4 +1,4 @@
-group: Models - Distributed
+group: Models - Distributed Intel
 depends_on: 
   - image-build-xpu
 steps:

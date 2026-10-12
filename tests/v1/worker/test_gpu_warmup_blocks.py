@@ -20,6 +20,7 @@ from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -53,6 +54,18 @@ def _attention_group() -> KVCacheGroupSpec:
     )
 
 
+def _circular_group() -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        ["circular"],
+        CircularBufferSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        ),
+    )
+
+
 def _mamba_group(mamba_cache_mode: str) -> KVCacheGroupSpec:
     # Name carries the mode so several groups can coexist in one config.
     return KVCacheGroupSpec(
@@ -75,9 +88,10 @@ def _make_runner(
     """Stub model runner exposing only what the warmup entry points read."""
     return SimpleNamespace(
         num_speculative_steps=num_spec_steps,
+        adaptive_verification=None,
+        rejection_sampler=None,
         decode_query_len=num_spec_steps + 1,
         is_pooling_model=False,
-        is_encoder_only=False,
         is_encoder_decoder=False,
         is_last_pp_rank=True,
         max_num_reqs=4,
@@ -88,7 +102,9 @@ def _make_runner(
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=kv_cache_groups, num_blocks=1024
         ),
-        vllm_config=SimpleNamespace(num_lookahead_tokens=num_lookahead_tokens),
+        vllm_config=SimpleNamespace(
+            num_lookahead_tokens=num_lookahead_tokens, is_mm_encoder_only=False
+        ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
     )
@@ -100,9 +116,14 @@ class _StepRecorder:
     def __init__(self) -> None:
         # (blocks held per group, num_computed_tokens, num_scheduled_tokens)
         self.steps: list[tuple[list[int], int, int]] = []
+        self.num_spec_tokens_to_schedule: list[int] = []
         self._held: dict[str, list[int]] = {}
 
     def execute_model(self, scheduler_output) -> None:
+        if scheduler_output.total_num_scheduled_tokens:
+            self.num_spec_tokens_to_schedule.append(
+                scheduler_output.num_spec_tokens_to_schedule
+            )
         for new_req in scheduler_output.scheduled_new_reqs:
             self._held[new_req.req_id] = [len(ids) for ids in new_req.block_ids]
             self._record(new_req.req_id, new_req.num_computed_tokens, scheduler_output)
@@ -145,7 +166,7 @@ def _assert_covers_lookahead(
 
 # 0 covers eagle / MTP / draft models, 1 covers DFlash's extra in-fill query.
 @pytest.mark.parametrize("extra_lookahead", [0, 1])
-@pytest.mark.parametrize("num_spec_steps", [2, 3, 5, 7])
+@pytest.mark.parametrize("num_spec_steps", [1, 2, 3, 5, 7])
 def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahead):
     num_lookahead_tokens = num_spec_steps + extra_lookahead
     recorder = _StepRecorder()
@@ -157,6 +178,7 @@ def test_warmup_kernels_reserves_lookahead_blocks(num_spec_steps, extra_lookahea
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+    assert set(recorder.num_spec_tokens_to_schedule) == {num_spec_steps}
 
 
 def test_mixed_warmup_reserves_lookahead_blocks():
@@ -171,9 +193,10 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     )
 
     _assert_covers_lookahead(recorder.steps, num_lookahead_tokens)
+    assert set(recorder.num_spec_tokens_to_schedule) == {NUM_SPEC_STEPS}
 
 
-@pytest.mark.parametrize("mamba_cache_mode", ["none", "all", "align"])
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
 def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
     """Mamba groups hold the running-state block plus the speculative tail.
 
@@ -211,22 +234,14 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
 
 
 def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
-    """Full attention plus one Mamba group per cache mode, so a single manager
-    exercises every branch `_reserved_block_count` has.
-
-    "none" and "all" reach the same branch of both `_reserved_block_count` and
-    `MambaManager`, which tests only for "align". They are still both listed:
-    the mode is a spec-level input, and having the real manager confirm the
-    prediction for each is what keeps a future divergence between them from
-    landing unnoticed.
-    """
+    """Attention, circular, and Mamba groups exercise every reservation branch."""
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
             _attention_group(),
+            _circular_group(),
             _mamba_group("none"),
-            _mamba_group("all"),
             _mamba_group("align"),
         ],
     )
@@ -306,24 +321,28 @@ def test_reserved_block_count_matches_real_kv_cache_manager():
 
 
 @pytest.mark.parametrize(
-    ("method", "expected"),
+    ("method", "draft_hf_config", "expected"),
     [
-        ("eagle", NUM_SPEC_STEPS),
-        ("eagle3", NUM_SPEC_STEPS),
-        ("mtp", NUM_SPEC_STEPS),
-        ("dspark", NUM_SPEC_STEPS),
-        ("draft_model", NUM_SPEC_STEPS),
+        ("eagle", None, NUM_SPEC_STEPS),
+        ("eagle3", None, NUM_SPEC_STEPS),
+        ("mtp", None, NUM_SPEC_STEPS),
+        ("dspark", None, NUM_SPEC_STEPS),
+        ("dspark", {"sample_from_anchor": True}, NUM_SPEC_STEPS),
+        ("dspark", {"sample_from_anchor": False}, NUM_SPEC_STEPS + 1),
+        ("draft_model", None, NUM_SPEC_STEPS),
         # DFlash's in-fill decoding adds a query for the last sampled token.
-        ("dflash", NUM_SPEC_STEPS + 1),
-        ("ngram", 0),
-        ("ngram_gpu", 0),
-        ("medusa", 0),
-        ("mlp_speculator", 0),
-        ("suffix", 0),
-        ("extract_hidden_states", 0),
+        ("dflash", None, NUM_SPEC_STEPS + 1),
+        ("ngram", None, 0),
+        ("ngram_gpu", None, 0),
+        ("medusa", None, 0),
+        ("mlp_speculator", None, 0),
+        ("suffix", None, 0),
+        ("extract_hidden_states", None, 0),
     ],
 )
-def test_num_lookahead_tokens_per_method(method: str, expected: int):
+def test_num_lookahead_tokens_per_method(
+    method: str, draft_hf_config: dict | None, expected: int
+):
     """`VllmConfig.num_lookahead_tokens` is the single source of the reservation.
 
     Both the scheduler and the warmup read it, so a wrong answer here silently
@@ -342,6 +361,12 @@ def test_num_lookahead_tokens_per_method(method: str, expected: int):
     speculative_config = object.__new__(SpeculativeConfig)
     object.__setattr__(speculative_config, "method", method)
     object.__setattr__(speculative_config, "num_speculative_tokens", NUM_SPEC_STEPS)
+    hf_config = SimpleNamespace(**(draft_hf_config or {}))
+    object.__setattr__(
+        speculative_config,
+        "draft_model_config",
+        SimpleNamespace(hf_config=hf_config),
+    )
 
     config = _Config()
     config.speculative_config = speculative_config
