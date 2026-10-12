@@ -9,6 +9,7 @@ import pybase64 as base64
 import pytest
 import soundfile as sf
 
+import vllm.envs as envs
 from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
@@ -16,6 +17,7 @@ from vllm.multimodal.media.audio import (
     load_audio_soundfile,
     load_audio_torchcodec,
 )
+from vllm.multimodal.media.base import MediaDecodedBudget
 
 from ...conftest import AudioTestAssets
 
@@ -116,6 +118,17 @@ def _make_flac_bytes(frames: int, channels: int, samplerate: int) -> bytes:
     buf = BytesIO()
     sf.write(buf, data, samplerate, format="FLAC")
     return buf.getvalue()
+
+
+@pytest.mark.skip_global_cleanup
+def test_request_budget_rejects_second_decoded_audio_clip(monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", 384)
+    clip = _make_flac_bytes(frames=64, channels=1, samplerate=16000)
+    audio_io = AudioMediaIO(decoded_budget=MediaDecodedBudget())
+
+    audio_io.load_bytes(clip)
+    with pytest.raises(ValueError, match="VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES"):
+        audio_io.load_bytes(clip)
 
 
 def test_small_file_passes_memory_guard():

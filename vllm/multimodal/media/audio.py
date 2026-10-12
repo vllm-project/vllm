@@ -23,7 +23,7 @@ from vllm.utils.sparse_utils import (
     safe_to_dense,
 )
 
-from .base import MediaIO
+from .base import MediaDecodedBudget, MediaIO
 
 logger = init_logger(__name__)
 
@@ -527,8 +527,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
     error handling.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+        self, *, decoded_budget: MediaDecodedBudget | None = None, **kwargs
+    ) -> None:
         super().__init__()
+        self.decoded_budget = decoded_budget
 
         # Allow per-server override of the audio decoding backend, e.g.:
         #   --media-io-kwargs '{"audio": {"audio_backend": "torchcodec"}}'
@@ -564,13 +567,49 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         self._validate_encoded_size(len(data))
-        return load_audio(
-            BytesIO(data),
-            sr=None,
-            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
-            max_decode_bytes=envs.VLLM_MAX_AUDIO_DECODE_BYTES,
-            backend=self.audio_backend,
-        )
+        return self._load_with_budget(BytesIO(data))
+
+    def _load_with_budget(self, source: BytesIO | Path) -> tuple[npt.NDArray, float]:
+        budget = self.decoded_budget
+        if budget is None:
+            return load_audio(
+                source,
+                sr=None,
+                max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+                max_decode_bytes=envs.VLLM_MAX_AUDIO_DECODE_BYTES,
+                backend=self.audio_backend,
+            )
+
+        with budget.lock:
+            remaining = budget.remaining()
+            if remaining == 0:
+                raise ValueError(
+                    "Request decoded media exceeds VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
+                )
+            max_decode_bytes = envs.VLLM_MAX_AUDIO_DECODE_BYTES
+            if remaining is not None:
+                max_decode_bytes = min(max_decode_bytes, remaining)
+            try:
+                audio = load_audio(
+                    source,
+                    sr=None,
+                    max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+                    max_decode_bytes=max_decode_bytes,
+                    backend=self.audio_backend,
+                )
+            except ValueError as exc:
+                if (
+                    remaining is not None
+                    and remaining < envs.VLLM_MAX_AUDIO_DECODE_BYTES
+                    and "VLLM_MAX_AUDIO_DECODE_BYTES" in str(exc)
+                ):
+                    raise ValueError(
+                        "Request decoded media exceeds "
+                        "VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES."
+                    ) from exc
+                raise
+            budget.charge(audio[0].nbytes)
+            return audio
 
     def load_base64(
         self,
@@ -588,13 +627,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
         self._validate_encoded_size(filepath.stat().st_size)
-        return load_audio(
-            filepath,
-            sr=None,
-            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
-            max_decode_bytes=envs.VLLM_MAX_AUDIO_DECODE_BYTES,
-            backend=self.audio_backend,
-        )
+        return self._load_with_budget(filepath)
 
     def encode_base64(
         self,

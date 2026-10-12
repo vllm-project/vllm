@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -9,7 +10,36 @@ from typing import Any, Generic, TypeVar, cast
 
 import numpy as np
 
+import vllm.envs as envs
+
 _T = TypeVar("_T")
+
+
+class MediaDecodedBudget:
+    """Thread-safe decoded-media byte accumulator for one request."""
+
+    def __init__(self) -> None:
+        self.used = 0
+        self.lock = threading.RLock()
+
+    def remaining(self) -> int | None:
+        limit = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+        with self.lock:
+            return None if limit <= 0 else max(0, limit - self.used)
+
+    def charge(self, decoded_bytes: int) -> None:
+        limit = envs.VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES
+        if limit <= 0 or decoded_bytes <= 0:
+            return
+        with self.lock:
+            used = self.used + decoded_bytes
+            if used > limit:
+                raise ValueError(
+                    "Request decoded media exceeds "
+                    f"VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES={limit} "
+                    f"({used} bytes)."
+                )
+            self.used = used
 
 
 @dataclass
