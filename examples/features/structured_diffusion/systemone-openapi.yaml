@@ -139,7 +139,7 @@ components:
         criteria:
           type: object
           minProperties: 2
-          maxProperties: 26
+          maxProperties: 128
           additionalProperties: {}
     Noul:
       type: object
@@ -165,5 +165,5 @@ components:
         criteria:
           type: array
           minItems: 2
-          maxItems: 26
+          maxItems: 128
           items: {}

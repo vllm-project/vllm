@@ -84,6 +84,7 @@ import math
 import os
 import random
 import ssl
+import string
 import subprocess
 import threading
 import time
@@ -116,6 +117,19 @@ THOUGHT_OPEN = None
 THOUGHT_CLOSE = None
 BACKEND = "gemma"
 MASK_TOKEN_ID = 100
+# vLLM returns exact logprobs for at most 128 logprob_token_ids per request,
+# so one read covers at most this many distinct answer labels.
+MAX_ALTERNATIVES = 128
+# Answer codes in order of use. A-Z come first, so a schema that fit the former
+# 26-alternative limit renders byte-identical prompts. Wider questions continue
+# with a-z and 0-9, then two-letter capitals the tokenizer keeps as one token.
+CODE_ORDER = (
+    list(string.ascii_uppercase)
+    + list(string.ascii_lowercase)
+    + list(string.digits)
+    + [a + b for a in string.ascii_uppercase for b in string.ascii_uppercase]
+)
+CODES = list(string.ascii_uppercase)  # extended by init_tokenizer
 
 
 # ----------------------------------------------------------------------------
@@ -161,20 +175,19 @@ def parse_schema(value):
                 else (str(o), None)
                 for o in opts
             ]
-            labels = [chr(ord("A") + i) for i in range(len(choices))]
         elif kind == "score":
             choices = [(str(level), None) for level in (q.get("levels") or [])]
-            labels = (
-                [str(i + 1) for i in range(len(choices))]
-                if len(choices) <= 9
-                else [chr(ord("A") + i) for i in range(len(choices))]
-            )
         else:
             raise SchemaError(f"question {qid!r}: unknown type {kind!r}")
         if len(choices) < 2:
             raise SchemaError(f"question {qid!r}: needs at least two alternatives")
-        if len(choices) > 26:
-            raise SchemaError(f"question {qid!r}: at most 26 alternatives")
+        widest = min(MAX_ALTERNATIVES, len(CODES))
+        if len(choices) > widest:
+            raise SchemaError(f"question {qid!r}: at most {widest} alternatives")
+        if kind == "score" and len(choices) <= 9:
+            labels = [str(i + 1) for i in range(len(choices))]
+        elif kind != "noul":
+            labels = CODES[: len(choices)]
         deps = q.get("depends_on") or []
         ask_if = q.get("ask_if") or {}
         if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
@@ -261,7 +274,13 @@ def parse_schema(value):
         "chunk_rows": chunk_rows,
         "chunk_prompt": chunk_prompt,
         "sequential": sequential,
-        "format": "lines" if len(qs) <= 10 else "indexed",
+        # Codes past Z can merge with a preceding id, so wide questions keep
+        # the "id: label" lines.
+        "format": (
+            "lines"
+            if len(qs) <= 10 or any(len(q["labels"]) > 26 for q in qs)
+            else "indexed"
+        ),
     }
 
 
@@ -325,10 +344,25 @@ def enc(text):
     return TOK.encode(text, add_special_tokens=False)
 
 
+def single_token_codes():
+    """CODE_ORDER past A-Z, kept when the code is one token after "id: "
+    and that token is not already used by an earlier code. The answer template
+    still checks every label in its real position."""
+    reference = len(enc(": A"))
+    codes, seen = [], set()
+    for i, code in enumerate(CODE_ORDER):
+        ids = enc(": " + code)
+        if i < 26 or (len(ids) == reference and ids[-1] not in seen):
+            codes.append(code)
+            seen.add(ids[-1])
+    return codes
+
+
 def init_tokenizer(tok):
-    global TOK, SCAFFOLD, THOUGHT_OPEN, THOUGHT_CLOSE, TURN_CLOSE, PAD
+    global TOK, SCAFFOLD, THOUGHT_OPEN, THOUGHT_CLOSE, TURN_CLOSE, PAD, CODES
     TOK = tok
     _template_cache.clear()
+    CODES = single_token_codes()
     if BACKEND == "nemotron":
         SCAFFOLD, THOUGHT_OPEN, THOUGHT_CLOSE = [], [], []
         TURN_CLOSE = TOK.eos_token_id
@@ -716,8 +750,9 @@ def schedule(qs):
 
 def chunk_groups(schema, qs):
     """``qs`` split, in order, into the fewest groups whose answer templates
-    fit ``chunk_rows`` (the canvas by default). A question marked alone gets
-    its own group."""
+    fit ``chunk_rows`` (the canvas by default) and use at most
+    MAX_ALTERNATIVES distinct labels. A question marked alone gets its own
+    group."""
     limit = schema.get("chunk_rows") or CANVAS_LEN
     groups, group = [], []
     for q in qs:
@@ -735,7 +770,9 @@ def chunk_groups(schema, qs):
             )
             + 1
         )
-        if rows > limit and group:
+        # Wide questions also split reads at the candidate-token limit.
+        labels = {label for t in trial for label in t["labels"]}
+        if (rows > limit or len(labels) > MAX_ALTERNATIVES) and group:
             groups.append(group)
             group = [q]
         else:
