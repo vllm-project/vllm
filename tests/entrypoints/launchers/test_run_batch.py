@@ -18,11 +18,16 @@ from vllm.entrypoints.launchers.run_batch import (
     BatchRequestOutput,
     BatchTranscriptionRequest,
     download_bytes_from_url,
+    main,
+    make_arg_parser,
     make_transcription_wrapper,
     upload_data,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.exceptions import VLLMValidationError
+from vllm.reasoning import ReasoningParserManager
+from vllm.tool_parsers import ToolParserManager
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -1120,3 +1125,49 @@ async def test_upload_data_error_includes_awaited_response_body():
     message = str(exc_info.value)
     assert "server-error-detail" in message
     assert "coroutine" not in message
+
+
+class _StopBeforeEngine(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_main_imports_parser_plugins_before_engine_setup(tmp_path, monkeypatch):
+    for manager in (ToolParserManager, ReasoningParserManager):
+        monkeypatch.setattr(manager, "lazy_parsers", dict(manager.lazy_parsers))
+    tool_plugin = tmp_path / "batch_tool_plugin.py"
+    tool_plugin.write_text(
+        "from vllm.tool_parsers import ToolParser, ToolParserManager\n"
+        "@ToolParserManager.register_module('batch_plugin_tool')\n"
+        "class BatchPluginToolParser(ToolParser):\n"
+        "    pass\n"
+    )
+    reasoning_plugin = tmp_path / "batch_reasoning_plugin.py"
+    reasoning_plugin.write_text(
+        "from vllm.reasoning import ReasoningParser, ReasoningParserManager\n"
+        "@ReasoningParserManager.register_module('batch_plugin_reasoning')\n"
+        "class BatchPluginReasoningParser(ReasoningParser):\n"
+        "    pass\n"
+    )
+    args = make_arg_parser(FlexibleArgumentParser()).parse_args(
+        [
+            "--input-file=in.jsonl",
+            "--output-file=out.jsonl",
+            f"--tool-parser-plugin={tool_plugin}",
+            f"--reasoning-parser-plugin={reasoning_plugin}",
+        ]
+    )
+
+    def build_async_engine_client(*_args, **_kwargs):
+        assert "batch_plugin_tool" in ToolParserManager.list_registered()
+        assert "batch_plugin_reasoning" in ReasoningParserManager.list_registered()
+        raise _StopBeforeEngine
+
+    with (
+        patch(
+            "vllm.entrypoints.launchers.api_server.entry.build_async_engine_client",
+            build_async_engine_client,
+        ),
+        pytest.raises(_StopBeforeEngine),
+    ):
+        await main(args)
