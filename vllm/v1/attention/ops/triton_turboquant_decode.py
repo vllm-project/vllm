@@ -96,12 +96,11 @@ def _tq_decode_stage1(
 
     # Sequence length for this batch
     seq_len = tl.load(Seq_lens_ptr + bid)
-    
     if SLIDING_WINDOW > 0:
         window_start = tl.maximum(0, seq_len - SLIDING_WINDOW)
     else:
         window_start = 0
-        
+
     # KV split range
     split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
     split_start = split_len * sid
