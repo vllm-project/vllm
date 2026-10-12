@@ -181,6 +181,7 @@ def test_online_moe_stages_quantized_weights_for_humming(
     setattr(method, backend_attr, backend)
     method.weight_scale_name = "weight_scale"
     method.experts_cls = None
+    method.moe = SimpleNamespace(use_mxfp4_w4a4_dsv4=False)
     method.get_fused_moe_quant_config = Mock(return_value=None)
 
     layer = torch.nn.Module()
