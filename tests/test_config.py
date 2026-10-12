@@ -1614,34 +1614,28 @@ def test_all2all_backend_defaults_to_one_sided_only_on_gb200_gb300(
 
 
 @pytest.mark.parametrize(
-    ("data_parallel_size", "tensor_parallel_size", "expected"),
+    ("data_parallel_size", "expected"),
     [
-        # One-sided only pays off once a token stops reaching every rank, which
-        # needs ep_size >= 8; below that large prefill chunks regress.
-        (8, 1, "flashinfer_nvlink_one_sided"),
-        (16, 1, "flashinfer_nvlink_one_sided"),
-        # EP flattens TP across DP, so DP x TP is what counts, not DP alone.
-        (4, 2, "flashinfer_nvlink_one_sided"),
-        (4, 1, "allgather_reducescatter"),
-        (2, 1, "allgather_reducescatter"),
-        (1, 1, "allgather_reducescatter"),
+        (8, "flashinfer_nvlink_one_sided"),
+        (16, "flashinfer_nvlink_one_sided"),
+        (4, "allgather_reducescatter"),
+        (2, "allgather_reducescatter"),
+        (1, "allgather_reducescatter"),
     ],
 )
-def test_one_sided_all2all_default_requires_wide_enough_ep_group(
-    one_sided_capable_host, data_parallel_size, tensor_parallel_size, expected
+def test_one_sided_all2all_default_requires_eight_data_parallel_ranks(
+    one_sided_capable_host, data_parallel_size, expected
 ):
-    """Below ep_size 8 one-sided loses on large prefill chunks, so the default
-    must stay on allgather_reducescatter there."""
+    """Below DP 8 one-sided loses on large prefill chunks, so the default must
+    stay on allgather_reducescatter there."""
     config = _parallel_config(
-        enable_expert_parallel=True,
-        data_parallel_size=data_parallel_size,
-        tensor_parallel_size=tensor_parallel_size,
+        enable_expert_parallel=True, data_parallel_size=data_parallel_size
     )
     assert config.all2all_backend == expected
 
 
-def test_explicit_all2all_backend_survives_a_narrow_ep_group(one_sided_capable_host):
-    """The EP-size threshold is a default-picking heuristic, not a constraint:
+def test_explicit_all2all_backend_survives_a_small_deployment(one_sided_capable_host):
+    """The DP threshold is a default-picking heuristic, not a constraint:
     asking for one-sided explicitly must still get it."""
     config = _parallel_config(
         all2all_backend="flashinfer_nvlink_one_sided",
