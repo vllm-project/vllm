@@ -401,9 +401,9 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub served_model_name: Vec<String>,
 
-    /// CORS allowed origins as a JSON list. `["*"]` allows any origin.
-    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
-    #[serde(default = "default_cors_wildcard")]
+    /// CORS allowed origins as a JSON list. Defaults to `[]` (no cross-origin access).
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = "[]")]
+    #[serde(default = "default_cors_origins")]
     pub allowed_origins: JsonStringList,
 
     /// CORS allowed methods as a JSON list. `["*"]` allows the standard set.
@@ -662,6 +662,10 @@ fn default_stream_interval() -> NonZeroU32 {
 
 fn default_cors_wildcard() -> JsonStringList {
     JsonStringList(vec!["*".to_string()])
+}
+
+fn default_cors_origins() -> JsonStringList {
+    JsonStringList(Vec::new())
 }
 
 fn default_py_bootstrap_parser_selection() -> ParserSelection {

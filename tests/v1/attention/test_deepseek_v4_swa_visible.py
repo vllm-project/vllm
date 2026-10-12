@@ -828,3 +828,57 @@ def test_v41_flashinfer_mixed_sparse_indices_respect_replay_start():
     # Decode row is copied through; prefill rows follow the bounded window.
     assert bounded[0].cpu().tolist() == plain[0].cpu().tolist()
     assert bounded[1:].cpu().tolist() == rows[1:]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_dspark_noncausal_draft_decode_update_matches_build():
+    """A DSpark draft graph refreshes its non-causal SWA metadata in place
+    instead of rebuilding it, so the refresh must match a fresh build."""
+    from vllm.v1.attention.backends.mla.compressor_utils import (
+        get_dspark_swa_index_width,
+    )
+
+    num_spec = 4
+    query_lens = [num_spec] * 3
+
+    def make_dspark_builder():
+        builder = make_builder(vision=False)
+        builder.is_dspark = True
+        builder.noncausal_index_width = get_dspark_swa_index_width(WINDOW, num_spec)
+        builder.decode_threshold = num_spec
+        return builder
+
+    def common_metadata(seq_lens):
+        query_start_loc, seq_lens_t, _, slot_mapping, block_table = make_batch(
+            seq_lens, query_lens, torch.device("cuda")
+        )
+        return CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.cpu(),
+            seq_lens=seq_lens_t,
+            seq_lens_cpu_upper_bound=seq_lens_t.cpu(),
+            num_reqs=len(seq_lens),
+            num_actual_tokens=int(query_start_loc[-1]),
+            max_query_len=num_spec,
+            max_seq_len=max(seq_lens),
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=False,
+        )
+
+    captured_seq_lens = [6, 40, 130]
+    replay_seq_lens = [130, 9, 90]
+    builder = make_dspark_builder()
+    captured = common_metadata(captured_seq_lens)
+    md = builder.build(0, captured)
+    replay = common_metadata(replay_seq_lens)
+    expected = make_dspark_builder().build(0, replay)
+
+    # A replay sees new inputs through the same device buffers.
+    captured.seq_lens.copy_(replay.seq_lens)
+    captured.block_table_tensor.copy_(replay.block_table_tensor)
+    builder.update_draft_decode_metadata(md)
+
+    assert md.decode_swa_width == builder.noncausal_index_width
+    torch.testing.assert_close(md.decode_swa_lens, expected.decode_swa_lens)
+    torch.testing.assert_close(md.decode_swa_indices, expected.decode_swa_indices)
