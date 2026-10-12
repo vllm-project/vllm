@@ -149,15 +149,7 @@ def _request_group(
         pytest.param(4, 8192, {}, 4, id="q4-self"),
         pytest.param(4, 8192, {"is_cross_attention": True}, 4, id="q4-cross"),
         pytest.param(1, 128, {}, 4, id="q1-decode"),
-        pytest.param(16, 128, {}, 1, id="q16-mha-more-spans"),
         pytest.param(40, 8192, {}, 4, id="large-query-gqa"),
-        pytest.param(
-            4,
-            8192,
-            {"num_query_heads": 16, "num_kv_heads": 1, "head_size": 256},
-            4,
-            id="subgroup-fills-team",
-        ),
         pytest.param(
             10,
             8192,
@@ -178,13 +170,6 @@ def _request_group(
             },
             4,
             id="amx-fp8",
-        ),
-        pytest.param(
-            4,
-            128,
-            {"head_size": 80, "isa_hint": "amx", "enable_kv_split": False},
-            4,
-            id="amx-hint-head80-vec16",
         ),
     ],
 )

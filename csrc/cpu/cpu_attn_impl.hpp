@@ -441,9 +441,8 @@ class AttentionScheduler {
     };
     const int32_t original_q_head_per_kv =
         input.num_heads_q / input.num_heads_kv;
-    const bool supports_gqa = original_q_head_per_kv <= max_num_q_per_iter;
     const int32_t min_split_kv_len =
-        ((max_num_q_per_iter * 8 + kv_len_alignment - 1) / kv_len_alignment) *
+        ((max_num_q_per_iter * 16 + kv_len_alignment - 1) / kv_len_alignment) *
         kv_len_alignment;
     const int64_t default_tile_size = calcu_default_tile_size(
         cache_size, input.head_dim, input.elem_size, input.q_buffer_elem_size,
@@ -452,20 +451,17 @@ class AttentionScheduler {
     const auto request_causal = [&](const int32_t req_id) {
       return is_dynamic_causal ? input.dynamic_causal[req_id] != 0 : causal;
     };
-    const auto group_for_request = [&](const int32_t req_id,
-                                       const int32_t group) {
-      const int32_t q_tokens = request_q_token_num(req_id);
-      if (!supports_gqa) {
+    // Pack all query heads of a KV head into one iteration when they fit.
+    // Divisible groups pack any query length; other groups pack only queries
+    // that fit one iteration. Groups larger than an iteration use MHA.
+    const auto request_q_head_group = [&](const int32_t req_id) {
+      if (original_q_head_per_kv > max_num_q_per_iter) {
         return 1;
       }
-      if (q_tokens == 1) {
-        return original_q_head_per_kv;
-      }
-      // Divisible groups fill query iterations; other groups pack one
-      // iteration to offset unused query rows.
       if (max_num_q_per_iter % original_q_head_per_kv == 0 ||
-          q_tokens <= max_num_q_per_iter / original_q_head_per_kv) {
-        return group;
+          request_q_token_num(req_id) * original_q_head_per_kv <=
+              max_num_q_per_iter) {
+        return original_q_head_per_kv;
       }
       return 1;
     };
@@ -477,7 +473,7 @@ class AttentionScheduler {
       int32_t kv_split_pos_start;
       int32_t kv_split_pos_end;
       int64_t total_kv_len = 0;
-      int32_t split_id = -1;
+      int32_t reduction = -1;
       int32_t local_split_id = 0;
       int32_t group;
 
@@ -493,7 +489,6 @@ class AttentionScheduler {
       int32_t req_id;
       int32_t token_start;
       int32_t token_num;
-      int32_t split_start;
       int32_t group;
       int32_t split_num = 0;
     };
@@ -501,10 +496,9 @@ class AttentionScheduler {
       std::vector<PartitionItem> items;
       std::vector<PartitionReduction> reductions;
       std::vector<int32_t> offsets;
-      int32_t total_splits = 0;
       int32_t head_stride = 1;
     };
-    const auto partition = [&](const int32_t group) {
+    const auto partition = [&]() {
       Partitions result;
       result.head_stride = original_q_head_per_kv;
 
@@ -513,9 +507,9 @@ class AttentionScheduler {
       size_t query_tile_num = 0;
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
         result.head_stride =
-            std::gcd(result.head_stride, group_for_request(req_id, group));
+            std::gcd(result.head_stride, request_q_head_group(req_id));
         const int32_t max_num_q_token_per_iter =
-            max_num_q_per_iter / group_for_request(req_id, group);
+            max_num_q_per_iter / request_q_head_group(req_id);
         const int32_t seq_len = input.seq_lens[req_id];
         const int32_t q_token_num = request_q_token_num(req_id);
         const bool req_causal = request_causal(req_id);
@@ -555,9 +549,8 @@ class AttentionScheduler {
       // split tasks
       int32_t curr_thread_id = 0;
       int64_t remaining_kv_len = kv_len_per_thread;
-      int32_t cum_split_num = 0;
       for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-        const int32_t request_group = group_for_request(req_id, group);
+        const int32_t request_group = request_q_head_group(req_id);
         const int32_t max_num_q_token_per_iter =
             max_num_q_per_iter / request_group;
         const int32_t default_tile_token_num =
@@ -569,12 +562,6 @@ class AttentionScheduler {
         const int32_t kv_start_pos = 0;
         const int32_t kv_end_pos = seq_len;
         const bool grouped_query = request_group > 1 && q_token_num > 1;
-        const int64_t query_tiles =
-            (static_cast<int64_t>(q_token_num) + max_num_q_token_per_iter - 1) /
-            max_num_q_token_per_iter;
-        const bool packed_query =
-            grouped_query &&
-            query_tiles * (input.num_heads_q / request_group) < thread_num;
         // Keep coalesced fragments comparable to MHA in physical query rows.
         const int64_t fragment_kv_budget = kv_len_per_thread / request_group;
 
@@ -591,41 +578,31 @@ class AttentionScheduler {
           const auto [aligned_kv_tile_pos_left, aligned_kv_tile_pos_right] =
               align_kv_tile_pos(kv_tile_pos_left, kv_tile_pos_right,
                                 kv_len_alignment);
-          // A packed query already supplies several rows of work per KV load.
-          // Discount its partition credit to avoid creating tiny KV splits.
-          const int32_t scale = packed_query ? q_tile_token_num : 1;
-          const auto charge = [&](const int64_t len) {
-            return ((len + scale * kv_len_alignment - 1) /
-                    (scale * kv_len_alignment)) *
-                   kv_len_alignment;
-          };
-          const int64_t min_credit = charge(min_split_kv_len);
           int32_t curr_kv_len =
               aligned_kv_tile_pos_right - aligned_kv_tile_pos_left;
           int32_t kv_token_pos_start = aligned_kv_tile_pos_left;
           int32_t local_split_id = 0;
 
           while (curr_kv_len > 0) {
-            if (charge(curr_kv_len) <= (remaining_kv_len + min_credit) ||
+            if (curr_kv_len <= (remaining_kv_len + min_split_kv_len) ||
                 curr_thread_id == (thread_num - 1)) {
               curr_workitem.q_token_num += q_tile_token_num;
               curr_workitem.total_kv_len += curr_kv_len;
-              remaining_kv_len -= charge(curr_kv_len);
+              remaining_kv_len -= curr_kv_len;
               curr_kv_len = 0;
 
               if (remaining_kv_len < 0) {
                 // stop to accept more workitems
-                remaining_kv_len -= min_credit;
+                remaining_kv_len -= min_split_kv_len;
               }
 
               if (curr_workitem.kv_split_pos_start != 0) {
                 // got a partial kv spilt, need to create a single workitem
-                curr_workitem.split_id = cum_split_num;
+                curr_workitem.reduction = reduce_workitems.size() - 1;
                 curr_workitem.local_split_id = local_split_id;
                 workitems.emplace_back(curr_workitem);
                 ++workitem_num_per_thread[curr_thread_id];
                 ++reduce_workitems.back().split_num;
-                ++cum_split_num;
 
                 curr_workitem =
                     PartitionItem(req_id, token_id + max_num_q_token_per_iter,
@@ -635,7 +612,7 @@ class AttentionScheduler {
               break;
             }
 
-            if (remaining_kv_len < min_credit &&
+            if (remaining_kv_len < min_split_kv_len &&
                 (curr_workitem.total_kv_len > 0 ||
                  workitem_num_per_thread[curr_thread_id] > 0)) {
               // remaining_kv_len is too short, and have allocated workitems,
@@ -655,12 +632,11 @@ class AttentionScheduler {
               continue;
             }
 
-            // Split a whole packed query or a one-token tail; coalesce the
-            // other prefill tiles to amortize scheduling and query copies.
+            // Split KV only for query tiles exceeding one thread's share;
+            // coalesce smaller tiles to amortize scheduling and query copies.
             if (!input.enable_kv_split ||
-                (!packed_query &&
-                 (token_id + max_num_q_token_per_iter < q_token_num ||
-                  q_tile_token_num > 1))) {
+                aligned_kv_tile_pos_right - aligned_kv_tile_pos_left <=
+                    kv_len_per_thread) {
               // if requires a new q tile iteration and already has workitems,
               // leave this workitem to next thread
               if (curr_workitem.q_token_num % default_tile_token_num == 0 &&
@@ -680,7 +656,7 @@ class AttentionScheduler {
 
               curr_workitem.q_token_num += q_tile_token_num;
               curr_workitem.total_kv_len += curr_kv_len;
-              remaining_kv_len -= charge(curr_kv_len);
+              remaining_kv_len -= curr_kv_len;
               curr_kv_len = 0;
               break;
             }
@@ -694,24 +670,23 @@ class AttentionScheduler {
 
             if (kv_token_pos_start == aligned_kv_tile_pos_left) {
               // first split, init the workitem
-              reduce_workitems.push_back({req_id, token_id, q_tile_token_num,
-                                          cum_split_num, request_group});
+              reduce_workitems.push_back(
+                  {req_id, token_id, q_tile_token_num, request_group});
             }
 
             int32_t spilt_size = std::min<int64_t>(
-                std::max<int64_t>(remaining_kv_len * scale, min_split_kv_len),
+                std::max<int64_t>(remaining_kv_len, min_split_kv_len),
                 curr_kv_len);
             curr_workitem =
                 PartitionItem(req_id, token_id, kv_token_pos_start,
                               kv_token_pos_start + spilt_size, request_group);
             curr_workitem.q_token_num += q_tile_token_num;
             curr_workitem.total_kv_len += spilt_size;
-            curr_workitem.split_id = cum_split_num;
+            curr_workitem.reduction = reduce_workitems.size() - 1;
             curr_workitem.local_split_id = local_split_id;
             workitems.emplace_back(curr_workitem);
             ++workitem_num_per_thread[curr_thread_id];
             ++reduce_workitems.back().split_num;
-            ++cum_split_num;
             ++local_split_id;
 
             kv_token_pos_start += spilt_size;
@@ -724,10 +699,8 @@ class AttentionScheduler {
             remaining_kv_len = kv_len_per_thread;
           }
 
-          if ((packed_query || (grouped_query && curr_workitem.total_kv_len >=
-                                                     fragment_kv_budget)) &&
-              curr_workitem.total_kv_len > 0) {
-            // Keep packed queries independently claimable by worker threads.
+          if (grouped_query && curr_workitem.total_kv_len > 0 &&
+              curr_workitem.total_kv_len >= fragment_kv_budget) {
             workitems.emplace_back(curr_workitem);
             ++workitem_num_per_thread[curr_thread_id];
             curr_workitem =
@@ -742,7 +715,6 @@ class AttentionScheduler {
           ++workitem_num_per_thread[curr_thread_id];
         }
       }
-      result.total_splits = cum_split_num;
       result.offsets.resize(thread_num + 1, 0);
       std::partial_sum(workitem_num_per_thread.begin(),
                        workitem_num_per_thread.end(),
@@ -774,48 +746,7 @@ class AttentionScheduler {
         }
       }
     };
-    const auto span_count = [&](const Partitions& partitions) {
-      int64_t count = 0;
-      for (int32_t head = 0; head < input.num_heads_q;
-           head += partitions.head_stride) {
-        for_each_span(partitions, head,
-                      [&](const int32_t, const int32_t) { ++count; });
-      }
-      return count;
-    };
-    // Keep the largest group that fills the threads; otherwise prefer more
-    // spans. MHA must improve the span count; ties retain GQA.
-    Partitions partitions = partition(original_q_head_per_kv);
-    int64_t best_spans = span_count(partitions);
-    if (input.enable_kv_split && best_spans < thread_num) {
-      for (int32_t req_id = 0; req_id < input.num_reqs; ++req_id) {
-        if (request_q_token_num(req_id) <= 1 ||
-            group_for_request(req_id, original_q_head_per_kv) == 1) {
-          continue;
-        }
-        for (int32_t group = original_q_head_per_kv - 1; group >= 2; --group) {
-          if (original_q_head_per_kv % group != 0) {
-            continue;
-          }
-          auto candidate = partition(group);
-          const int64_t spans = span_count(candidate);
-          if (spans > best_spans) {
-            partitions = std::move(candidate);
-            best_spans = spans;
-          }
-          if (best_spans >= thread_num) {
-            break;
-          }
-        }
-        if (best_spans < thread_num) {
-          auto mha = partition(1);
-          if (span_count(mha) > best_spans) {
-            partitions = std::move(mha);
-          }
-        }
-        break;
-      }
-    }
+    const Partitions partitions = partition();
     std::vector<AttentionWorkItemGroup> workitems;
     std::vector<ReductionWorkItemGroup> reduce_workitems;
     std::vector<AttentionTaskSpan> task_spans;
@@ -829,16 +760,7 @@ class AttentionScheduler {
     }
     workitems.reserve(workitem_num);
     reduce_workitems.reserve(reduction_item_num);
-    task_spans.reserve(std::min(
-        workitem_num, partitions.items.size() + size_t(thread_num) *
-                                                    input.num_heads_q /
-                                                    partitions.head_stride));
-    std::vector<int32_t> reduction_for_split(partitions.total_splits);
-    for (size_t idx = 0; idx < partitions.reductions.size(); ++idx) {
-      const auto& reduction = partitions.reductions[idx];
-      std::fill_n(reduction_for_split.begin() + reduction.split_start,
-                  reduction.split_num, idx);
-    }
+    task_spans.reserve(workitem_num);
     std::vector<int32_t> reduction_ids(partitions.reductions.size());
     for (int32_t head = 0; head < input.num_heads_q;
          head += partitions.head_stride) {
@@ -871,13 +793,9 @@ class AttentionScheduler {
                         item.q_head_start = head;
                         item.q_token_num = source.q_token_num;
                         item.local_split_id = source.local_split_id;
-                        if (source.split_id >= 0) {
-                          const int32_t reduction_idx =
-                              reduction_for_split[source.split_id];
-                          item.reduction_id = reduction_ids[reduction_idx];
-                          item.split_id =
-                              source.split_id -
-                              partitions.reductions[reduction_idx].split_start;
+                        if (source.reduction >= 0) {
+                          item.reduction_id = reduction_ids[source.reduction];
+                          item.split_id = source.local_split_id;
                         }
                         workitems.emplace_back(item);
                       }
@@ -1751,12 +1669,16 @@ class AttentionMainLoop {
 
  public:
   void operator()(const AttentionInput* input) {
-    TORCH_CHECK_EQ(input->metadata->thread_num, cpu_utils::get_max_threads());
-    alignas(64) std::atomic<int32_t> guard_counter(0);
-    const auto run_thread = [&](const int thread_id, const int thread_num) {
+    const int thread_num = cpu_utils::get_max_threads();
+    TORCH_CHECK_EQ(input->metadata->thread_num, thread_num);
+    std::atomic<int32_t> guard_counter(0);
+    std::atomic<int32_t>* guard_counter_ptr = &guard_counter;
+
+#pragma omp parallel for schedule(static, 1)
+    for (int thread_id = 0; thread_id < thread_num; ++thread_id) {
       AttentionMetadata& metadata = *input->metadata;
       if (metadata.workitem_group_num == 0) {
-        return;
+        continue;
       }
 
       attention_impl_t attn_impl;
@@ -1828,8 +1750,8 @@ class AttentionMainLoop {
           workitem_groups_counter_num + reduction_items_counter_num;
 
       if (metadata.reduction_split_num > 0) {
-        guard_counter.fetch_add(1, std::memory_order_acq_rel);
-        while (guard_counter.load(std::memory_order_acquire) != thread_num) {
+        ++(*guard_counter_ptr);
+        while (guard_counter_ptr->load() != thread_num) {
 #ifdef FAST_SPINNING
           FAST_SPINNING
 #else
@@ -2201,17 +2123,7 @@ class AttentionMainLoop {
               q_head_num, output_v_scale);
         }
       }
-    };
-
-#ifdef _OPENMP
-  #pragma omp parallel
-    {
-      run_thread(omp_get_thread_num(), omp_get_num_threads());
     }
-#else
-    run_thread(0, 1);
-#endif
-
     // Reset counter for next call
     input->metadata->reset_counter();
   }

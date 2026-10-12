@@ -1382,15 +1382,13 @@ def test_varlen_with_paged_kv_dynamic_causal(
             id="q16_singleton_split_reduction",
         ),
         pytest.param([(16, 8192)], (16, 1), 256, 256, id="q16_single_kv"),
-        pytest.param(
-            [(14, 8192)], (16, 1), 256, 256, id="q14_underfilled_span_balance"
-        ),
+        pytest.param([(14, 8192)], (16, 1), 256, 256, id="q14_g16_partial_tile"),
         pytest.param(
             [(17, 8192)] * 4,
             (32, 8),
             128,
             128,
-            id="whole_adaptive_tile_after_partition_credit",
+            id="q17_b4_multi_tile",
         ),
     ],
 )
