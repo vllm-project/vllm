@@ -2,14 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import types
 from collections.abc import Iterable
-from functools import partial
 from typing import Any, Final, Literal, Union, cast, get_args, get_origin
 
-from openai.types.chat import (
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionContentPartTextParam,
-    ChatCompletionToolMessageParam,
-)
 from PIL import Image
 
 from vllm.config import ModelConfig
@@ -22,13 +16,20 @@ from .content_parser import (
     BaseMultiModalContentParser,
 )
 from .item_tracker import BaseMultiModalItemTracker
-from .mm_parser_map import MM_PARSER_MAP, _ContentPart, _InputAudioParser
-from .multimodal import _get_full_multimodal_text_prompt
+from .mm_parser_map import (
+    MM_PARSER_MAP,
+    ContentPart,
+    _AssistantParser,
+    _InputAudioParser,
+    _ToolParser,
+    get_full_multimodal_text_prompt,
+)
 from .types import (
     ChatCompletionContentPartAudioEmbedsParam,
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartPromptEmbedsParam,
+    ChatCompletionContentPartTextParam,
     ChatCompletionContentPartVideoEmbedsParam,
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -37,6 +38,7 @@ from .types import (
     CustomChatCompletionContentSimpleImageParam,
     CustomChatCompletionContentSimpleVideoParam,
     CustomChatCompletionContentToolReferenceParam,
+    InputAudio,
     MultiModalEmbedsPayload,
 )
 
@@ -140,7 +142,7 @@ def parse_chat_message_content_part(
     *,
     wrap_dicts: bool,
     interleave_strings: bool,
-) -> _ContentPart | None:
+) -> ContentPart | None:
     """Parses a single part of a conversation. If wrap_dicts is True,
     structured dictionary pieces for texts and images will be
     wrapped in dictionaries, i.e., {"type": "text", "text", ...} and
@@ -271,7 +273,7 @@ def parse_chat_message_content_parts(
     mm_processor_kwargs: dict[str, Any] | None = None,
     multimodal_content_part_separator="\n",
 ) -> list[ConversationMessage]:
-    content = list[_ContentPart]()
+    content = list[ContentPart]()
 
     mm_parser = mm_tracker.create_parser(mm_processor_kwargs=mm_processor_kwargs)
 
@@ -291,7 +293,7 @@ def parse_chat_message_content_parts(
     texts = cast(list[str], content)
     mm_placeholder_storage = mm_parser.mm_placeholder_storage()
     if mm_placeholder_storage:
-        text_prompt = _get_full_multimodal_text_prompt(
+        text_prompt = get_full_multimodal_text_prompt(
             mm_placeholder_storage,
             texts,
             interleave_strings,
@@ -301,11 +303,6 @@ def parse_chat_message_content_parts(
         text_prompt = "\n".join(texts)
 
     return [ConversationMessage(role=role, content=text_prompt)]
-
-
-# No need to validate using Pydantic again
-_AssistantParser = partial(cast, ChatCompletionAssistantMessageParam)
-_ToolParser = partial(cast, ChatCompletionToolMessageParam)
 
 
 def parse_chat_message_content(
@@ -389,7 +386,7 @@ def parse_chat_message_content(
 
 def parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
-) -> tuple[str, _ContentPart]:
+) -> tuple[str, ContentPart]:
     """Parses a given multi-modal content part based on its type.
 
     Args:
