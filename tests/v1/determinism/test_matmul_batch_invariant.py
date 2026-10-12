@@ -129,3 +129,29 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
+
+
+@skip_unsupported
+@pytest.mark.parametrize("m", [8, 17, 64])
+@pytest.mark.parametrize(
+    "n,k", [(17408, 5120), (5120, 8704), (8192, 5120), (5120, 3072), (124160, 5120)]
+)
+def test_hopper_small_m_tiles_preserve_fallback_bits(m, n, k, monkeypatch):
+    """Decode tiles must match the former tile and rows across the M=16 boundary."""
+    capability = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
+    if _get_tuned_matmul_arch_family(capability) != "hopper":
+        pytest.skip("Hopper tuning regression")
+    torch.manual_seed(42)
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=torch.bfloat16)
+    a[-1] = a[0]
+    b = torch.randn((n, k), device=DEVICE_TYPE, dtype=torch.bfloat16).t()
+    with monkeypatch.context() as patch:
+        patch.delitem(_BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["hopper"], (n, k))
+        fallback = matmul_batch_invariant(a, b)
+    actual = matmul_batch_invariant(a, b)
+    single = matmul_batch_invariant(a[:1], b)
+    assert torch.equal(actual.view(torch.int16), fallback.view(torch.int16))
+    assert torch.equal(actual[:1].view(torch.int16), single.view(torch.int16))
+    assert torch.equal(actual[-1:].view(torch.int16), single.view(torch.int16))
