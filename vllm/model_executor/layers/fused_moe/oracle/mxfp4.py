@@ -875,13 +875,18 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         triton_uses_128 = (
             backend == Mxfp4MoeBackend.TRITON_UNFUSED and get_cdna_version() != 4
         )
+        aiter_w4a4 = backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4
 
-        alignment = (
-            128 if is_situ_or_silu and (aiter_uses_128 or triton_uses_128) else 256
+        intermediate_alignment = (
+            128
+            if aiter_w4a4 or (is_situ_or_silu and (aiter_uses_128 or triton_uses_128))
+            else 256
         )
+        # W4A4 stage 1 still requires a 256-aligned hidden dimension.
+        hidden_alignment = 256 if aiter_w4a4 else intermediate_alignment
 
-        intermediate_size = round_up(intermediate_size, alignment)
-        hidden_size = round_up(hidden_size, alignment)
+        intermediate_size = round_up(intermediate_size, intermediate_alignment)
+        hidden_size = round_up(hidden_size, hidden_alignment)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
@@ -2128,6 +2133,59 @@ def make_mxfp4_moe_quant_config(
         )
 
 
+_MXFP4_SCHEME_CANDIDATES: list[tuple[QuantKey, QuantKey | None]] = [
+    (kMxfp4Static, kMxfp4Dynamic),
+    (kMxfp4Static, kMxfp8Dynamic),
+    (kMxfp4Static, kFp8Dynamic128Sym),
+    (kMxfp4Static, kFp8StaticTensorSym),
+    (kMxfp4Static, None),
+]
+
+
+def _mxfp4_quant_keys_for_experts(
+    experts_cls: type[mk.FusedMoEExperts],
+    mxfp4_backend: Mxfp4MoeBackend,
+) -> tuple[QuantKey | None, QuantKey | None]:
+    for weight_key, activation_key in _MXFP4_SCHEME_CANDIDATES:
+        if experts_cls._supports_quant_scheme(weight_key, activation_key):
+            return weight_key, activation_key
+    return kMxfp4Static, _backend_activation_key(mxfp4_backend)
+
+
+def _activation_format_for_config(
+    moe_config: FusedMoEConfig,
+) -> mk.FusedMoEActivationFormat:
+    return (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if moe_config.moe_parallel_config.use_batched_activation_format
+        else mk.FusedMoEActivationFormat.Standard
+    )
+
+
+def _validate_mxfp4_experts_config(
+    experts_cls: type[mk.FusedMoEExperts],
+    moe_config: FusedMoEConfig,
+    mxfp4_backend: Mxfp4MoeBackend,
+) -> None:
+    """Fail closed when a caller bypasses the oracle and picks experts directly."""
+    activation_format = _activation_format_for_config(moe_config)
+    weight_key, activation_key = _mxfp4_quant_keys_for_experts(
+        experts_cls, mxfp4_backend
+    )
+    supported, reason = experts_cls.is_supported_config(
+        experts_cls,
+        moe_config,
+        weight_key,
+        activation_key,
+        activation_format,
+    )
+    if not supported:
+        raise ValueError(
+            f"{experts_cls.__name__} does not support this MoE deployment"
+            f"{f' since {reason}' if reason else ''}."
+        )
+
+
 def make_mxfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
@@ -2136,6 +2194,8 @@ def make_mxfp4_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
+    _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
+
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
     prepare_finalize = maybe_make_prepare_finalize(
