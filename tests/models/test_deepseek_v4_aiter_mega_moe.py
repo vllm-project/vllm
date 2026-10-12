@@ -110,6 +110,45 @@ def test_experts_load_into_local_slots(monkeypatch):
             assert torch.all(w2 == 10 * expert + 3)
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("fixed_slot", [True, False])
+def test_decode_runtime_selected_by_max_tokens_across_dp(monkeypatch, fixed_slot):
+    experts = _make_experts(monkeypatch, max_num_batched_tokens=3000)
+    monkeypatch.setattr(
+        mega_moe_module.rocm_aiter_ops, "shuffle_weight_a16w4", lambda w, *_: w
+    )
+    monkeypatch.setattr(
+        mega_moe_module.rocm_aiter_ops, "shuffle_scale_a16w4", lambda s, *_: s
+    )
+    monkeypatch.setattr(experts, "_uses_fixed_slot", lambda mtpr: fixed_slot)
+    monkeypatch.setattr(experts, "_get_runtime", lambda mtpr: f"runtime{mtpr}")
+    experts.finalize_weights()
+
+    expected_capacities = [128, 4096] if fixed_slot else [4096]
+    assert [c for c, _ in experts._runtimes] == expected_capacities
+
+    across_dp = torch.tensor([0])
+    monkeypatch.setattr(mega_moe_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        mega_moe_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=across_dp)
+        ),
+    )
+    decode = "runtime128" if fixed_slot else "runtime4096"
+    for local, others, expected in [
+        (128, [1, 128], decode),
+        (4, [4, 129], "runtime4096"),
+        (129, [129, 4], "runtime4096"),
+        (4096, [4096], "runtime4096"),
+    ]:
+        across_dp = torch.tensor(others)
+        assert experts.select_runtime(local) == expected
+    with pytest.raises(ValueError):
+        experts.select_runtime(4097)
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")
 def test_shared_expert_route_appended(monkeypatch):
     experts = _make_experts(
