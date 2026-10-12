@@ -215,6 +215,9 @@ class CpuPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
+        # A simulation models a GPU deployment: it keeps that deployment's
+        # scheduling settings rather than the CPU platform's defaults.
+        simulated = vllm_config.simulation_config.simulate_forward
 
         # Import lazily: vllm.triton_utils imports vllm.platforms.current_platform,
         # which is still being resolved while this platform class is loading.
@@ -290,9 +293,19 @@ class CpuPlatform(Platform):
                 )
             cache_config.block_size = 256
         elif not cache_config.user_specified_block_size:
-            cache_config.block_size = 128
+            # The GPU default block size (16) is below the CPU attention
+            # backend's minimum; a simulation takes that minimum, the closest
+            # prefix-caching granularity.
+            cache_config.block_size = 32 if simulated else 128
 
-        if not reference_cpu_mla_enabled and cache_config.block_size % 32 != 0:
+        if simulated and not reference_cpu_mla_enabled:
+            if cache_config.block_size % 32 != 0:
+                raise ValueError(
+                    "Simulated execution on the CPU platform needs a KV block "
+                    "size that is a multiple of 32 (CPU attention backend), "
+                    f"got {cache_config.block_size}."
+                )
+        elif not reference_cpu_mla_enabled and cache_config.block_size % 32 != 0:
             logger.warning(
                 "CPU backend prefers block_size is multiples of 32, "
                 "otherwise the performance is not optimized."
@@ -327,13 +340,15 @@ class CpuPlatform(Platform):
             cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
 
         scheduler_config = vllm_config.scheduler_config
-        # async scheduling is not required on CPU
-        scheduler_config.async_scheduling = False
+        if not simulated:
+            # async scheduling is not required on CPU
+            scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
         if (
             os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") == "1"
             and parallel_config.distributed_executor_backend == "uni"
+            and not simulated
         ):
             # OMP requires the MP executor to function correctly, UniProc
             # is not supported as it is not possible to set the OMP
@@ -341,7 +356,7 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
 
         if parallel_config.worker_cls == "auto":
-            if vllm_config.simulation_config.simulate_forward:
+            if simulated:
                 parallel_config.worker_cls = (
                     "vllm.v1.worker.simulated.worker.SimulatedWorker"
                 )

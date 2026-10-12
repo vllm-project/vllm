@@ -15,6 +15,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import LogicalCPUInfo
+from vllm.utils.system_utils import set_env_var
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -28,6 +29,7 @@ class OMPProcessManager:
             return
 
         self.local_world_size = config.parallel_config.local_world_size
+        self.simulated = config.simulation_config.simulate_forward
         self.local_dp_rank = config.parallel_config.data_parallel_rank_local
         # This is a bit tricky because the internal DP size
         # is always 1 for non-MoE models
@@ -69,6 +71,14 @@ class OMPProcessManager:
 
     @contextmanager
     def configure_omp_envs(self, rank: int, local_rank: int):
+        if current_platform.is_cpu() and self.simulated:
+            # Simulated workers run only small input-preparation kernels: cap
+            # their thread pools rather than giving each rank its own cores,
+            # so any number of ranks fits on the host.
+            threads = max(1, min(4, (os.cpu_count() or 1) // self.local_world_size))
+            with set_env_var("OMP_NUM_THREADS", str(threads)):
+                yield
+            return
         if not current_platform.is_cpu() or self.skip_setup:
             yield
             return
@@ -121,6 +131,14 @@ class OMPProcessManager:
 
     def _parse_omp_threads_bind_env(self):
         vllm_mask = envs.VLLM_CPU_OMP_THREADS_BIND
+        if self.simulated:
+            if vllm_mask not in ("auto", "nobind"):
+                logger.warning(
+                    "Ignoring VLLM_CPU_OMP_THREADS_BIND=%s: simulated workers "
+                    "are not bound to cores.",
+                    vllm_mask,
+                )
+            vllm_mask = "nobind"
         self.skip_setup = vllm_mask == "nobind"
         self.auto_setup = vllm_mask == "auto"
         self.reserved_cpu_list = []

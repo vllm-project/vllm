@@ -35,7 +35,7 @@ a CPU-only CI node.
 The worker runs on CUDA-alike hosts as well as the CPU platform. On a CUDA host
 it binds a device for the runner's small request-state buffers and uses the
 stock Triton input-preparation kernels; on the CPU platform the same kernels
-need Triton's CPU backend.
+need Triton's CPU backend (see [Running without a GPU](#running-without-a-gpu)).
 
 ## Usage
 
@@ -249,10 +249,37 @@ shrink (see above). Qwen3-VL-30B-A3B-Instruct-FP8 (MoE, text only) with DP=2
 and expert parallelism under `vllm serve` (ISL 512, OSL 64, 16 req/s, 128
 requests) reproduces mean TPOT within 2% and mean TTFT within 9%.
 
+### Running without a GPU
+
+A CPU build of vLLM (`VLLM_TARGET_DEVICE=cpu`, which installs Triton's CPU
+backend from `requirements/cpu.txt`) runs simulations on any x86-64 host:
+
+```bash
+TRITON_CPU_BACKEND=1 vllm serve Qwen/Qwen3-235B-A22B --simulate-forward \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --kv-cache-memory-bytes 68719476736 \
+  --simulation-config '{"timing": "replay", "timing_args": {"path": "steps.jsonl"}}'
+```
+
+Ranks need no devices there, so a layout larger than the host's GPU count
+(16 ranks above) runs on one CPU host. Simulated workers run only the small
+input-preparation kernels, so instead of each getting its own NUMA node they
+share the host with at most four OpenMP threads each. A simulation keeps the settings of the GPU
+deployment it models rather than the CPU platform's: async scheduling stays
+on and the in-process executor (which the `fast_forward` and `virtual`
+clocks need) stays available. The one exception is the KV block size: the CPU
+attention backend needs a multiple of 32, so the default is 32 instead of the
+GPU default of 16, which coarsens prefix-cache matching. Pass `--block-size`
+to match the deployment when its backend uses a larger one; MLA models on
+CPUs without AMX keep the CPU backend's required size. The CPU build needs
+Python 3.11 or newer for triton-cpu.
+
 ## Limitations
 
-* Ranks cannot share a device on CUDA hosts, so simulating a deployment
-  needs as many devices as it has ranks (not their memory).
+* Ranks cannot share a device on CUDA hosts, so simulating a deployment there
+  needs as many devices as it has ranks (not their memory); the CPU platform
+  has no such limit.
+* On the CPU platform the KV block size must be a multiple of 32.
 * Pipeline stages are assumed balanced.
 * No LoRA, KV transfer or pooling models. Speculative decoding without
   adaptive verification only, and no diffusion models.

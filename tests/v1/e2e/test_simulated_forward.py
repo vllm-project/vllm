@@ -268,10 +268,12 @@ def test_simulate_forward_multi_rank(
 ) -> None:
     """Every rank runs the bookkeeping; the output rank's trace tokens come
     back as on a single rank."""
-    if not current_platform.is_cuda_alike() or (
-        current_platform.device_count() < tp * pp
+    # CPU ranks need no devices; CUDA ranks need one each.
+    if not current_platform.is_cpu() and (
+        not current_platform.is_cuda_alike()
+        or current_platform.device_count() < tp * pp
     ):
-        pytest.skip(f"Needs {tp * pp} CUDA devices.")
+        pytest.skip(f"Needs the CPU platform or {tp * pp} CUDA devices.")
     prompt = list(range(1000, 1064))
     sampling_params = SamplingParams(trace_decode_token_ids=[501, 502, 503])
     with vllm_runner(
