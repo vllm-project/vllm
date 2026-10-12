@@ -175,9 +175,10 @@ When `--api-key` is configured, the following endpoints require Bearer token aut
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
+- `/v1/systemone` - Structured decisions API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
-- `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`)
+- `/inference/v1/generate` - Generate completions (available when `--enable-scale-out` is set, or with `--tokens-only`; otherwise returns HTTP 403 with instructions to enable it)
 - `/cohere/v2/chat/render` - Render Cohere Chat v2 requests (requires `VLLM_ENABLE_COHERE_API=1` and either `--enable-scale-out` or `--tokens-only`)
 - `/v2/embed` - Cohere Embed API
 - `/v2/rerank` - Cohere Rerank API
@@ -301,6 +302,25 @@ configuration.
 Only deployments whose API clients are trusted should start the server with
 `--trust-request-mm-kwargs` to restore per-request overrides. Do not enable
 this option on an endpoint exposed to untrusted clients.
+
+### P2P KV-Offload Peer Session Limits
+
+Deployments that enable the P2P secondary tier (`OffloadingConnector` with `TieringOffloadingSpec` and a `p2p` secondary tier) accept peer addresses from `kv_transfer_params` in API requests. Without limits, an attacker with API access could submit many unique non-listening peer addresses, each consuming ZeroMQ sockets until the context quota is exhausted, crashing the EngineCore.
+
+vLLM enforces several configurable limits to prevent this:
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_P2P_MAX_PEERS` | `128` | Maximum concurrent P2P peer sessions. New peers (both outbound and inbound) are rejected when this limit is reached. |
+| `VLLM_P2P_HANDSHAKE_TIMEOUT_S` | `30` | Seconds to wait for a newly connected peer to complete the P2P handshake. Sessions that remain connected but not ready after this deadline are torn down. |
+| `VLLM_P2P_IDLE_TIMEOUT_S` | `300` | Seconds a P2P session may remain idle (no pending work, no messages) before it is eligible for eviction. Idle eviction runs only when remaining peer slots are within 8 of `VLLM_P2P_MAX_PEERS`. Set to `0` to disable idle eviction. |
+
+Connections that fail (ZMQ socket errors, handshake failures) are handled gracefully — the request falls back to local prefill instead of crashing the engine.
+
+**Recommendations:**
+
+- **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).
+- **Sensitive deployments:** Consider deploying behind a reverse proxy that strips or validates `kv_transfer_params` from API requests to prevent client-supplied peer addresses entirely.
 
 ## Tool Server and MCP Security
 
@@ -571,7 +591,7 @@ An attacker sharing the same backend can measure differences in Time to First To
 
 vLLM accepts an optional `cache_salt` parameter on requests. The salt is mixed into the hash of the first KV cache block, so only requests carrying the same salt can share cached prefix blocks. See [Automatic Prefix Caching](../design/prefix_caching.md) for the implementation details.
 
-`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, and by the Anthropic `/v1/messages` endpoint.
+`cache_salt` is accepted by the OpenAI-compatible chat completions, completions, responses, and pooling (embeddings, classification, scoring) endpoints, the Anthropic `/v1/messages` endpoint, the structured decisions `/v1/systemone` endpoint, and the generative scoring `/generative_scoring` endpoint.
 
 #### Usage with the OpenAI Python client
 

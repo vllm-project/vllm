@@ -21,8 +21,8 @@ from vllm.models.qwen4_exp.amd.indexer_qsa import (
     apply_qsa_rope,
 )
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
-from vllm.models.qwen4_exp.amd.ops.qsa_pre_indexer import (
-    qsa_pre_indexer,
+from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
+    qsa_prepare,
     supports_fused_pre_indexer,
 )
 from vllm.platforms import current_platform
@@ -127,6 +127,18 @@ def test_qsa_rmsnorm_uses_portable_implementation(default_vllm_config) -> None:
     torch.testing.assert_close(output, norm.forward_native(tensor))
 
 
+def _make_attn(*, use_fused: bool) -> SimpleNamespace:
+    """The main-attention fields the fused QSA prepare reads from its owner."""
+    return SimpleNamespace(
+        use_fused_qsa_prepare=use_fused,
+        kv_cache=torch.zeros(1, 2, 16, 8),
+        q_norm=GemmaRMSNorm(4, eps=1e-6),
+        k_norm=GemmaRMSNorm(4, eps=1e-6),
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
+
+
 def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
     """A QSAIndexer whose unfused path runs for real, with no projection weights.
 
@@ -184,29 +196,45 @@ def _make_indexer(*, use_fused: bool, num_tokens: int = 2) -> QSAIndexer:
 
 
 @pytest.mark.usefixtures("default_vllm_config")
-def test_qsa_fused_pre_indexer_replaces_the_unfused_chain(
+def test_qsa_fused_prepare_replaces_the_unfused_chain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     indexer = _make_indexer(use_fused=True)
+    attn = _make_attn(use_fused=True)
     calls = []
-    monkeypatch.setattr(
-        indexer_qsa,
-        "qsa_pre_indexer",
-        lambda *args, **kwargs: calls.append((args, kwargs)),
-    )
+    main_outputs = (torch.empty(0), torch.empty(0))
+
+    def fake_prepare(*args, **kwargs):
+        calls.append((args, kwargs))
+        return main_outputs
+
+    monkeypatch.setattr(indexer_qsa, "qsa_prepare", fake_prepare)
     monkeypatch.setattr(
         QSAIndexer,
         "_update_and_compress",
         lambda *args, **kwargs: pytest.fail("fused path ran the unfused chain"),
     )
     rows = torch.tensor([[3, 1, -1], [5, 2, 0]], dtype=torch.int32)
+    qkv = torch.zeros(4, 16)
+    slot_mapping = torch.arange(4)
+    gate_out = torch.empty(4, 1, 4)
 
-    actual = QSAIndexer.forward(indexer, torch.zeros(2, 8), torch.tensor([7, 8]), rows)
+    actual, actual_main = QSAIndexer.forward(
+        indexer,
+        torch.zeros(2, 8),
+        torch.tensor([7, 8]),
+        rows,
+        attn=attn,
+        qkv=qkv,
+        slot_mapping=slot_mapping,
+        gate_out=gate_out,
+    )
 
     assert actual is rows
+    assert actual_main is main_outputs
     assert len(calls) == 1
     args, kwargs = calls[0]
-    passed = inspect.signature(qsa_pre_indexer).bind(*args, **kwargs).arguments
+    passed = inspect.signature(qsa_prepare).bind(*args, **kwargs).arguments
     _, compressed_metadata = indexer.test_metadata
     # The kernel addresses the raw cache at its full width and writes the MRoPE
     # position tail itself, so it needs kv_cache, not the key_cache view.
@@ -215,6 +243,17 @@ def test_qsa_fused_pre_indexer_replaces_the_unfused_chain(
     assert passed["k_work_metadata"] is compressed_metadata.k_work_metadata
     assert passed["compress_ratio"] == indexer.compress_ratio
     assert passed["rope_pos_offset"] == indexer.index_head_dim
+    # Main attention: only the real tokens, the vLLM cache viewed per token,
+    # and the gate landing in the caller's buffer.
+    assert passed["main_qkv"].shape[0] == 2
+    assert passed["main_qkv"].data_ptr() == qkv.data_ptr()
+    assert passed["main_slot_mapping"].shape == (2,)
+    assert passed["main_kv_cache"].shape == (1, 16, 2, 8)
+    assert passed["main_kv_cache"].data_ptr() == attn.kv_cache.data_ptr()
+    assert passed["main_gate_out"].shape[0] == 2
+    assert passed["main_gate_out"].data_ptr() == gate_out.data_ptr()
+    assert passed["main_q_norm_weight"] is attn.q_norm.weight
+    assert passed["main_k_norm_weight"] is attn.k_norm.weight
 
 
 @pytest.mark.usefixtures("default_vllm_config")
@@ -224,7 +263,7 @@ def test_qsa_unsupported_config_keeps_the_unfused_chain(
     indexer = _make_indexer(use_fused=False)
     monkeypatch.setattr(
         indexer_qsa,
-        "qsa_pre_indexer",
+        "qsa_prepare",
         lambda *args, **kwargs: pytest.fail("unfused path ran the fused kernel"),
     )
     updates = []
@@ -235,9 +274,16 @@ def test_qsa_unsupported_config_keeps_the_unfused_chain(
     )
     rows = torch.tensor([[3, 1, -1], [5, 2, 0]], dtype=torch.int32)
 
-    actual = QSAIndexer.forward(indexer, torch.zeros(2, 8), torch.tensor([7, 8]), rows)
+    actual, main_outputs = QSAIndexer.forward(
+        indexer,
+        torch.zeros(2, 8),
+        torch.tensor([7, 8]),
+        rows,
+        attn=_make_attn(use_fused=False),
+    )
 
     assert actual is rows
+    assert main_outputs is None
     assert len(updates) == 1
 
 
