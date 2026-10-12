@@ -27,7 +27,7 @@ use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs}
 /// Output tokens `[start, end)` were sampled by weights labelled `version`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WeightVersionSpan {
-    pub version: String,
+    pub version: Arc<str>,
     pub start: usize,
     pub end: usize,
 }
@@ -419,7 +419,7 @@ impl GenerateOutputStream {
                 .iter()
                 .zip(ends)
                 .map(|((version, start), end)| WeightVersionSpan {
-                    version: version.to_string(),
+                    version: version.clone(),
                     start: *start,
                     end,
                 })

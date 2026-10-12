@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
@@ -228,6 +229,8 @@ struct WireEngineCoreOutputs {
     /// wave needs to start in other engines.
     #[serde(default)]
     start_wave: Option<u32>,
+    /// Label of the weights used for this step, as set by the
+    /// `set_weight_version` utility; `"default"` until set.
     #[serde(default)]
     weight_version: Option<String>,
 }
@@ -246,7 +249,9 @@ pub struct RequestBatchOutputs {
     pub scheduler_stats: Option<Box<SchedulerStats>>,
     pub timestamp: f64,
     pub finished_requests: Option<BTreeSet<String>>,
-    pub weight_version: Option<String>,
+    /// Label of the weights used for this step. It changes only while
+    /// generation is paused, so it applies to every output in the batch.
+    pub weight_version: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -327,7 +332,7 @@ impl TryFrom<WireEngineCoreOutputs> for EngineCoreOutputs {
                 scheduler_stats: value.scheduler_stats,
                 timestamp: value.timestamp,
                 finished_requests: value.finished_requests,
-                weight_version: value.weight_version,
+                weight_version: value.weight_version.map(Arc::from),
             }
             .into()),
             (false, Some(_), None, None) => Ok(UtilityCallOutput {
@@ -366,7 +371,7 @@ impl From<EngineCoreOutputs> for WireEngineCoreOutputs {
                 scheduler_stats: batch.scheduler_stats,
                 timestamp: batch.timestamp,
                 finished_requests: batch.finished_requests,
-                weight_version: batch.weight_version,
+                weight_version: batch.weight_version.map(|version| version.to_string()),
                 ..Default::default()
             },
             EngineCoreOutputs::Utility(utility) => Self {

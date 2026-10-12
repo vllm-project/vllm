@@ -363,7 +363,7 @@ async fn generate_merges_outputs_by_stream_interval() {
                                 Some(token_logprobs(token_ids)),
                                 None,
                             )],
-                            weight_version: Some(weight_version.to_string()),
+                            weight_version: Some(weight_version.into()),
                             ..Default::default()
                         }
                         .into(),
@@ -416,7 +416,7 @@ async fn generate_merges_outputs_by_stream_interval() {
         assert_eq!(output.logprobs, Some(token_logprobs(&output.token_ids)));
     }
     let span = |version: &str, start, end| WeightVersionSpan {
-        version: version.to_string(),
+        version: version.into(),
         start,
         end,
     };
@@ -750,7 +750,7 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
                     push,
                     RequestBatchOutputs {
                         outputs: vec![request_output(&request.request_id, vec![7], None)],
-                        weight_version: Some("v7".to_string()),
+                        weight_version: Some("v7".into()),
                         ..Default::default()
                     }
                     .into(),
@@ -788,7 +788,7 @@ async fn abort_resolves_external_request_id_to_internal_before_reaching_engine()
     assert_eq!(
         terminal.weight_versions,
         Some(vec![WeightVersionSpan {
-            version: "v7".to_string(),
+            version: "v7".into(),
             start: 0,
             end: 1
         }])
