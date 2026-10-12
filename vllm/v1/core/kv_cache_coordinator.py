@@ -426,23 +426,6 @@ class KVCacheCoordinator(ABC):
             blocks.extend(manager.pop_blocks_for_free(request_id))
         return blocks
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Get the number of common prefix blocks for all requests with allocated
-        KV cache for each kv cache group.
-
-        Args:
-            running_request_id: The request ID of any running request, used to
-                identify the common prefix blocks.
-
-        Returns:
-            list[int]: The number of common prefix blocks for each kv cache group.
-
-        """
-        return [
-            manager.get_num_common_prefix_blocks(running_request_id)
-            for manager in self.single_type_managers
-        ]
-
     def remove_skipped_blocks(
         self,
         request_id: str,
@@ -526,9 +509,6 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.num_single_type_manager = len(self.single_type_managers)
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        return [0] * self.num_single_type_manager
 
     def find_longest_cache_hit(
         self,
