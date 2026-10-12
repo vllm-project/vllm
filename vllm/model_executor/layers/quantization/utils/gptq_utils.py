@@ -133,6 +133,11 @@ def is_layer_gptq_quantized(
 
     quantized_layers = flatten_list(quantized_layers)
 
+    # Empty means no metadata could be read at all, not that the checkpoint
+    # holds no quantized layer, and loading GPTQ weights unquantized cannot work.
+    if not quantized_layers:
+        return True
+
     # Fused layers like gate_up_proj or qkv_proj will not be fused
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
