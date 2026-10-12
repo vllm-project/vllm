@@ -17,12 +17,16 @@ from vllm.entrypoints.generate.structured_decisions.protocol import (
     StructuredDecisionRequest,
     StructuredDecisionResponse,
 )
-from vllm.entrypoints.generate.structured_decisions.question_types import LABELS
+from vllm.entrypoints.generate.structured_decisions.question_types import (
+    LABELS,
+    StructuredDecisionError,
+)
 from vllm.entrypoints.generate.structured_decisions.serving import (
     ServingStructuredDecisions,
     state_text,
 )
 from vllm.entrypoints.generate.structured_decisions.strategies import (
+    DiffusionGemmaCanvasStrategy,
     NextTokenStrategy,
     ReadContext,
     reply_label_ids,
@@ -52,6 +56,10 @@ def test_strategy_selection():
     qwen = "Qwen3ForCausalLM"
     assert select_read_strategy(model(qwen)) is NextTokenStrategy
     assert select_read_strategy(model(qwen, "processed_logprobs")) is NextTokenStrategy
+    assert (
+        select_read_strategy(model("DiffusionGemmaForBlockDiffusion"))
+        is DiffusionGemmaCanvasStrategy
+    )
     with pytest.raises(ValueError, match="does not support LlamaForCausalLM"):
         select_read_strategy(model("LlamaForCausalLM"))
     with pytest.raises(ValueError, match="not raw_logits"):
@@ -214,9 +222,37 @@ async def test_request_metadata_reaches_every_question(
     )
     response = await serving.create_decision(request, raw_request)
     assert isinstance(response, StructuredDecisionResponse)
+    engine.is_tracing_enabled.assert_not_awaited()
     assert engine.generate.call_count == 2
     for call in engine.generate.call_args_list:
         assert call.args[0].get("cache_salt") == cache_salt
         assert call.kwargs["trace_headers"] == (
-            TRACE_HEADERS if tracing_enabled and request_headers else None
+            TRACE_HEADERS if request_headers else None
+        )
+
+
+def test_canvas_read():
+    strategy = DiffusionGemmaCanvasStrategy.__new__(DiffusionGemmaCanvasStrategy)
+    strategy.thought, strategy.end, strategy.pad = [10, 11, 12, 13], 106, 0
+    strategy.width, strategy.vocab_size = 16, 1000
+    strategy.max_model_len = 23
+    params = strategy._sampling_params([65, 66], prompt_ids=[1, 2, 3])
+    assert params.extra_args is not None
+    canvas = params.extra_args["diffusion_seed_canvas"]
+    # The label slot as noise, the end of the turn, padding.
+    assert canvas[1:] == [106] + [0] * 14
+    assert params.max_tokens == 2 and params.logprob_token_ids == [65, 66]
+    again = strategy._sampling_params([65, 66], prompt_ids=[1, 2, 3])
+    assert again.extra_args == params.extra_args
+    read_input = strategy._read_input(
+        {"type": "token", "prompt_token_ids": [1, 2, 3]}, [1, 2, 3]
+    )
+    assert read_input == {
+        "type": "token",
+        "prompt_token_ids": [1, 2, 3, 10, 11, 12, 13],
+    }
+    # One token more and the thought and the canvas no longer fit.
+    with pytest.raises(StructuredDecisionError, match="max_model_len=23"):
+        strategy._read_input(
+            {"type": "token", "prompt_token_ids": [1, 2, 3, 4]}, [1, 2, 3, 4]
         )
