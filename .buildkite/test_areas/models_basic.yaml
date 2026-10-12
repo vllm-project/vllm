@@ -198,6 +198,28 @@ steps:
   commands:
     - pytest -v -s models/step5
 
+- label: ":nvidia: (4xB200) MiniMax-M3 Feature Matrix Shard %N"
+  key: minimax-m3-feature-matrix-4xb200
+  timeout_in_minutes: 75
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/minimax_m3/
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/structured_output/
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+  - vllm/v1/kv_offload/
+  - vllm/v1/simple_kv_offload/
+  - tests/models/minimax_m3/
+  - .buildkite/scripts/install-kv-connectors.sh
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - pytest -v -s models/minimax_m3 --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
   timeout_in_minutes: 20
