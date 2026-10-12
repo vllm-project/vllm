@@ -88,16 +88,17 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.fast_prefill_mapping_meta.prepare_tensors(compact_mapping)
         return compact_mapping
 
-    def _token_mapping_meta_args(
-        self, token_nums: int, token_lora_mapping: torch.Tensor | None = None
-    ):
-        if token_lora_mapping is None and is_forward_context_available():
-            token_lora_mapping = get_forward_context().lora_token_mapping
-        metadata = (
-            self.fast_prefill_mapping_meta
-            if token_lora_mapping is not None
-            else self.token_mapping_meta
-        )
+    def get_token_mapping_meta(self) -> LoRAKernelMeta:
+        """Select full or compact metadata using the graph's batch descriptor."""
+        if is_forward_context_available():
+            batch_descriptor = get_forward_context().batch_descriptor
+            if batch_descriptor is not None and batch_descriptor.is_fast_prefill:
+                return self.fast_prefill_mapping_meta
+
+        return self.token_mapping_meta
+
+    def _token_mapping_meta_args(self, token_nums: int):
+        metadata = self.get_token_mapping_meta()
         return metadata.meta_args(token_nums, self.lora_config.specialize_active_lora)
 
     def update_metadata(
@@ -144,7 +145,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             y,
-            *self._token_mapping_meta_args(x.size(0), kwargs.get("token_lora_mapping")),
+            *self._token_mapping_meta_args(x.size(0)),
             scale,
         )
 
@@ -189,9 +190,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_b_stacked,
             y,
-            *self._token_mapping_meta_args(
-                num_tokens, kwargs.get("token_lora_mapping")
-            ),
+            *self._token_mapping_meta_args(num_tokens),
             offset_start=offset_start,
             add_inputs=add_inputs,
         )
@@ -223,7 +222,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x.unsqueeze(dim=0),
             (lora_b_stacked,),
             y,
-            *self.token_mapping_meta.meta_args(
+            *self.get_token_mapping_meta().meta_args(
                 x.size(0), self.lora_config.specialize_active_lora
             ),
             offset_start=0,

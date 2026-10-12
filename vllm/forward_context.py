@@ -55,6 +55,10 @@ class BatchDescriptor:
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+    is_fast_prefill: bool = False
+    """Whether this descriptor belongs to the compact fast-prefill batch."""
+    has_fast_prefill: bool = False
+    """Whether the outer breakable graph follows the fast-prefill path."""
 
 
 def _compute_sp_num_tokens(

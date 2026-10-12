@@ -104,9 +104,11 @@ class FastPrefillHelper:
         has_prefill: bool,
         batch_desc: "BatchExecutionDescriptor",
         num_active_loras: int = 0,
+        max_query_len: int | None = None,
     ) -> FastPrefillBatchMetadata | None:
         if (
             not has_prefill
+            or max_query_len == 1
             or batch_desc.cg_mode == CUDAGraphMode.FULL
             or batch_desc.num_ubatches > 1
         ):
