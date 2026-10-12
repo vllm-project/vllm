@@ -3,7 +3,9 @@
 
 from collections.abc import Sequence
 
+import numpy as np
 import pytest
+import torch
 
 from vllm import PoolingParams, SamplingParams
 from vllm.entrypoints.common.offline import OfflineInferenceMixin, _mix_prompt_seeds
@@ -147,6 +149,62 @@ def test_mixed_seed_uses_image_content():
     assert _mixed_seeds(params, [mm_prompt(black)]) != _mixed_seeds(
         params, [mm_prompt(white)]
     )
+
+
+@pytest.mark.parametrize(
+    "make_audio",
+    [
+        pytest.param(lambda x: (np.full(8, x, dtype=np.float32), 16000), id="tuple"),
+        pytest.param(lambda x: torch.full((8,), x), id="tensor"),
+    ],
+)
+def test_mixed_seed_uses_audio_content(make_audio):
+    """Audio given as a (waveform, sample_rate) tuple or a tensor must be
+    hashed by content, not reduced to its type name."""
+    params = SamplingParams(seed=0)
+
+    def mm_prompt(audio):
+        return {"prompt": "transcribe", "multi_modal_data": {"audio": audio}}
+
+    assert _mixed_seeds(params, [mm_prompt(make_audio(0.0))]) == _mixed_seeds(
+        params, [mm_prompt(make_audio(0.0))]
+    )
+    assert _mixed_seeds(params, [mm_prompt(make_audio(0.0))]) != _mixed_seeds(
+        params, [mm_prompt(make_audio(1.0))]
+    )
+
+
+def test_mixed_seed_uses_chat_image_content():
+    """Chat conversations are hashed by content too, including images."""
+    from PIL import Image
+
+    params = SamplingParams(seed=0)
+
+    def conv(color):
+        image = Image.new("RGB", (4, 4), color=color)
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_pil", "image_pil": image},
+                ],
+            }
+        ]
+
+    assert _mixed_seeds(params, [conv(0)]) == _mixed_seeds(params, [conv(0)])
+    assert _mixed_seeds(params, [conv(0)]) != _mixed_seeds(params, [conv(255)])
+
+
+def test_mixed_seed_uses_prompt_embeds():
+    params = SamplingParams(seed=0)
+    zeros = {"prompt_embeds": torch.zeros(3, 8)}
+    ones = {"prompt_embeds": torch.ones(3, 8)}
+
+    assert _mixed_seeds(params, [zeros]) == _mixed_seeds(
+        params, [{"prompt_embeds": torch.zeros(3, 8)}]
+    )
+    assert _mixed_seeds(params, [zeros]) != _mixed_seeds(params, [ones])
 
 
 def test_unseeded_sampling_params_pass_through_unchanged():

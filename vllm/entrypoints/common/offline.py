@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-import json
 import struct
 from collections.abc import Callable, Iterable, Sequence
 from copy import copy
@@ -24,6 +23,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -51,42 +51,26 @@ _O = TypeVar(
 _R = TypeVar("_R", default=Any)
 
 
-_SEED_SPACE = 2**63
+# Leaves headroom below int64 for the `seed + index` child seeds of `n>1`.
+_SEED_SPACE = 2**62
 
 
-def _hash_fallback(hasher: "hashlib._Hash", value: object) -> None:
+def _hash_content(hasher: "hashlib._Hash", value: object) -> None:
+    # Reuse the multi-modal cache-key serialization so nested containers,
+    # text, images, arrays, tensors and audio tuples all hash by content.
     try:
-        hasher.update(
-            json.dumps(
-                value, sort_keys=True, default=lambda o: type(o).__name__
-            ).encode("utf-8")
-        )
-    except (TypeError, ValueError):
+        for chunk in MultiModalHasher.iter_value_to_bytes(value):
+            hasher.update(chunk)
+    except Exception:
         hasher.update(type(value).__name__.encode("utf-8"))
-
-
-def _hash_mm_item(hasher: "hashlib._Hash", item: object) -> None:
-    size = getattr(item, "size", None)
-    tobytes = getattr(item, "tobytes", None)
-    if isinstance(size, tuple) and len(size) == 2 and callable(tobytes):
-        # PIL-style image: hash decoded pixels so the digest depends on
-        # content, not on the source encoding.
-        hasher.update(struct.pack(">QQ", *size))
-        hasher.update(tobytes())
-    elif callable(tobytes) and hasattr(item, "shape"):
-        # Array-style data (e.g. numpy).
-        hasher.update(repr(item.shape).encode("utf-8"))
-        hasher.update(tobytes())
-    else:
-        hasher.update(type(item).__name__.encode("utf-8"))
 
 
 def _prompt_digest(prompt: object) -> bytes:
     """Deterministic, process-independent digest of a prompt's content.
 
     Text and explicit token IDs are hashed with distinct type tags so they
-    cannot collide. Multi-modal items are hashed by decoded content where
-    possible (PIL images, arrays) and reduced to their type name otherwise.
+    cannot collide. Everything else (multi-modal items, chat conversations,
+    prompt embeddings) is hashed by content.
     """
     hasher = sha256()
     if isinstance(prompt, str):
@@ -105,7 +89,7 @@ def _prompt_digest(prompt: object) -> bytes:
             hasher.update(b"T")
             hasher.update(text.encode("utf-8"))
         else:
-            _hash_fallback(hasher, prompt)
+            _hash_content(hasher, prompt)
             return hasher.digest()
 
         multi_modal_data = prompt.get("multi_modal_data")
@@ -117,14 +101,14 @@ def _prompt_digest(prompt: object) -> bytes:
                 hasher.update(b"M")
                 hasher.update(str(modality).encode("utf-8"))
                 for item in items:
-                    _hash_mm_item(hasher, item)
+                    _hash_content(hasher, item)
         mm_processor_kwargs = prompt.get("mm_processor_kwargs")
         if mm_processor_kwargs:
             hasher.update(b"K")
-            _hash_fallback(hasher, mm_processor_kwargs)
+            _hash_content(hasher, mm_processor_kwargs)
         return hasher.digest()
 
-    _hash_fallback(hasher, prompt)
+    _hash_content(hasher, prompt)
     return hasher.digest()
 
 
