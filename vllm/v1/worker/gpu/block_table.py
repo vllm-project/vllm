@@ -15,6 +15,9 @@ from vllm.v1.worker.gpu.buffer_utils import (
 
 
 class BlockTables:
+    # Set by the elastic EP warmup so KV writes land in the null block.
+    redirect_writes_to_null_block = False
+
     def __init__(
         self,
         block_sizes: list[int],
@@ -22,7 +25,6 @@ class BlockTables:
         max_num_batched_tokens: int,
         max_num_blocks_per_group: list[int],
         device: torch.device,
-        kernel_block_sizes: list[int],
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
@@ -30,7 +32,6 @@ class BlockTables:
         dcp_sharded: list[bool] | None = None,
     ):
         self.block_sizes = block_sizes
-        self.kernel_block_sizes = kernel_block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
@@ -50,14 +51,9 @@ class BlockTables:
         assert len(dcp_sharded) == self.num_kv_cache_groups
         self.dcp_sharded = torch.tensor(dcp_sharded, dtype=torch.bool, device=device)
 
-        self.blocks_per_kv_block = [
-            bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
-        ]
-
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
-        for i in range(self.num_kv_cache_groups):
-            max_num_blocks = max_num_blocks_per_group[i] * self.blocks_per_kv_block[i]
+        for max_num_blocks in max_num_blocks_per_group:
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks), dtype=torch.int32, device=device
             )
@@ -106,9 +102,6 @@ class BlockTables:
         self.block_sizes_tensor = torch.tensor(
             self.block_sizes, dtype=torch.int32, device=self.device
         )
-        self.kernel_block_sizes_tensor = torch.tensor(
-            self.kernel_block_sizes, dtype=torch.int32, device=self.device
-        )
         self.slot_mapping_enabled = torch.tensor(
             self._slot_mapping_enabled, dtype=torch.bool, device=self.device
         )
@@ -123,9 +116,8 @@ class BlockTables:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
             block_ids = new_block_ids[i]
-            bpk = self.blocks_per_kv_block[i]
-            if bpk > 1:
-                block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
+            if self.redirect_writes_to_null_block:
+                block_ids = [0] * len(block_ids)
             end = start + len(block_ids)
             row_capacity = self.block_tables[i].gpu.shape[1]
             if end > row_capacity:
@@ -213,7 +205,6 @@ class BlockTables:
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
-            self.kernel_block_sizes_tensor,
             self.slot_mapping_enabled,
             self.dcp_sharded,
             slot_mappings,
@@ -287,7 +278,6 @@ def _compute_slot_mappings_kernel(
     block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
     block_sizes,  # [num_kv_cache_groups]
-    kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mapping_enabled,  # [num_kv_cache_groups]
     dcp_sharded,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
@@ -317,7 +307,6 @@ def _compute_slot_mappings_kernel(
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
     kv_block_size = tl.load(block_sizes + group_id)
-    kernel_block_size = tl.load(kernel_block_sizes + group_id)
     mapping_enabled = tl.load(slot_mapping_enabled + group_id)
     if CP_SIZE != 1:
         sharded = tl.load(dcp_sharded + group_id)
@@ -349,16 +338,14 @@ def _compute_slot_mappings_kernel(
             local_positions = tl.where(sharded, local_positions, positions)
             is_local = ~sharded | is_local
 
-        block_indices = tl.where(
-            mapping_enabled, local_positions // kernel_block_size, 0
-        )
-        block_offsets = local_positions % kernel_block_size
+        block_indices = tl.where(mapping_enabled, local_positions // kv_block_size, 0)
+        block_offsets = local_positions % kv_block_size
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices,
             mask=is_local & is_real_req,
             other=0,
         )
-        slot_ids = block_numbers * kernel_block_size + block_offsets
+        slot_ids = block_numbers * kv_block_size + block_offsets
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 

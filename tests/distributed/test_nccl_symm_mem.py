@@ -3,6 +3,7 @@
 
 import random
 import typing
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -12,11 +13,15 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from tests.utils import ensure_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.cuda_communicator import (
+    NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION,
+    CudaCommunicator,
+)
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
 from vllm.distributed.device_communicators.pynccl_allocator import (
     get_nccl_mem_pool,
     is_symmetric_memory_enabled,
+    is_symmetric_memory_tensor,
 )
 from vllm.distributed.parallel_state import (
     get_tp_group,
@@ -30,6 +35,53 @@ torch.manual_seed(42)
 random.seed(44)
 
 test_size_elements = 4 * 1024 * 1024
+
+
+def test_disabled_pynccl_does_not_allocate_symmetric_buffer():
+    communicator = object.__new__(CudaCommunicator)
+    communicator.pynccl_comm = SimpleNamespace(disabled=True)
+
+    assert (
+        communicator.get_symmetric_memory_buffer(
+            "test", (1,), torch.float32, torch.device("cuda")
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("use_aiter", [False, True])
+def test_reduce_scatterv_preserves_caller_output(monkeypatch, use_aiter):
+    import vllm.distributed.device_communicators.cuda_communicator as cc
+
+    communicator = object.__new__(CudaCommunicator)
+    communicator.world_size = 2
+    communicator.rank_in_group = 0
+    input_ = torch.arange(12, dtype=torch.float32).view(4, 3)
+    output = torch.full((2, 3), float("nan"))
+
+    def reduce_scatter(out, inp):
+        assert out is output
+        out.copy_(inp.view(2, 2, 3).sum(dim=0))
+
+    communicator.pynccl_comm = SimpleNamespace(
+        disabled=False, nccl_version=22902, reduce_scatter=reduce_scatter
+    )
+    communicator._can_use_aiter_ag_rs = lambda sizes: use_aiter and sizes is None
+    communicator.aiter_ar_comm = SimpleNamespace(
+        should_custom_rs=lambda inp, dim: True,
+        custom_reduce_scatter=lambda inp, out, dim: reduce_scatter(out, inp),
+    )
+    monkeypatch.setattr(cc, "should_nccl_symm_mem_ag_rs", lambda: True)
+    monkeypatch.setattr(cc, "is_symmetric_memory_tensor", lambda tensor: False)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+
+    # Explicit uniform sizes must not stage an ordinary input into symmetric
+    # scratch, and AITER must write the supplied output after normalization.
+    result = communicator.reduce_scatterv_into_output(
+        input_, output, dim=0, sizes=[2, 2]
+    )
+    assert result.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(output, input_.view(2, 2, 3).sum(dim=0))
 
 
 def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
@@ -193,15 +245,107 @@ def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
             pytest.skip("NCCL symmetric memory is disabled.")
 
         per_rank_size = test_size_elements // world_size
-        input_tensor = torch.randint(
+        ordinary_input = torch.randint(
             1, 23, (test_size_elements,), dtype=dtype, device=device
         )
-        input_clone = input_tensor.clone()
-        output = cuda_communicator.reduce_scatter(input_tensor, dim=0)
+        ordinary_clone = ordinary_input.clone()
+        ordinary_output = cuda_communicator.reduce_scatter(ordinary_input, dim=0)
 
         group = get_tp_group().device_group
-        expected = torch.empty(per_rank_size, dtype=dtype, device=device)
+        ordinary_expected = torch.empty(per_rank_size, dtype=dtype, device=device)
+        dist.reduce_scatter_tensor(ordinary_expected, ordinary_clone, group=group)
+        torch.testing.assert_close(
+            ordinary_output, ordinary_expected, atol=2.5, rtol=0.1
+        )
+        assert is_symmetric_memory_tensor(ordinary_output)
+
+        # Both calls reuse rs_out; validate the first result before overwriting it.
+        for sizes in (None, [per_rank_size] * world_size):
+            ordinary_v_output = cuda_communicator.reduce_scatterv(
+                ordinary_input, dim=0, sizes=sizes
+            )
+            torch.testing.assert_close(
+                ordinary_v_output, ordinary_expected, atol=2.5, rtol=0.1
+            )
+            assert is_symmetric_memory_tensor(ordinary_v_output)
+
+        pynccl_comm = cuda_communicator.pynccl_comm
+        assert pynccl_comm is not None
+        if pynccl_comm.nccl_version < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION:
+            return
+
+        from vllm.v1.worker import ubatching
+
+        m.setattr(ubatching, "dbo_current_ubatch_id", lambda: 0)
+        ubatch0 = cuda_communicator._get_symm_scratch("ag_out", (128,), dtype, device)
+        ubatch0.fill_(1)
+        m.setattr(ubatching, "dbo_current_ubatch_id", lambda: 1)
+        ubatch1 = cuda_communicator._get_symm_scratch("ag_out", (128,), dtype, device)
+        ubatch1.fill_(2)
+        assert ubatch0.data_ptr() != ubatch1.data_ptr()
+        assert (ubatch0 == 1).all()
+
+        m.setattr(ubatching, "dbo_current_ubatch_id", lambda: 0)
+        smaller = cuda_communicator._get_symm_scratch("ag_out", (64,), dtype, device)
+        assert smaller.shape == (64,)
+        assert smaller.data_ptr() == ubatch0.data_ptr()
+
+        grown = cuda_communicator._get_symm_scratch("ag_out", (129,), dtype, device)
+        assert grown.shape == (129,)
+        assert grown.data_ptr() != ubatch0.data_ptr()
+        reused = cuda_communicator._get_symm_scratch("ag_out", (200,), dtype, device)
+        assert reused.data_ptr() == grown.data_ptr()
+
+        input_tensor = cuda_communicator._get_symm_scratch(
+            "test_graph_rs_input", (test_size_elements,), dtype, device
+        )
+        input_tensor.random_(1, 23)
+        input_clone = input_tensor.clone()
+        output = torch.empty(per_rank_size, dtype=dtype, device=device)
+        assert is_symmetric_memory_tensor(input_tensor)
+        assert not is_symmetric_memory_tensor(output)
+
+        result = cuda_communicator.reduce_scatterv_into_output(
+            input_tensor,
+            output,
+            dim=0,
+            sizes=[per_rank_size] * world_size,
+        )
+        assert result.data_ptr() == output.data_ptr()
+
+        expected = torch.empty_like(output)
         dist.reduce_scatter_tensor(expected, input_clone, group=group)
+        torch.testing.assert_close(result, expected, atol=2.5, rtol=0.1)
+
+        dist.barrier(group=get_tp_group().cpu_group)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_result = cuda_communicator.reduce_scatterv_into_output(
+                input_tensor,
+                output,
+                dim=0,
+                sizes=[per_rank_size] * world_size,
+            )
+        assert graph_result.data_ptr() == output.data_ptr()
+
+        input_tensor.random_(24, 47)
+        input_clone.copy_(input_tensor)
+        dist.reduce_scatter_tensor(expected, input_clone, group=group)
+        captured_input_ptr = input_tensor.data_ptr()
+        del input_tensor
+        grown_input = cuda_communicator._get_symm_scratch(
+            "test_graph_rs_input", (test_size_elements + 1,), dtype, device
+        )
+        assert grown_input.data_ptr() != captured_input_ptr
+        retired = cuda_communicator.__dict__["_retired_symm_scratch_bufs"]
+        assert any(
+            buf.data_ptr() == captured_input_ptr
+            for buffers in retired.values()
+            for buf in buffers
+        )
+        output.zero_()
+        graph.replay()
+        torch.accelerator.synchronize()
         torch.testing.assert_close(output, expected, atol=2.5, rtol=0.1)
 
 

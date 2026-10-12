@@ -4,8 +4,10 @@
 import unittest
 from unittest.mock import MagicMock
 
+import numpy as np
 import torch
 
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -13,6 +15,12 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import (
+    get_request_block_hasher,
+    hash_block_tokens,
+    init_none_hash,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -20,7 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -84,6 +92,61 @@ def create_scheduler() -> Scheduler:
 
 
 class TestStreamingScheduler(unittest.TestCase):
+    def test_chunk_logprobs_do_not_depend_on_continuation_arrival(self):
+        """A queued continuation must not change the finishing chunk's logprobs."""
+        for continuation_queued in (False, True):
+            with self.subTest(continuation_queued=continuation_queued):
+                scheduler = create_scheduler()
+                session = DummyRequest("session", prompt_token_ids=[1, 2, 3])
+                session.sampling_params = SamplingParams(
+                    stop_token_ids=[STOP_TOKEN], max_tokens=16, logprobs=0
+                )
+                scheduler.add_request(session)
+                scheduled = scheduler.schedule()
+
+                continuation = DummyRequest("session", prompt_token_ids=[4, 5])
+                assert continuation.sampling_params.logprobs is None
+                if continuation_queued:
+                    scheduler.add_request(continuation)
+
+                logprobs = LogprobsLists(
+                    logprob_token_ids=np.array([[STOP_TOKEN]], dtype=np.int32),
+                    logprobs=np.array([[-0.25]], dtype=np.float32),
+                    sampled_token_ranks=np.array([1], dtype=np.int32),
+                )
+                runner_output = ModelRunnerOutput(
+                    req_ids=[session.request_id],
+                    req_id_to_index={session.request_id: 0},
+                    sampled_token_ids=[[STOP_TOKEN]],
+                    logprobs=logprobs,
+                    prompt_logprobs_dict={},
+                    pooler_output=[],
+                )
+                outputs = scheduler.update_from_output(scheduled, runner_output)
+                [output] = outputs[session.client_index].outputs
+
+                if not continuation_queued:
+                    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+                    scheduler.add_request(continuation)
+                assert session.status == RequestStatus.WAITING
+                assert session.sampling_params is continuation.sampling_params
+                assert output.new_token_ids == [STOP_TOKEN]
+                assert output.finish_reason == FinishReason.STOP
+                assert output.new_logprobs is not None, (
+                    "The finishing chunk requested logprobs; the continuation's "
+                    "settings must not suppress them"
+                )
+                np.testing.assert_array_equal(
+                    output.new_logprobs.logprob_token_ids, logprobs.logprob_token_ids
+                )
+                np.testing.assert_array_equal(
+                    output.new_logprobs.logprobs, logprobs.logprobs
+                )
+                np.testing.assert_array_equal(
+                    output.new_logprobs.sampled_token_ranks,
+                    logprobs.sampled_token_ranks,
+                )
+
     def test_add_request(self):
         scheduler = create_scheduler()
 
@@ -115,8 +178,7 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[1, 2, 3],
         )
         session.num_computed_tokens = len(session.prompt_token_ids)
-        session.max_tokens = 10  # Initial max_tokens
-        session._output_token_ids = [1] * 10  # reach max_tokens
+        session.max_tokens = 2
 
         new_request = DummyRequest(
             request_id="session",
@@ -129,26 +191,21 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler._update_request_as_session(session, update)
 
         assert session.sampling_params.max_tokens == 10
-        # _update_request_as_session clears output tokens first, so
-        # max_tokens = num_output_tokens (0) + update.max_tokens (10) = 10
         assert session.max_tokens == 10
 
         session.num_computed_tokens = len(session.prompt_token_ids)
 
-        # Simulate generating 5 more output tokens
-        session._output_token_ids = [1] * 5
         new_request2 = DummyRequest(
             request_id="session",
             prompt_token_ids=[7, 8, 9],
         )
-        new_request2.sampling_params = SamplingParams(max_tokens=10)
-        new_request2.max_tokens = 10
+        new_request2.sampling_params = SamplingParams(max_tokens=4)
+        new_request2.max_tokens = 4
         update2 = StreamingUpdate.from_request(new_request2)
         scheduler._update_request_as_session(session, update2)
 
-        assert session.sampling_params.max_tokens == 10
-        # Again, output tokens are cleared first, so max_tokens = 0 + 10 = 10
-        assert session.max_tokens == 10
+        assert session.sampling_params.max_tokens == 4
+        assert session.max_tokens == 4
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
@@ -314,6 +371,48 @@ class TestStreamingScheduler(unittest.TestCase):
         # num_new_tokens = num_tokens - num_computed_tokens = 6 - 4 = 2
         num_new_tokens = session.num_tokens - session.num_computed_tokens
         assert num_new_tokens == 2
+
+    def test_update_request_as_session_drops_stale_block_hashes(self):
+        """A discarded sampled token must not stay fingerprinted in
+        block_hashes (#49377)."""
+        init_none_hash(sha256)
+        scheduler = create_scheduler()
+        hash_block_size = scheduler.hash_block_size
+
+        # hash_block_size - 1 prompt tokens, so the discarded sampled token
+        # completes hash block 0.
+        prompt = list(range(1, hash_block_size))
+        discarded_token = 999
+        session = Request(
+            request_id="session",
+            prompt_token_ids=list(prompt),
+            sampling_params=SamplingParams(max_tokens=16),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(hash_block_size, sha256),
+            resumable=True,
+        )
+        session.append_output_token_ids(discarded_token)
+        assert len(session.block_hashes) == 1
+        stale_hash = session.block_hashes[0]
+        session.num_computed_tokens = len(prompt)
+
+        next_token = 42
+        update = StreamingUpdate.from_request(
+            DummyRequest(request_id="session", prompt_token_ids=[next_token])
+        )
+        scheduler._update_request_as_session(session, update)
+
+        assert list(session.all_token_ids) == prompt + [next_token]
+        assert len(session.block_hashes) == 1
+        expected = hash_block_tokens(
+            sha256, kv_cache_utils.NONE_HASH, tuple(prompt + [next_token])
+        )
+        assert session.block_hashes[0] == expected, (
+            "block_hashes[0] does not identify the current token sequence"
+        )
+        assert session.block_hashes[0] != stale_hash, (
+            "block_hashes[0] still fingerprints the discarded sampled token"
+        )
 
     def test_streaming_e2e_lifecycle(self):
         """Comprehensive integration test covering complete streaming request lifecycle
@@ -498,9 +597,9 @@ class TestStreamingScheduler(unittest.TestCase):
         eco_cycle2 = eco_dict_cycle2[session.client_index].outputs[0]
         assert eco_cycle2.finish_reason == FinishReason.STOP
         assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        # Sessions paused for streaming input are blocked-waiting, so they
-        # live in the skipped_waiting queue rather than the main waiting queue.
-        assert session in scheduler.skipped_waiting
+        # Sessions paused for streaming input keep their KV blocks, so they
+        # live in the kv_holding_waiting queue.
+        assert session in scheduler.kv_holding_waiting
         assert session._all_token_ids == [1, 2, 3, 10, STOP_TOKEN]
 
         # CRITICAL ASSERTION: Cached prompt_token_ids STILL must not have changed

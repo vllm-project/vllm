@@ -30,7 +30,7 @@ class KimiVLConfig(PreTrainedConfig):
             text_config = DeepseekV2Config()
         elif isinstance(text_config, dict):
             text_config = DeepseekV2Config(**text_config)
-        self.text_config = text_config
+        self.text_config: DeepseekV2Config = text_config
 
         self.ignore_index = ignore_index
         self.media_placeholder_token_id = media_placeholder_token_id
