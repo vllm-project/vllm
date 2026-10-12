@@ -14,7 +14,6 @@ from fastapi.responses import Response
 from vllm import PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.generate.base.protocol import validate_request_mm_kwargs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
@@ -23,6 +22,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, RetryableRequestError
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
+from vllm.renderers.chat_utils import ChatTemplateConfig
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 from ...serve.engine.protocol import ErrorResponse
