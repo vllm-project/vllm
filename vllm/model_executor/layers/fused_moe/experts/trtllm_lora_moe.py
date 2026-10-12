@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""LoRA-aware FlashInfer TRT-LLM MoE experts (BF16).
+"""LoRA-aware FlashInfer TRT-LLM MoE experts (BF16, MXFP4 x BF16).
 
-Reuses the routed API + ``gemm1_lora_delta`` path from FlashInfer PR #3153:
+Reuses the routed API + ``gemm1_lora_delta`` path from FlashInfer PR #3153
+(BF16) and PR #3987 (FP4 block-scale):
 
   * The W13 (gate_up) LoRA delta is passed directly as ``gemm1_lora_delta`` to
     the routed kernel, which fuses it into FC1 before SwiGLU (BiasType::Mn).
@@ -13,7 +14,7 @@ Reuses the routed API + ``gemm1_lora_delta`` path from FlashInfer PR #3153:
 
 Constraints (matching the PR support matrix; final gating lives in the oracle):
   * SM100+ (Blackwell), gated SwiGLU, shuffled weights only;
-  * BF16 only;
+  * BF16 weights, or MXFP4 weights with BF16 activations;
   * routing must be computed outside the MoE (the Modular path satisfies this).
 
 """
@@ -37,12 +38,23 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
     view_as_block_major_k,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+    TrtLlmMxfp4ExpertsBase,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Static,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_trtllm_fp4_lora_delta,
+    has_flashinfer_trtllm_fused_moe,
+)
 
 
 @triton.jit
@@ -224,6 +236,15 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         """
         raise NotImplementedError
 
+    def prepare_gemm1_lora_delta(
+        self,
+        gemm1_lora_delta: torch.Tensor,
+        lora_context: MoELoRAContext,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Hook to rewrite the W13 delta before it is handed to the kernel."""
+        return gemm1_lora_delta
+
     def apply(
         self,
         output: torch.Tensor,
@@ -247,7 +268,8 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         num_tokens = hidden_states.size(0)
         top_k = self.topk
         intermediate_size = self.intermediate_size_per_partition
-        K = output.size(1)
+        # LoRA buffers use the padded hidden size; `output` may be narrower.
+        K = self.hidden_dim
 
         # ---- Base-model fast path ----
         # When no token in the batch selects a LoRA adapter, skip the LoRA machinery
@@ -325,6 +347,9 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             top_k_num=top_k,
             add_inputs=False,
             swap_w13_slices=True,
+        )
+        gemm1_lora_delta = self.prepare_gemm1_lora_delta(
+            gemm1_lora_delta, lora_context, topk_ids
         )
 
         # ---- 2) Call the routed flashinfer kernel ----
@@ -466,7 +491,9 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         (``expert_weights`` in expanded order, ``idx_map < 0`` dropped), scale by
         ``scale``, and add the already-weighted ``w2_delta`` reduced over top_k.
         """
-        K = gemm2_permuted.size(1)
+        # Inputs may carry hidden padding that `output` does not.
+        K = output.size(1)
+        assert gemm2_permuted.size(1) >= K and w2_delta.size(2) >= K
         BLOCK_K = 512
         grid = (num_tokens, triton.cdiv(K, BLOCK_K))
         _finalize_lora_kernel[grid](
@@ -549,4 +576,188 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
             # [gemm2_output, expert_weights, expanded_idx, gemm1_activation]
             return list(ret)
         # do_finalize=True finalized directly into `output`.
+        return [output]
+
+
+# MXFP4 weights x BF16 activations trtllm MoE + LoRA
+class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
+    """MXFP4-weight, BF16-activation trtllm MoE + LoRA. Not MXFP8 activations:
+    the kernel then returns the FC1 activation as codes without block scales."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        _TrtLlmLoRAExpertsBase.__init__(self, moe_config, quant_config)
+        # gemm1_alpha / gemm1_beta / gemm1_clamp_limit, hidden_dim_unpadded.
+        TrtLlmMxfp4ExpertsBase.__init__(self, moe_config, quant_config)
+        self._w13_bias_up_gate_index: torch.Tensor | None = None
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return (
+            _TrtLlmLoRAExpertsBase._supports_current_device()
+            and has_flashinfer_trtllm_fp4_lora_delta()
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key == kMxfp4Static and activation_key is None
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in (MoEActivation.SWIGLUOAI, MoEActivation.SILU)
+
+    @staticmethod
+    def _supports_routing_method(routing_method, weight_key, activation_key) -> bool:
+        return True  # routing is done outside the kernel
+
+    def workspace_shapes(
+        self,
+        M,
+        N,
+        K,
+        topk,
+        global_num_experts,
+        local_num_experts,
+        expert_tokens_meta,
+        activation,
+    ):
+        # flashinfer manages its own workspace and drops the hidden padding.
+        return (0,), (0,), (M, self.hidden_dim_unpadded)
+
+    def _max_supported_tokens(self, top_k: int, global_num_experts: int) -> int:
+        # See TrtLlmMxfp4ExpertsModular._max_supported_tokens.
+        return max(1, min(300000, (65535 - global_num_experts) * 8 // top_k))
+
+    def _w13_bias_up_gate(self) -> torch.Tensor | None:
+        """FC1 bias as (local_num_experts, 2I) float32 in [up | gate] order."""
+        w1_bias = self.w1_bias
+        if w1_bias is None:
+            return None
+        w1_bias = w1_bias.reshape(self.local_num_experts, -1)
+        if self._w13_bias_up_gate_index is None:
+            from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
+
+            # Kernel format is the (up_i, gate_i) bias permuted for the tile.
+            permute = get_w2_permute_indices_with_cache(
+                {}, w1_bias[0].reshape(-1, 1), 128
+            ).to(w1_bias.device)
+            interleaved = torch.argsort(permute)
+            self._w13_bias_up_gate_index = torch.cat(
+                [interleaved[0::2], interleaved[1::2]]
+            )
+        return w1_bias[:, self._w13_bias_up_gate_index].to(torch.float32)
+
+    def prepare_gemm1_lora_delta(
+        self,
+        gemm1_lora_delta: torch.Tensor,
+        lora_context: MoELoRAContext,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Bring the W13 delta to [up | gate] halves and fold in the FC1 bias."""
+        delta = gemm1_lora_delta
+        intermediate_size = delta.size(-1) // 2
+        # SWIGLUOAI weights, and the deltas that follow them, are interleaved.
+        interleaved = self.moe_config.activation == MoEActivation.SWIGLUOAI
+        if lora_context.w13_num_slices == 2:
+            if interleaved:
+                # (up_0, gate_0, up_1, gate_1, ...) -> [up | gate]
+                delta = (
+                    delta.unflatten(-1, (intermediate_size, 2))
+                    .transpose(-1, -2)
+                    .flatten(-2)
+                )
+        elif interleaved:
+            # (gate_0, up_0, gate_1, up_1, ...) -> [up | gate]
+            delta = (
+                delta.unflatten(-1, (intermediate_size, 2))
+                .flip(-1)
+                .transpose(-1, -2)
+                .flatten(-2)
+            )
+        else:
+            # [gate | up] -> [up | gate]
+            delta = delta.roll(intermediate_size, dims=-1)
+
+        # The kernel has a single FC1 bias slot, shared by the static bias and
+        # the per-token delta, so the static bias rides along in the delta.
+        bias = self._w13_bias_up_gate()
+        if bias is not None:
+            local_ids = topk_ids.to(torch.int64) - self.ep_rank * self.local_num_experts
+            local_ids = local_ids.clamp_(0, self.local_num_experts - 1)
+            delta = (delta.to(torch.float32) + bias[local_ids]).to(torch.bfloat16)
+        return delta.contiguous()
+
+    def invoke_routed_moe(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids_and_weights: tuple[torch.Tensor, torch.Tensor],
+        gemm1_lora_delta: torch.Tensor | None,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor | None,
+        output: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        from flashinfer import trtllm_fp4_block_scale_routed_moe
+
+        assert a1q_scale is None and hidden_states.dtype == torch.bfloat16
+        assert self.w1_scale is not None and self.w2_scale is not None
+        topk_ids, topk_weights = topk_ids_and_weights
+        num_tokens = hidden_states.size(0)
+        max_tokens = self._max_supported_tokens(self.topk, global_num_experts)
+        if num_tokens > max_tokens:
+            # The LoRA token mapping covers the whole batch: no chunking here.
+            raise ValueError(
+                f"TrtLlmMxfp4LoRAExperts supports at most {max_tokens} tokens "
+                f"per call for top_k={self.topk}, got {num_tokens}."
+            )
+
+        # See TrtLlmBf16LoRAExperts.invoke_routed_moe for the return contract.
+        do_finalize = gemm1_lora_delta is None
+        ret = trtllm_fp4_block_scale_routed_moe(
+            topk_ids=(topk_ids.to(torch.int32), topk_weights),
+            routing_bias=None,
+            hidden_states=hidden_states,
+            hidden_states_scale=None,
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.w1_scale,
+            # With a delta the bias is folded into it (prepare_gemm1_lora_delta).
+            gemm1_bias=self.w1_bias if do_finalize else None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.w2_scale,
+            gemm2_bias=self.w2_bias,
+            output1_scale_scalar=None,
+            output1_scale_gate_scalar=None,
+            output2_scale_scalar=None,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            n_group=None,
+            topk_group=None,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=None,
+            # Routing is already done; Renormalize is a safe default.
+            routing_method_type=RoutingMethodType.Renormalize,
+            do_finalize=do_finalize,
+            enable_pdl=True,
+            activation_type=self._flashinfer_activation_type(
+                self.moe_config.activation
+            ),
+            output=output if do_finalize else None,
+            tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
+            gemm1_lora_delta=gemm1_lora_delta,
+        )
+        if not do_finalize:
+            return list(ret)
         return [output]

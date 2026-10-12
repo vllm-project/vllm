@@ -534,6 +534,23 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_trtllm_fp4_lora_delta() -> bool:
+    """Return `True` if the FP4 routed MoE takes `gemm1_lora_delta` (>= 0.6.18)."""
+    if not has_flashinfer_trtllm_fused_moe():
+        return False
+    mod = _get_submodule("flashinfer.fused_moe")
+    routed_moe = getattr(mod, "trtllm_fp4_block_scale_routed_moe", None)
+    if routed_moe is None:
+        return False
+    import inspect
+
+    try:
+        return "gemm1_lora_delta" in inspect.signature(routed_moe).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
