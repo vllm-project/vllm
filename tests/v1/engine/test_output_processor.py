@@ -24,6 +24,7 @@ from vllm.outputs import (
     PoolingRequestOutput,
     RequestOutput,
     SamplingMask,
+    WeightVersionSpan,
 )
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -87,6 +88,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
     ]
     state.routed_experts_chunks = []
     state.spec_decode_metrics = None
+    state.weight_version_starts = []
 
     output = state._new_completion_output([1, 2, 3], FinishReason.LENGTH, None)
 
@@ -1596,6 +1598,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
     state.spec_decode_metrics = None
+    state.weight_version_starts = []
 
     supports = [[10, 11], [20], [30, 31]]
     masks = []
@@ -1725,3 +1728,53 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
     assert output.error is not None
     assert output.error.retryable
     assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+)
+@pytest.mark.parametrize(
+    "steps,expected",
+    [
+        # Merge adjacent equal labels; A -> B -> A remains three spans.
+        (
+            [("v7", [10, 11]), ("v7", [12]), ("v8", [13, 14]), ("v7", [15])],
+            [("v7", 0, 3), ("v8", 3, 5), ("v7", 5, 6)],
+        ),
+        # An output without tokens has no spans.
+        ([], []),
+    ],
+)
+def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    queue = RequestOutputCollector(output_kind, request_id="request-0-int")
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False, output_kind=output_kind),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None, queue=queue)
+
+    for i, (weight_version, token_ids) in enumerate(steps):
+        # Copy: merging deltas extends token lists in place.
+        output = EngineCoreOutput(
+            request_id="request-0-int", new_token_ids=list(token_ids)
+        )
+        output_processor.process_outputs([output], weight_version=weight_version)
+        if i == 0 and output_kind == RequestOutputKind.DELTA:
+            intermediate = queue.get_nowait()
+            assert intermediate is not None
+            assert intermediate.outputs[0].weight_versions is None
+
+    # Unread deltas merge into the abort output without losing spans.
+    output_processor.abort_requests(["request-0"], internal=False)
+    final = queue.get_nowait()
+    assert final is not None and final.finished
+    assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
