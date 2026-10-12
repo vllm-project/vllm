@@ -454,7 +454,7 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 
 
 _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
-    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
+    "--mamba-cache-mode is deprecated and will be removed in v0.33.0. "
     "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
 )
 
