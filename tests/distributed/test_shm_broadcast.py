@@ -57,6 +57,7 @@ def distributed_run(fn, world_size, timeout=60, mp_context=None):
     ctx = mp_context or mp
     number_of_processes = world_size
     processes = []
+    master_port = str(get_open_port())
     for i in range(number_of_processes):
         env = {}
         env["RANK"] = str(i)
@@ -64,7 +65,7 @@ def distributed_run(fn, world_size, timeout=60, mp_context=None):
         env["WORLD_SIZE"] = str(number_of_processes)
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
-        env["MASTER_PORT"] = "12345"
+        env["MASTER_PORT"] = master_port
         p = ctx.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
@@ -88,11 +89,14 @@ def distributed_run(fn, world_size, timeout=60, mp_context=None):
             break
         time.sleep(0.1)  # Check every 100ms
 
-    # Check for timeout if no failures detected yet
+    # Reap every child; failures can occur after the last polling iteration.
+    failed_processes.clear()
     for i, p in enumerate(processes):
         if p.is_alive():
             p.kill()
-            p.join()
+        p.join()
+        if p.exitcode != 0:
+            failed_processes.append((i, p.exitcode))
 
     # Report failures
     if failed_processes:
@@ -100,6 +104,11 @@ def distributed_run(fn, world_size, timeout=60, mp_context=None):
         for rank, status in failed_processes:
             error_msg += f"  Rank {rank}: Exit code {status}\n"
         raise AssertionError(error_msg)
+
+
+def test_distributed_run_reports_timeout():
+    with pytest.raises(AssertionError, match="Distributed test failed"):
+        distributed_run(lambda _: time.sleep(60), world_size=1, timeout=0)
 
 
 def worker_fn_wrapper(fn):
@@ -381,14 +390,10 @@ def worker_fn_tensor_broadcast():
     # Both ranks construct the identical reference payload.
     torch.manual_seed(42)
     payload = {
-        # 2MiB: rides the shm ring as an out-of-band buffer (the receiving
-        # side must copy out of the reusable ring chunk).
         "mid": torch.randn(1024, 512),
-        # 16MiB > max_chunk_bytes: overflows to the zmq socket (the
-        # receiving side aliases the zmq.Frame zero-copy).
-        "big": torch.randn(4096, 2048, dtype=torch.bfloat16),
         "nested": ["plain", 123, {"inner": torch.arange(5)}],
     }
+    big = torch.randn(4096, 2048, dtype=torch.bfloat16)
 
     if rank == writer_rank:
         with mock.patch(
@@ -396,28 +401,23 @@ def worker_fn_tensor_broadcast():
             wraps=_reduce_tensor,
         ) as wrapped_reduce:
             message_queue.enqueue(payload)
+            # Overflow is per message, not per tensor: send this separately.
+            message_queue.enqueue(big)
         assert wrapped_reduce.call_count == 3
-        # Cycle the ring (max_chunks=4) several times over so that aliased
-        # ring chunks would be overwritten.
-        for i in range(16):
-            message_queue.enqueue({"junk": torch.full((1024, 512), float(i))})
     else:
-        received = message_queue.dequeue(timeout=30)
-        for key in ("mid", "big"):
-            assert torch.equal(received[key], payload[key]), key
-            assert received[key].dtype == payload[key].dtype, key
+        with mock.patch.object(MessageQueue, "recv", wraps=MessageQueue.recv) as recv:
+            received = message_queue.dequeue(timeout=30)
+            recv.assert_not_called()
+            received_big = message_queue.dequeue(timeout=30)
+            recv.assert_called_once()
+        assert torch.equal(received["mid"], payload["mid"])
+        assert received["mid"].dtype == payload["mid"].dtype
+        assert torch.equal(received_big, big)
+        assert received_big.dtype == big.dtype
         assert torch.equal(received["nested"][2]["inner"], torch.arange(5))
-
-        snapshot = received["mid"].clone()
-        for i in range(16):
-            junk = message_queue.dequeue(timeout=30)
-            assert torch.equal(junk["junk"], torch.full((1024, 512), float(i)))
-        # Tensors received via the shm ring must not alias chunk memory
-        # that the writer has reused for subsequent messages.
-        assert torch.equal(received["mid"], snapshot)
         # Rebuilt tensors must be writable, like regular tensors.
         received["mid"] += 1.0
-        received["big"][0, 0] = 1.0
+        received_big[0, 0] = 1.0
 
     dist.barrier()
     print(f"tensor broadcast passed the test! Rank {rank}")
@@ -425,6 +425,61 @@ def worker_fn_tensor_broadcast():
 
 def test_tensor_broadcast():
     distributed_run(worker_fn_tensor_broadcast, 2)
+
+
+@pytest.mark.parametrize("kind", ["tensor", "numpy", "numpy_readonly"])
+@pytest.mark.parametrize(
+    "nbytes, overflow, num_oob",
+    [
+        pytest.param(1024 * 1024 - 2, False, 0, id="inline"),
+        pytest.param(1024 * 1024, False, 1, id="shm_oob"),
+        pytest.param(2 * 1024 * 1024, True, 1, id="overflow"),
+    ],
+)
+def test_broadcast_retains_values_after_ring_reuse(kind, nbytes, overflow, num_oob):
+    """Received data belongs to its consumer, not the next queue message."""
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=2 * 1024 * 1024,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    writer.wait_until_ready()
+    reader.wait_until_ready()
+    array = np.full(nbytes // 2, 17, dtype=np.uint16)
+    array.flags.writeable = kind != "numpy_readonly"
+    payload = torch.from_numpy(array) if kind == "tensor" else array
+    try:
+        with (
+            mock.patch.object(MessageQueue, "recv", wraps=MessageQueue.recv) as recv,
+            mock.patch.object(pickle, "loads", wraps=pickle.loads) as loads,
+        ):
+            writer.enqueue(payload)
+            received = reader.dequeue(timeout=5)
+            received_oob = len(loads.call_args.kwargs["buffers"])
+            # The spy must not keep the ring's memoryviews alive.
+            loads.reset_mock()
+            assert recv.call_count == int(overflow)
+            assert received_oob == num_oob
+        assert type(received) is type(payload)
+        assert received.dtype == payload.dtype
+        if isinstance(received, np.ndarray):
+            assert received.flags.writeable == array.flags.writeable
+        np.testing.assert_array_equal(received, array)
+        for value in range(4):
+            # Fit the replacement in SHM even when the original overflowed.
+            writer.enqueue(np.full(512 * 1024, value, dtype=np.uint16))
+            replacement = reader.dequeue(timeout=5)
+            np.testing.assert_array_equal(replacement, value)
+            np.testing.assert_array_equal(received, array)
+        if array.flags.writeable:
+            received[0] = 42
+            assert array[0] == 17
+    finally:
+        reader.shutdown()
+        writer.shutdown()
 
 
 def _dumps_oob(obj) -> tuple[bytes, list]:
