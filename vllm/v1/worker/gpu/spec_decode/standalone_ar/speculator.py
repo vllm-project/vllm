@@ -247,7 +247,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         num_reqs: int,
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
-    ) -> torch.Tensor:
+    ) -> None:
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         if skip_attn:
             last_positions = input_batch.positions[
@@ -267,20 +267,13 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 max=self.max_model_len,
             )
         )
+
         if num_reqs_padded > num_reqs:
             self.input_buffers.seq_lens[num_reqs:num_reqs_padded].zero_()
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
         query_start_loc[: num_reqs + 1].copy_(self.arange_gpu[: num_reqs + 1])
         if num_reqs_padded > num_reqs:
             query_start_loc[num_reqs + 1 :].fill_(num_reqs)
-
-        seq_lens_cpu_upper_bound = torch.zeros_like(
-            input_batch.seq_lens_cpu_upper_bound
-        )
-        seq_lens_cpu_upper_bound[:num_reqs].copy_(
-            input_batch.seq_lens_cpu_upper_bound[:num_reqs]
-        )
-        return seq_lens_cpu_upper_bound
 
     def _multi_step_decode(
         self,
@@ -365,7 +358,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                     attn_group.update_draft_decode_metadata(attn_metadata)
 
             self.current_draft_step.fill_(step)
-            self._prepare_eplb_forward(num_reqs)
             hidden_states = self._run_model(
                 self.input_buffers.input_ids[:num_tokens_padded],
                 self.input_buffers.positions[:num_tokens_padded],
@@ -418,11 +410,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         num_tokens_across_dp = (
             dp_sync_state.num_tokens_across_dp if dp_sync_state is not None else None
         )
-        # Plain prefill adds one correction-token slot per request, so its
-        # batch shape cannot reuse the target's DP sync. Preserve the target's
-        # eager decision when dispatching the expanded draft batch.
-        need_eager = is_profile or (dp_sync is not None and dp_sync.eager)
-
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
         # buffers so sample_draft can read them without extra slicing.
         self._copy_request_inputs(
@@ -465,6 +452,8 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 max_query_len + self.num_extra_query_per_req,
                 input_batch.decode_graph_eligible,
             )
+            # Plain prefill adds a correction-token slot per request, so it
+            # needs a separate DP sync for the expanded batch.
             prefill_batch_desc, prefill_batch_sync = dispatch_cg_and_sync_dp(
                 self.prefill_cudagraph_manager,
                 num_reqs,
@@ -472,7 +461,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 uniform_token_count=uniform_token_count,
                 dp_size=self.dp_size,
                 dp_rank=self.dp_rank,
-                need_eager=need_eager,
+                need_eager=is_profile,
             )
             num_tokens_across_dp = (
                 prefill_batch_sync.num_tokens_across_dp
@@ -484,11 +473,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             assert block_tables is not None
             num_tokens = prefill_batch_desc.num_tokens
             num_reqs_padded = prefill_batch_desc.num_reqs or num_reqs
-            # num_tokens_padding = num_tokens - total_expanded
-            # assert num_tokens_padding >= 0
-            # if num_tokens_padding:
-            #     self.expanded_input_ids[total_expanded:num_tokens].zero_()
-            #     self.expanded_positions[total_expanded:num_tokens].zero_()
 
             query_start_loc_cpu = (
                 input_batch.query_start_loc_np[: num_reqs + 1]
@@ -514,8 +498,6 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             prefill_slot_maps_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
-            self.current_draft_step.zero_()
-            self._prepare_eplb_forward(total_expanded)
             if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
                 assert self.prefill_cudagraph_manager is not None
                 self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
@@ -544,14 +526,13 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             uniform_token_count=1,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            need_eager=need_eager or skip_attn,
+            need_eager=is_profile,
             dp_sync=decode_sync,
         )
         decode_num_tokens_across_dp = (
             decode_sync.num_tokens_across_dp if decode_sync is not None else None
         )
-
-        seq_lens_cpu_upper_bound = self._prepare_decode_inputs(
+        self._prepare_decode_inputs(
             input_batch,
             num_rejected,
             num_reqs,
@@ -567,7 +548,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 skip_attn,
                 decode_batch_desc,
                 decode_num_tokens_across_dp,
-                seq_lens_cpu_upper_bound,
+                input_batch.seq_lens_cpu_upper_bound,
             )
 
         return self.draft_tokens[:num_reqs]
