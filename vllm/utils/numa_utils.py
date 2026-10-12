@@ -56,12 +56,17 @@ def _can_set_mempolicy() -> bool:
         return False
 
 
-def _is_auto_numa_available(verbose: bool = True) -> bool:
+def _is_auto_numa_available(
+    verbose: bool = True, *, strict_affinity: bool = False
+) -> bool:
     """Check whether automatic GPU-to-NUMA detection should be attempted.
 
     Args:
         verbose: Log why detection is skipped at warning level; otherwise at
             debug level, for the default mode where skipping is expected.
+        strict_affinity: Skip automatic default binding if CPU availability
+            cannot be checked. Explicit topology discovery keeps its existing
+            best-effort affinity check.
 
     """
     from vllm.platforms import current_platform
@@ -69,24 +74,31 @@ def _is_auto_numa_available(verbose: bool = True) -> bool:
     log = logger.warning if verbose else logger.debug
 
     if not current_platform.is_cuda_alike():
+        log("Automatic NUMA binding requires a CUDA or ROCm platform.")
         return False
 
     if not os.path.isdir("/sys/devices/system/node/node1"):
+        log("Automatic NUMA binding requires multiple NUMA nodes.")
         return False
 
     try:
         process = psutil.Process(os.getpid())
         cpu_affinity = process.cpu_affinity()
         cpu_count = psutil.cpu_count()
-        if cpu_count is not None and cpu_affinity != list(range(cpu_count)):
+        if cpu_count is not None and set(cpu_affinity) != set(range(cpu_count)):
             log(
                 "CPU affinity is already constrained for this process. "
                 "Skipping automatic NUMA binding; pass --numa-bind-nodes "
                 "explicitly to override."
             )
             return False
+        if cpu_count is None and strict_affinity:
+            log("Could not determine CPU availability for automatic NUMA binding.")
+            return False
     except (AttributeError, NotImplementedError, psutil.Error):
-        pass
+        if strict_affinity:
+            log("Could not check CPU affinity for automatic NUMA binding.")
+            return False
 
     if not _can_set_mempolicy():
         log(
@@ -120,8 +132,10 @@ def get_auto_numa_nodes() -> list[int] | None:
     return numa_nodes
 
 
-def _can_auto_bind(parallel_config) -> bool:
-    """Whether the default (unset) ``numa_bind`` should bind in this process.
+def _can_auto_bind(
+    parallel_config, local_rank: int, dp_local_rank: int | None = None
+) -> bool:
+    """Validate and store this launcher's automatic GPU-to-NUMA topology.
 
     Unlike ``--numa-bind``, this never fails startup or forces the ``spawn``
     start method: any unmet requirement means starting unbound.
@@ -129,18 +143,66 @@ def _can_auto_bind(parallel_config) -> bool:
     from shutil import which
 
     if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
+        logger.debug("Automatic NUMA binding requires the spawn start method.")
+        return False
+    if (
+        parallel_config.distributed_executor_backend not in ("mp", "uni")
+        or parallel_config.data_parallel_backend != "mp"
+    ):
+        logger.debug("Automatic NUMA binding requires local mp/uni launchers.")
+        return False
+    # Keep automatic PCP excluded until bound launches are validated.
+    if parallel_config.prefill_context_parallel_size > 1:
+        logger.debug("Automatic NUMA binding does not yet support PCP.")
         return False
     # Topology is indexed in visible-device order, which --device-ids remaps.
     if parallel_config.assigned_physical_gpu_ids is not None:
+        logger.debug("Automatic NUMA binding does not support --device-ids remapping.")
         return False
-    if which("numactl") is None or not _is_auto_numa_available(verbose=False):
+    if which("numactl") is None:
+        logger.debug("Automatic NUMA binding requires numactl on PATH.")
         return False
     try:
-        # Empty when this process sees no GPUs (e.g. a zero-GPU Ray actor).
-        return bool(get_auto_numa_nodes())
+        from vllm.platforms import current_platform
+        from vllm.utils.cpu_resource_utils import parse_id_list
+
+        if not _is_auto_numa_available(verbose=False, strict_affinity=True):
+            return False
+        numa_nodes = get_auto_numa_nodes()
+        if not numa_nodes:
+            logger.debug("No GPU-to-NUMA topology available for automatic binding.")
+            return False
+        if len(numa_nodes) != current_platform.device_count() or any(
+            not isinstance(node, int) or node < 0 for node in numa_nodes
+        ):
+            logger.debug("Incomplete or invalid GPU-to-NUMA topology: %s", numa_nodes)
+            return False
+
+        last_local_rank = max(local_rank, parallel_config.local_world_size - 1)
+        last_dp_local_rank = (parallel_config.data_parallel_rank_local or 0) + max(
+            parallel_config.data_parallel_size_local - 1, 0
+        )
+        last_gpu_index = max(
+            parallel_config.get_local_gpu_index(last_local_rank, dp_local_rank),
+            parallel_config.get_local_gpu_index(last_local_rank, last_dp_local_rank),
+        )
+        if last_gpu_index >= len(numa_nodes):
+            logger.debug(
+                "GPU-to-NUMA topology does not cover all local workers: "
+                "GPU index %d, mapping size %d.",
+                last_gpu_index,
+                len(numa_nodes),
+            )
+            return False
+        for node in set(numa_nodes):
+            cpulist_path = Path(f"/sys/devices/system/node/node{node}/cpulist")
+            if not parse_id_list(cpulist_path.read_text().strip()):
+                logger.debug("NUMA node %d has no CPUs for automatic binding.", node)
+                return False
+        parallel_config.numa_bind_nodes = list(numa_nodes)
+        return True
     except Exception:
-        # e.g. amdsmi init failing outside the platform's own error handling.
-        logger.debug("GPU-to-NUMA detection failed", exc_info=True)
+        logger.debug("Automatic GPU-to-NUMA topology validation failed", exc_info=True)
         return False
 
 
@@ -360,21 +422,8 @@ def _get_numactl_worker_args(
     cpu_binding = _get_cpu_binding(parallel_config, gpu_index, [numa_node])
 
     if cpu_binding is not None:
-        logger.info(
-            "Binding worker subprocess (local_rank=%s, gpu_index=%s) to CPUs %s and NUMA node %s",  # noqa: E501
-            local_rank,
-            gpu_index,
-            cpu_binding,
-            numa_node,
-        )
         return f"--physcpubind={cpu_binding} --membind={numa_node}"
 
-    logger.info(
-        "Binding worker subprocess (local_rank=%s, gpu_index=%s) to NUMA node %s",
-        local_rank,
-        gpu_index,
-        numa_node,
-    )
     return f"--cpunodebind={numa_node} --membind={numa_node}"
 
 
@@ -429,20 +478,8 @@ def _get_numactl_enginecore_args(
 
     if pct_cpus is not None:
         cpu_binding = ",".join(str(c) for c in pct_cpus)
-        logger.info(
-            "Binding EngineCore subprocess (local_rank=%s) to CPUs %s "
-            "and NUMA nodes %s",
-            local_rank,
-            cpu_binding,
-            membind_arg,
-        )
         return f"--physcpubind={cpu_binding} --membind={membind_arg}"
 
-    logger.info(
-        "Binding EngineCore subprocess (local_rank=%s) to NUMA nodes %s",
-        local_rank,
-        membind_arg,
-    )
     return f"--cpunodebind={membind_arg} --membind={membind_arg}"
 
 
@@ -495,12 +532,12 @@ def _resolve_numactl_args(numactl_args: str) -> str:
         if _probe_numactl_args(candidate):
             if candidate != numactl_args:
                 logger.warning(
-                    "numactl args %r rejected; falling back to %r. Add "
-                    "--cap-add SYS_NICE for full NUMA binding.",
+                    "numactl args %r rejected; falling back to %r.",
                     numactl_args,
                     candidate or "no binding",
                 )
             return candidate
+    logger.warning("numactl probes failed; starting without NUMA binding.")
     return ""
 
 
@@ -513,13 +550,19 @@ def configure_subprocess(
 ):
     """Temporarily replace the multiprocessing executable with a numactl wrapper."""
     parallel_config = vllm_config.parallel_config
-    if parallel_config.numa_bind is None:
+    automatic = parallel_config.numa_bind is None
+    if automatic:
         # Resolve once in the launching process; spawned children inherit the
         # result through the pickled config instead of re-checking (a bound
         # EngineCore would fail the unconstrained-affinity check).
-        parallel_config.numa_bind = _can_auto_bind(parallel_config)
+        parallel_config.numa_bind = _can_auto_bind(
+            parallel_config, local_rank, dp_local_rank
+        )
         if not parallel_config.numa_bind:
-            logger.debug("Automatic NUMA binding unavailable; starting unbound.")
+            logger.info(
+                "Automatic NUMA binding unavailable on this host; starting "
+                "unbound. Enable debug logging for the skip reason."
+            )
     if not parallel_config.numa_bind:
         yield
         return
@@ -541,8 +584,19 @@ def configure_subprocess(
     numactl_args = _resolve_numactl_args(numactl_args)
     if not numactl_args:
         # No NUMA binding possible here; launch without the wrapper.
+        if automatic:
+            parallel_config.numa_bind = False
+            parallel_config.numa_bind_nodes = None
         yield
         return
+    if envs.VLLM_WORKER_MULTIPROC_METHOD == "spawn":
+        logger.info(
+            "Launching %s subprocess (local_rank=%s, dp_local_rank=%s) with numactl %s",
+            process_kind,
+            local_rank,
+            dp_local_rank,
+            numactl_args,
+        )
     python_executable = os.fsdecode(multiprocessing.spawn.get_executable())
     with (
         _set_numa_wrapper_env(numactl_args, python_executable),
