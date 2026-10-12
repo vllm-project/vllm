@@ -10,6 +10,8 @@ finite output and MXFP8-level accuracy -- across the V4.1 attention shapes at
 TP=4 and the small token counts decode actually runs.
 """
 
+import copy
+
 import pytest
 import torch
 
@@ -20,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm() or not current_platform.supports_mx(),
@@ -284,3 +287,83 @@ def test_rocm_mxfp8_quantizer_matches_torch_on_degenerate_blocks(num_rows):
     torch.testing.assert_close(
         q_triton.view(torch.uint8), q_torch.view(torch.uint8), rtol=0, atol=0
     )
+
+
+# With AITER enabled, 32x32 block-scaled layers (DeepSeek V4.1) run AITER's
+# FlyDSL GEMM on a preshuffled weight; every other layer keeps the paths above.
+
+
+@pytest.fixture
+def flydsl(monkeypatch: pytest.MonkeyPatch):
+    """Enables AITER; skips the test unless AITER's FlyDSL GEMM can run."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        _flydsl_enabled,
+    )
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        if not _flydsl_enabled():
+            pytest.skip("requires AITER on gfx950")
+        yield
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+def _kernel(n: int, k: int, dtype: torch.dtype = torch.bfloat16):
+    """The kernel as a model of this dtype builds it."""
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+        RocmDotScaledMxfp8LinearKernel,
+    )
+
+    with set_default_torch_dtype(dtype):
+        return RocmDotScaledMxfp8LinearKernel(
+            Mxfp8LinearLayerConfig(weight_shape=(n, k))
+        )
+
+
+@pytest.mark.parametrize("name,n,k", V41_BLOCK32_SHAPES, ids=lambda v: str(v))
+@pytest.mark.parametrize("num_tokens", [1, 7, 32, 33, 192, 1024])
+@torch.inference_mode()
+def test_rocm_mxfp8_linear_flydsl_matches_block32_gemm(flydsl, name, n, k, num_tokens):
+    """The FlyDSL GEMM agrees with the block-scaled Triton GEMM it replaces."""
+    kernel = _kernel(n, k)
+    ref = _kernel(n, k, torch.float32)  # not a bf16 model: keeps the Triton GEMM
+    torch.manual_seed(num_tokens)
+    layer = _make_block32_layer(n, k, "cuda")
+    ref_layer = copy.deepcopy(layer)
+    kernel.process_weights_after_loading(layer)
+    ref.process_weights_after_loading(ref_layer)
+    assert kernel._use_flydsl(layer) and not ref._use_flydsl(ref_layer)
+
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    out = kernel.apply_weights(layer, x)
+    assert out.shape == (num_tokens, n) and out.dtype == torch.bfloat16
+    rel = _rel_err(out, ref.apply_weights(ref_layer, x).float())
+    assert rel < 1e-3, f"{name}: relative error {rel:.2e}"
+
+
+@torch.inference_mode()
+def test_rocm_mxfp8_linear_flydsl_leaves_other_layers_alone(flydsl):
+    """Only 32x32 block-scaled layers get a preshuffled weight: 1x32 layers
+    (every other MXFP8 model), K % 64 != 0 and batched layers (DeepSeek V4.1's
+    wo_a, which the model runs itself) are untouched."""
+    torch.manual_seed(0)
+    batched = _make_block32_layer(256, 512, "cuda")
+    batched.bmm_batch_size = 2
+    layers = {
+        "per_row": _make_layer(256, 512, "cuda"),
+        "k_tail": _make_block32_layer(256, 288, "cuda"),
+        "batched": batched,
+    }
+    for name, layer in layers.items():
+        kernel = _kernel(*layer.weight.shape)
+        loaded = layer.weight.data.view(torch.uint8).clone()
+        kernel.process_weights_after_loading(layer)
+        assert not kernel._use_flydsl(layer), name
+        assert torch.equal(layer.weight.view(torch.uint8), loaded), name
