@@ -31,6 +31,8 @@ matcher, and the final stop token must terminate it.
 """
 
 import json
+import multiprocessing
+import os
 import sys
 from functools import cache
 from pathlib import Path
@@ -94,39 +96,47 @@ def replay(
     return f"replayed {len(token_ids)} tokens from token zero"
 
 
+def check_model(path: Path) -> tuple[list[str], list[str]]:
+    """Check every grammar of one model file and return its stdout and stderr lines."""
+    model = json.loads(path.read_text())
+    out, err = [], []
+    for case in model["grammars"]:
+        grammar = case["grammar"]
+        coverage = grammar["coverage"]
+        try:
+            compiled = compile_grammar(model, grammar)
+        except Exception as error:
+            names = ", ".join(case["generations"])
+            err.append(f"FAIL {path.name} {names} [{coverage}]: {error}")
+            continue
+        for name, generation in case["generations"].items():
+            try:
+                summary = replay(model, grammar, compiled, generation)
+            except Exception as error:
+                err.append(f"FAIL {path.name} {name} [{coverage}]: {error}")
+            else:
+                out.append(f"PASS {path.name} {name}: {summary}")
+    return out, err
+
+
 def main() -> int:
     paths = sorted(CASES_DIR.glob("*.json"))
     if not paths:
         print(f"no grammar replay cases in {CASES_DIR}", file=sys.stderr)
         return 1
 
-    failures = 0
-    for path in paths:
-        model = json.loads(path.read_text())
-        for case in model["grammars"]:
-            grammar = case["grammar"]
-            coverage = grammar["coverage"]
-            try:
-                compiled = compile_grammar(model, grammar)
-            except Exception as error:
-                failures += 1
-                names = ", ".join(case["generations"])
-                print(
-                    f"FAIL {path.name} {names} [{coverage}]: {error}", file=sys.stderr
-                )
-                continue
-            for name, generation in case["generations"].items():
-                try:
-                    summary = replay(model, grammar, compiled, generation)
-                except Exception as error:
-                    failures += 1
-                    print(
-                        f"FAIL {path.name} {name} [{coverage}]: {error}",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(f"PASS {path.name} {name}: {summary}")
+    # The cost is dominated by loading each model's tokenizer, which no other model
+    # shares, so check the model files in parallel. Fork after the imports above so
+    # that the workers share them instead of paying for them again.
+    workers = min(len(paths), os.cpu_count() or 1)
+    with multiprocessing.get_context("fork").Pool(workers) as pool:
+        results = pool.map(check_model, paths, chunksize=1)
 
+    failures = 0
+    for out, err in results:
+        print("\n".join(out))
+        print("\n".join(err), file=sys.stderr)
+        failures += len(err)
     return 1 if failures else 0
 
 
