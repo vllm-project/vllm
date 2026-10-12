@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from transformers import NemotronHConfig
 from transformers.configuration_utils import PreTrainedConfig
 from transformers.models.siglip2.configuration_siglip2 import Siglip2VisionConfig
-
-from .nemotron_h import NemotronHConfig
 
 
 def _normalize_mrope_parameters(config: NemotronHConfig) -> None:
@@ -31,11 +30,14 @@ class Cosmos3EdgeTextConfig(NemotronHConfig):
         num_hidden_layers: int = 28,
         hidden_act: str = "relu2",
         rms_norm_eps: float = 1e-5,
+        layers_block_type: list[str] | None = None,
         **kwargs,
     ) -> None:
+        # Each decoder block is an attention layer followed by an MLP layer
+        if layers_block_type is None:
+            layers_block_type = ["full_attention", "mlp"] * num_hidden_layers
         super().__init__(
-            num_hidden_layers=2 * num_hidden_layers,
-            hybrid_override_pattern="*-" * num_hidden_layers,
+            layers_block_type=layers_block_type,
             mlp_hidden_act=hidden_act,
             layer_norm_epsilon=rms_norm_eps,
             **kwargs,
@@ -46,7 +48,6 @@ class Cosmos3EdgeTextConfig(NemotronHConfig):
         config_dict["num_hidden_layers"] = self.num_hidden_layers // 2
         config_dict["hidden_act"] = config_dict.pop("mlp_hidden_act")
         config_dict["rms_norm_eps"] = config_dict.pop("layer_norm_epsilon")
-        config_dict.pop("hybrid_override_pattern", None)
         return config_dict
 
 

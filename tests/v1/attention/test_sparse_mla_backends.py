@@ -140,7 +140,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     metadata = SimpleNamespace(
         req_id_per_token=torch.zeros(1, dtype=torch.int32),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
-        block_size=1,
+        block_size=32,
     )
     recorded_scale = None
 
@@ -178,7 +178,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     )
     impl.forward_mqa(
         torch.zeros(1, 1, kv_lora_rank),
-        torch.zeros(1, 1, kv_lora_rank),
+        torch.zeros(1, 32, kv_lora_rank),
         metadata,
         SimpleNamespace(),
     )
@@ -437,6 +437,7 @@ def test_sparse_backend_decode_correctness(
     qk_rope_head_dim: int,
     v_head_dim: int,
     monkeypatch,
+    block_stride_rows: int | None = None,
 ):
     if qk_rope_head_dim == 0 and (
         backend_cls != FlashMLASparseBackend
@@ -478,8 +479,7 @@ def test_sparse_backend_decode_correctness(
         if device_capability is None or device_capability.major != 10:
             pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
 
-    supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
-    if block_size not in supported_block_sizes:
+    if not backend_cls.supports_block_size(block_size):
         pytest.skip(
             f"{backend_cls.get_name()} does not support block_size={block_size}"
         )
@@ -719,6 +719,11 @@ def test_sparse_backend_decode_correctness(
         kv_cache_dtype=kv_cache_dtype,
         scale=kv_cache_scale,
     )
+    if block_stride_rows is not None:
+        pad = (0, 0, 0, block_stride_rows - block_size)
+        kv_cache = torch.nn.functional.pad(kv_cache, pad)[:, :, :block_size]
+        slot = int(common_attn_metadata.slot_mapping[-1])
+        query_row = kv_cache[slot // block_size, 0, slot % block_size].zero_()
 
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
@@ -814,6 +819,12 @@ def test_sparse_backend_decode_correctness(
             out_buffer,
         )
 
+    if block_stride_rows is not None and kv_cache_dtype == "auto":
+        expected_row = torch.cat((kv_c_vllm[-1], k_pe_vllm[-1, 0]))
+        torch.testing.assert_close(query_row, expected_row, rtol=0, atol=0)
+    elif block_stride_rows is not None:
+        assert query_row.any()
+
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
     assert torch.isfinite(backend_output).all()
@@ -826,6 +837,56 @@ def test_sparse_backend_decode_correctness(
         )
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
+
+
+@pytest.mark.parametrize(
+    ("backend_cls", "kv_cache_dtype", "block_size", "block_stride_rows", "head_dims"),
+    [
+        pytest.param(
+            FlashInferMLASparseTRTLLMBackend,
+            "auto",
+            256,
+            320,
+            (128, 128, 64, 128),
+            id="FlashInferTRTLLM",
+        ),
+        # GLM-5.3 on SM90: the fp8 kernel's 64-token pages in larger blocks.
+        pytest.param(
+            FlashMLASparseBackend,
+            "fp8_ds_mla",
+            128,
+            192,
+            (64, 256, 0, 256),
+            id="FlashMLA-fp8_ds_mla",
+        ),
+    ],
+)
+def test_sparse_mla_packed_stride(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    monkeypatch,
+    backend_cls,
+    kv_cache_dtype,
+    block_size,
+    block_stride_rows,
+    head_dims,
+):
+    test_sparse_backend_decode_correctness(
+        default_vllm_config,
+        dist_init,
+        backend_cls,
+        "mixed_small",
+        kv_cache_dtype,
+        1,
+        block_size,
+        workspace_init,
+        1.0,
+        1.0,
+        *head_dims,
+        monkeypatch,
+        block_stride_rows=block_stride_rows,
+    )
 
 
 def _triton_convert_reference_impl(
@@ -2578,7 +2639,7 @@ def test_hisparse_multi_step_writes_request_major_output():
 
 
 @requires_hisparse_ops
-def test_hisparse_kv_update_writes_resident_and_staging_caches():
+def test_hisparse_kv_update_writes_resident_cache():
     device = torch.device(DEVICE_TYPE)
     block_size = 4
     row_width = 8
@@ -2597,18 +2658,11 @@ def test_hisparse_kv_update_writes_resident_and_staging_caches():
         block_table=torch.tensor([[1]], dtype=torch.int32, device=device),
         slot_mapping=resident_slots,
     )
-    cache_handle.mirror_staging_cache = torch.empty(
-        (1, block_size, row_width), dtype=torch.float32, device=device
-    )
-    cache_handle.mirror_staging_slots = torch.arange(
-        block_size, dtype=torch.int64, device=device
-    )
     slots = torch.tensor([3, 7, -1], dtype=torch.int64, device=device)
     kv_c = torch.randn(8, row_width - 2, device=device)
     k_pe = torch.randn(8, 1, 2, device=device)
     cache_handle.num_actual_tokens = slots.numel()
     cache_handle.decode_batch = False
-    cache_handle.host_mirror_required = True
     source_cache = torch.zeros_like(cache_handle.view.cache)
     impl = object.__new__(FlashMLASparseImpl)
     layer = SimpleNamespace(
@@ -2635,9 +2689,6 @@ def test_hisparse_kv_update_writes_resident_and_staging_caches():
         expected.to(device),
     )
     torch.testing.assert_close(source_cache, torch.zeros_like(source_cache))
-    staged = cache_handle.mirror_staging_cache.view(-1, row_width)
-    staged_expected = torch.cat([kv_c[:3], k_pe[:3, 0]], dim=-1)
-    torch.testing.assert_close(staged[:3], staged_expected)
 
 
 @requires_hisparse_ops
@@ -3190,7 +3241,8 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
         [[11, 12, 0, 13, 0, 0], [21, 0, 22, 23, 0, 0]], dtype=torch.int32
     )
 
-    plan.ensure_gpu_sources(resident_table, resident_block_size)
+    state_indices = torch.arange(2, dtype=torch.int32)
+    plan.ensure_gpu_sources(resident_table, state_indices, resident_block_size)
 
     assert plan.gpu_row_ids is not None
     unique_hosts = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
@@ -3220,10 +3272,49 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
         check_dtype=False,
     )
 
-    plan.ensure_gpu_sources(torch.zeros_like(resident_table), resident_block_size)
+    plan.ensure_gpu_sources(
+        torch.zeros_like(resident_table), state_indices, resident_block_size
+    )
 
     assert plan.gpu_row_ids is not None
     assert (plan.gpu_row_ids == -1).all()
+
+
+def test_hisparse_prefill_resident_sources_follow_each_resident_group():
+    """Layers of different resident groups share one batch staging plan.
+
+    Each group's layers must stage from that group's resident blocks. Keying
+    the plan's cached resident sources on a per-call batch gather let a later
+    group's gather reuse the freed address of an earlier one, so its layers
+    read the earlier group's block ids.
+    """
+    block_size = 4
+    plan = build_hisparse_prefill_staging_plan(
+        torch.tensor([[5, 2]], dtype=torch.int32),
+        torch.tensor([8], dtype=torch.int32),
+        block_size,
+        staging_block_capacity=2,
+    )
+    # The prefill runs in request state row 1; one table holds both groups.
+    # Rows are wide so that a cache keyed on a freed per-call gather of a row
+    # would see the next gather reuse its address.
+    state_rows = torch.zeros((4, 2, 1024), dtype=torch.int32)
+    state_rows[1, 0, :2] = torch.tensor([11, 12])
+    state_rows[1, 1, :2] = torch.tensor([21, 22])
+    state_indices = torch.tensor([1], dtype=torch.int32)
+    host_ids = (plan.row_ids[0].view(-1, block_size)[:, 0] // block_size).tolist()
+
+    for group in (0, 1, 0, 1):
+        plan.ensure_gpu_sources(state_rows[:, group], state_indices, block_size)
+        assert plan.gpu_row_ids is not None
+        gpu_blocks = plan.gpu_row_ids[0].view(-1, block_size)[:, 0] // block_size
+        staged = {
+            host_id: gpu_block
+            for host_id, gpu_block in zip(host_ids, gpu_blocks.tolist())
+            if host_id > 0
+        }
+        first_page, second_page = state_rows[1, group, :2].tolist()
+        assert staged == {5: first_page, 2: second_page}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -3243,7 +3334,11 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
         dtype=torch.int32,
         device=device,
     )
-    plan.ensure_gpu_sources(resident_table, resident_block_size)
+    plan.ensure_gpu_sources(
+        resident_table,
+        torch.arange(2, dtype=torch.int32, device=device),
+        resident_block_size,
+    )
 
     num_host_blocks, num_res_blocks = 10, 24
     host_cache = (
@@ -3306,7 +3401,8 @@ def test_hisparse_fp8_decode_resolves_rows_once_then_runs_batched_attention():
 
     cache = SimpleNamespace(
         runtime=SimpleNamespace(
-            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
+            hot=SimpleNamespace(attention_cache=torch.empty(1, device=device)),
+            max_swap_rows=num_tokens,
         ),
         source_block_table=torch.empty(
             num_decodes, 1, dtype=torch.int32, device=device
@@ -3614,15 +3710,23 @@ def test_flashinfer_sm120_hisparse_decode_uses_index_group():
 
 
 def test_hisparse_resident_prefill_uses_attention_block_stride():
+    """A batch beyond the swap-row capacity must bypass swap_in.
+
+    The index-group workspace has one more row than the HiSparse swap rows, so
+    routing on its size sent a 2-token batch with max_num_seqs=1 (a piecewise
+    CUDA-graph capture) into swap_in, which overflowed its capacity of 1.
+    """
     expected = torch.tensor([[19]], dtype=torch.int32)
     cache_handle = SimpleNamespace(
         all_context_pages_resident=True,
         view=SimpleNamespace(block_size=64, attention_block_stride=832),
         block_table=torch.tensor([[3]], dtype=torch.int32),
+        batch_block_table=lambda: torch.tensor([[3]], dtype=torch.int32),
+        runtime=SimpleNamespace(max_swap_rows=1),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache_handle]
-    index_group.physical_topk_indices = torch.empty((1, 1), dtype=torch.int32)
+    index_group.physical_topk_indices = torch.empty((2, 1), dtype=torch.int32)
     index_group._convert_once = MagicMock(return_value=expected)
     topk = torch.zeros((2, 1), dtype=torch.int32)
     metadata = SimpleNamespace(
@@ -4032,6 +4136,7 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     cache = SimpleNamespace(
         runtime=SimpleNamespace(
             gather_prefill_cache=gather,
+            request_state_indices=torch.tensor([0], dtype=torch.int32),
         ),
         view=SimpleNamespace(cache=resident_cache, block_size=1),
         block_table=resident_block_table,
@@ -4054,10 +4159,6 @@ def test_hisparse_prefill_reuses_builder_staging_plan():
     assert result is staged
     assert block_table is plan.block_table
     torch.testing.assert_close(request_ids, metadata.req_id_per_token)
-    plan.ensure_gpu_sources.assert_called_once()
-    args = plan.ensure_gpu_sources.call_args.args
-    torch.testing.assert_close(args[0], resident_block_table)
-    assert args[1] == 1
     assert calls == [(source, plan, resident_cache)]
 
 
@@ -4075,6 +4176,9 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     cache = SimpleNamespace(
         view=SimpleNamespace(cache=resident_cache, block_size=4),
         block_table=torch.tensor([[2, 3]], dtype=torch.int32),
+        runtime=SimpleNamespace(
+            request_state_indices=torch.tensor([0], dtype=torch.int32)
+        ),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [cache]
@@ -4119,10 +4223,6 @@ def test_hisparse_fp8_prefill_gather_uses_dedicated_stream(monkeypatch):
     assert args.kwargs["host_cache"].data_ptr() == source.data_ptr()
     assert args.kwargs["host_row_ids"] is plan.row_ids
     assert args.kwargs["device_row_ids"] is plan.gpu_row_ids
-    plan.ensure_gpu_sources.assert_called_once()
-    ensure_args = plan.ensure_gpu_sources.call_args.args
-    torch.testing.assert_close(ensure_args[0], cache.block_table)
-    assert ensure_args[1] == 4
 
 
 def test_sparse_impl_observes_repointed_indexer_buffer():
