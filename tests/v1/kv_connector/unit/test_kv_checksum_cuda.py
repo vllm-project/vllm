@@ -23,6 +23,7 @@ from .test_kv_checksum import (
     MAMBA_BLOCKS,
     NUM_BLOCKS,
     _cache,
+    _check_requests_and_groups_of_one_step,
     _config,
     _group,
     _logical_kv,
@@ -63,6 +64,13 @@ def test_triton_kernel_matches_definition(token_major, kernel_split):
     assert all(view.use_triton for view in worker._layer_views[0])
     [group] = _send(worker).values()
     np.testing.assert_array_equal(group.values[:, 0], _reference(layers))
+
+
+@needs_triton
+def test_triton_kernel_reads_rows_of_several_requests_and_groups():
+    """The kernel reads each group's rows from one shared copy, after a group
+    with an odd number of rows."""
+    _check_requests_and_groups_of_one_step("cuda")
 
 
 @needs_triton
