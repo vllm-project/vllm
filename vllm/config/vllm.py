@@ -3116,6 +3116,8 @@ class VllmConfig:
                 unsupported.append("xpress speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
+            if self.speculative_config.draft_context_window is not None:
+                unsupported.append("draft context window")
             if self.speculative_config.draft_lm_head_quantization is not None:
                 unsupported.append("draft lm_head quantization")
 
