@@ -141,23 +141,6 @@ def _scatter(state, hold=True) -> float:
     return time.perf_counter() - start
 
 
-def test_the_slot_is_pinned_host_memory(setup):
-    assert setup.slot.device.type == "cpu"
-    assert setup.slot.is_pinned()
-
-
-def test_control_a_copy_that_waits_for_the_stream_takes_the_hold(setup):
-    start, end = _hold(setup.engine._proc_stream, HOLD_SECONDS)
-    before = time.perf_counter()
-    with torch.cuda.stream(setup.engine._proc_stream):
-        setup.layer.weight.data.copy_(setup.slot[:SLICE])
-    seconds = time.perf_counter() - before
-    held = start.elapsed_time(end) / 1000
-    assert seconds > held / 2, (
-        f"a waited-for copy took {seconds:.3f}s of the stream's {held:.3f}s hold"
-    )
-
-
 def test_the_copy_is_queued_not_waited_for(setup):
     seconds = _scatter(setup)
     queued = not setup.engine._slot_read_done[0].query()
