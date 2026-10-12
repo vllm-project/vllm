@@ -461,11 +461,10 @@ class AttentionScheduler {
       if (q_tokens == 1) {
         return original_q_head_per_kv;
       }
-      // Keep long prefill on MHA. Divisible groups fill short-query iterations;
-      // other groups pack only one iteration to offset unused query rows.
-      if (q_tokens <= max_num_q_per_iter &&
-          (max_num_q_per_iter % original_q_head_per_kv == 0 ||
-           q_tokens <= max_num_q_per_iter / original_q_head_per_kv)) {
+      // Divisible groups fill query iterations; other groups pack one
+      // iteration to offset unused query rows.
+      if (max_num_q_per_iter % original_q_head_per_kv == 0 ||
+          q_tokens <= max_num_q_per_iter / original_q_head_per_kv) {
         return group;
       }
       return 1;
@@ -569,9 +568,15 @@ class AttentionScheduler {
         const int32_t q_start_pos = seq_len - q_token_num;
         const int32_t kv_start_pos = 0;
         const int32_t kv_end_pos = seq_len;
-        // Short verification queries can span several packed iterations.
-        // Split each iteration separately so their reduction fits one tile.
-        const bool packed_query = request_group > 1 && q_token_num > 1;
+        const bool grouped_query = request_group > 1 && q_token_num > 1;
+        const int64_t query_tiles =
+            (static_cast<int64_t>(q_token_num) + max_num_q_token_per_iter - 1) /
+            max_num_q_token_per_iter;
+        const bool packed_query =
+            grouped_query &&
+            query_tiles * (input.num_heads_q / request_group) < thread_num;
+        // Keep coalesced fragments comparable to MHA in physical query rows.
+        const int64_t fragment_kv_budget = kv_len_per_thread / request_group;
 
         PartitionItem curr_workitem(req_id, 0, 0, seq_len, request_group);
         for (int32_t token_id = 0; token_id < q_token_num;
@@ -719,7 +724,9 @@ class AttentionScheduler {
             remaining_kv_len = kv_len_per_thread;
           }
 
-          if (packed_query && curr_workitem.total_kv_len > 0) {
+          if ((packed_query || (grouped_query && curr_workitem.total_kv_len >=
+                                                     fragment_kv_budget)) &&
+              curr_workitem.total_kv_len > 0) {
             // Keep packed queries independently claimable by worker threads.
             workitems.emplace_back(curr_workitem);
             ++workitem_num_per_thread[curr_thread_id];

@@ -150,7 +150,7 @@ def _request_group(
         pytest.param(4, 8192, {"is_cross_attention": True}, 4, id="q4-cross"),
         pytest.param(1, 128, {}, 4, id="q1-decode"),
         pytest.param(16, 128, {}, 1, id="q16-mha-more-spans"),
-        pytest.param(40, 8192, {}, 1, id="large-query-mha"),
+        pytest.param(40, 8192, {}, 4, id="large-query-gqa"),
         pytest.param(
             4,
             8192,
