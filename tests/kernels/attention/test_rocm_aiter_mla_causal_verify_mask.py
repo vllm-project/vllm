@@ -204,7 +204,7 @@ def _run_verify_block():
         ),
     ):
         assert isinstance(impl, AiterMLAImpl)
-        impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)  # type: ignore[arg-type]  # Spy decode path does not read layer.
+        impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)
 
     return metadata, captured
 

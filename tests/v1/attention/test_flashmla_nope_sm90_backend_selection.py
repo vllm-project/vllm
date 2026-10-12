@@ -7,9 +7,9 @@ v_head_dim=256, kv_lora_rank=512 -> head_size 512. These tests pin the
 selection contract only (no GPU required):
 
 * ``get_supported_head_sizes`` advertises 512 so the backend is a candidate;
-* ``supports_combination`` admits exactly two shapes for 512 -- a quantized
-  DS-MLA cache format (zero-padded 576/656B envelope) and a rope-free bf16
-  cache on SM90 -- and rejects everything else;
+* ``supports_combination`` admits 512 only for rope-free models on SM90, with
+  a bf16 cache or an fp8_ds_mla cache (zero RoPE slot), and rejects
+  everything else;
 * adding 512 must NOT reorder the SM100 priority list for bf16, which is why
   the bf16 arm is restricted to SM90.
 """
@@ -19,17 +19,33 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
+    _fp8_kv_pages,
+)
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheLayout,
+    KVCacheTensor,
+    KVQuantMode,
+    MLAAttentionSpec,
+)
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    allocate_kv_cache,
+    prepare_kernel_block_sizes,
+    select_common_block_size,
 )
 
 SM90 = DeviceCapability(major=9, minor=0)
 SM100 = DeviceCapability(major=10, minor=0)
 
 BF16_CACHE_DTYPES = (None, "auto", "bfloat16", "float16")
-QUANTIZED_CACHE_DTYPES = ("fp8_ds_mla", "nvfp4_ds_mla")
+NOPE_SM90_CACHE_DTYPES = (*BF16_CACHE_DTYPES, "fp8_ds_mla")
 
 
 def _supports_combination(head_size, kv_cache_dtype, capability):
@@ -82,38 +98,112 @@ def test_supported_head_sizes_include_512():
     assert FlashMLASparseBackend.get_supported_head_sizes() == [576, 512]
 
 
+def test_flashmla_bf16_nope_accepts_packed_manager_blocks():
+    spec = MLAAttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        cache_dtype_str="bfloat16",
+        block_stride_alignment=1024,
+    )
+    num_blocks = 2
+    layers = ["layer.0", "layer.1"]
+    page_size = spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * len(layers) * page_size,
+                layers=layers,
+                layer_stride=page_size,
+                block_stride=len(layers) * page_size,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layers, spec)],
+    )
+    groups = [[AttentionGroup(FlashMLASparseBackend, layers, spec, 0)]]
+
+    kernel_block_sizes = prepare_kernel_block_sizes(config, groups)
+    caches = allocate_kv_cache(
+        config,
+        torch.device("cpu"),
+        KVCacheLayout.BLHNC,
+        kernel_block_sizes,
+    )
+
+    assert kernel_block_sizes == [1152]
+    assert caches["layer.0"].shape == (num_blocks, 1, 1152, 512)
+
+
+@pytest.mark.parametrize("sm100", [False, True])
+def test_flashmla_quantized_cache_kernel_pages(monkeypatch, sm100):
+    """Quantized blocks are read as 64-token pages; SM100 only row-aligns them
+    (TMA) and keeps 64-token blocks."""
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family, device_id=0: sm100 and family == 100,
+    )
+    spec = MLAAttentionSpec(
+        block_size=1152,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.float8_e4m3fn,
+        cache_dtype_str="fp8_ds_mla",
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+        state_content_bytes=656,
+    )
+
+    kernel_block_size = 64 if sm100 else 1152
+    assert (
+        select_common_block_size(1152, [FlashMLASparseBackend], [spec])
+        == kernel_block_size
+    )
+
+
+def test_fp8_kv_pages_address_packed_blocks():
+    """Token t of block b is row b * block_stride_rows + t of the 64-row pages;
+    64-token blocks are passed through."""
+    row, block_size, stride_rows = 656, 128, 192
+    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
+    cache = backing.view(3, stride_rows, row)[:, :block_size]
+
+    pages, block_stride_rows = _fp8_kv_pages(cache, block_size)
+    assert block_stride_rows == stride_rows
+    assert pages.shape[1:] == (64, row)
+    slot = 2 * block_stride_rows + 100
+    assert torch.equal(pages[slot // 64, slot % 64], cache[2, 100])
+
+    pages, block_stride_rows = _fp8_kv_pages(cache[:, :64], 64)
+    assert block_stride_rows is None
+    assert torch.equal(pages, cache[:, :64])
+
+
 def test_quantized_ds_mla_formats_are_the_envelope_set():
     assert frozenset({"fp8_ds_mla", "nvfp4_ds_mla"}) == QUANTIZED_DS_MLA_CACHE_FORMATS
 
 
-@pytest.mark.parametrize("kv_cache_dtype", QUANTIZED_CACHE_DTYPES)
-def test_nope_512_quantized_rejected_here(kv_cache_dtype):
-    # Quantized DS-MLA NoPE-512 is served by the zero-padded 576/656B
-    # envelope, wired up in a separate change; this backend must reject it.
-    reason = _supports_combination(512, kv_cache_dtype, SM90)
-    assert reason is not None
-
-
-@pytest.mark.parametrize("kv_cache_dtype", BF16_CACHE_DTYPES)
-def test_nope_512_bf16_sm90_rope_free_accepted(kv_cache_dtype, rope_free_model):
+@pytest.mark.parametrize("kv_cache_dtype", NOPE_SM90_CACHE_DTYPES)
+def test_nope_512_sm90_rope_free_accepted(kv_cache_dtype, rope_free_model):
     assert _supports_combination(512, kv_cache_dtype, SM90) is None
 
 
-@pytest.mark.parametrize("kv_cache_dtype", BF16_CACHE_DTYPES)
-def test_nope_512_bf16_sm90_rope_carrying_rejected(kv_cache_dtype, rope_carrying_model):
+@pytest.mark.parametrize("kv_cache_dtype", NOPE_SM90_CACHE_DTYPES)
+def test_nope_512_sm90_rope_carrying_rejected(kv_cache_dtype, rope_carrying_model):
     reason = _supports_combination(512, kv_cache_dtype, SM90)
     assert reason is not None and "rope-free" in reason
 
 
-@pytest.mark.parametrize("kv_cache_dtype", BF16_CACHE_DTYPES)
-def test_nope_512_bf16_sm100_rejected(kv_cache_dtype, rope_free_model):
+@pytest.mark.parametrize("kv_cache_dtype", NOPE_SM90_CACHE_DTYPES)
+def test_nope_512_sm100_rejected(kv_cache_dtype, rope_free_model):
     # The SM90 restriction is what keeps the SM100 priority order unchanged.
     reason = _supports_combination(512, kv_cache_dtype, SM100)
     assert reason is not None
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ("fp8", "fp8_e4m3"))
-def test_nope_512_plain_fp8_rejected(kv_cache_dtype, rope_free_model):
+@pytest.mark.parametrize("kv_cache_dtype", ("fp8", "fp8_e4m3", "nvfp4_ds_mla"))
+def test_nope_512_other_quantized_rejected(kv_cache_dtype, rope_free_model):
     reason = _supports_combination(512, kv_cache_dtype, SM90)
     assert reason is not None
 
@@ -174,3 +264,15 @@ def test_sm100_bf16_512_priority_unchanged(num_heads):
 def test_sm100_576_priority_unchanged():
     order = _sparse_order("auto", 576, num_heads=32)
     assert order[0] == "FLASHMLA_SPARSE", order
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA backends")
+def test_sm90_nope_fp8_ds_mla_resolves_to_flashmla():
+    """The sparse backends ranked ahead of FLASHMLA_SPARSE for SM90 NoPE-512
+    reject fp8_ds_mla, so the auto-selector lands on FlashMLA."""
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    order = _sparse_order("fp8_ds_mla", 512, num_heads=64, capability=SM90)
+    for name in order[: order.index("FLASHMLA_SPARSE")]:
+        backend_cls = AttentionBackendEnum[name].get_class()
+        assert not backend_cls.supports_kv_cache_dtype("fp8_ds_mla"), name

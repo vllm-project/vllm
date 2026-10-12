@@ -4,6 +4,7 @@ import enum
 import io
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from vllm.config import LoggingConfig
 from vllm.logger import (
     _DATE_FORMAT,
     _FORMAT,
+    _JSON_FORMAT,
     _configure_vllm_root_logger,
     _use_color,
     configure_logging,
@@ -202,6 +204,35 @@ def test_configure_logging_preserves_application_record_factory(
             assert formatter.format(record) == "request-123 Worker_DP0 probe"
     finally:
         logging.setLogRecordFactory(original_factory)
+
+
+def test_builtin_json_formatter(monkeypatch):
+    output = io.StringIO()
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(sys, "stdout", output)
+            context.setattr(vllm_logger, "_vllm_process_info", None)
+            _configure_vllm_root_logger(LoggingConfig(formatter="json"))
+            decorate_logs("Worker_DP0")
+            init_logger("vllm.structured_log_probe").info("structured log probe")
+
+            log = json.loads(output.getvalue())
+            formatter = logging.getLogger("vllm").handlers[0].formatter
+    finally:
+        _configure_vllm_root_logger(LoggingConfig())
+
+    assert log == {
+        "asctime": log["asctime"],
+        "levelname": "INFO",
+        "name": "vllm.structured_log_probe",
+        "processName": multiprocessing.current_process().name,
+        "process": os.getpid(),
+        "message": "structured log probe",
+        "vllm_process_name": "Worker_DP0",
+    }
+    assert formatter is not None
+    assert formatter._fmt == _JSON_FORMAT
 
 
 def test_use_color_force_color(monkeypatch):
