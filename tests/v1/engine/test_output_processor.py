@@ -1607,6 +1607,12 @@ def test_abort_requests(runner: str, abort_by: str, finish_reason, dummy_test_ve
         assert output.finished
         if runner == "pooling":
             assert output.outputs.data.numel() == 0
+            if finish_reason == FinishReason.ERROR:
+                assert output.error is not None
+                assert output.error.code == "engine_error"
+                assert output.error.retryable
+            else:
+                assert output.error is None
         else:
             assert output.outputs[0].finish_reason == str(finish_reason)
 
