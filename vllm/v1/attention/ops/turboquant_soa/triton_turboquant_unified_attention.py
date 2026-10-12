@@ -876,6 +876,16 @@ def _get_pair_lut(centroids: torch.Tensor) -> torch.Tensor:
     return build_pair_lut(centroids)
 
 
+def _use_decode_launch(
+    max_query_len: int | None, num_tokens: int, num_seqs: int
+) -> bool:
+    # Short verification blocks need decode-sized tiles and split-KV parallelism.
+    # Without a maximum, token counts cannot bound a ragged batch's query length.
+    if max_query_len is None:
+        return num_tokens <= num_seqs
+    return max_query_len <= 32
+
+
 def triton_turboquant_unified_attention(
     query: torch.Tensor,  # [num_tokens, Hq, D] - fp16/bf16
     kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
@@ -1011,7 +1021,7 @@ def triton_turboquant_unified_attention(
     # the pair-LUT gather pattern is latency-bound (NOT HBM-bandwidth-bound,
     # confirmed via rocprof: MemUnitStalled=0.01%, VALUBusy=56% at BM=16).
     #
-    # For prefill/chunked (max_query_len > 1) we want BLOCK_M as large as
+    # For prefill/chunked (max_query_len > 32) we want BLOCK_M as large as
     # possible to (a) amortize the fixed dequant overhead over more query
     # tokens per CTA and (b) let MFMA saturate with a 128x32 tile shape.
     # Empirical sweep on MI300X across gpt-oss (D=64) and llama (D=128):
@@ -1019,13 +1029,8 @@ def triton_turboquant_unified_attention(
     #     chunked B=64 Q=1k C=8: BM=128 is 5.6x faster than BM=16
     # With BM=128 v3 matches or BEATS the fp16 baseline on prefill/chunked.
     #
-    # For pure decode (max_query_len == 1) BLOCK_M stays small because
-    # BLOCK_Q > 1 just pads rows — each sequence contributes at most 1 query
-    # token and larger BLOCK_M wastes lanes on masked-out rows.
-    if max_query_len is not None:
-        is_prefill_like = max_query_len > 1
-    else:
-        is_prefill_like = num_tokens > num_seqs
+    # Decode and short verification blocks share the small query tile.
+    is_prefill_like = not _use_decode_launch(max_query_len, num_tokens, num_seqs)
 
     if is_prefill_like:
         # Prefill / chunked: use BLOCK_M=128 (rounded up to a multiple of
@@ -1047,8 +1052,8 @@ def triton_turboquant_unified_attention(
     total_num_q_blocks = num_tokens // BLOCK_Q + num_seqs
 
     # TILE_SIZE heuristic (matches stock unified_attention's _get_tile_size):
-    #   prefill (max_query_len > 1): 32
-    #   decode  (max_query_len == 1): 16
+    #   prefill / chunked: 32
+    #   decode / short verification: 16
     if tile_size is None:
         tile_size = 32 if is_prefill_like else 16
 
@@ -1081,13 +1086,13 @@ def triton_turboquant_unified_attention(
     soa_v_zero = 1 if key_fp8 else 2
 
     # ------------------------------------------------------------------
-    # Dispatch: 2D for prefill / chunked; 3D split-KV for pure decode with
-    # long KV. Falls back to 2D if the sequences are short or if the caller
-    # forces it. ``is_prefill_like`` was already computed above for the
+    # Dispatch: 2D for prefill / chunked; 3D split-KV for decode / short
+    # verification with long KV. Falls back to 2D for short histories or when
+    # forced by the caller. ``is_prefill_like`` was already computed above for the
     # BLOCK_M / tile_size heuristic; reuse it here.
     # ------------------------------------------------------------------
 
-    # Use 3D only for pure decode where the KV history is long enough that
+    # Use 3D for decode / short verification where the KV history is long enough that
     # splitting meaningfully increases SM occupancy. Threshold is empirically
     # tuned on MI300X:
     #   seq <  1024 -> 2D path (short KV, reduce overhead > parallelism gain)
