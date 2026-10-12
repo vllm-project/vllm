@@ -1089,7 +1089,7 @@ timm==1.0.28
     # via
     #   -r requirements/test/xpu.in
     #   open-clip-torch
-tokenizers==0.23.1
+tokenizers==0.23.2
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1134,7 +1134,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.17.0
+transformers==5.19.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
